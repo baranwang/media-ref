@@ -42,6 +42,7 @@ import {
   type CatalogGatewayConfig,
   type CatalogTargetSnapshot,
 } from "./catalog-gateway.ts";
+import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
 import { enqueueJob } from "./jobs.ts";
 import type { OutboundClient } from "./outbound.ts";
 import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
@@ -1297,6 +1298,27 @@ export async function approveChangeRequestInTransaction(
           .where("id", "=", createdInitAssoc.id)
           .execute();
       }
+
+      const demandExternalKeys = new Set<string>([prefetchedCatalog.canonicalKey]);
+      for (const extNs of EXTERNAL_ID_NAMESPACES) {
+        const extNativeId = prefetchedCatalog.externalIds[extNs];
+        if (extNativeId) {
+          demandExternalKeys.add(formatExternalKey({ namespace: extNs, nativeId: extNativeId }));
+        }
+      }
+      if (initAssoc) {
+        demandExternalKeys.add(
+          formatExternalKey({ namespace: initAssoc.namespace, nativeId: initAssoc.nativeId }),
+        );
+      }
+
+      await mergeExternalKeyDemandsIntoMedia(trx, {
+        mediaId: createdMedia.id,
+        externalKeys: [...demandExternalKeys],
+        seasons: prefetchedCatalog.snapshot.seasons,
+        mediaType: createdMedia.type,
+        now: input.now,
+      });
 
       media = createdMedia;
     }

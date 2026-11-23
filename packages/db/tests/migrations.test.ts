@@ -67,6 +67,16 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0010_demands",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0011_invalidation_reports",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -594,6 +604,264 @@ describe("packages/db migrations", () => {
         })
         .execute(),
     ).rejects.toThrow();
+
+    // Demands table from 0010_demands
+    const insertedMediaDemand = await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: insertedMedia.id,
+        season: 2,
+        namespace_group: "platform",
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedMediaDemand).toMatchObject({
+      media_id: insertedMedia.id,
+      external_key: null,
+      season: 2,
+      namespace_group: "platform",
+      demand_count: 1,
+      status: "open",
+      not_found_count: 0,
+      lease_generation: 0,
+      last_explored_at: null,
+      lease_expires_at: null,
+    });
+    expect(insertedMediaDemand.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(insertedMediaDemand.next_eligible_at).toBeInstanceOf(Date);
+    expect(insertedMediaDemand.last_demanded_at).toBeInstanceOf(Date);
+
+    // Partial unique index prevents duplicate (media_id, season, namespace_group)
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: insertedMedia.id,
+          season: 2,
+          namespace_group: "platform",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Null season uniqueness also enforced via COALESCE(season, -1)
+    await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: insertedMedia.id,
+        season: null,
+        namespace_group: "platform",
+      })
+      .execute();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: insertedMedia.id,
+          season: null,
+          namespace_group: "platform",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // External-key demand when media_id IS NULL
+    const insertedExtDemand = await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        external_key: "tmdb:tv:77777",
+        season: 1,
+        namespace_group: "catalog",
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedExtDemand).toMatchObject({
+      media_id: null,
+      external_key: "tmdb:tv:77777",
+      season: 1,
+      namespace_group: "catalog",
+      demand_count: 1,
+      status: "open",
+    });
+
+    // Partial unique index prevents duplicate (external_key, season, namespace_group)
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          external_key: "tmdb:tv:77777",
+          season: 1,
+          namespace_group: "catalog",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // XOR check rejects both media_id and external_key set, or both null
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: insertedMedia.id,
+          external_key: "tmdb:tv:95479",
+          season: 3,
+          namespace_group: "platform",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: null,
+          external_key: null,
+          season: 3,
+          namespace_group: "platform",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Rejects invalid namespace_group, status, negative season, and demand_count < 1
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: insertedMedia.id,
+          season: 3,
+          namespace_group: "other" as any,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: insertedMedia.id,
+          season: 3,
+          namespace_group: "platform",
+          status: "unknown" as any,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: insertedMedia.id,
+          season: -1,
+          namespace_group: "platform",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: insertedMedia.id,
+          season: 3,
+          namespace_group: "platform",
+          demand_count: 0,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Invalidation reports table from 0011_invalidation_reports
+    const openAnonReport = await testDb.writeDb
+      .insertInto("invalidation_reports")
+      .values({
+        association_id: assoc.id,
+        reporter_type: "api_key",
+        reporter_user_id: "user_1",
+        reporter_key_id: "key_1",
+        reason: "404 on bilibili",
+        recheck_job_id: null,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(openAnonReport).toMatchObject({
+      association_id: assoc.id,
+      reporter_type: "api_key",
+      reporter_user_id: "user_1",
+      reporter_key_id: "key_1",
+      reason: "404 on bilibili",
+      recheck_job_id: null,
+    });
+    expect(openAnonReport.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(openAnonReport.created_at).toBeInstanceOf(Date);
+
+    // Partial unique index rejects duplicate open anonymous reports from the same API key
+    await expect(
+      testDb.writeDb
+        .insertInto("invalidation_reports")
+        .values({
+          association_id: assoc.id,
+          reporter_type: "api_key",
+          reporter_user_id: "user_1",
+          reporter_key_id: "key_1",
+          reason: "duplicate spam",
+          recheck_job_id: null,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Closing the cycle by attaching recheck_job_id frees the partial unique index for a new cycle
+    await testDb.writeDb
+      .updateTable("invalidation_reports")
+      .set({ recheck_job_id: insertedJob.id })
+      .where("id", "=", openAnonReport.id)
+      .execute();
+
+    const nextCycleReport = await testDb.writeDb
+      .insertInto("invalidation_reports")
+      .values({
+        association_id: assoc.id,
+        reporter_type: "api_key",
+        reporter_user_id: "user_1",
+        reporter_key_id: "key_1",
+        reason: "down again later",
+        recheck_job_id: null,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    expect(nextCycleReport.id).not.toBe(openAnonReport.id);
+
+    // Rejects invalid reporter_type
+    await expect(
+      testDb.writeDb
+        .insertInto("invalidation_reports")
+        .values({
+          association_id: assoc.id,
+          reporter_type: "bot" as "user",
+          reporter_user_id: "user_1",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Logged-in user reports require reporter_user_id and can record multiple reports
+    const userReport = await testDb.writeDb
+      .insertInto("invalidation_reports")
+      .values({
+        association_id: assoc.id,
+        reporter_type: "user",
+        reporter_user_id: "user_1",
+        reporter_key_id: null,
+        reason: "verified gone",
+        recheck_job_id: insertedJob.id,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    expect(userReport.id).toBeTruthy();
 
     const rerunResults = await runMigrations(testDb.writeDb);
     expect(rerunResults).toEqual([]);

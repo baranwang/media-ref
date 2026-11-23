@@ -602,6 +602,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -684,6 +685,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -893,6 +895,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -933,7 +936,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
         body: JSON.stringify({
           targetExternalKey: "tmdb:tv:95479",
           namespace: "tencent",
-          nativeId: "ss50005",
+          nativeId: "mzc002000050005",
           variantDescription: "原声",
           segments: [
             {
