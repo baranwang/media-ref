@@ -4,7 +4,10 @@ export { runMigrations } from "./migrator.ts";
 export type {
   AccountTable,
   ApiKeyTable,
+  BackgroundJobStatus,
+  BackgroundJobsTable,
   Database,
+  JsonObject,
   SchemaMetaTable,
   SessionTable,
   UserTable,

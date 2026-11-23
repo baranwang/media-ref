@@ -32,6 +32,11 @@ describe("packages/db migrations", () => {
         status: "Success",
       },
       {
+        migrationName: "0003_background_jobs",
+        direction: "Up",
+        status: "Success",
+      },
+      {
         migrationName: "0004_api_keys",
         direction: "Up",
         status: "Success",
@@ -146,6 +151,65 @@ describe("packages/db migrations", () => {
       emailVerified: false,
       role: "user",
     });
+
+    const insertedJob = await testDb.writeDb
+      .insertInto("background_jobs")
+      .values({
+        job_type: "echo",
+        dedupe_key: "test:unique",
+        status: "pending",
+        payload: JSON.stringify({ hello: "world" }),
+      })
+      .returning([
+        "id",
+        "job_type",
+        "status",
+        "priority",
+        "attempts",
+        "max_attempts",
+        "lease_generation",
+      ])
+      .executeTakeFirstOrThrow();
+
+    expect(insertedJob).toMatchObject({
+      job_type: "echo",
+      status: "pending",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 5,
+      lease_generation: 0,
+    });
+
+    // Active dedupe_key prevents duplicate active jobs
+    await expect(
+      testDb.writeDb
+        .insertInto("background_jobs")
+        .values({
+          job_type: "echo",
+          dedupe_key: "test:unique",
+          status: "pending",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Completing the job frees the partial unique index for future re-scheduling
+    await testDb.writeDb
+      .updateTable("background_jobs")
+      .set({ status: "completed", completed_at: new Date() })
+      .where("id", "=", insertedJob.id)
+      .execute();
+
+    const rescheduled = await testDb.writeDb
+      .insertInto("background_jobs")
+      .values({
+        job_type: "echo",
+        dedupe_key: "test:unique",
+        status: "pending",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    expect(rescheduled.id).not.toBe(insertedJob.id);
 
     const rerunResults = await runMigrations(testDb.writeDb);
     expect(rerunResults).toEqual([]);
