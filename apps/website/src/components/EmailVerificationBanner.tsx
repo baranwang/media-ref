@@ -23,7 +23,9 @@ export default function EmailVerificationBanner({
     setErrorMessage(null);
     try {
       const callbackURL =
-        typeof window !== "undefined" ? `${window.location.origin}/keys` : undefined;
+        typeof window !== "undefined"
+          ? `${window.location.origin}${window.location.pathname || "/keys"}`
+          : undefined;
       await resendVerificationEmail(email, callbackURL);
       setSentMessage(`验证邮件已重新发送至 ${email}，请查收收件箱或垃圾邮件文件夹。`);
     } catch (error) {

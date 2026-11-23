@@ -3,6 +3,7 @@ import { createLiveOutboundClient, parseOutboundProxyConfig } from "@media-ref/c
 import { createDb } from "@media-ref/db";
 import { createApiApp } from "./app.ts";
 import { DEFAULT_EMAIL_FROM } from "./auth.ts";
+import type { InternalMediaWorkerEnv } from "./internal.ts";
 import { parseOAuthConfigFromEnv } from "./oauth.ts";
 import { parseRateLimitConfigFromEnv, type RateLimitBinding } from "./rate-limit.ts";
 
@@ -61,13 +62,30 @@ export {
 } from "./auth.ts";
 export { registerLeadRoutes, type CreateLeadResponse, type LeadResponse } from "./leads.ts";
 export {
+  CLIENT_IP_HEADER,
+  createCloudflareRateLimiterAdapter,
+  createInMemoryIpRateLimiter,
+  createInternalMediaApp,
+  DEFAULT_ANONYMOUS_IP_RATE_LIMIT,
+  DEFAULT_ANONYMOUS_IP_RATE_WINDOW_SECONDS,
+  extractClientIp,
+  INTERNAL_MEDIA_PATH_PREFIX,
+  InternalMediaEntrypoint,
+  type AnonymousIpRateLimitDecision,
+  type AnonymousIpRateLimiter,
+  type InMemoryIpRateLimiterOptions,
+  type InternalMediaDeps,
+  type InternalMediaRpcResult,
+  type InternalMediaWorkerEnv,
+} from "./internal.ts";
+export {
   createInMemoryRateLimiter,
   createReadRateLimitRuntime,
   DEFAULT_READ_IP_LIMIT,
   DEFAULT_READ_KEY_LIMIT,
   DEFAULT_READ_PERIOD_SECONDS,
   DEFAULT_READ_RETRY_AFTER_SECONDS,
-  extractClientIp,
+  extractRequestClientIp,
   parseRateLimitConfigFromEnv,
   parseReadRateLimitConfigFromEnv,
   requireReadRateLimit,
@@ -82,8 +100,7 @@ export {
   type ReadRateLimitScope,
 } from "./rate-limit.ts";
 
-export interface ApiWorkerEnv {
-  HYPERDRIVE_READ: Hyperdrive;
+export interface ApiWorkerEnv extends InternalMediaWorkerEnv {
   HYPERDRIVE_WRITE: Hyperdrive;
   EMAIL?: SendEmail;
   EMAIL_FROM?: string;

@@ -105,23 +105,23 @@ export function createInMemoryRateLimiter(options: InMemoryRateLimiterOptions): 
   };
 }
 
-export function extractClientIp(headers: Headers): string {
+export function extractRequestClientIp(headers: Headers): string {
   const cfIp = headers.get("cf-connecting-ip")?.trim();
   if (cfIp && cfIp.length > 0) {
-    return cfIp;
+    return cfIp.toLowerCase();
   }
 
   const forwardedFor = headers.get("x-forwarded-for");
   if (forwardedFor) {
     const firstHop = forwardedFor.split(",")[0]?.trim();
     if (firstHop && firstHop.length > 0) {
-      return firstHop;
+      return firstHop.toLowerCase();
     }
   }
 
   const realIp = headers.get("x-real-ip")?.trim();
   if (realIp && realIp.length > 0) {
-    return realIp;
+    return realIp.toLowerCase();
   }
 
   return "unknown";
@@ -353,7 +353,7 @@ export const requireReadRateLimit: MiddlewareHandler<ApiEnv> = async (c, next) =
     }
   }
 
-  const clientIp = extractClientIp(c.req.raw.headers);
+  const clientIp = extractRequestClientIp(c.req.raw.headers);
   const ipOutcome = await runtime.ipLimiter.limit({ key: `read:ip:${clientIp}` });
   if (!ipOutcome.success) {
     c.header("Retry-After", String(runtime.retryAfterSeconds));
