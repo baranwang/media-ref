@@ -1,10 +1,12 @@
 import type { Namespace } from "@media-ref/client";
 import { bilibiliAdapter } from "./bilibili.ts";
 import { iqiyiAdapter } from "./iqiyi.ts";
+import { tencentAdapter } from "./tencent.ts";
 import type { AdapterRegistry, AdapterTier, MediaAdapter } from "./types.ts";
 
 export { bilibiliAdapter, parseBilibiliInput } from "./bilibili.ts";
 export { iqiyiAdapter, parseIqiyiInput } from "./iqiyi.ts";
+export { parseTencentInput, tencentAdapter } from "./tencent.ts";
 export {
   AdapterTransientError,
   createTier1Adapter,
@@ -52,5 +54,5 @@ export function createAdapterRegistry(adapters: readonly MediaAdapter[] = []): A
 }
 
 export function createDefaultAdapterRegistry(): AdapterRegistry {
-  return createAdapterRegistry([bilibiliAdapter, iqiyiAdapter]);
+  return createAdapterRegistry([bilibiliAdapter, iqiyiAdapter, tencentAdapter]);
 }

@@ -221,6 +221,8 @@ export interface ApiEnv {
     tmdbConfig: TmdbGatewayConfig | undefined;
     tmdbGateway: TmdbGateway | undefined;
     now: () => Date;
+    onBackgroundTask: ((promise: Promise<unknown>) => void) | undefined;
+    onBackgroundTaskError: ((error: unknown) => void) | undefined;
     hasCustomClock: boolean;
     readRateLimit: ReadRateLimitRuntime;
     submissionQuota: SubmissionQuotaConfig | undefined;

@@ -1,7 +1,7 @@
 {
   "name": "@media-ref/client",
   "version": "0.0.0",
-  "description": "Core types, episode resolution, and segment validation for media-ref.",
+  "description": "Typed HTTP client, canonical domain types, episode resolution, and segment validation for media-ref.",
   "license": "MIT",
   "files": [
     "dist"
