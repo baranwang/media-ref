@@ -10,6 +10,7 @@ import {
 import type { Hono } from "hono";
 import { requireApiKey } from "./api-keys.ts";
 import type { ApiEnv } from "./auth.ts";
+import { requireReadRateLimit } from "./rate-limit.ts";
 
 export interface MediaReadResponse {
   key: string;
@@ -88,7 +89,9 @@ function parseBatchMediaRequest(body: unknown): ParseBatchRequestResult {
 }
 
 export function registerMediaRoutes(app: Hono<ApiEnv>): void {
-  app.post("/v1/media/batch", requireApiKey({ db: "read", permission: "read" }), async (c) => {
+  app.use("/v1/media/*", requireApiKey({ db: "read", permission: "read" }), requireReadRateLimit);
+
+  app.post("/v1/media/batch", async (c) => {
     let rawBody: unknown;
     try {
       rawBody = await c.req.json();
@@ -117,7 +120,7 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
     }
   });
 
-  app.get("/v1/media/:key", requireApiKey({ db: "read", permission: "read" }), async (c) => {
+  app.get("/v1/media/:key", async (c) => {
     const includeUnconfirmedParsed = parseBooleanQueryParam(c.req.query("includeUnconfirmed"));
     if (!includeUnconfirmedParsed.ok) {
       return c.json(
@@ -128,7 +131,6 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
         400,
       );
     }
-
     const rawKey = c.req.param("key").trim();
     const result = await queryMediaByKey(c.get("dbRead"), rawKey, {
       includeUnconfirmed: includeUnconfirmedParsed.value,

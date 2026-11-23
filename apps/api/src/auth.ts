@@ -1,10 +1,16 @@
 import { apiKey } from "@better-auth/api-key";
-import type { OutboundClient, TmdbGateway, TmdbGatewayConfig } from "@media-ref/core";
+import type {
+  OutboundClient,
+  SubmissionQuotaConfig,
+  TmdbGateway,
+  TmdbGatewayConfig,
+} from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { betterAuth } from "better-auth";
 import type { MiddlewareHandler } from "hono";
 import type { VerifiedApiKey } from "./api-keys.ts";
 import { buildOAuthAuthOptions, type OAuthConfig } from "./oauth.ts";
+import type { ReadRateLimitRuntime } from "./rate-limit.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
 export const DEFAULT_API_BASE_URL = "https://api.mediaref.org";
@@ -213,6 +219,9 @@ export interface ApiEnv {
     tmdbConfig: TmdbGatewayConfig | undefined;
     tmdbGateway: TmdbGateway | undefined;
     now: () => Date;
+    hasCustomClock: boolean;
+    readRateLimit: ReadRateLimitRuntime;
+    submissionQuota: SubmissionQuotaConfig | undefined;
     session: AuthenticatedSession | null;
     apiKey: VerifiedApiKey | null;
   };

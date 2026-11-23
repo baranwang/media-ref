@@ -539,6 +539,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
         tmdb: { accessToken: "test-tmdb-token", traktClientId: "test-trakt-client-id" },
+        submitBaseHourlyLimit: 20,
       },
     });
 

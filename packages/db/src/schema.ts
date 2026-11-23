@@ -15,6 +15,7 @@ export interface UserTable {
   createdAt: Generated<Date>;
   updatedAt: Generated<Date>;
   role: Generated<string>;
+  reputation: Generated<number>;
 }
 
 export interface SessionTable {

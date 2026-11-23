@@ -1,3 +1,4 @@
+import { sql } from "kysely";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { runMigrations } from "../src/index.ts";
 import { createTestDb, type TestDbHandle } from "../src/testing.ts";
@@ -53,6 +54,11 @@ describe("packages/db migrations", () => {
       },
       {
         migrationName: "0007_platform_status",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0008_reputation_rate_limits",
         direction: "Up",
         status: "Success",
       },
@@ -156,7 +162,7 @@ describe("packages/db migrations", () => {
 
     const userRow = await testDb.readDb
       .selectFrom("user")
-      .select(["id", "email", "emailVerified", "role"])
+      .select(["id", "email", "emailVerified", "role", "reputation"])
       .where("id", "=", "user_1")
       .executeTakeFirst();
 
@@ -165,6 +171,7 @@ describe("packages/db migrations", () => {
       email: "dev@mediaref.org",
       emailVerified: false,
       role: "user",
+      reputation: 0,
     });
 
     const insertedJob = await testDb.writeDb
@@ -371,6 +378,17 @@ describe("packages/db migrations", () => {
       status: "needs_review",
       submitter_type: "human",
     });
+
+    const submitterCreatedIdx = await sql<{ indexdef: string }>`
+      select indexdef
+      from pg_indexes
+      where schemaname = 'public'
+        and tablename = 'change_requests'
+        and indexname = 'change_requests_submitter_created_idx'
+    `.execute(testDb.readDb);
+
+    expect(submitterCreatedIdx.rows).toHaveLength(1);
+    expect(submitterCreatedIdx.rows[0]?.indexdef).toMatch(/submitter_user_id,\s*created_at DESC/i);
 
     const insertedLead = await testDb.writeDb
       .insertInto("leads")
