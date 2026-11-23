@@ -3,6 +3,7 @@ export { migrations, staticMigrationProvider } from "./migrations/index.ts";
 export { runMigrations } from "./migrator.ts";
 export type {
   AccountTable,
+  ApiKeyTable,
   Database,
   SchemaMetaTable,
   SessionTable,

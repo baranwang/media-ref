@@ -1,7 +1,9 @@
+import { apiKey } from "@better-auth/api-key";
 import type { OutboundClient } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { betterAuth } from "better-auth";
 import type { MiddlewareHandler } from "hono";
+import type { VerifiedApiKey } from "./api-keys.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
 export const DEFAULT_API_BASE_URL = "https://api.mediaref.org";
@@ -123,7 +125,32 @@ export function createAuth(deps: AuthDeps) {
       db: deps.dbWrite,
       type: "postgres",
     },
+    disabledPaths: ["/api-key/create"],
     trustedOrigins,
+    plugins: [
+      apiKey({
+        defaultPrefix: "mref_",
+        startingCharactersConfig: {
+          shouldStore: true,
+          charactersLength: 11,
+        },
+        maximumNameLength: 64,
+        rateLimit: {
+          enabled: false,
+        },
+        enableSessionForAPIKeys: false,
+        permissions: {
+          defaultPermissions: {
+            media: ["read", "report"],
+          },
+        },
+        keyExpiration: {
+          defaultExpiresIn: null,
+          minExpiresIn: 0,
+          maxExpiresIn: 365,
+        },
+      }),
+    ],
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
@@ -151,14 +178,19 @@ export function createAuth(deps: AuthDeps) {
         },
       },
     },
-    advanced: cookieDomain
-      ? {
-          crossSubDomainCookies: {
-            enabled: true,
-            domain: cookieDomain,
-          },
-        }
-      : undefined,
+    advanced: {
+      database: {
+        validateSchema: false,
+      },
+      ...(cookieDomain
+        ? {
+            crossSubDomainCookies: {
+              enabled: true,
+              domain: cookieDomain,
+            },
+          }
+        : {}),
+    },
   });
 }
 
@@ -167,7 +199,11 @@ export type AuthInstance = ReturnType<typeof createAuth>;
 export interface ApiEnv {
   Variables: {
     auth: AuthInstance;
+    dbRead: Db;
+    dbWrite: Db;
+    now: () => Date;
     session: AuthenticatedSession | null;
+    apiKey: VerifiedApiKey | null;
   };
 }
 
