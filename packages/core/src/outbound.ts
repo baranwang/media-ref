@@ -37,6 +37,18 @@ export interface EmailMessage {
   html?: string;
 }
 
+export interface CloudflareSendEmailPayload {
+  from: string;
+  to: string | string[];
+  subject: string;
+  text?: string;
+  html?: string;
+}
+
+export interface CloudflareSendEmailBinding {
+  send(builder: CloudflareSendEmailPayload): Promise<unknown>;
+}
+
 export interface ModelMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
@@ -84,6 +96,8 @@ export interface LiveOutboundClientOptions {
   fetchImpl?: typeof fetch;
   proxyConfig?: OutboundProxyConfig;
   sendEmail?: (message: EmailMessage) => Promise<void>;
+  emailBinding?: CloudflareSendEmailBinding;
+  defaultEmailFrom?: string;
   invokeModel?: (request: ModelInvocationRequest) => Promise<ModelInvocationResponse>;
 }
 
@@ -147,10 +161,27 @@ export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}
     },
 
     async sendEmail(message) {
-      if (!options.sendEmail) {
-        throw new Error("Outbound email transport is not configured");
+      if (options.sendEmail) {
+        await options.sendEmail(message);
+        return;
       }
-      await options.sendEmail(message);
+
+      if (options.emailBinding) {
+        const from = message.from ?? options.defaultEmailFrom;
+        if (!from) {
+          throw new Error("Outbound email sender address is not configured");
+        }
+        await options.emailBinding.send({
+          from,
+          to: message.to,
+          subject: message.subject,
+          text: message.text,
+          ...(message.html !== undefined ? { html: message.html } : {}),
+        });
+        return;
+      }
+
+      throw new Error("Outbound email transport is not configured");
     },
 
     async invokeModel(request) {
