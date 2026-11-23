@@ -112,6 +112,7 @@ export type BaselineSourceRow = "tmdb" | "tvdb" | "imdb" | "bangumi" | "douban";
 export type ExternalIdNamespaceRow = "tmdb" | "imdb" | "tvdb" | "trakt";
 export type ExternalIdSourceRow = "sync" | "reviewer" | "submission";
 export type PlatformNamespaceRow = "tencent" | "iqiyi" | "youku" | "bilibili" | "mgtv";
+export type PlatformCheckStatusRow = "not_found";
 export type AssociationNamespaceRow = PlatformNamespaceRow | "douban" | "bangumi";
 export type AssociationStatusRow = "confirmed" | "seed_unconfirmed" | "delisted";
 export type ChangeRequestStatusRow = "pending_evidence" | "approved" | "needs_review" | "rejected";
@@ -264,6 +265,18 @@ export interface LeadsTable {
   created_at: Generated<Date>;
 }
 
+export interface PlatformChecksTable {
+  id: Generated<string>;
+  media_id: string;
+  platform: PlatformNamespaceRow;
+  status: PlatformCheckStatusRow;
+  checked_at: Date;
+  attempt_count: Generated<number>;
+  next_retry_at: Date | null;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
 export interface Database {
   schema_meta: SchemaMetaTable;
   user: UserTable;
@@ -280,4 +293,5 @@ export interface Database {
   segments: SegmentsTable;
   change_requests: ChangeRequestsTable;
   leads: LeadsTable;
+  platform_checks: PlatformChecksTable;
 }
