@@ -4,6 +4,7 @@ import type { Db } from "@media-ref/db";
 import { betterAuth } from "better-auth";
 import type { MiddlewareHandler } from "hono";
 import type { VerifiedApiKey } from "./api-keys.ts";
+import { buildOAuthAuthOptions, type OAuthConfig } from "./oauth.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
 export const DEFAULT_API_BASE_URL = "https://api.mediaref.org";
@@ -15,6 +16,7 @@ export interface AuthConfig {
   cookieDomain?: string;
   emailFrom?: string;
   trustedOrigins?: string[];
+  oauth?: OAuthConfig;
 }
 
 export interface AuthDeps {
@@ -116,6 +118,7 @@ export function createAuth(deps: AuthDeps) {
   const cookieDomain = normalizeCookieDomain(deps.config.cookieDomain);
   const emailFrom = deps.config.emailFrom ?? DEFAULT_EMAIL_FROM;
   const trustedOrigins = resolveTrustedOrigins(deps.config);
+  const oauthOptions = buildOAuthAuthOptions(deps.config.oauth, deps.outbound);
 
   return betterAuth({
     baseURL,
@@ -127,6 +130,10 @@ export function createAuth(deps: AuthDeps) {
     },
     disabledPaths: ["/api-key/create"],
     trustedOrigins,
+    socialProviders: oauthOptions.socialProviders,
+    account: {
+      accountLinking: oauthOptions.accountLinking,
+    },
     plugins: [
       apiKey({
         defaultPrefix: "mref_",
@@ -150,6 +157,7 @@ export function createAuth(deps: AuthDeps) {
           maxExpiresIn: 365,
         },
       }),
+      ...oauthOptions.plugins,
     ],
     emailAndPassword: {
       enabled: true,
