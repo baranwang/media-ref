@@ -3,10 +3,13 @@ import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 import {
   AdapterTransientError,
   InvalidNativeIdError,
+  type AdapterSearchCandidate,
+  type AdapterSearchQuery,
+  type AdapterSearchResult,
   type CollectionEvidenceResult,
   type FeatureEpisode,
   type ParsedNativeIdInput,
-  type Tier2Adapter,
+  type Tier3Adapter,
 } from "./types.ts";
 
 const BILIBILI_ALLOWED_HOSTS = new Set([
@@ -31,6 +34,62 @@ const BILIBILI_API_HEADERS: Record<string, string> = {
 
 const BILIBILI_SEASON_API = "https://api.bilibili.com/pgc/view/web/season";
 const BILIBILI_MEDIA_API = "https://api.bilibili.com/pgc/review/user";
+const BILIBILI_SEARCH_API = "https://api.bilibili.com/x/web-interface/search/type";
+const BILIBILI_SEARCH_TYPES = ["media_bangumi", "media_ft"] as const;
+const CST_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function buildBilibiliSearchHeaders(): Record<string, string> {
+  const rawUuid =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID().toUpperCase()
+      : "00000000-0000-4000-8000-000000000000";
+  return {
+    referer: "https://search.bilibili.com/",
+    accept: "application/json",
+    cookie: `buvid3=${rawUuid}infoc`,
+  };
+}
+
+function stripBilibiliHighlightHtml(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const withoutTags = raw.replace(/<\/?[^>]+>/g, "");
+  const decoded = withoutTags
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&nbsp;", " ");
+  const trimmed = decoded.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseUnixYear(rawTimestamp: unknown): number | null {
+  if (typeof rawTimestamp !== "number" || !Number.isFinite(rawTimestamp) || rawTimestamp <= 0) {
+    return null;
+  }
+  const ms = rawTimestamp > 1e12 ? rawTimestamp : rawTimestamp * 1000;
+  const date = new Date(ms + CST_OFFSET_MS);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const year = date.getUTCFullYear();
+  return Number.isInteger(year) && year >= 1800 && year <= 3000 ? year : null;
+}
+
+function parseRetryAfterMs(headers: Record<string, string>): number | undefined {
+  const raw = headers["retry-after"];
+  if (!raw) {
+    return undefined;
+  }
+  const seconds = Number.parseInt(raw.trim(), 10);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return seconds * 1000;
+  }
+  return undefined;
+}
 
 function nonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") {
@@ -387,9 +446,9 @@ async function resolveSeasonIdFromMedia(
   return `ss${seasonId}`;
 }
 
-export const bilibiliAdapter: Tier2Adapter<"bilibili"> = {
+export const bilibiliAdapter: Tier3Adapter<"bilibili"> = {
   namespace: "bilibili",
-  tier: 2,
+  tier: 3,
 
   parseInput: parseBilibiliInput,
 
@@ -507,5 +566,146 @@ export const bilibiliAdapter: Tier2Adapter<"bilibili"> = {
         featureEpisodes: featureEpisodes ?? [],
       },
     };
+  },
+
+  async search(query: AdapterSearchQuery, outbound: OutboundClient): Promise<AdapterSearchResult> {
+    const keyword = query.title.trim();
+    if (keyword.length === 0) {
+      return { status: "ok", candidates: [] };
+    }
+
+    const page =
+      query.page !== undefined && Number.isInteger(query.page) && query.page > 0 ? query.page : 1;
+    const limit =
+      query.limit !== undefined && Number.isInteger(query.limit) && query.limit > 0
+        ? query.limit
+        : null;
+
+    const searchHeaders = buildBilibiliSearchHeaders();
+    const seenCanonicalIds = new Set<string>();
+    const candidates: AdapterSearchCandidate[] = [];
+
+    for (const searchType of BILIBILI_SEARCH_TYPES) {
+      const url = `${BILIBILI_SEARCH_API}?search_type=${encodeURIComponent(searchType)}&keyword=${encodeURIComponent(keyword)}&page=${page}`;
+      let response: ExternalHttpResponse;
+      try {
+        response = await outbound.fetchExternal({
+          kind: "platform",
+          namespace: "bilibili",
+          url,
+          method: "GET",
+          headers: searchHeaders,
+        });
+      } catch (error) {
+        return {
+          status: "transient_error",
+          reason: error instanceof Error ? error.message : "bilibili_search_request_failed",
+        };
+      }
+
+      if (response.status < 200 || response.status >= 300) {
+        const retryAfterMs =
+          response.status === 429 ? parseRetryAfterMs(response.headers) : undefined;
+        return {
+          status: "transient_error",
+          reason: `http_${response.status}`,
+          ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+        };
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(response.body);
+      } catch {
+        return {
+          status: "transient_error",
+          reason: "invalid_json",
+        };
+      }
+
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return {
+          status: "transient_error",
+          reason: "unexpected_payload",
+        };
+      }
+
+      const envelope = parsed as Record<string, unknown>;
+      if (typeof envelope.code !== "number") {
+        return {
+          status: "transient_error",
+          reason: "missing_code",
+        };
+      }
+
+      if (envelope.code !== 0) {
+        return {
+          status: "transient_error",
+          reason: `bilibili_code_${envelope.code}`,
+        };
+      }
+
+      const data =
+        envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data)
+          ? (envelope.data as Record<string, unknown>)
+          : null;
+      const rawResults = data?.result;
+      if (!Array.isArray(rawResults)) {
+        continue;
+      }
+
+      for (const item of rawResults) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          continue;
+        }
+        const record = item as Record<string, unknown>;
+        const seasonId = parsePositiveInt(record.season_id);
+        if (seasonId === null) {
+          continue;
+        }
+
+        const canonicalId = `ss${seasonId}`;
+        if (seenCanonicalIds.has(canonicalId)) {
+          continue;
+        }
+
+        const title = stripBilibiliHighlightHtml(record.title);
+        if (!title) {
+          continue;
+        }
+
+        seenCanonicalIds.add(canonicalId);
+
+        const originalTitle = stripBilibiliHighlightHtml(record.org_title);
+        const year = parseUnixYear(record.pubtime);
+        const mediaType =
+          mapBilibiliMediaType(record.media_type ?? record.season_type) ??
+          (searchType === "media_bangumi" ? "tv" : null);
+
+        const epSize = parsePositiveInt(record.ep_size);
+        const epsLength =
+          Array.isArray(record.eps) && record.eps.length > 0 ? record.eps.length : null;
+        const episodeCount = epSize ?? epsLength;
+
+        const itemUrl =
+          nonEmptyString(record.url) ?? `https://www.bilibili.com/bangumi/play/${canonicalId}`;
+
+        candidates.push({
+          canonicalId,
+          title,
+          ...(originalTitle ? { originalTitle } : {}),
+          year,
+          mediaType,
+          episodeCount,
+          url: itemUrl,
+        });
+
+        if (limit !== null && candidates.length >= limit) {
+          return { status: "ok", candidates };
+        }
+      }
+    }
+
+    return { status: "ok", candidates };
   },
 };

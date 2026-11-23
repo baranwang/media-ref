@@ -336,11 +336,11 @@ describe("Bilibili Tier 1 & Tier 2 adapter", () => {
     const defaultRegistry = createDefaultAdapterRegistry();
     const bili = defaultRegistry.get("bilibili");
     expect(bili).toBeDefined();
-    expect(bili?.tier).toBe(2);
+    expect(bili?.tier).toBe(3);
     expect(bili && isTier2Adapter(bili)).toBe(true);
-    expect(bili && isTier3Adapter(bili)).toBe(false);
+    expect(bili && isTier3Adapter(bili)).toBe(true);
     expect(defaultRegistry.listByMinTier(2).map((a) => a.namespace)).toContain("bilibili");
-    expect(defaultRegistry.listByMinTier(3)).toEqual([]);
+    expect(defaultRegistry.listByMinTier(3).map((a) => a.namespace)).toEqual(["bilibili"]);
 
     const tier1Stub = createTier1Adapter({
       namespace: "youku",
@@ -356,5 +356,258 @@ describe("Bilibili Tier 1 & Tier 2 adapter", () => {
     expect(isTier2Adapter(tier1Stub)).toBe(false);
     expect(customRegistry.listByMinTier(1).map((a) => a.namespace)).toEqual(["youku", "bilibili"]);
     expect(customRegistry.listByMinTier(2).map((a) => a.namespace)).toEqual(["bilibili"]);
+    expect(customRegistry.listByMinTier(3).map((a) => a.namespace)).toEqual(["bilibili"]);
+  });
+});
+
+describe("Bilibili Tier 3 search", () => {
+  test("searches media_bangumi and media_ft with buvid3 cookie + search referer, strips highlight tags, and deduplicates by season_id", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        expect(request.kind).toBe("platform");
+        expect(request.namespace).toBe("bilibili");
+        expect(request.headers?.referer).toBe("https://search.bilibili.com/");
+        expect(request.headers?.cookie).toMatch(/buvid3=[A-Za-z0-9-]+/);
+
+        const url = new URL(request.url);
+        expect(url.origin + url.pathname).toBe(
+          "https://api.bilibili.com/x/web-interface/search/type",
+        );
+        expect(url.searchParams.get("keyword")).toBe("咒术回战");
+        expect(url.searchParams.get("page")).toBe("1");
+
+        const searchType = url.searchParams.get("search_type");
+        if (searchType === "media_bangumi") {
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "0",
+            data: {
+              numResults: 2,
+              result: [
+                {
+                  season_id: 34430,
+                  media_id: 28229899,
+                  title: '<em class="keyword">咒术回战</em>',
+                  org_title: "呪術廻戦",
+                  media_type: 1,
+                  season_type: 1,
+                  pubtime: 1601659500, // 2020-10-03 01:25:00 CST
+                  ep_size: 24,
+                  url: "https://www.bilibili.com/bangumi/play/ss34430",
+                },
+                {
+                  season_id: 45574,
+                  media_id: 28339735,
+                  title: '<em class="keyword">咒术回战</em> 第二季',
+                  org_title: "呪術廻戦 懐玉・玉折／渋谷事変",
+                  media_type: 1,
+                  season_type: 1,
+                  pubtime: 1688659200, // 2023-07-07 CST
+                  ep_size: 23,
+                },
+              ],
+            },
+          });
+        }
+
+        if (searchType === "media_ft") {
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "0",
+            data: {
+              numResults: 2,
+              result: [
+                // Duplicate season_id 34430 must be deduplicated
+                {
+                  season_id: 34430,
+                  media_id: 28229899,
+                  title: '<em class="keyword">咒术回战</em> (重复)',
+                  media_type: 1,
+                  pubtime: 1601659500,
+                  ep_size: 24,
+                },
+                {
+                  season_id: 40500,
+                  media_id: 28331111,
+                  title: '<em class="keyword">咒术回战</em> 0 &amp; 剧场版',
+                  org_title: '劇場版 <em class="keyword">呪術廻戦</em> 0',
+                  media_type: 2,
+                  season_type: 2,
+                  pubtime: 1640304000, // 2021-12-24 CST
+                  ep_size: 1,
+                  url: "https://www.bilibili.com/bangumi/play/ss40500",
+                },
+              ],
+            },
+          });
+        }
+
+        throw new Error(`Unexpected search_type: ${searchType}`);
+      },
+    });
+
+    const result = await bilibiliAdapter.search({ title: "咒术回战" }, outbound);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") {
+      return;
+    }
+
+    expect(outbound.httpRequests).toHaveLength(2);
+    expect(result.candidates).toEqual([
+      {
+        canonicalId: "ss34430",
+        title: "咒术回战",
+        originalTitle: "呪術廻戦",
+        year: 2020,
+        mediaType: "tv",
+        episodeCount: 24,
+        url: "https://www.bilibili.com/bangumi/play/ss34430",
+      },
+      {
+        canonicalId: "ss45574",
+        title: "咒术回战 第二季",
+        originalTitle: "呪術廻戦 懐玉・玉折／渋谷事変",
+        year: 2023,
+        mediaType: "tv",
+        episodeCount: 23,
+        url: "https://www.bilibili.com/bangumi/play/ss45574",
+      },
+      {
+        canonicalId: "ss40500",
+        title: "咒术回战 0 & 剧场版",
+        originalTitle: "劇場版 呪術廻戦 0",
+        year: 2021,
+        mediaType: "movie",
+        episodeCount: 1,
+        url: "https://www.bilibili.com/bangumi/play/ss40500",
+      },
+    ]);
+  });
+
+  test("maps empty search results cleanly to { status: 'ok', candidates: [] } and respects limit", async () => {
+    const emptyOutbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (url.searchParams.get("search_type") === "media_bangumi") {
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "0",
+            data: { numResults: 0 },
+          });
+        }
+        return jsonResponse(request.url, {
+          code: 0,
+          message: "0",
+          data: { numResults: 0, result: [] },
+        });
+      },
+    });
+
+    const empty = await bilibiliAdapter.search({ title: "不存在的神秘番剧XYZ" }, emptyOutbound);
+    expect(empty).toEqual({ status: "ok", candidates: [] });
+
+    const limitOutbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (url.searchParams.get("search_type") === "media_bangumi") {
+          return jsonResponse(request.url, {
+            code: 0,
+            data: {
+              result: [
+                { season_id: 1001, title: "剧A", media_type: 1, pubtime: 1704067200, ep_size: 12 },
+                { season_id: 1002, title: "剧B", media_type: 1, pubtime: 1704067200, ep_size: 12 },
+              ],
+            },
+          });
+        }
+        return jsonResponse(request.url, {
+          code: 0,
+          data: {
+            result: [
+              {
+                season_id: 1003,
+                title: "剧C",
+                media_type: 5,
+                pubtime: 1704067200,
+                eps: [{ id: 1 }, { id: 2 }],
+              },
+            ],
+          },
+        });
+      },
+    });
+
+    const limited = await bilibiliAdapter.search({ title: "剧", limit: 2 }, limitOutbound);
+    expect(limited.status).toBe("ok");
+    if (limited.status === "ok") {
+      expect(limited.candidates).toHaveLength(2);
+      expect(limited.candidates.map((c) => c.canonicalId)).toEqual(["ss1001", "ss1002"]);
+    }
+  });
+
+  test("maps HTTP 412, 429, 5xx, timeouts, and non-zero Bilibili codes to transient_error", async () => {
+    const scenarios: Array<{
+      label: string;
+      handler: () => ExternalHttpResponse | Promise<ExternalHttpResponse>;
+      expectedReasonPattern: RegExp;
+    }> = [
+      {
+        label: "http 412 risk control",
+        handler: () => ({
+          status: 412,
+          headers: { "content-type": "text/html" },
+          body: "<html>risk control</html>",
+          url: "https://api.bilibili.com/x/web-interface/search/type",
+        }),
+        expectedReasonPattern: /412/,
+      },
+      {
+        label: "http 429 rate limited",
+        handler: () => ({
+          status: 429,
+          headers: { "retry-after": "30" },
+          body: "Too Many Requests",
+          url: "https://api.bilibili.com/x/web-interface/search/type",
+        }),
+        expectedReasonPattern: /429/,
+      },
+      {
+        label: "http 503 upstream failure",
+        handler: () => ({
+          status: 503,
+          headers: {},
+          body: "Service Unavailable",
+          url: "https://api.bilibili.com/x/web-interface/search/type",
+        }),
+        expectedReasonPattern: /503/,
+      },
+      {
+        label: "network timeout",
+        handler: async () => {
+          throw new Error("The operation timed out");
+        },
+        expectedReasonPattern: /timed out/i,
+      },
+      {
+        label: "non-zero bilibili error code",
+        handler: () =>
+          jsonResponse("https://api.bilibili.com/x/web-interface/search/type", {
+            code: -412,
+            message: "请求被拦截",
+          }),
+        expectedReasonPattern: /-412/,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const outbound = createFakeOutboundClient({
+        fetchExternal: scenario.handler,
+      });
+      const result = await bilibiliAdapter.search({ title: "咒术回战" }, outbound);
+      expect(result.status, scenario.label).toBe("transient_error");
+      if (result.status === "transient_error") {
+        expect(result.reason, scenario.label).toMatch(scenario.expectedReasonPattern);
+      }
+    }
   });
 });

@@ -89,6 +89,7 @@ export interface AdapterSearchQuery {
   year?: number | null;
   mediaType?: MediaType;
   season?: number | null;
+  page?: number;
   limit?: number;
 }
 

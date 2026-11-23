@@ -164,6 +164,261 @@ describe("OutboundClient live HTTP routing", () => {
       }),
     ).rejects.toThrow(/sender/i);
   });
+
+  test("invokes Cloudflare Workers AI binding with AI Gateway options and normalizes multi-turn tool calls", async () => {
+    const runCalls: Array<{
+      model: string;
+      input: Record<string, unknown>;
+      options?: Record<string, unknown>;
+    }> = [];
+
+    const aiBinding = {
+      async run(model: string, input: Record<string, unknown>, options?: Record<string, unknown>) {
+        runCalls.push({ model, input, options });
+        return {
+          response: null,
+          tool_calls: [
+            {
+              name: "search_platform",
+              arguments: { keyword: "咒术回战", page: 1 },
+            },
+          ],
+          usage: {
+            prompt_tokens: 120,
+            completion_tokens: 24,
+          },
+        };
+      },
+    };
+
+    const outbound = createLiveOutboundClient({
+      aiBinding,
+      aiGatewayId: "media-ref-gateway",
+      aiProvider: "workers-ai",
+      aiModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    });
+
+    const response = await outbound.invokeModel({
+      messages: [
+        { role: "system", content: "You find candidate collections." },
+        { role: "user", content: "Find Bilibili collection for 咒术回战 S1" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_prev", name: "search_platform", arguments: { keyword: "JJK" } }],
+        },
+        {
+          role: "tool",
+          toolCallId: "call_prev",
+          name: "search_platform",
+          content: '{"status":"ok","candidates":[]}',
+        },
+      ],
+      tools: [
+        {
+          name: "search_platform",
+          description: "Search platform collections",
+          parameters: {
+            type: "object",
+            properties: { keyword: { type: "string" } },
+            required: ["keyword"],
+          },
+        },
+      ],
+      temperature: 0,
+      maxTokens: 512,
+    });
+
+    expect(runCalls).toHaveLength(1);
+    expect(runCalls[0]?.model).toBe("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    expect(runCalls[0]?.options).toEqual({
+      gateway: { id: "media-ref-gateway" },
+    });
+    expect(runCalls[0]?.input).toMatchObject({
+      temperature: 0,
+      max_tokens: 512,
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "search_platform",
+            description: "Search platform collections",
+          },
+        },
+      ],
+    });
+    expect(response).toEqual({
+      content: null,
+      text: null,
+      toolCalls: [
+        {
+          id: "call_1",
+          name: "search_platform",
+          arguments: { keyword: "咒术回战", page: 1 },
+        },
+      ],
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      provider: "workers-ai",
+      finishReason: "tool_calls",
+      usage: {
+        inputTokens: 120,
+        outputTokens: 24,
+      },
+    });
+  });
+
+  test("routes non-workers-ai providers through Cloudflare AI Gateway binding purely by config", async () => {
+    const gatewayCalls: Array<{
+      gatewayId: string;
+      data: {
+        provider: string;
+        endpoint: string;
+        headers?: Record<string, string>;
+        query: Record<string, unknown>;
+      };
+    }> = [];
+
+    const aiBinding = {
+      async run() {
+        throw new Error("Should use gateway.run for external provider");
+      },
+      gateway(gatewayId: string) {
+        return {
+          async run(data: {
+            provider: string;
+            endpoint: string;
+            headers?: Record<string, string>;
+            query: Record<string, unknown>;
+          }) {
+            gatewayCalls.push({ gatewayId, data });
+            if (data.provider === "openai") {
+              return new Response(
+                JSON.stringify({
+                  model: "gpt-4o-mini",
+                  choices: [
+                    {
+                      finish_reason: "tool_calls",
+                      message: {
+                        content: null,
+                        tool_calls: [
+                          {
+                            id: "call_oa_1",
+                            type: "function",
+                            function: {
+                              name: "inspect_collection",
+                              arguments: '{"nativeId":"ss34430"}',
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                  usage: { prompt_tokens: 88, completion_tokens: 19 },
+                }),
+                { status: 200, headers: { "content-type": "application/json" } },
+              );
+            }
+            if (data.provider === "anthropic") {
+              return new Response(
+                JSON.stringify({
+                  model: "claude-sonnet-4-5",
+                  stop_reason: "tool_use",
+                  content: [
+                    { type: "text", text: "Checking ss34430" },
+                    {
+                      type: "tool_use",
+                      id: "toolu_01",
+                      name: "submit_candidate",
+                      input: { nativeId: "ss34430", variantDescription: "原声" },
+                    },
+                  ],
+                  usage: { input_tokens: 95, output_tokens: 31 },
+                }),
+                { status: 200, headers: { "content-type": "application/json" } },
+              );
+            }
+            throw new Error(`Unexpected provider: ${data.provider}`);
+          },
+        };
+      },
+    };
+
+    const openaiOutbound = createLiveOutboundClient({
+      aiBinding,
+      aiGatewayId: "prod-gateway",
+      aiProvider: "openai",
+      aiModel: "gpt-4o-mini",
+    });
+
+    const openaiRes = await openaiOutbound.invokeModel({
+      messages: [{ role: "user", content: "inspect candidate" }],
+      tools: [
+        {
+          name: "inspect_collection",
+          description: "Inspect collection",
+          parameters: { type: "object", properties: { nativeId: { type: "string" } } },
+        },
+      ],
+    });
+
+    expect(gatewayCalls[0]?.gatewayId).toBe("prod-gateway");
+    expect(gatewayCalls[0]?.data.provider).toBe("openai");
+    expect(gatewayCalls[0]?.data.endpoint).toBe("chat/completions");
+    expect(openaiRes).toEqual({
+      content: null,
+      text: null,
+      toolCalls: [
+        {
+          id: "call_oa_1",
+          name: "inspect_collection",
+          arguments: { nativeId: "ss34430" },
+        },
+      ],
+      model: "gpt-4o-mini",
+      provider: "openai",
+      finishReason: "tool_calls",
+      usage: { inputTokens: 88, outputTokens: 19 },
+    });
+
+    const anthropicOutbound = createLiveOutboundClient({
+      aiBinding,
+      aiGatewayId: "prod-gateway",
+      aiProvider: "anthropic",
+      aiModel: "claude-sonnet-4-5",
+    });
+
+    const anthropicRes = await anthropicOutbound.invokeModel({
+      messages: [
+        { role: "system", content: "System rule" },
+        { role: "user", content: "submit ss34430" },
+      ],
+      tools: [
+        {
+          name: "submit_candidate",
+          description: "Submit candidate",
+          parameters: { type: "object", properties: { nativeId: { type: "string" } } },
+        },
+      ],
+    });
+
+    expect(gatewayCalls[1]?.data.provider).toBe("anthropic");
+    expect(gatewayCalls[1]?.data.endpoint).toBe("v1/messages");
+    expect(anthropicRes).toEqual({
+      content: "Checking ss34430",
+      text: "Checking ss34430",
+      toolCalls: [
+        {
+          id: "toolu_01",
+          name: "submit_candidate",
+          arguments: { nativeId: "ss34430", variantDescription: "原声" },
+        },
+      ],
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      finishReason: "tool_calls",
+      usage: { inputTokens: 95, outputTokens: 31 },
+    });
+  });
 });
 
 describe("createFakeOutboundClient", () => {

@@ -60,6 +60,7 @@ const LOCK_CLASS_MEDIA_KEY = 1001;
 const LOCK_CLASS_MEDIA_NAMESPACE = 1002;
 const LOCK_CLASS_VARIANT = 1003;
 const LOCK_CLASS_COLLECTION = 1004;
+const LOCK_CLASS_TASK_ID = 1005;
 
 export const EVIDENCE_CHECK_JOB_TYPE = "evidence_check";
 export const TIER1_MANUAL_REVIEW_REASON = "adapter_tier_1_manual_review";
@@ -669,6 +670,18 @@ export async function createChangeRequest(
     throw new MediaServiceError("INVALID_TASK_ID", 400, "taskId must be a valid UUID");
   }
 
+  // Idempotent per-task change request lookup (duplicate queue delivery fast-path)
+  if (input.taskId) {
+    const existingByTask = await dbWrite
+      .selectFrom("change_requests")
+      .selectAll()
+      .where("task_id", "=", input.taskId)
+      .executeTakeFirst();
+    if (existingByTask) {
+      return toChangeRequestRecord(existingByTask);
+    }
+  }
+
   // Resolve existing media if present
   const resolved = await resolveExistingMediaByTarget(dbWrite, target);
   if (target.kind === "media_id" && !resolved) {
@@ -1034,12 +1047,33 @@ export async function createChangeRequest(
     : null;
   const effectiveNow = input.now ?? options.now;
 
+  const submitterType = input.submitterType ?? "human";
   const inserted = await dbWrite.transaction().execute(async (trx) => {
-    const quota = await enforceSubmissionQuotaInTx(trx, {
-      submitterUserId: input.submitterUserId,
-      config: input.submissionQuota,
-      now: effectiveNow,
-    });
+    if (input.taskId) {
+      await acquireAdvisoryLock(trx, LOCK_CLASS_TASK_ID, input.taskId);
+      const existingByTaskInTx = await trx
+        .selectFrom("change_requests")
+        .selectAll()
+        .where("task_id", "=", input.taskId)
+        .executeTakeFirst();
+      if (existingByTaskInTx) {
+        return existingByTaskInTx;
+      }
+    }
+
+    let referenceNow: Date;
+    if (submitterType === "agent") {
+      // Agent exploration submissions are capped by exploration_daily_budget,
+      // not the human contributor hourly submit quota.
+      referenceNow = effectiveNow ?? new Date();
+    } else {
+      const quota = await enforceSubmissionQuotaInTx(trx, {
+        submitterUserId: input.submitterUserId,
+        config: input.submissionQuota,
+        now: effectiveNow,
+      });
+      referenceNow = quota.referenceNow;
+    }
 
     const row = await trx
       .insertInto("change_requests")
@@ -1047,7 +1081,7 @@ export async function createChangeRequest(
         status: resolvedStatus,
         submitter_user_id: input.submitterUserId,
         submitter_key_id: input.submitterKeyId ?? null,
-        submitter_type: input.submitterType ?? "human",
+        submitter_type: submitterType,
         task_id: input.taskId ?? null,
         media_id: existingMedia?.id ?? null,
         target_external_key: canonicalTargetKey,
@@ -1061,7 +1095,7 @@ export async function createChangeRequest(
         evidence: initialEvidenceJson,
         conflict_reason: initialConflictReason,
         decision_reason: initialDecisionReason,
-        ...(effectiveNow ? { created_at: quota.referenceNow, updated_at: quota.referenceNow } : {}),
+        ...(effectiveNow ? { created_at: referenceNow, updated_at: referenceNow } : {}),
       })
       .returningAll()
       .executeTakeFirstOrThrow();
@@ -1073,10 +1107,10 @@ export async function createChangeRequest(
           ? { changeRequestId: row.id, replacesAssociationId: replacesAssociation.id }
           : { changeRequestId: row.id },
         dedupeKey: `${EVIDENCE_CHECK_JOB_TYPE}:${row.id}`,
-        runAfter: effectiveNow ?? quota.referenceNow,
+        runAfter: effectiveNow ?? referenceNow,
       });
     } else if (lockedImmediateTargets.length > 0 && existingMedia) {
-      const detectedAt = (effectiveNow ?? quota.referenceNow).toISOString();
+      const detectedAt = (effectiveNow ?? referenceNow).toISOString();
       for (const targetLocked of lockedImmediateTargets) {
         await trx
           .insertInto("review_alerts")
