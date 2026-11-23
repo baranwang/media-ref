@@ -277,6 +277,27 @@ export interface PlatformChecksTable {
   updated_at: Generated<Date>;
 }
 
+export type ReviewAlertStatusRow = "open" | "resolved";
+
+export interface SyncStateTable {
+  sync_key: string;
+  last_synced_date: string;
+  metadata: ColumnType<JsonObject, JsonObject | string | undefined, JsonObject | string>;
+  updated_at: Generated<Date>;
+}
+
+export interface ReviewAlertsTable {
+  id: Generated<string>;
+  alert_type: string;
+  media_id: string | null;
+  association_id: string | null;
+  status: Generated<ReviewAlertStatusRow>;
+  details: ColumnType<JsonObject, JsonObject | string | undefined, JsonObject | string>;
+  created_at: Generated<Date>;
+  resolved_at: Date | null;
+  resolved_by_user_id: string | null;
+}
+
 export interface Database {
   schema_meta: SchemaMetaTable;
   user: UserTable;
@@ -294,4 +315,6 @@ export interface Database {
   change_requests: ChangeRequestsTable;
   leads: LeadsTable;
   platform_checks: PlatformChecksTable;
+  sync_state: SyncStateTable;
+  review_alerts: ReviewAlertsTable;
 }

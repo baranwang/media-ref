@@ -38,6 +38,11 @@ export interface BackgroundWorkerEnv {
   OUTBOUND_PROXY_CONFIG?: string;
   JOB_BATCH_SIZE?: string;
   JOB_LEASE_DURATION_MS?: string;
+  TMDB_ACCESS_TOKEN?: string;
+  TMDB_API_KEY?: string;
+  TMDB_API_BASE_URL?: string;
+  TRAKT_CLIENT_ID?: string;
+  TRAKT_API_BASE_URL?: string;
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -52,6 +57,13 @@ function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerConfig {
   return {
     batchSize: parsePositiveInt(env.JOB_BATCH_SIZE, DEFAULT_JOB_BATCH_SIZE),
     leaseDurationMs: parsePositiveInt(env.JOB_LEASE_DURATION_MS, DEFAULT_LEASE_DURATION_MS),
+    tmdb: {
+      accessToken: env.TMDB_ACCESS_TOKEN,
+      apiKey: env.TMDB_API_KEY,
+      apiBaseUrl: env.TMDB_API_BASE_URL,
+      traktClientId: env.TRAKT_CLIENT_ID,
+      traktApiBaseUrl: env.TRAKT_API_BASE_URL,
+    },
   };
 }
 
