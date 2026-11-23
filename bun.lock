@@ -79,6 +79,7 @@
       "name": "@media-ref/core",
       "version": "0.0.0",
       "dependencies": {
+        "@media-ref/client": "workspace:*",
         "@media-ref/db": "workspace:*",
         "kysely": "^0.29.9",
       },

@@ -8,6 +8,7 @@ export type {
   BackgroundJobsTable,
   Database,
   JsonObject,
+  LeadsTable,
   SchemaMetaTable,
   SessionTable,
   UserTable,

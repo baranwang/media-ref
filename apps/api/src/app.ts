@@ -12,6 +12,7 @@ import {
   type AuthConfig,
   type AuthInstance,
 } from "./auth.ts";
+import { registerLeadRoutes } from "./leads.ts";
 
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
@@ -136,6 +137,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
   });
 
   registerApiKeyRoutes(app);
+  registerLeadRoutes(app);
 
   return app;
 }

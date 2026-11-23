@@ -106,6 +106,19 @@ export interface ApiKeyTable {
   metadata: string | null;
 }
 
+export interface LeadsTable {
+  id: Generated<string>;
+  target_external_key: string;
+  namespace: string;
+  native_id: string;
+  season: number | null;
+  variant_description: string | null;
+  notes: string | null;
+  reporter_user_id: string;
+  reporter_key_id: string;
+  created_at: Generated<Date>;
+}
+
 export interface Database {
   schema_meta: SchemaMetaTable;
   user: UserTable;
@@ -114,4 +127,5 @@ export interface Database {
   verification: VerificationTable;
   background_jobs: BackgroundJobsTable;
   apikey: ApiKeyTable;
+  leads: LeadsTable;
 }
