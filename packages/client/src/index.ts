@@ -33,6 +33,7 @@ export type {
   SeasonSnapshot,
   Segment,
   SegmentInput,
+  UnconfirmedAssociationSource,
   Variant,
   WholeSeasonSegmentInput,
 } from "./types.ts";

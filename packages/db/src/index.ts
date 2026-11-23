@@ -21,6 +21,8 @@ export type {
   LeadsTable,
   MediaTable,
   MediaTypeRow,
+  PlatformChecksTable,
+  PlatformCheckStatusRow,
   PlatformNamespaceRow,
   SchemaMetaTable,
   SeasonSnapshotRow,
