@@ -1502,7 +1502,11 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        enableExplorationScheduling: false,
+      },
       now: () => t0,
     });
 
@@ -1625,7 +1629,11 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        enableExplorationScheduling: false,
+      },
       now: () => t0,
     });
 
@@ -1756,7 +1764,11 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        enableExplorationScheduling: false,
+      },
       now: () => t0,
     });
 
@@ -1870,7 +1882,11 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        enableExplorationScheduling: false,
+      },
       now: () => t0,
     });
 
@@ -1951,7 +1967,11 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        enableExplorationScheduling: false,
+      },
       now: () => t0,
     });
 
@@ -2067,7 +2087,11 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        enableExplorationScheduling: false,
+      },
       now: () => t0,
     });
 
@@ -2132,7 +2156,11 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        enableExplorationScheduling: false,
+      },
       now: () => t0,
     });
 

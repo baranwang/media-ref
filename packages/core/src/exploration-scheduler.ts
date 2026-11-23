@@ -154,21 +154,25 @@ export type PlatformExplorationOutcome =
       status: "submitted";
       changeRequestId?: string;
       nativeId?: string;
+      durationMs?: number;
     }
   | {
       namespace: Namespace;
       status: "not_found";
       reason?: string;
+      durationMs?: number;
     }
   | {
       namespace: Namespace;
       status: "transient_error";
       reason: string;
       retryAfterMs?: number;
+      durationMs?: number;
     };
 
 export interface ExplorationExecutionResult {
   platformOutcomes: readonly PlatformExplorationOutcome[];
+  durationMs?: number;
 }
 
 export type ExplorationExecutor = (
@@ -2071,6 +2075,7 @@ export function createExplorationJobHandler(
       };
     }
 
+    const execStartMs = Date.now();
     const execResult = await options.executor({
       db: ctx.db,
       outbound: ctx.outbound,
@@ -2085,6 +2090,7 @@ export function createExplorationJobHandler(
       targetNamespaces: effectiveTargetNamespaces,
       now: ctx.now,
     });
+    const durationMs = execResult.durationMs ?? Math.max(0, Date.now() - execStartMs);
 
     const outcomes = execResult.platformOutcomes;
     const hasSubmitted = outcomes.some((o) => o.status === "submitted");
@@ -2110,6 +2116,7 @@ export function createExplorationJobHandler(
         targetNamespaces: effectiveTargetNamespaces,
         demandOutcome,
         platformOutcomes: outcomes,
+        durationMs,
       },
       async onCommit(trx) {
         const lockedDemand = await trx

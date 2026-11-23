@@ -158,6 +158,20 @@ export {
 } from "./conflict-resolution.ts";
 export { createEvidenceCheckJobHandler, type EvidenceCheckJobOptions } from "./evidence-job.ts";
 export {
+  createExplorationAgentExecutor,
+  DEFAULT_EXPLORATION_MAX_DURATION_MS,
+  DEFAULT_EXPLORATION_MAX_STEPS,
+  DEFAULT_EXPLORATION_VARIANT_DESCRIPTION,
+  deriveExplorationTaskId,
+  ensureExplorationAgentUser,
+  EXPLORATION_AGENT_USER_EMAIL,
+  EXPLORATION_AGENT_USER_ID,
+  EXPLORATION_AGENT_USER_NAME,
+  resolveExplorationAgentConfig,
+  type ExplorationAgentConfig,
+  type ResolvedExplorationAgentConfig,
+} from "./exploration-agent.ts";
+export {
   buildTmdbExportUrl,
   computeNotFoundBackoffSeconds,
   createExplorationJobHandler,
@@ -325,7 +339,13 @@ export {
 export {
   createFakeOutboundClient,
   createLiveOutboundClient,
+  DEFAULT_AI_MODEL,
+  DEFAULT_AI_PROVIDER,
   parseOutboundProxyConfig,
+  type CloudflareAiBinding,
+  type CloudflareAiGatewayBinding,
+  type CloudflareAiGatewayRequest,
+  type CloudflareAiGatewayResponse,
   type CloudflareSendEmailBinding,
   type CloudflareSendEmailPayload,
   type EmailMessage,
@@ -336,6 +356,7 @@ export {
   type FakeOutboundClient,
   type FakeOutboundHandlers,
   type LiveOutboundClientOptions,
+  type ModelFinishReason,
   type ModelInvocationRequest,
   type ModelInvocationResponse,
   type ModelMessage,

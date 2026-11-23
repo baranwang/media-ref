@@ -5,7 +5,6 @@ import {
   bilibiliAdapter,
   createAdapterRegistry,
   createChangeRequest,
-  createDefaultAdapterRegistry,
   createFakeOutboundClient,
   createTier1Adapter,
   EVIDENCE_CHECK_JOB_TYPE,
@@ -1137,7 +1136,14 @@ describe("Exploration scheduler (#28)", () => {
       })
       .execute();
 
-    // 1. Default registry has ONLY Tier 2 bilibili -> zero Tier 3 platforms -> no exploration scheduled, zero budget used
+    // 1. Registry with ONLY Tier 2 adapters -> zero Tier 3 platforms -> no exploration scheduled, zero budget used
+    const tier2Bilibili: Tier2Adapter<"bilibili"> = {
+      namespace: "bilibili",
+      tier: 2,
+      parseInput: (raw) => bilibiliAdapter.parseInput(raw),
+      canonicalize: (raw, outbound) => bilibiliAdapter.canonicalize(raw, outbound),
+      fetchCollection: (id, outbound) => bilibiliAdapter.fetchCollection(id, outbound),
+    };
     const defaultEmitted: JobQueueMessage[] = [];
     const workerNoTier3 = createBackgroundWorker({
       db: testDb.writeDb,
@@ -1147,7 +1153,7 @@ describe("Exploration scheduler (#28)", () => {
           defaultEmitted.push(message);
         },
       },
-      adapterRegistry: createDefaultAdapterRegistry(),
+      adapterRegistry: createAdapterRegistry([tier2Bilibili]),
       config: {
         enableDailyTmdbSync: false,
         exploration: { dailyBudget: 10 },
@@ -1163,7 +1169,7 @@ describe("Exploration scheduler (#28)", () => {
       .execute();
     expect(budgetWhenNoTier3).toHaveLength(0);
 
-    // 2. Mixed registry: Tier 1 (youku), Tier 2 (bilibili, tencent), Tier 3 (iqiyi) -> ONLY iqiyi targeted!
+    // 2. Mixed registry: Tier 1 (youku), Tier 2 (bilibili stub, tencent), Tier 3 (iqiyi) -> ONLY iqiyi targeted!
     const tier1Youku = createTier1Adapter({
       namespace: "youku",
       parseInput: (raw) => ({ kind: "show", id: raw, canonicalId: raw }),
@@ -1186,7 +1192,7 @@ describe("Exploration scheduler (#28)", () => {
 
     const mixedRegistry = createAdapterRegistry([
       tier1Youku,
-      bilibiliAdapter, // Tier 2
+      tier2Bilibili, // Tier 2
       tier2Tencent, // Tier 2
       tier3Iqiyi, // Tier 3
     ]);
