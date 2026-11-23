@@ -808,5 +808,58 @@ describe("seed importers (#32)", () => {
       expect(Array.isArray(ndjson)).toBe(true);
       expect(ndjson).toHaveLength(2);
     });
+
+    test("createSeedLeadsReporter records ambiguous bangumi-data items into leads under system:seed-importer", async () => {
+      const testDb = await setupDb();
+      const now = new Date("2026-11-24T09:00:00.000Z");
+      const { createSeedLeadsReporter, SEED_IMPORTER_USER_ID } = await import("../src/seeds.ts");
+
+      // Ambiguous bangumi-data item: seasonless TMDB TV ref (tv/95479) -> reported as leads!
+      const summary = await importBangumiDataSeeds(
+        testDb.writeDb,
+        {
+          items: [
+            {
+              title: "呪術廻戦 第2期",
+              type: "tv",
+              begin: "2023-07-06T00:00:00.000Z",
+              sites: [
+                { site: "tmdb", id: "tv/95479" },
+                { site: "bangumi", id: "369304" },
+                { site: "bilibili", id: "ss34430" },
+              ],
+            },
+          ],
+        },
+        {
+          leadsReporter: createSeedLeadsReporter(testDb.writeDb),
+          now,
+        },
+      );
+
+      expect(summary.skippedAmbiguous).toBe(1);
+      expect(summary.leadsRecorded).toBe(2);
+
+      const leads = await testDb.readDb.selectFrom("leads").selectAll().execute();
+      expect(leads).toHaveLength(2);
+      expect(leads.every((lead) => lead.reporter_user_id === SEED_IMPORTER_USER_ID)).toBe(true);
+      expect(leads.every((lead) => lead.target_external_key === "tmdb:tv:95479")).toBe(true);
+      expect(leads.map((lead) => `${lead.namespace}:${lead.native_id}`).toSorted()).toEqual([
+        "bangumi:369304",
+        "bilibili:ss34430",
+      ]);
+    });
+
+    test("ADVISORY_LOCK_CLASSES assigns unique positive 32-bit integers with zero collisions", async () => {
+      const { ADVISORY_LOCK_CLASSES } = await import("../src/locks.ts");
+      const entries = Object.entries(ADVISORY_LOCK_CLASSES);
+      expect(entries.length).toBeGreaterThanOrEqual(8);
+      const values = entries.map(([, value]) => value);
+      expect(new Set(values).size).toBe(values.length);
+      for (const value of values) {
+        expect(Number.isInteger(value)).toBe(true);
+        expect(value).toBeGreaterThan(0);
+      }
+    });
   });
 });

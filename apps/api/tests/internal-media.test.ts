@@ -722,4 +722,119 @@ describe("API Worker internal anonymous single-media entrypoint (#25)", () => {
 
     await Promise.all(pending);
   });
+
+  test("anonymous /internal/media/:key preserves platform_checks not_found statuses and returns all matched items for shared collections", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const fixture = await seedConfirmedMediaFixture(testDb);
+    const checkedAt = new Date("2026-11-23T14:30:00.000Z");
+
+    await testDb.writeDb
+      .insertInto("platform_checks")
+      .values({
+        media_id: fixture.mediaId,
+        platform: "tencent",
+        status: "not_found",
+        checked_at: checkedAt,
+        next_retry_at: new Date("2026-11-30T14:30:00.000Z"),
+        attempt_count: 1,
+      })
+      .execute();
+
+    // Second media sharing the same bilibili collection ss34430 (reverse lookup returns both items)
+    const secondMedia = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "咒术回战 特别联动篇",
+        original_title: "Jujutsu Kaisen Special",
+        year: 2021,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 12, airYear: 2021 }]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const secondVariant = await testDb.writeDb
+      .insertInto("variants")
+      .values({
+        media_id: secondMedia.id,
+        platform: "bilibili",
+        description: "原声",
+        is_default: true,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const secondAssoc = await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: secondMedia.id,
+        namespace: "bilibili",
+        native_id: "ss34430",
+        variant_id: secondVariant.id,
+        status: "confirmed",
+        needs_review: false,
+        locked: false,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    await testDb.writeDb
+      .insertInto("segments")
+      .values({
+        association_id: secondAssoc.id,
+        season: 1,
+        episode_start: 1,
+        episode_end: 12,
+        target_episode_start: 25,
+        baseline: "tmdb",
+        non_linear: false,
+        needs_review: false,
+      })
+      .execute();
+
+    const internalApp = createInternalMediaApp({ dbRead: testDb.readDb });
+
+    // 1. Direct lookup reflects platform_checks "not_found" with checkedAt
+    const directRes = await internalApp.fetch(
+      new Request(`${INTERNAL_BASE_URL}/internal/media/tmdb:tv:95479`, {
+        headers: { "x-forwarded-client-ip": "203.0.113.50" },
+      }),
+    );
+    expect(directRes.status).toBe(200);
+    const directBody = (await directRes.json()) as {
+      document: MediaDocument;
+      matchedAssociationId: string | null;
+      items: Array<{ document: MediaDocument; matchedAssociationId: string | null }>;
+    };
+    expect(directBody.document.platformStatuses?.tencent).toEqual({
+      status: "not_found",
+      checkedAt: checkedAt.toISOString(),
+    });
+    expect(directBody.document.platformStatuses?.bilibili).toEqual({ status: "associated" });
+    expect(directBody.document.platformStatuses?.youku).toEqual({ status: "unchecked" });
+    expect(directBody.items).toHaveLength(1);
+    expect(directBody.items[0]?.document.media.id).toBe(fixture.mediaId);
+
+    // 2. Shared-collection reverse lookup returns all matched items while staying backwards-compatible
+    const reverseRes = await internalApp.fetch(
+      new Request(`${INTERNAL_BASE_URL}/internal/media/bilibili:ss34430`, {
+        headers: { "x-forwarded-client-ip": "203.0.113.51" },
+      }),
+    );
+    expect(reverseRes.status).toBe(200);
+    const reverseBody = (await reverseRes.json()) as {
+      document: MediaDocument;
+      matchedAssociationId: string | null;
+      items: Array<{ document: MediaDocument; matchedAssociationId: string | null }>;
+    };
+    expect(reverseBody.items).toHaveLength(2);
+    expect(reverseBody.document.media.id).toBe(reverseBody.items[0]?.document.media.id);
+    expect(reverseBody.matchedAssociationId).toBe(reverseBody.items[0]?.matchedAssociationId);
+    expect(new Set(reverseBody.items.map((item) => item.document.media.id))).toEqual(
+      new Set([fixture.mediaId, secondMedia.id]),
+    );
+  });
 });

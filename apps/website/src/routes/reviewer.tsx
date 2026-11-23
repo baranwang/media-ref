@@ -579,7 +579,7 @@ function ReviewerQueuePage() {
                         </span>
                       ) : (
                         <span className="block text-[11px] text-[var(--warn-ink)]">
-                          尚未建档，通过时将按 TMDB 自动建档
+                          尚未建档，通过时将按目标目录自动建档
                         </span>
                       )}
                     </dd>

@@ -51,6 +51,18 @@ interface MarkNeedsReviewInput {
   now: Date;
 }
 
+function mergeEvidenceWithExistingMetadata(
+  existingEvidence: JsonObject | null,
+  nextEvidence: JsonObject,
+  replacesAssociationId: string | null,
+): JsonObject {
+  return {
+    ...existingEvidence,
+    ...nextEvidence,
+    ...(replacesAssociationId !== null ? { replacesAssociationId } : {}),
+  };
+}
+
 async function markChangeRequestNeedsReviewInTx(
   trx: Transaction<Database>,
   input: MarkNeedsReviewInput,
@@ -156,13 +168,26 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
     }
 
     const checkedAt = ctx.now.toISOString();
+    const replacesAssociationId =
+      changeRequest.replacesAssociationId ??
+      (typeof ctx.job.payload.replacesAssociationId === "string" &&
+      isUuid(ctx.job.payload.replacesAssociationId)
+        ? ctx.job.payload.replacesAssociationId
+        : null);
+    const mergeEvidence = (nextEvidence: JsonObject): JsonObject =>
+      mergeEvidenceWithExistingMetadata(
+        changeRequest.evidence,
+        nextEvidence,
+        replacesAssociationId,
+      );
+
     const adapter = adapterRegistry.get(changeRequest.namespace);
     if (!adapter || !isTier2Adapter(adapter)) {
-      const evidence: JsonObject = {
+      const evidence = mergeEvidence({
         checkedAt,
         adapterTier: adapter?.tier ?? null,
         namespace: changeRequest.namespace,
-      };
+      });
       return {
         status: "completed",
         result: {
@@ -193,11 +218,11 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
     let prefetchedCatalog: CatalogTargetSnapshot | null = null;
 
     if (!catalogKey) {
-      const evidence: JsonObject = {
+      const evidence = mergeEvidence({
         checkedAt,
         catalogStatus: "unsupported_catalog",
         targetExternalKey: changeRequest.targetExternalKey,
-      };
+      });
       return {
         status: "completed",
         result: {
@@ -234,12 +259,12 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
     }
 
     if (catalogResult.status === "not_found" || catalogResult.status === "invalid_key") {
-      const evidence: JsonObject = {
+      const evidence = mergeEvidence({
         checkedAt,
         catalogStatus: catalogResult.status,
         targetExternalKey: changeRequest.targetExternalKey,
         catalogKey,
-      };
+      });
       return {
         status: "completed",
         result: {
@@ -291,13 +316,6 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
     }
 
     // 2c. Check whether this submission contradicts an existing confirmed or locked association
-    const replacesAssociationId =
-      changeRequest.replacesAssociationId ??
-      (typeof ctx.job.payload.replacesAssociationId === "string" &&
-      isUuid(ctx.job.payload.replacesAssociationId)
-        ? ctx.job.payload.replacesAssociationId
-        : null);
-
     const conflictingAssociations = await findConflictingAssociations(ctx.db, {
       mediaId: changeRequest.mediaId,
       targetExternalKey: changeRequest.targetExternalKey,
@@ -330,6 +348,8 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         };
       }
 
+      const mergedConflictEvidence = mergeEvidence(conflictResolution.evidenceRecord);
+
       if (conflictResolution.kind === "locked") {
         return {
           status: "completed",
@@ -341,7 +361,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
           async onCommit(trx) {
             await markChangeRequestNeedsReviewInTx(trx, {
               changeRequestId: changeRequest.id,
-              evidence: conflictResolution.evidenceRecord,
+              evidence: mergedConflictEvidence,
               conflictReason: conflictResolution.conflictReason,
               decisionReason: conflictResolution.decisionReason,
               now: ctx.now,
@@ -372,7 +392,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
           async onCommit(trx) {
             await markChangeRequestNeedsReviewInTx(trx, {
               changeRequestId: changeRequest.id,
-              evidence: conflictResolution.evidenceRecord,
+              evidence: mergedConflictEvidence,
               conflictReason: conflictResolution.conflictReason,
               decisionReason: conflictResolution.decisionReason,
               now: ctx.now,
@@ -396,7 +416,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
               changeRequestId: changeRequest.id,
               reviewerUserId: null,
               reason: conflictResolution.decisionReason,
-              evidence: conflictResolution.evidenceRecord,
+              evidence: mergedConflictEvidence,
               conflictReason: null,
               prefetchedCatalog,
               allowedStatuses: ["pending_evidence"],
@@ -416,7 +436,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
             if (error instanceof MediaServiceError && error.code === "ASSOCIATION_LOCKED") {
               await markChangeRequestNeedsReviewInTx(trx, {
                 changeRequestId: changeRequest.id,
-                evidence: conflictResolution.evidenceRecord,
+                evidence: mergedConflictEvidence,
                 conflictReason: CONFLICT_REASONS.LOCKED_ASSOCIATION_CHALLENGED,
                 decisionReason: error.message,
                 now: ctx.now,
@@ -443,7 +463,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
             ) {
               await markChangeRequestNeedsReviewInTx(trx, {
                 changeRequestId: changeRequest.id,
-                evidence: conflictResolution.evidenceRecord,
+                evidence: mergedConflictEvidence,
                 conflictReason: error.code.toLowerCase(),
                 decisionReason: error.message,
                 now: ctx.now,
@@ -457,7 +477,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
     }
 
     if (collectionResult.status === "not_found") {
-      const evidence: JsonObject = {
+      const evidence = mergeEvidence({
         checkedAt,
         catalog: {
           namespace: catalogEvidence.namespace,
@@ -471,7 +491,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         },
         collectionStatus: "not_found",
         collectionReason: collectionResult.reason ?? null,
-      };
+      });
       return {
         status: "completed",
         result: {
@@ -503,7 +523,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
       evaluateStep2: options.evaluateStep2,
     });
 
-    const evidenceRecord: JsonObject = {
+    const evidenceRecord = mergeEvidence({
       checkedAt,
       catalog: {
         namespace: catalogEvidence.namespace,
@@ -533,7 +553,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         conflicts: gate.conflicts,
         reasons: gate.reasons,
       },
-    };
+    });
 
     if (gate.decision === "pass") {
       return {

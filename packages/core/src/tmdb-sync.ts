@@ -19,6 +19,7 @@ import type {
 } from "@media-ref/db";
 import { sql, type Selectable, type Transaction } from "kysely";
 import { enqueueJob, type BackgroundJob, type JobHandler } from "./jobs.ts";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { isUuid } from "./media-service.ts";
 import type { OutboundClient } from "./outbound.ts";
 import {
@@ -1089,15 +1090,11 @@ export async function listNeedsReviewSegments(
   };
 }
 
-const LOCK_CLASS_MEDIA_MERGE = 1005;
-
 async function acquireMergeAdvisoryLock(
   trx: Transaction<Database>,
   mediaId: string,
 ): Promise<void> {
-  await sql`select pg_advisory_xact_lock(${LOCK_CLASS_MEDIA_MERGE}::int4, hashtext(${mediaId}::text))`.execute(
-    trx,
-  );
+  await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_MERGE, mediaId);
 }
 
 interface LockedMediaSummary {

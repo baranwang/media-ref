@@ -849,6 +849,17 @@ async function hydrateMediaDocuments(
       }
     }
 
+    let visibleVariants = variants;
+    if (!includeUnconfirmed) {
+      const confirmedVariantIds = new Set<string>();
+      for (const assoc of associations) {
+        if (assoc.variantId !== null) {
+          confirmedVariantIds.add(assoc.variantId);
+        }
+      }
+      visibleVariants = variants.filter((variant) => confirmedVariantIds.has(variant.id));
+    }
+
     documentsByMediaId.set(media.id, {
       media: {
         id: media.id,
@@ -867,7 +878,7 @@ async function hydrateMediaDocuments(
         nativeId: row.native_id,
         ...(row.locked ? { locked: true } : {}),
       })),
-      variants,
+      variants: visibleVariants,
       associations,
       matchedAssociationIds: [],
       platformStatuses,

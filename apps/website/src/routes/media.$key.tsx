@@ -106,7 +106,7 @@ function formatPlatformStatusLabel(entry: PlatformStatusEntry | undefined): {
   };
 }
 
-function SegmentList({ segments }: { segments: Segment[] }) {
+function SegmentList({ segments }: { segments: readonly Segment[] }) {
   if (segments.length === 0) {
     return (
       <span className="inline-flex items-center rounded-full border border-[var(--chip-line)] bg-[var(--chip-bg)] px-2.5 py-0.5 text-xs font-semibold text-[var(--sea-ink)]">
@@ -154,7 +154,7 @@ function AssociationsTable({
   associations,
   matchedAssociationId,
 }: {
-  associations: Association[];
+  associations: readonly Association[];
   matchedAssociationId: string | null;
 }) {
   if (associations.length === 0) {
@@ -658,7 +658,7 @@ function AnonymousMediaPage() {
           <div className="space-y-1">
             <p className="island-kicker m-0">参与维护</p>
             <h2 className="m-0 text-base font-bold text-[var(--sea-ink)]">
-              发现缺失合集、段映射有误或合集已失效？
+              发现缺失合集、段对应有误或合集已失效？
             </h2>
             <p className="m-0 text-sm text-[var(--sea-ink-soft)]">
               {user

@@ -20,11 +20,16 @@ const BANGUMI_ALLOWED_HOSTS = new Set([
 const BANGUMI_SUBJECT_PATH_PATTERN = /^\/subject\/([1-9]\d*)\/?$/;
 const IMDB_ID_PATTERN = /\b(tt\d+)\b/i;
 
-const BANGUMI_API_BASE = "https://api.bgm.tv/v0";
+export const DEFAULT_BANGUMI_API_BASE_URL = "https://api.bgm.tv/v0";
 const BANGUMI_API_HEADERS: Record<string, string> = {
   accept: "application/json",
   "user-agent": "media-ref/0.1 (https://mediaref.org)",
 };
+
+export interface BangumiFetchOptions {
+  apiBaseUrl?: string;
+  timeoutMs?: number;
+}
 
 // Bangumi subject types: 1=Book, 2=Anime, 3=Music, 4=Game, 6=Real (live-action TV/Movie)
 const BANGUMI_MEDIA_SUBJECT_TYPES = new Set([2, 6]);
@@ -191,11 +196,13 @@ function buildOrdinalEpisodes(count: number): FeatureEpisode[] {
 async function fetchBangumiMainEpisodes(
   subjectId: string,
   outbound: OutboundClient,
+  apiBaseUrl: string,
+  timeoutMs?: number,
 ): Promise<
   | { ok: true; total: number | null; episodes: FeatureEpisode[] }
   | { ok: false; transientReason: string }
 > {
-  const url = `${BANGUMI_API_BASE}/episodes?subject_id=${encodeURIComponent(subjectId)}&type=0&limit=100&offset=0`;
+  const url = `${apiBaseUrl}/episodes?subject_id=${encodeURIComponent(subjectId)}&type=0&limit=100&offset=0`;
   let response: ExternalHttpResponse;
   try {
     response = await outbound.fetchExternal({
@@ -204,6 +211,7 @@ async function fetchBangumiMainEpisodes(
       url,
       method: "GET",
       headers: BANGUMI_API_HEADERS,
+      timeoutMs,
     });
   } catch (error) {
     return {
@@ -308,6 +316,128 @@ export function parseBangumiInput(raw: string): ParsedNativeIdInput | null {
   };
 }
 
+export async function fetchBangumiCollection(
+  canonicalId: string,
+  outbound: OutboundClient,
+  options: BangumiFetchOptions = {},
+): Promise<CollectionEvidenceResult> {
+  const subjectId = canonicalId.trim();
+  if (!BANGUMI_SUBJECT_ID_PATTERN.test(subjectId)) {
+    return { status: "not_found", reason: "invalid_canonical_id" };
+  }
+
+  const apiBaseUrl = (options.apiBaseUrl ?? DEFAULT_BANGUMI_API_BASE_URL).replace(/\/+$/, "");
+  const url = `${apiBaseUrl}/subjects/${encodeURIComponent(subjectId)}`;
+  let response: ExternalHttpResponse;
+  try {
+    response = await outbound.fetchExternal({
+      kind: "catalog",
+      namespace: "bangumi",
+      url,
+      method: "GET",
+      headers: BANGUMI_API_HEADERS,
+      timeoutMs: options.timeoutMs,
+    });
+  } catch (error) {
+    return {
+      status: "transient_error",
+      reason: error instanceof Error ? error.message : "bangumi_request_failed",
+    };
+  }
+
+  if (response.status === 404) {
+    return { status: "not_found", reason: "http_404" };
+  }
+
+  if (response.status < 200 || response.status >= 300) {
+    return {
+      status: "transient_error",
+      reason: `http_${response.status}`,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(response.body);
+  } catch {
+    return { status: "transient_error", reason: "invalid_json" };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { status: "transient_error", reason: "unexpected_payload" };
+  }
+
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.type === "number" && !BANGUMI_MEDIA_SUBJECT_TYPES.has(record.type)) {
+    return {
+      status: "not_found",
+      reason: `unsupported_bangumi_subject_type_${record.type}`,
+    };
+  }
+
+  const nameCn = nonEmptyString(record.name_cn);
+  const originalName = nonEmptyString(record.name);
+  const title = nameCn ?? originalName;
+  if (!title) {
+    return { status: "transient_error", reason: "missing_title" };
+  }
+
+  const infobox = parseBangumiInfobox(record.infobox);
+  const aliases = dedupeAliases(infobox.aliases, title, originalName);
+  const year = parseFourDigitYear(record.date) ?? infobox.fallbackYear;
+
+  const rawPlatform = nonEmptyString(record.platform)?.toLowerCase() ?? "";
+  const mediaType: MediaType = BANGUMI_MOVIE_PLATFORMS.has(rawPlatform) ? "movie" : "tv";
+
+  let featureEpisodeCount: number | null;
+  let featureEpisodes: FeatureEpisode[];
+  if (mediaType === "movie") {
+    featureEpisodeCount = 1;
+    featureEpisodes = [{ index: 1 }];
+  } else {
+    const subjectEps = parsePositiveInt(record.eps);
+    if (subjectEps !== null) {
+      featureEpisodeCount = subjectEps;
+      featureEpisodes = buildOrdinalEpisodes(subjectEps);
+    } else {
+      const fetchedEps = await fetchBangumiMainEpisodes(
+        subjectId,
+        outbound,
+        apiBaseUrl,
+        options.timeoutMs,
+      );
+      if (!fetchedEps.ok) {
+        return {
+          status: "transient_error",
+          reason: fetchedEps.transientReason,
+        };
+      }
+      featureEpisodeCount = fetchedEps.total;
+      featureEpisodes = fetchedEps.episodes;
+    }
+  }
+
+  const externalIds: Partial<Record<Namespace, string>> | undefined = infobox.imdbId
+    ? { imdb: infobox.imdbId }
+    : undefined;
+
+  return {
+    status: "found",
+    info: {
+      namespace: "bangumi",
+      canonicalId: subjectId,
+      title,
+      ...(originalName ? { originalTitle: originalName } : {}),
+      ...(aliases.length > 0 ? { aliases } : {}),
+      year,
+      mediaType,
+      featureEpisodeCount,
+      featureEpisodes,
+      ...(externalIds ? { externalIds } : {}),
+    },
+  };
+}
+
 export const bangumiAdapter: Tier2Adapter<"bangumi"> = {
   namespace: "bangumi",
   tier: 2,
@@ -326,114 +456,7 @@ export const bangumiAdapter: Tier2Adapter<"bangumi"> = {
     return parsed.canonicalId;
   },
 
-  async fetchCollection(canonicalId, outbound): Promise<CollectionEvidenceResult> {
-    const subjectId = canonicalId.trim();
-    if (!BANGUMI_SUBJECT_ID_PATTERN.test(subjectId)) {
-      return { status: "not_found", reason: "invalid_canonical_id" };
-    }
-
-    const url = `${BANGUMI_API_BASE}/subjects/${encodeURIComponent(subjectId)}`;
-    let response: ExternalHttpResponse;
-    try {
-      response = await outbound.fetchExternal({
-        kind: "catalog",
-        namespace: "bangumi",
-        url,
-        method: "GET",
-        headers: BANGUMI_API_HEADERS,
-      });
-    } catch (error) {
-      return {
-        status: "transient_error",
-        reason: error instanceof Error ? error.message : "bangumi_request_failed",
-      };
-    }
-
-    if (response.status === 404) {
-      return { status: "not_found", reason: "http_404" };
-    }
-
-    if (response.status < 200 || response.status >= 300) {
-      return {
-        status: "transient_error",
-        reason: `http_${response.status}`,
-      };
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(response.body);
-    } catch {
-      return { status: "transient_error", reason: "invalid_json" };
-    }
-
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { status: "transient_error", reason: "unexpected_payload" };
-    }
-
-    const record = parsed as Record<string, unknown>;
-    if (typeof record.type === "number" && !BANGUMI_MEDIA_SUBJECT_TYPES.has(record.type)) {
-      return {
-        status: "not_found",
-        reason: `unsupported_bangumi_subject_type_${record.type}`,
-      };
-    }
-
-    const nameCn = nonEmptyString(record.name_cn);
-    const originalName = nonEmptyString(record.name);
-    const title = nameCn ?? originalName;
-    if (!title) {
-      return { status: "transient_error", reason: "missing_title" };
-    }
-
-    const infobox = parseBangumiInfobox(record.infobox);
-    const aliases = dedupeAliases(infobox.aliases, title, originalName);
-    const year = parseFourDigitYear(record.date) ?? infobox.fallbackYear;
-
-    const rawPlatform = nonEmptyString(record.platform)?.toLowerCase() ?? "";
-    const mediaType: MediaType = BANGUMI_MOVIE_PLATFORMS.has(rawPlatform) ? "movie" : "tv";
-
-    let featureEpisodeCount: number | null;
-    let featureEpisodes: FeatureEpisode[];
-    if (mediaType === "movie") {
-      featureEpisodeCount = 1;
-      featureEpisodes = [{ index: 1 }];
-    } else {
-      const subjectEps = parsePositiveInt(record.eps);
-      if (subjectEps !== null) {
-        featureEpisodeCount = subjectEps;
-        featureEpisodes = buildOrdinalEpisodes(subjectEps);
-      } else {
-        const fetchedEps = await fetchBangumiMainEpisodes(subjectId, outbound);
-        if (!fetchedEps.ok) {
-          return {
-            status: "transient_error",
-            reason: fetchedEps.transientReason,
-          };
-        }
-        featureEpisodeCount = fetchedEps.total;
-        featureEpisodes = fetchedEps.episodes;
-      }
-    }
-
-    const externalIds: Partial<Record<Namespace, string>> | undefined = infobox.imdbId
-      ? { imdb: infobox.imdbId }
-      : undefined;
-
-    return {
-      status: "found",
-      info: {
-        namespace: "bangumi",
-        canonicalId: subjectId,
-        title,
-        ...(originalName ? { originalTitle: originalName } : {}),
-        ...(aliases.length > 0 ? { aliases } : {}),
-        year,
-        mediaType,
-        featureEpisodeCount,
-        featureEpisodes,
-        ...(externalIds ? { externalIds } : {}),
-      },
-    };
+  fetchCollection(canonicalId, outbound): Promise<CollectionEvidenceResult> {
+    return fetchBangumiCollection(canonicalId, outbound);
   },
 };

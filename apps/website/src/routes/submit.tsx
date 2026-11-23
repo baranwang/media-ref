@@ -31,6 +31,7 @@ import {
 interface SubmitSearch {
   target?: string;
   namespace?: AssociationNamespace;
+  replacesAssociationId?: string;
 }
 
 interface SegmentDraft {
@@ -97,9 +98,15 @@ export const Route = createFileRoute("/submit")({
         : undefined;
     const rawNs = typeof search.namespace === "string" ? search.namespace.trim() : "";
     const namespace = isAssociationNamespace(rawNs) ? rawNs : undefined;
+    const replacesAssociationId =
+      typeof search.replacesAssociationId === "string" &&
+      search.replacesAssociationId.trim().length > 0
+        ? search.replacesAssociationId.trim()
+        : undefined;
     return {
       ...(target ? { target } : {}),
       ...(namespace ? { namespace } : {}),
+      ...(replacesAssociationId ? { replacesAssociationId } : {}),
     };
   },
   beforeLoad: ({ context, location }) => requireLogin(context, location),
@@ -122,6 +129,9 @@ function SubmitChangeRequestPage() {
     search.namespace ?? PLATFORM_NAMESPACES[0],
   );
   const [nativeIdInput, setNativeIdInput] = useState("");
+  const [replacesAssociationId, setReplacesAssociationId] = useState(
+    search.replacesAssociationId ?? "",
+  );
 
   const [variantMode, setVariantMode] = useState<"description" | "id">("description");
   const [variantDescription, setVariantDescription] = useState("原声");
@@ -227,6 +237,17 @@ function SubmitChangeRequestPage() {
     return null;
   }, [nativeIdInput, isPlatform]);
 
+  const replacesAssociationIdError = useMemo(() => {
+    const trimmed = replacesAssociationId.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    if (!isUuid(trimmed)) {
+      return "拟替换的关联 ID 必须是合法的 UUID";
+    }
+    return null;
+  }, [replacesAssociationId]);
+
   async function handleRefreshUserStatus() {
     setRefreshingUser(true);
     try {
@@ -310,6 +331,11 @@ function SubmitChangeRequestPage() {
       return;
     }
 
+    if (replacesAssociationIdError) {
+      setSubmitError(replacesAssociationIdError);
+      return;
+    }
+
     if (!segmentValidation.valid) {
       setSubmitError(segmentValidation.allErrors.map(formatSegmentValidationError).join("；"));
       return;
@@ -317,6 +343,7 @@ function SubmitChangeRequestPage() {
 
     setSubmitting(true);
     try {
+      const trimmedReplaces = replacesAssociationId.trim();
       const created = await submitChangeRequest({
         targetExternalKey: targetValidation.normalized,
         namespace,
@@ -333,6 +360,7 @@ function SubmitChangeRequestPage() {
                 setDefaultVariant,
               }
           : {}),
+        ...(trimmedReplaces.length > 0 ? { replacesAssociationId: trimmedReplaces } : {}),
         segments: segmentValidation.normalizedSegments,
       });
 
@@ -441,8 +469,11 @@ function SubmitChangeRequestPage() {
                     </p>
                   ) : (
                     <p className="m-0 text-xs text-[var(--sea-ink-soft)]">
-                      库里尚未建档的媒体须使用 TMDB 外部键（<code>tmdb:tv:&lt;id&gt;</code> 或{" "}
-                      <code>tmdb:movie:&lt;id&gt;</code>）。
+                      库里尚未建档的媒体可使用目录外部键自动建档（支持
+                      TMDB、TVDB、IMDb、Bangumi、豆瓣、Trakt，例如 <code>tmdb:tv:&lt;id&gt;</code>、
+                      <code>tvdb:series:&lt;id&gt;</code>、<code>imdb:tt&lt;id&gt;</code>、
+                      <code>bangumi:&lt;id&gt;</code>、<code>douban:&lt;id&gt;</code>、
+                      <code>trakt:show:&lt;id&gt;</code>）。
                     </p>
                   )}
                 </div>
@@ -466,7 +497,7 @@ function SubmitChangeRequestPage() {
                     }}
                     className="field-input"
                   >
-                    <optgroup label="平台（视频网站 · 需指定变体）">
+                    <optgroup label="平台（需指定变体）">
                       {PLATFORM_NAMESPACES.map((ns) => (
                         <option key={ns} value={ns}>
                           {NAMESPACE_LABELS[ns]}（{ns}）
@@ -531,6 +562,33 @@ function SubmitChangeRequestPage() {
                 ) : (
                   <p className="m-0 text-xs text-[var(--sea-ink-soft)]">
                     服务端会将网址或常见写法换算为规范 ID；无法换算的网址将被直接拒收。
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="submit-replaces-association-id"
+                  className="block text-sm font-semibold text-[var(--sea-ink)]"
+                >
+                  拟替换的现有关联 ID（可选，UUID）
+                </label>
+                <input
+                  id="submit-replaces-association-id"
+                  name="replacesAssociationId"
+                  type="text"
+                  placeholder="更正已有错误关联时填写旧关联的 UUID，新提交新增关联时留空"
+                  value={replacesAssociationId}
+                  onChange={(event) => setReplacesAssociationId(event.target.value)}
+                  className="field-input font-mono text-sm"
+                />
+                {replacesAssociationIdError ? (
+                  <p className="m-0 text-xs font-semibold text-[var(--danger-ink)]">
+                    {replacesAssociationIdError}
+                  </p>
+                ) : (
+                  <p className="m-0 text-xs text-[var(--sea-ink-soft)]">
+                    填写后，证据门与审核流程会将其作为针对该关联的更正提案处理；通过后旧关联将被下架替换。
                   </p>
                 )}
               </div>

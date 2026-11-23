@@ -10,8 +10,8 @@ import {
   type Namespace,
   type SeasonSnapshot,
 } from "@media-ref/client";
-import { bangumiAdapter } from "./adapters/bangumi.ts";
-import { doubanAdapter } from "./adapters/douban.ts";
+import { fetchBangumiCollection } from "./adapters/bangumi.ts";
+import { fetchDoubanCollection } from "./adapters/douban.ts";
 import type { CollectionInfo } from "./adapters/types.ts";
 import type { CatalogEvidence } from "./evidence-gate.ts";
 import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
@@ -37,6 +37,8 @@ export interface CatalogGatewayConfig {
   tmdbGateway?: TmdbGateway;
   tvdbApiBaseUrl?: string;
   tvdbBearerToken?: string;
+  doubanApiBaseUrl?: string;
+  bangumiApiBaseUrl?: string;
   imdbApiBaseUrl?: string;
   traktApiBaseUrl?: string;
   traktClientId?: string;
@@ -931,14 +933,45 @@ async function fetchTraktTargetSnapshot(
       ? 1
       : parsePositiveInt(data.aired_episodes ?? data.episode_count ?? data.episodeCount);
 
+  const ids =
+    data.ids && typeof data.ids === "object" && !Array.isArray(data.ids)
+      ? (data.ids as Record<string, unknown>)
+      : null;
+
   if (parsed.traktType === null) {
-    const ids =
-      data.ids && typeof data.ids === "object" && !Array.isArray(data.ids)
-        ? (data.ids as Record<string, unknown>)
-        : null;
     const resolvedId = parsePositiveInt(ids?.trakt);
     if (resolvedId !== null) {
       canonicalNativeId = `${inferredType === "movie" ? "movie" : "show"}:${resolvedId}`;
+    }
+  }
+
+  const externalIds: Partial<Record<ExternalIdNamespace, string>> = {
+    trakt: canonicalNativeId,
+  };
+  const evidenceExternalIds: Partial<Record<Namespace, string>> = {
+    trakt: canonicalNativeId,
+  };
+  const sources: CatalogNamespace[] = ["trakt"];
+
+  if (ids) {
+    const tmdbNum = parsePositiveInt(ids.tmdb);
+    if (tmdbNum !== null) {
+      const tmdbVal = `${inferredType}:${tmdbNum}`;
+      externalIds.tmdb = tmdbVal;
+      evidenceExternalIds.tmdb = tmdbVal;
+      sources.push("tmdb");
+    }
+    const tvdbVal = normalizeTvdbId(ids.tvdb);
+    if (tvdbVal) {
+      externalIds.tvdb = tvdbVal;
+      evidenceExternalIds.tvdb = tvdbVal;
+      sources.push("tvdb");
+    }
+    const imdbVal = normalizeImdbId(ids.imdb);
+    if (imdbVal) {
+      externalIds.imdb = imdbVal;
+      evidenceExternalIds.imdb = imdbVal;
+      sources.push("imdb");
     }
   }
 
@@ -950,8 +983,9 @@ async function fetchTraktTargetSnapshot(
     seasons: [],
   };
 
-  // Trakt-only media has NO baseline (baseline: null) and only supports whole-media associations.
-  const baseline = selectBaseline(["trakt"]);
+  // Trakt-only media has NO baseline (baseline: null); when Trakt returns higher-priority
+  // external IDs (TMDB/TVDB/IMDb), selectBaseline picks the highest priority source.
+  const baseline = selectBaseline(sources);
 
   return {
     status: "found",
@@ -962,7 +996,7 @@ async function fetchTraktTargetSnapshot(
       type: inferredType,
       baseline,
       snapshot,
-      externalIds: { trakt: canonicalNativeId },
+      externalIds,
       initialAssociation: null,
       evidence: {
         namespace: "trakt",
@@ -973,7 +1007,7 @@ async function fetchTraktTargetSnapshot(
         year,
         seasons: [],
         ...(episodeCount !== null ? { episodeCount } : {}),
-        externalIds: { trakt: canonicalNativeId },
+        externalIds: evidenceExternalIds,
       },
     },
   };
@@ -1020,7 +1054,10 @@ export async function resolveCatalogTargetSnapshot(
       return fetchImdbTargetSnapshot(parsed, outbound, config);
 
     case "bangumi": {
-      const fetched = await bangumiAdapter.fetchCollection(parsed.subjectId, outbound);
+      const fetched = await fetchBangumiCollection(parsed.subjectId, outbound, {
+        apiBaseUrl: config.bangumiApiBaseUrl,
+        timeoutMs: config.timeoutMs ?? config.tmdb?.timeoutMs,
+      });
       if (fetched.status === "not_found") {
         return { status: "not_found", reason: fetched.reason };
       }
@@ -1038,7 +1075,10 @@ export async function resolveCatalogTargetSnapshot(
     }
 
     case "douban": {
-      const fetched = await doubanAdapter.fetchCollection(parsed.subjectId, outbound);
+      const fetched = await fetchDoubanCollection(parsed.subjectId, outbound, {
+        apiBaseUrl: config.doubanApiBaseUrl,
+        timeoutMs: config.timeoutMs ?? config.tmdb?.timeoutMs,
+      });
       if (fetched.status === "not_found") {
         return { status: "not_found", reason: fetched.reason };
       }

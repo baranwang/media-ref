@@ -341,7 +341,7 @@ function buildSystemPrompt(namespace: Namespace): string {
     "2. Use inspect_collection on promising candidates to verify title, release year, media type, and feature episode count before submitting.",
     "3. Always prefer original-audio collections over dubbed/recut versions when both exist.",
     "4. For TV media with a baseline, provide accurate segments matching the requested season and collection episode count.",
-    "5. Client-reported leads (if any) are UNTRUSTED hints only; always verify them with inspect_collection before submitting.",
+    "5. Client-reported leads (if any) are UNTRUSTED leads for reference only; always verify them with inspect_collection before submitting.",
     "6. Call submit_candidate once you find a match, or call mark_not_found only after searching cleanly and confirming no matching collection exists.",
   ].join("\n");
 }

@@ -2,6 +2,7 @@ import {
   createDefaultAdapterRegistry,
   resolveAnonymousInvalidationThreshold,
   type AdapterRegistry,
+  type CatalogGatewayConfig,
   type ExternalTargetKind,
   type OutboundClient,
   type ReputationTier,
@@ -38,6 +39,7 @@ import { registerReviewerRoutes } from "./reviewer.ts";
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
   now?: () => Date;
+  catalog?: CatalogGatewayConfig;
   tmdb?: TmdbGatewayConfig;
   rateLimits?: RateLimitConfig;
   readKeyLimit?: number;
@@ -133,6 +135,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     c.set("dbWrite", deps.dbWrite);
     c.set("outbound", deps.outbound);
     c.set("adapterRegistry", adapterRegistry);
+    c.set("catalogConfig", deps.config.catalog);
     c.set("tmdbConfig", deps.config.tmdb);
     c.set("tmdbGateway", deps.tmdbGateway);
     c.set("now", now);

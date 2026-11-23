@@ -60,6 +60,13 @@ export interface BackgroundWorkerEnv {
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
   TMDB_API_BASE_URL?: string;
+  TMDB_EXPORTS_BASE_URL?: string;
+  ENABLE_DAILY_TMDB_EXPORTS_SYNC?: string;
+  TVDB_BEARER_TOKEN?: string;
+  TVDB_API_BASE_URL?: string;
+  DOUBAN_API_BASE_URL?: string;
+  BANGUMI_API_BASE_URL?: string;
+  IMDB_API_BASE_URL?: string;
   TRAKT_CLIENT_ID?: string;
   TRAKT_API_BASE_URL?: string;
 }
@@ -118,9 +125,18 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
 
 export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerConfig {
   const gatewayId = parseOptionalString(env.AI_GATEWAY_ID);
+  const tmdb = {
+    accessToken: env.TMDB_ACCESS_TOKEN,
+    apiKey: env.TMDB_API_KEY,
+    apiBaseUrl: env.TMDB_API_BASE_URL,
+    traktClientId: env.TRAKT_CLIENT_ID,
+    traktApiBaseUrl: env.TRAKT_API_BASE_URL,
+  };
   return {
     batchSize: parsePositiveInt(env.JOB_BATCH_SIZE, DEFAULT_JOB_BATCH_SIZE),
     leaseDurationMs: parsePositiveInt(env.JOB_LEASE_DURATION_MS, DEFAULT_LEASE_DURATION_MS),
+    enableDailyTmdbExportsSync: env.ENABLE_DAILY_TMDB_EXPORTS_SYNC !== "false",
+    tmdbExportsBaseUrl: parseOptionalString(env.TMDB_EXPORTS_BASE_URL),
     exploration: {
       dailyBudget: parseNonNegativeInt(
         env.EXPLORATION_DAILY_BUDGET,
@@ -146,12 +162,16 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
         DEFAULT_EXPLORATION_MAX_DURATION_MS,
       ),
     },
-    tmdb: {
-      accessToken: env.TMDB_ACCESS_TOKEN,
-      apiKey: env.TMDB_API_KEY,
-      apiBaseUrl: env.TMDB_API_BASE_URL,
-      traktClientId: env.TRAKT_CLIENT_ID,
-      traktApiBaseUrl: env.TRAKT_API_BASE_URL,
+    tmdb,
+    catalog: {
+      tmdb,
+      tvdbBearerToken: parseOptionalString(env.TVDB_BEARER_TOKEN),
+      tvdbApiBaseUrl: parseOptionalString(env.TVDB_API_BASE_URL),
+      doubanApiBaseUrl: parseOptionalString(env.DOUBAN_API_BASE_URL),
+      bangumiApiBaseUrl: parseOptionalString(env.BANGUMI_API_BASE_URL),
+      imdbApiBaseUrl: parseOptionalString(env.IMDB_API_BASE_URL),
+      traktClientId: parseOptionalString(env.TRAKT_CLIENT_ID),
+      traktApiBaseUrl: parseOptionalString(env.TRAKT_API_BASE_URL),
     },
   };
 }

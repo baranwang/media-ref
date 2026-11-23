@@ -1317,4 +1317,206 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       status: "open",
     });
   });
+
+  test("invalidation recheck loads association segments so valid split-season, open-ended ongoing, and nonLinear collections are NOT falsely flagged needs_review", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    let currentTime = new Date("2026-11-23T18:00:00.000Z");
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (request) => {
+        if (request.kind === "catalog" && request.namespace === "tmdb") {
+          if (request.url.includes("/tv/95479")) {
+            // TMDB S1 has 47 episodes; platform splits S1 into a 24-ep collection (part 1)
+            return jsonResponse(request.url, {
+              id: 95479,
+              name: "咒术回战",
+              original_name: "呪術廻戦",
+              first_air_date: "2020-10-03",
+              seasons: [{ season_number: 1, episode_count: 47, air_date: "2020-10-03" }],
+              external_ids: { imdb_id: "tt12343534" },
+            });
+          }
+          return jsonResponse(request.url, { status_code: 34 }, 404);
+        }
+        if (request.kind === "catalog" && request.namespace === "trakt") {
+          return jsonResponse(request.url, []);
+        }
+        if (request.kind === "platform" && request.namespace === "bilibili") {
+          if (request.url.includes("season_id=34430")) {
+            return jsonResponse(request.url, {
+              code: 0,
+              message: "success",
+              result: {
+                season_id: 34430,
+                title: "咒术回战",
+                jp_title: "呪術廻戦",
+                type: 1,
+                publish: { pub_time: "2020-10-03 01:25:00" },
+                episodes: makeBilibiliEpisodes(24),
+              },
+            });
+          }
+          if (request.url.includes("season_id=34431")) {
+            // Ongoing collection currently at 12 eps (open-ended segment episodeEnd: null)
+            return jsonResponse(request.url, {
+              code: 0,
+              message: "success",
+              result: {
+                season_id: 34431,
+                title: "咒术回战",
+                jp_title: "呪術廻戦",
+                type: 1,
+                publish: { pub_time: "2020-10-03 01:25:00" },
+                episodes: makeBilibiliEpisodes(12),
+              },
+            });
+          }
+          if (request.url.includes("season_id=34432")) {
+            // Non-linear cut (e.g., 10 compiled episodes covering S1 E1-47 with nonLinear: true)
+            return jsonResponse(request.url, {
+              code: 0,
+              message: "success",
+              result: {
+                season_id: 34432,
+                title: "咒术回战",
+                jp_title: "呪術廻戦",
+                type: 1,
+                publish: { pub_time: "2020-10-03 01:25:00" },
+                episodes: makeBilibiliEpisodes(10),
+              },
+            });
+          }
+        }
+        return jsonResponse(request.url, { error: "not_found" }, 404);
+      },
+    });
+    const dispatched: JobQueueMessage[] = [];
+
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => currentTime,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          dispatched.push(message);
+        },
+      },
+      config: { enableDailyTmdbSync: false },
+      now: () => currentTime,
+    });
+
+    const user = await setupVerifiedUser(app, outbound, "split-season-recheck@example.com");
+    const submitKey = await createUserApiKey(app, user.cookie, {
+      name: "Submit Key",
+      canSubmit: true,
+    });
+    const readKey = await createUserApiKey(app, user.cookie, { name: "Read Key" });
+
+    // Submit & confirm all 3 valid associations: split-season, open-ended ongoing, and nonLinear
+    const submissions = [
+      {
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+      {
+        nativeId: "ss34431",
+        variantDescription: "中配",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+      {
+        nativeId: "ss34432",
+        variantDescription: "剪辑版",
+        segments: [
+          {
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 47,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+            nonLinear: true,
+          },
+        ],
+      },
+    ];
+
+    const assocIds: string[] = [];
+    for (const sub of submissions) {
+      const crRes = await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": submitKey.key },
+          body: JSON.stringify({
+            targetExternalKey: "tmdb:tv:95479",
+            namespace: "bilibili",
+            ...sub,
+          }),
+        }),
+      );
+      expect(crRes.status).toBe(201);
+      const cycle = await runWorkerCycle(worker, dispatched, currentTime);
+      expect(cycle.queue.completed).toBe(1);
+    }
+
+    const mediaBefore = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": readKey.key },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaBefore.document.associations).toHaveLength(3);
+    for (const assoc of mediaBefore.document.associations) {
+      assocIds.push(assoc.id);
+    }
+
+    // Trigger invalidation recheck on every single one of the 3 associations
+    currentTime = new Date("2026-11-23T19:30:00.000Z");
+    for (const assocId of assocIds) {
+      const reportRes = await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/associations/${assocId}/invalidation-reports`, {
+          method: "POST",
+          headers: { cookie: user.cookie },
+        }),
+      );
+      expect(reportRes.status).toBe(202);
+    }
+
+    const recheckCycle = await runWorkerCycle(worker, dispatched, currentTime);
+    expect(recheckCycle.queue.completed).toBe(3);
+
+    // ALL 3 MUST remain confirmed with needsReview unset/false and ZERO mismatch alerts!
+    const mediaAfter = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": readKey.key },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaAfter.document.associations).toHaveLength(3);
+    for (const assoc of mediaAfter.document.associations) {
+      expect(assoc.status).toBe("confirmed");
+      expect(assoc.needsReview).toBeUndefined();
+    }
+
+    const alerts = await testDb.readDb.selectFrom("review_alerts").selectAll().execute();
+    expect(alerts).toHaveLength(0);
+  });
 });

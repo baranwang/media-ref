@@ -6,13 +6,14 @@ import type {
 import {
   claimDueJobs,
   completeJobWithFencing,
-  createDefaultJobHandlers,
   createEvidenceCheckJobHandler,
   createExplorationAgentExecutor,
   createExplorationJobHandler,
   createInvalidationRecheckJobHandler,
   createSeedEvidenceCheckJobHandler,
+  createTmdbDailyExportsJobHandler,
   createTmdbSyncJobHandler,
+  enqueueTmdbDailyExportsIfDue,
   enqueueTmdbDailySyncIfDue,
   EVIDENCE_CHECK_JOB_TYPE,
   EXPLORATION_JOB_TYPE,
@@ -23,8 +24,10 @@ import {
   rescheduleJobWithFencing,
   scheduleExplorationJobs,
   SEED_EVIDENCE_CHECK_JOB_TYPE,
+  TMDB_DAILY_EXPORTS_JOB_TYPE,
   TMDB_SYNC_JOB_TYPE,
   type AdapterRegistry,
+  type CatalogGatewayConfig,
   type EvidenceGateStep2Evaluator,
   type ExplorationAgentConfig,
   type ExplorationExecutor,
@@ -49,8 +52,11 @@ export interface BackgroundWorkerConfig {
   dispatchFailureRetryDelayMs?: number;
   defaultRetryDelayMs?: number;
   jobTypes?: readonly string[];
+  catalog?: CatalogGatewayConfig;
   tmdb?: TmdbGatewayConfig;
   enableDailyTmdbSync?: boolean;
+  enableDailyTmdbExportsSync?: boolean;
+  tmdbExportsBaseUrl?: string;
   exploration?: Partial<ExplorationSchedulerConfig>;
   explorationAgent?: ExplorationAgentConfig;
   enableExplorationScheduling?: boolean;
@@ -140,15 +146,16 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
   const dispatchFailureRetryDelayMs = deps.config?.dispatchFailureRetryDelayMs ?? 0;
   const defaultRetryDelayMs = deps.config?.defaultRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const handlers: JobHandlerRegistry = {
-    ...createDefaultJobHandlers(),
     [EVIDENCE_CHECK_JOB_TYPE]: createEvidenceCheckJobHandler({
       adapterRegistry: deps.adapterRegistry,
+      catalogConfig: deps.config?.catalog,
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
       evaluateStep2: deps.evaluateStep2,
     }),
     [SEED_EVIDENCE_CHECK_JOB_TYPE]: createSeedEvidenceCheckJobHandler({
       adapterRegistry: deps.adapterRegistry,
+      catalogConfig: deps.config?.catalog,
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
       evaluateStep2: deps.evaluateStep2,
@@ -160,8 +167,12 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
     }),
+    [TMDB_DAILY_EXPORTS_JOB_TYPE]: createTmdbDailyExportsJobHandler({
+      exportBaseUrl: deps.config?.tmdbExportsBaseUrl,
+    }),
     [EXPLORATION_JOB_TYPE]: createExplorationJobHandler({
       adapterRegistry: deps.adapterRegistry,
+      catalogConfig: deps.config?.catalog,
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
       config: deps.config?.exploration,
@@ -185,6 +196,14 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
       if (shouldCheckTmdbSync) {
         await enqueueTmdbDailySyncIfDue(deps.db, { now });
+      }
+
+      const shouldCheckTmdbDailyExports =
+        deps.config?.enableDailyTmdbExportsSync === true &&
+        (!deps.config?.jobTypes || deps.config.jobTypes.includes(TMDB_DAILY_EXPORTS_JOB_TYPE));
+
+      if (shouldCheckTmdbDailyExports) {
+        await enqueueTmdbDailyExportsIfDue(deps.db, { now });
       }
 
       const shouldScheduleExploration =

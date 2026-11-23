@@ -7,8 +7,10 @@ import type {
   ScheduledController,
 } from "@cloudflare/workers-types";
 import {
+  createDefaultJobHandlers,
   createFakeOutboundClient,
   enqueueJob,
+  EVIDENCE_CHECK_JOB_TYPE,
   getJobById,
   type JobQueueMessage,
 } from "@media-ref/core";
@@ -184,6 +186,7 @@ describe("Background Worker pipeline", () => {
           emitted.push(message);
         },
       },
+      handlers: createDefaultJobHandlers(),
       now: () => t0,
     });
 
@@ -285,6 +288,7 @@ describe("Background Worker pipeline", () => {
           emitted.push(message);
         },
       },
+      handlers: createDefaultJobHandlers(),
       config: { leaseDurationMs },
       now: () => now,
     });
@@ -431,6 +435,7 @@ describe("Background Worker pipeline", () => {
           emitted.push(message);
         },
       },
+      handlers: createDefaultJobHandlers(),
       config: { leaseDurationMs: 60_000 },
       now: () => now,
     });
@@ -509,6 +514,7 @@ describe("Background Worker pipeline", () => {
           emitted.push(message);
         },
       },
+      handlers: createDefaultJobHandlers(),
       config: { defaultRetryDelayMs: 30_000 },
       now: () => now,
     });
@@ -578,6 +584,7 @@ describe("Background Worker pipeline", () => {
           emitted.push(message);
         },
       },
+      handlers: createDefaultJobHandlers(),
       now: () => t0,
     });
 
@@ -624,14 +631,61 @@ describe("Background Worker pipeline", () => {
     expect(reEnqueued.job.id).not.toBe(first.job.id);
   });
 
+  test("production createBackgroundWorker does NOT register test-only echo/record_marker handlers", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T15:30:00.000Z");
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      now: () => t0,
+    });
+
+    const { job: echoJob } = await enqueueJob(testDb.writeDb, {
+      jobType: "echo",
+      payload: { label: "should-not-run" },
+      runAfter: t0,
+    });
+    const { job: markerJob } = await enqueueJob(testDb.writeDb, {
+      jobType: "record_marker",
+      payload: { key: "marker:should-not-run", probeUrl: "https://internal.example.test/ssrf" },
+      runAfter: t0,
+    });
+
+    await worker.scheduled(createScheduledController(t0));
+    expect(emitted).toHaveLength(2);
+
+    const { batch, tracked } = createQueueBatch(emitted, t0);
+    const summary = await worker.queue(batch);
+    expect(summary.failed).toBe(2);
+    expect(summary.completed).toBe(0);
+    expect(tracked.every((t) => t.acked)).toBe(true);
+
+    const echoRow = await getJobById(testDb.readDb, echoJob.id);
+    expect(echoRow?.status).toBe("failed");
+    expect(echoRow?.errorMessage).toContain('No handler registered for job type "echo"');
+
+    const markerRow = await getJobById(testDb.readDb, markerJob.id);
+    expect(markerRow?.status).toBe("failed");
+    expect(markerRow?.errorMessage).toContain('No handler registered for job type "record_marker"');
+  });
+
   test("default Cloudflare Worker scheduled and queue entrypoints run end-to-end via Hyperdrive and Queue bindings", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
     const t0 = new Date("2026-11-23T16:00:00.000Z");
+    const missingChangeRequestId = "00000000-0000-4000-8000-000000000001";
     const { job } = await enqueueJob(testDb.writeDb, {
-      jobType: "record_marker",
-      payload: { key: "marker:default-export", value: "from-cf-worker" },
+      jobType: EVIDENCE_CHECK_JOB_TYPE,
+      payload: { changeRequestId: missingChangeRequestId },
       runAfter: t0,
     });
 
@@ -654,6 +708,7 @@ describe("Background Worker pipeline", () => {
           emitted.push(message);
         },
       } as unknown as Queue<JobQueueMessage>,
+      ENABLE_DAILY_TMDB_EXPORTS_SYNC: "false",
     };
 
     await workerDefault.scheduled(createScheduledController(t0), env, ctx);
@@ -665,12 +720,13 @@ describe("Background Worker pipeline", () => {
     await Promise.all(pending);
 
     expect(tracked[0]?.acked).toBe(true);
-    const meta = await testDb.readDb
-      .selectFrom("schema_meta")
-      .select("value")
-      .where("key", "=", "marker:default-export")
-      .executeTakeFirstOrThrow();
-    expect(meta.value).toBe("from-cf-worker");
+    const completedJob = await getJobById(testDb.readDb, job.id);
+    expect(completedJob?.status).toBe("completed");
+    expect(completedJob?.result).toMatchObject({
+      changeRequestId: missingChangeRequestId,
+      skipped: true,
+      reason: "change_request_not_found",
+    });
   });
 
   test("concurrent scheduled ticks claim each due job at most once via FOR UPDATE SKIP LOCKED", async () => {

@@ -157,6 +157,53 @@ interface EvidenceSummaryEntry {
   value: string;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return null;
+}
+
+function formatStep1Summary(step1: Record<string, unknown> | null): string | null {
+  if (!step1) {
+    return null;
+  }
+  if (typeof step1.decision === "string" && step1.decision.trim().length > 0) {
+    const matchedBy =
+      typeof step1.matchedBy === "string" && step1.matchedBy.trim().length > 0
+        ? `（${step1.matchedBy.trim()}）`
+        : "";
+    return `${step1.decision.trim()}${matchedBy}`;
+  }
+  if (typeof step1.matched === "boolean") {
+    const matchedBy =
+      typeof step1.matchedBy === "string" && step1.matchedBy.trim().length > 0
+        ? `（${step1.matchedBy.trim()}）`
+        : "";
+    return `${step1.matched ? "通过" : "未通过"}${matchedBy}`;
+  }
+  return null;
+}
+
+function formatStep2Summary(step2: Record<string, unknown> | null): string | null {
+  if (!step2) {
+    return null;
+  }
+  if (typeof step2.decision === "string" && step2.decision.trim().length > 0) {
+    return step2.decision.trim();
+  }
+  if (typeof step2.status === "string" && step2.status.trim().length > 0) {
+    return step2.status.trim();
+  }
+  if (typeof step2.verdict === "string" && step2.verdict.trim().length > 0) {
+    return step2.verdict.trim();
+  }
+  if (typeof step2.passed === "boolean") {
+    return step2.passed ? "通过" : "未通过";
+  }
+  return null;
+}
+
 function summarizeEvidence(evidence: Record<string, unknown>): EvidenceSummaryEntry[] {
   const entries: EvidenceSummaryEntry[] = [];
   const tryPush = (label: string, raw: unknown) => {
@@ -170,13 +217,84 @@ function summarizeEvidence(evidence: Record<string, unknown>): EvidenceSummaryEn
     }
   };
 
-  tryPush("判定结果", evidence.outcome ?? evidence.verdict ?? evidence.decision);
-  tryPush("取证标题", evidence.title ?? evidence.collectionTitle);
-  tryPush("取证年份", evidence.year ?? evidence.airYear);
-  tryPush("正片集数", evidence.episodeCount ?? evidence.featureEpisodeCount);
+  const gate = asRecord(evidence.gate);
+  const collection = asRecord(evidence.collection);
+  const catalog = asRecord(evidence.catalog);
+  const conflict = asRecord(evidence.conflict);
+  const existingEvidence = asRecord(evidence.existingEvidence);
+
+  const step1 = asRecord(gate?.step1);
+  const step2 = asRecord(gate?.step2);
+
+  tryPush("证据门判定", gate?.decision ?? evidence.decision ?? evidence.verdict);
+  if (conflict) {
+    const newPassed = typeof conflict.newPassed === "boolean" ? String(conflict.newPassed) : null;
+    const oldPassed = typeof conflict.oldPassed === "boolean" ? String(conflict.oldPassed) : null;
+    const matrixDetail =
+      newPassed !== null || oldPassed !== null
+        ? `（新=${newPassed ?? "—"} / 旧=${oldPassed ?? "—"}）`
+        : "";
+    if (typeof conflict.outcome === "string" && conflict.outcome.trim().length > 0) {
+      tryPush("冲突裁决", `${conflict.outcome.trim()}${matrixDetail}`);
+    }
+    if (conflict.existingLocked === true) {
+      tryPush("已有锁定状态", "已锁定");
+    }
+    tryPush(
+      "冲突现有关联",
+      conflict.existingAssociationId ??
+        existingEvidence?.associationId ??
+        evidence.existingAssociationId,
+    );
+  } else {
+    tryPush("冲突现有关联", existingEvidence?.associationId ?? evidence.existingAssociationId);
+  }
+
+  tryPush("拟替换关联", evidence.replacesAssociationId);
+  tryPush("合集标题", collection?.title ?? evidence.collectionTitle ?? evidence.title);
+  tryPush("合集年份", collection?.year ?? evidence.year ?? evidence.airYear);
+  tryPush(
+    "正片集数",
+    collection?.featureEpisodeCount ?? evidence.featureEpisodeCount ?? evidence.episodeCount,
+  );
+  const catalogTitle =
+    typeof catalog?.title === "string" && catalog.title.trim().length > 0
+      ? catalog.title.trim()
+      : null;
+  const catalogYear =
+    typeof catalog?.year === "number" ||
+    (typeof catalog?.year === "string" && catalog.year.trim().length > 0)
+      ? String(catalog.year)
+      : null;
+  tryPush(
+    "目录标题",
+    catalogTitle ? `${catalogTitle}${catalogYear ? ` (${catalogYear})` : ""}` : null,
+  );
+  tryPush(
+    "目录标识",
+    typeof catalog?.namespace === "string" && typeof catalog?.canonicalId === "string"
+      ? `${catalog.namespace}:${catalog.canonicalId}`
+      : null,
+  );
+  tryPush(
+    "第一步结果",
+    formatStep1Summary(step1) ?? evidence.step1Status ?? evidence.identityMatch,
+  );
+  tryPush("第二步结果", formatStep2Summary(step2) ?? evidence.step2Status ?? evidence.segmentMatch);
+  if (Array.isArray(gate?.conflicts) && gate.conflicts.length > 0) {
+    const codes = gate.conflicts
+      .map((item) => {
+        const rec = asRecord(item);
+        return typeof rec?.code === "string" ? rec.code : null;
+      })
+      .filter((code): code is string => code !== null);
+    if (codes.length > 0) {
+      tryPush("证据门冲突项", codes.join(", "));
+    }
+  }
+  tryPush("合集取证状态", evidence.collectionStatus);
+  tryPush("目录取证状态", evidence.catalogStatus);
   tryPush("适配器级别", evidence.adapterTier ?? evidence.tier);
-  tryPush("第一步结果", evidence.step1Status ?? evidence.identityMatch);
-  tryPush("第二步结果", evidence.step2Status ?? evidence.segmentMatch);
   tryPush("取证时间", evidence.checkedAt ?? evidence.fetchedAt);
 
   if (entries.length === 0) {

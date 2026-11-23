@@ -13,9 +13,6 @@ import {
   type ExternalIdNamespace,
   type MediaDocument,
   type NormalizedSegment,
-  type PlatformNamespace,
-  type PlatformStatusEntry,
-  type SeasonSnapshot,
   type SegmentInput,
   type SegmentValidationError,
 } from "@media-ref/client";
@@ -42,10 +39,15 @@ import {
   type CatalogGatewayConfig,
   type CatalogTargetSnapshot,
 } from "./catalog-gateway.ts";
-import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
+import {
+  fulfillCoveredDemandsForAssociationInTx,
+  mergeExternalKeyDemandsIntoMedia,
+} from "./demands.ts";
 import { enqueueJob } from "./jobs.ts";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import type { OutboundClient } from "./outbound.ts";
 import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
+import { queryMediaByKey, type MediaQueryItem } from "./read-media.ts";
 import { type TmdbGateway, type TmdbGatewayConfig, type TmdbMediaFetchResult } from "./tmdb.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -55,12 +57,6 @@ const ASSOCIATION_NAMESPACE_SET: ReadonlySet<string> = new Set<AssociationNamesp
   "douban",
   "bangumi",
 ]);
-
-const LOCK_CLASS_MEDIA_KEY = 1001;
-const LOCK_CLASS_MEDIA_NAMESPACE = 1002;
-const LOCK_CLASS_VARIANT = 1003;
-const LOCK_CLASS_COLLECTION = 1004;
-const LOCK_CLASS_TASK_ID = 1005;
 
 export const EVIDENCE_CHECK_JOB_TYPE = "evidence_check";
 export const TIER1_MANUAL_REVIEW_REASON = "adapter_tier_1_manual_review";
@@ -217,7 +213,12 @@ export interface RejectChangeRequestInput {
 }
 
 export type ReadMediaDocumentResult =
-  | { kind: "ok"; document: MediaDocument; matchedAssociationId: string | null }
+  | {
+      kind: "ok";
+      document: MediaDocument;
+      matchedAssociationId: string | null;
+      items: MediaQueryItem[];
+    }
   | { kind: "not_found" }
   | { kind: "invalid_key"; message: string };
 
@@ -273,15 +274,6 @@ function parseJsonObject(raw: unknown): JsonObject | null {
   return null;
 }
 
-function parseSeasonsSnapshot(raw: unknown): SeasonSnapshot[] {
-  const entries = parseJsonArray<SeasonSnapshotRow>(raw);
-  return entries.map((entry) => ({
-    season: entry.season,
-    episodeCount: entry.episodeCount,
-    airYear: entry.airYear ?? null,
-  }));
-}
-
 function extractReplacesAssociationId(rawEvidence: unknown): string | null {
   const parsed = parseJsonObject(rawEvidence);
   const value = parsed?.replacesAssociationId;
@@ -333,16 +325,6 @@ function toChangeRequestRecord(row: Selectable<ChangeRequestsTable>): ChangeRequ
 }
 
 type DbExecutor = Db | Transaction<Database>;
-
-async function acquireAdvisoryLock(
-  trx: Transaction<Database>,
-  lockClass: number,
-  lockKey: string,
-): Promise<void> {
-  await sql`select pg_advisory_xact_lock(${lockClass}::int4, hashtext(${lockKey}::text))`.execute(
-    trx,
-  );
-}
 
 interface ResolvedMediaRow {
   id: string;
@@ -1050,7 +1032,7 @@ export async function createChangeRequest(
   const submitterType = input.submitterType ?? "human";
   const inserted = await dbWrite.transaction().execute(async (trx) => {
     if (input.taskId) {
-      await acquireAdvisoryLock(trx, LOCK_CLASS_TASK_ID, input.taskId);
+      await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.TASK_ID, input.taskId);
       const existingByTaskInTx = await trx
         .selectFrom("change_requests")
         .selectAll()
@@ -1340,7 +1322,7 @@ export async function approveChangeRequestInTransaction(
   }
 
   if (!media) {
-    await acquireAdvisoryLock(trx, LOCK_CLASS_MEDIA_KEY, target.canonicalKey);
+    await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_KEY, target.canonicalKey);
     const existingInTx = await resolveExistingMediaByTarget(trx, target);
     if (existingInTx) {
       media = existingInTx.media;
@@ -1417,6 +1399,8 @@ export async function approveChangeRequestInTransaction(
       // When created from a Douban or Bangumi catalog entry, establish the initial confirmed
       // catalog association immediately so GET /v1/media/douban:<id> or bangumi:<id> finds it.
       const initAssoc = prefetchedCatalog.initialAssociation;
+      let createdInitSegments: NormalizedSegment[] = [];
+      let createdInitAssociation = false;
       if (
         initAssoc &&
         (cr.namespace !== initAssoc.namespace || cr.native_id !== initAssoc.nativeId)
@@ -1484,6 +1468,9 @@ export async function approveChangeRequestInTransaction(
           .set({ current_revision_id: initRev.id })
           .where("id", "=", createdInitAssoc.id)
           .execute();
+
+        createdInitSegments = initSegments;
+        createdInitAssociation = true;
       }
 
       const demandExternalKeys = new Set<string>([prefetchedCatalog.canonicalKey]);
@@ -1507,6 +1494,15 @@ export async function approveChangeRequestInTransaction(
         now: input.now,
       });
 
+      if (initAssoc && createdInitAssociation) {
+        await fulfillCoveredDemandsForAssociationInTx(trx, {
+          mediaId: createdMedia.id,
+          namespace: initAssoc.namespace,
+          segments: createdInitSegments,
+          now: input.now,
+        });
+      }
+
       media = createdMedia;
     }
   }
@@ -1517,7 +1513,7 @@ export async function approveChangeRequestInTransaction(
   const now = input.now ?? new Date();
 
   // 2. Lock media + namespace before resolving/creating variants & reading sibling associations
-  await acquireAdvisoryLock(trx, LOCK_CLASS_MEDIA_NAMESPACE, `${mediaId}:${namespace}`);
+  await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE, `${mediaId}:${namespace}`);
 
   let resolvedVariantId: string | null = null;
   if (isPlatformNamespace(namespace)) {
@@ -1624,11 +1620,11 @@ export async function approveChangeRequestInTransaction(
     }
 
     // 3. Acquire explicit variant advisory lock (per-variant serialization invariant)
-    await acquireAdvisoryLock(trx, LOCK_CLASS_VARIANT, resolvedVariantId);
+    await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.VARIANT, resolvedVariantId);
   }
 
   // 4. Acquire shared collection advisory lock
-  await acquireAdvisoryLock(trx, LOCK_CLASS_COLLECTION, `${namespace}:${nativeId}`);
+  await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.COLLECTION, `${namespace}:${nativeId}`);
 
   // 5. Re-read active associations & segments inside the locked transaction and validate via @media-ref/client
   const storedSegments = parseJsonArray<StoredSegmentJson>(cr.segments);
@@ -1909,6 +1905,13 @@ export async function approveChangeRequestInTransaction(
     .where("id", "=", associationId)
     .execute();
 
+  await fulfillCoveredDemandsForAssociationInTx(trx, {
+    mediaId,
+    namespace,
+    segments: normalizedSegments,
+    now,
+  });
+
   const updatedCr = await trx
     .updateTable("change_requests")
     .set({
@@ -1990,146 +1993,19 @@ export async function readMediaDocument(
   dbRead: Db,
   rawKey: string,
 ): Promise<ReadMediaDocumentResult> {
-  const target = parseTargetKey(rawKey);
-  if (!target) {
-    return {
-      kind: "invalid_key",
-      message: "Key must be a valid media UUID or external key (e.g. tmdb:tv:95479)",
-    };
+  const result = await queryMediaByKey(dbRead, rawKey, { includeUnconfirmed: false });
+  if (result.kind === "invalid_key") {
+    return { kind: "invalid_key", message: result.message };
   }
-
-  const resolved = await resolveExistingMediaByTarget(dbRead, target);
-  if (!resolved) {
+  if (result.kind === "not_found" || result.items.length === 0) {
     return { kind: "not_found" };
   }
 
-  const { media, matchedAssociationIds } = resolved;
-
-  const [externalIdRows, variantRows, associationRows] = await Promise.all([
-    dbRead
-      .selectFrom("external_ids")
-      .select(["namespace", "native_id", "locked"])
-      .where("media_id", "=", media.id)
-      .orderBy("namespace", "asc")
-      .orderBy("native_id", "asc")
-      .execute(),
-    dbRead
-      .selectFrom("variants")
-      .select(["id", "media_id", "platform", "description", "is_default"])
-      .where("media_id", "=", media.id)
-      .orderBy("platform", "asc")
-      .orderBy("is_default", "desc")
-      .orderBy("created_at", "asc")
-      .execute(),
-    dbRead
-      .selectFrom("associations")
-      .select([
-        "id",
-        "media_id",
-        "namespace",
-        "native_id",
-        "variant_id",
-        "status",
-        "needs_review",
-        "locked",
-      ])
-      .where("media_id", "=", media.id)
-      .where("status", "=", "confirmed")
-      .orderBy("namespace", "asc")
-      .orderBy("created_at", "asc")
-      .orderBy("id", "asc")
-      .execute(),
-  ]);
-
-  const associationIds = associationRows.map((row) => row.id);
-  const segmentRows =
-    associationIds.length > 0
-      ? await dbRead
-          .selectFrom("segments")
-          .select([
-            "association_id",
-            "season",
-            "episode_start",
-            "episode_end",
-            "target_episode_start",
-            "baseline",
-            "non_linear",
-            "needs_review",
-          ])
-          .where("association_id", "in", associationIds)
-          .orderBy("season", "asc")
-          .orderBy("episode_start", "asc")
-          .orderBy("id", "asc")
-          .execute()
-      : [];
-
-  const segmentsByAssociation = new Map<
-    string,
-    MediaDocument["associations"][number]["segments"][number][]
-  >();
-  for (const seg of segmentRows) {
-    const list = segmentsByAssociation.get(seg.association_id) ?? [];
-    list.push({
-      season: seg.season,
-      episodeStart: seg.episode_start,
-      episodeEnd: seg.episode_end,
-      targetEpisodeStart: seg.target_episode_start,
-      baseline: seg.baseline,
-      ...(seg.non_linear ? { nonLinear: true } : {}),
-      ...(seg.needs_review ? { needsReview: true } : {}),
-    });
-    segmentsByAssociation.set(seg.association_id, list);
-  }
-
-  const platformStatuses: Partial<Record<PlatformNamespace, PlatformStatusEntry>> = {};
-  for (const platform of PLATFORM_NAMESPACES) {
-    const hasConfirmed = associationRows.some((row) => row.namespace === platform);
-    platformStatuses[platform] = hasConfirmed ? { status: "associated" } : { status: "unchecked" };
-  }
-
-  const document: MediaDocument = {
-    media: {
-      id: media.id,
-      type: media.type,
-      baseline: media.baseline,
-      snapshot: {
-        title: media.title,
-        originalTitle: media.original_title,
-        year: media.year,
-        type: media.type,
-        seasons: parseSeasonsSnapshot(media.seasons),
-      },
-    },
-    externalIds: externalIdRows.map((row) => ({
-      namespace: row.namespace,
-      nativeId: row.native_id,
-      ...(row.locked ? { locked: true } : {}),
-    })),
-    variants: variantRows.map((row) => ({
-      id: row.id,
-      mediaId: row.media_id,
-      namespace: row.platform,
-      label: row.description,
-      isDefault: Boolean(row.is_default),
-    })),
-    associations: associationRows.map((row) => ({
-      id: row.id,
-      mediaId: row.media_id,
-      namespace: row.namespace,
-      nativeId: row.native_id,
-      variantId: row.variant_id,
-      status: row.status,
-      segments: segmentsByAssociation.get(row.id) ?? [],
-      ...(row.needs_review ? { needsReview: true } : {}),
-      ...(row.locked ? { locked: true } : {}),
-    })),
-    matchedAssociationIds,
-    platformStatuses,
-  };
-
+  const primary = result.items[0]!;
   return {
     kind: "ok",
-    document,
-    matchedAssociationId: matchedAssociationIds[0] ?? null,
+    document: primary.document,
+    matchedAssociationId: primary.matchedAssociationId,
+    items: result.items,
   };
 }
