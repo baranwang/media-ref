@@ -10,6 +10,10 @@
     "test": "vp test --run",
     "check": "vp check"
   },
+  "dependencies": {
+    "@media-ref/db": "workspace:*",
+    "kysely": "^0.29.9"
+  },
   "devDependencies": {
     "@types/node": "^26.6.5",
     "typescript": "catalog:",
