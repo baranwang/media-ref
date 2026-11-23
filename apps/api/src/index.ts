@@ -55,6 +55,7 @@ export {
   type AuthenticatedUser,
   type AuthInstance,
 } from "./auth.ts";
+export { registerLeadRoutes, type CreateLeadResponse, type LeadResponse } from "./leads.ts";
 
 export interface ApiWorkerEnv {
   HYPERDRIVE_READ: Hyperdrive;
