@@ -28,9 +28,12 @@ export {
 export {
   evaluateEvidenceGate,
   evaluateEvidenceGateStep1,
+  evaluateEvidenceGateStep2,
+  isNonOriginalVariantDescription,
   normalizeTitleForComparison,
   type CatalogEvidence,
   type EvaluateEvidenceGateInput,
+  type EvaluateEvidenceGateStep1Options,
   type EvidenceGateConflict,
   type EvidenceGateDecision,
   type EvidenceGateResult,
@@ -42,6 +45,7 @@ export {
   type SharedIdMatch,
   type Step1ConflictCode,
   type Step1FieldCheckStatus,
+  type Step2ConflictCode,
 } from "./evidence-gate.ts";
 export {
   claimDueJobs,
