@@ -23,10 +23,10 @@
     "hono": "^4.13.21"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261123.1",
-    "@types/node": "^26.6.5",
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
-    "wrangler": "^4.70.0"
+    "wrangler": "catalog:"
   }
 }
