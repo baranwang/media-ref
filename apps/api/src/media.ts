@@ -15,6 +15,7 @@ import {
 import type { Context, Hono } from "hono";
 import { requireApiKey } from "./api-keys.ts";
 import type { ApiEnv } from "./auth.ts";
+import { requireReadRateLimit } from "./rate-limit.ts";
 
 const MAX_SEASON_NUMBER = 2_147_483_647;
 const NON_NEGATIVE_INTEGER_PATTERN = /^\d+$/;
@@ -181,7 +182,9 @@ function parseBatchMediaRequest(body: unknown): ParseBatchRequestResult {
 }
 
 export function registerMediaRoutes(app: Hono<ApiEnv>): void {
-  app.post("/v1/media/batch", requireApiKey({ db: "read", permission: "read" }), async (c) => {
+  app.use("/v1/media/*", requireApiKey({ db: "read", permission: "read" }), requireReadRateLimit);
+
+  app.post("/v1/media/batch", async (c) => {
     let rawBody: unknown;
     try {
       rawBody = await c.req.json();
@@ -226,7 +229,7 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
     }
   });
 
-  app.get("/v1/media/:key", requireApiKey({ db: "read", permission: "read" }), async (c) => {
+  app.get("/v1/media/:key", async (c) => {
     const includeUnconfirmedParsed = parseBooleanQueryParam(c.req.query("includeUnconfirmed"));
     if (!includeUnconfirmedParsed.ok) {
       return c.json(
@@ -237,7 +240,6 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
         400,
       );
     }
-
     const seasonParsed = parseSeasonQueryParam(c.req.query("season"));
     if (!seasonParsed.ok) {
       return c.json(

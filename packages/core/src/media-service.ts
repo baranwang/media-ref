@@ -29,8 +29,15 @@ import type {
 } from "@media-ref/db";
 import { sql, type Selectable, type Transaction } from "kysely";
 import type { Database } from "@media-ref/db";
+import {
+  AdapterTransientError,
+  InvalidNativeIdError,
+  type AdapterRegistry,
+} from "./adapters/index.ts";
 import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
+import { enqueueJob } from "./jobs.ts";
 import type { OutboundClient } from "./outbound.ts";
+import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
 import {
   TmdbGatewayError,
   createTmdbGateway,
@@ -53,12 +60,16 @@ const LOCK_CLASS_MEDIA_NAMESPACE = 1002;
 const LOCK_CLASS_VARIANT = 1003;
 const LOCK_CLASS_COLLECTION = 1004;
 
+export const EVIDENCE_CHECK_JOB_TYPE = "evidence_check";
+export const TIER1_MANUAL_REVIEW_REASON = "adapter_tier_1_manual_review";
+
 export type AssociationNamespace = AssociationNamespaceRow;
 
 export type MediaServiceErrorCode =
   | "INVALID_TARGET_KEY"
   | "INVALID_NAMESPACE"
   | "INVALID_NATIVE_ID"
+  | "PLATFORM_UPSTREAM_ERROR"
   | "VARIANT_REQUIRED"
   | "VARIANT_NOT_ALLOWED"
   | "INVALID_VARIANT"
@@ -131,6 +142,14 @@ export interface CreateChangeRequestInput {
   setDefaultVariant?: boolean;
   segments?: readonly SegmentInput[];
   initialStatus?: "needs_review" | "pending_evidence";
+  submissionQuota?: SubmissionQuotaConfig;
+  now?: Date;
+}
+
+export interface CreateChangeRequestOptions {
+  adapterRegistry?: AdapterRegistry;
+  outbound?: OutboundClient;
+  now?: Date;
 }
 
 export interface ListChangeRequestsOptions {
@@ -146,11 +165,26 @@ export interface ListChangeRequestsResult {
 
 export interface ApproveChangeRequestInput {
   changeRequestId: string;
-  reviewerUserId: string;
+  reviewerUserId: string | null;
   reason?: string | null;
+  evidence?: JsonObject | null;
+  conflictReason?: string | null;
+  prefetchedTmdb?: TmdbMediaFetchResult | null;
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   allowedStatuses?: readonly ChangeRequestStatus[];
+  now?: Date;
+}
+
+export interface ApproveChangeRequestInTransactionInput {
+  changeRequestId: string;
+  reviewerUserId: string | null;
+  reason?: string | null;
+  evidence?: JsonObject | null;
+  conflictReason?: string | null;
+  prefetchedTmdb?: TmdbMediaFetchResult | null;
+  allowedStatuses?: readonly ChangeRequestStatus[];
+  now?: Date;
 }
 
 export interface ApproveChangeRequestResult {
@@ -534,6 +568,7 @@ function classifyValidationErrorStatus(
 export async function createChangeRequest(
   dbWrite: Db,
   input: CreateChangeRequestInput,
+  options: CreateChangeRequestOptions = {},
 ): Promise<ChangeRequestRecord> {
   const target = parseTargetKey(input.targetExternalKey);
   if (!target) {
@@ -553,11 +588,46 @@ export async function createChangeRequest(
   }
   const namespace: AssociationNamespace = input.namespace;
 
-  const nativeId = input.nativeId.trim();
-  if (nativeId.length === 0) {
+  const trimmedNativeId = input.nativeId.trim();
+  if (trimmedNativeId.length === 0) {
     throw new MediaServiceError("INVALID_NATIVE_ID", 400, "nativeId must be a non-empty string");
   }
-  const rawNativeId = (input.rawNativeId ?? input.nativeId).trim() || nativeId;
+  const rawNativeId = (input.rawNativeId ?? input.nativeId).trim() || trimmedNativeId;
+
+  const adapter = options.adapterRegistry?.get(namespace);
+  let nativeId = trimmedNativeId;
+  if (adapter) {
+    const parsedInput = adapter.parseInput(trimmedNativeId);
+    if (!parsedInput) {
+      throw new MediaServiceError(
+        "INVALID_NATIVE_ID",
+        400,
+        `Invalid native ID for ${namespace}: unrecognized URL or ID`,
+      );
+    }
+    if (parsedInput.canonicalId !== null) {
+      nativeId = parsedInput.canonicalId;
+    } else {
+      if (!options.outbound) {
+        throw new MediaServiceError(
+          "PLATFORM_UPSTREAM_ERROR",
+          502,
+          `Outbound client is required to canonicalize ${namespace} input "${trimmedNativeId}"`,
+        );
+      }
+      try {
+        nativeId = await adapter.canonicalize(trimmedNativeId, options.outbound);
+      } catch (error) {
+        if (error instanceof InvalidNativeIdError) {
+          throw new MediaServiceError("INVALID_NATIVE_ID", 400, error.message);
+        }
+        if (error instanceof AdapterTransientError) {
+          throw new MediaServiceError("PLATFORM_UPSTREAM_ERROR", 502, error.message);
+        }
+        throw error;
+      }
+    }
+  }
 
   if (input.taskId !== undefined && input.taskId !== null && !isUuid(input.taskId)) {
     throw new MediaServiceError("INVALID_TASK_ID", 400, "taskId must be a valid UUID");
@@ -805,26 +875,59 @@ export async function createChangeRequest(
     }
   }
 
-  const inserted = await dbWrite
-    .insertInto("change_requests")
-    .values({
-      status: input.initialStatus ?? "needs_review",
-      submitter_user_id: input.submitterUserId,
-      submitter_key_id: input.submitterKeyId ?? null,
-      submitter_type: input.submitterType ?? "human",
-      task_id: input.taskId ?? null,
-      media_id: existingMedia?.id ?? null,
-      target_external_key: target.canonicalKey,
-      namespace,
-      raw_native_id: rawNativeId,
-      native_id: nativeId,
-      variant_id: resolvedVariantId,
-      variant_description: variantDescription,
-      set_default_variant: setDefaultVariant,
-      segments: JSON.stringify(normalizedSegments),
-    })
-    .returningAll()
-    .executeTakeFirstOrThrow();
+  const hasTier2Adapter = Boolean(adapter && adapter.tier >= 2);
+  const resolvedStatus: ChangeRequestStatus =
+    input.initialStatus ?? (hasTier2Adapter ? "pending_evidence" : "needs_review");
+  const initialDecisionReason =
+    input.initialStatus === undefined &&
+    resolvedStatus === "needs_review" &&
+    options.adapterRegistry
+      ? TIER1_MANUAL_REVIEW_REASON
+      : null;
+  const shouldEnqueueEvidenceCheck = resolvedStatus === "pending_evidence";
+  const effectiveNow = input.now ?? options.now;
+
+  const inserted = await dbWrite.transaction().execute(async (trx) => {
+    const quota = await enforceSubmissionQuotaInTx(trx, {
+      submitterUserId: input.submitterUserId,
+      config: input.submissionQuota,
+      now: effectiveNow,
+    });
+
+    const row = await trx
+      .insertInto("change_requests")
+      .values({
+        status: resolvedStatus,
+        submitter_user_id: input.submitterUserId,
+        submitter_key_id: input.submitterKeyId ?? null,
+        submitter_type: input.submitterType ?? "human",
+        task_id: input.taskId ?? null,
+        media_id: existingMedia?.id ?? null,
+        target_external_key: target.canonicalKey,
+        namespace,
+        raw_native_id: rawNativeId,
+        native_id: nativeId,
+        variant_id: resolvedVariantId,
+        variant_description: variantDescription,
+        set_default_variant: setDefaultVariant,
+        segments: JSON.stringify(normalizedSegments),
+        decision_reason: initialDecisionReason,
+        ...(effectiveNow ? { created_at: quota.referenceNow, updated_at: quota.referenceNow } : {}),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    if (shouldEnqueueEvidenceCheck) {
+      await enqueueJob(trx, {
+        jobType: EVIDENCE_CHECK_JOB_TYPE,
+        payload: { changeRequestId: row.id },
+        dedupeKey: `${EVIDENCE_CHECK_JOB_TYPE}:${row.id}`,
+        runAfter: effectiveNow ?? quota.referenceNow,
+      });
+    }
+
+    return row;
+  });
 
   return toChangeRequestRecord(inserted);
 }
@@ -916,8 +1019,8 @@ export async function approveChangeRequest(
     );
   }
 
-  let prefetchedTmdb: TmdbMediaFetchResult | null = null;
-  let needsMediaCreation = preRead.media_id === null;
+  let prefetchedTmdb: TmdbMediaFetchResult | null = input.prefetchedTmdb ?? null;
+  let needsMediaCreation = preRead.media_id === null && prefetchedTmdb === null;
   if (needsMediaCreation) {
     const existingBeforeTx = await resolveExistingMediaByTarget(dbWrite, preTarget);
     if (existingBeforeTx) {
@@ -968,164 +1071,225 @@ export async function approveChangeRequest(
     }
   }
 
-  return dbWrite.transaction().execute(async (trx) => {
-    // 0. Lock the change request row FOR UPDATE to prevent double-approval
-    const cr = await trx
-      .selectFrom("change_requests")
-      .selectAll()
-      .where("id", "=", input.changeRequestId)
-      .forUpdate()
-      .executeTakeFirst();
+  return dbWrite.transaction().execute((trx) =>
+    approveChangeRequestInTransaction(trx, {
+      changeRequestId: input.changeRequestId,
+      reviewerUserId: input.reviewerUserId,
+      reason,
+      evidence: input.evidence,
+      conflictReason: input.conflictReason,
+      prefetchedTmdb,
+      allowedStatuses,
+      now: input.now,
+    }),
+  );
+}
 
-    if (!cr) {
-      throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
-    }
-    if (!allowedStatuses.includes(cr.status)) {
-      throw new MediaServiceError(
-        "INVALID_CHANGE_REQUEST_STATE",
-        409,
-        `Change request is in status "${cr.status}" and cannot be approved`,
-      );
-    }
+export async function approveChangeRequestInTransaction(
+  trx: Transaction<Database>,
+  input: ApproveChangeRequestInTransactionInput,
+): Promise<ApproveChangeRequestResult> {
+  if (!isUuid(input.changeRequestId)) {
+    throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
+  }
 
-    const target = parseTargetKey(cr.target_external_key);
-    if (!target) {
-      throw new MediaServiceError(
-        "INVALID_TARGET_KEY",
-        400,
-        `Invalid targetExternalKey on change request: ${cr.target_external_key}`,
-      );
-    }
+  const allowedStatuses = input.allowedStatuses ?? ["needs_review"];
+  const reason = input.reason?.trim() || null;
+  const prefetchedTmdb = input.prefetchedTmdb ?? null;
 
-    // 1. Resolve or create target media under media-key advisory lock
-    let media: ResolvedMediaRow | null = null;
-    if (cr.media_id) {
-      media = await resolveCanonicalMediaById(trx, cr.media_id);
-    }
+  // 0. Lock the change request row FOR UPDATE to prevent double-approval
+  const cr = await trx
+    .selectFrom("change_requests")
+    .selectAll()
+    .where("id", "=", input.changeRequestId)
+    .forUpdate()
+    .executeTakeFirst();
 
-    if (!media) {
-      await acquireAdvisoryLock(trx, LOCK_CLASS_MEDIA_KEY, target.canonicalKey);
-      const existingInTx = await resolveExistingMediaByTarget(trx, target);
-      if (existingInTx) {
-        media = existingInTx.media;
-      } else {
-        if (!prefetchedTmdb) {
-          throw new MediaServiceError(
-            "MEDIA_NOT_FOUND",
-            404,
-            `Target media ${target.canonicalKey} does not exist`,
-          );
-        }
+  if (!cr) {
+    throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
+  }
+  if (!allowedStatuses.includes(cr.status)) {
+    throw new MediaServiceError(
+      "INVALID_CHANGE_REQUEST_STATE",
+      409,
+      `Change request is in status "${cr.status}" and cannot be approved`,
+    );
+  }
 
-        const createdMedia = await trx
-          .insertInto("media")
-          .values({
-            type: prefetchedTmdb.type,
-            baseline: "tmdb",
-            title: prefetchedTmdb.snapshot.title,
-            original_title: prefetchedTmdb.snapshot.originalTitle,
-            year: prefetchedTmdb.snapshot.year,
-            seasons: JSON.stringify(prefetchedTmdb.snapshot.seasons),
-          })
-          .returning([
-            "id",
-            "type",
-            "baseline",
-            "title",
-            "original_title",
-            "year",
-            "seasons",
-            "merged_into_media_id",
-          ])
-          .executeTakeFirstOrThrow();
+  const target = parseTargetKey(cr.target_external_key);
+  if (!target) {
+    throw new MediaServiceError(
+      "INVALID_TARGET_KEY",
+      400,
+      `Invalid targetExternalKey on change request: ${cr.target_external_key}`,
+    );
+  }
 
-        // Sync TMDB + IMDb + TVDB + Trakt external IDs
+  // 1. Resolve or create target media under media-key advisory lock
+  let media: ResolvedMediaRow | null = null;
+  if (cr.media_id) {
+    media = await resolveCanonicalMediaById(trx, cr.media_id);
+  }
+
+  if (!media) {
+    await acquireAdvisoryLock(trx, LOCK_CLASS_MEDIA_KEY, target.canonicalKey);
+    const existingInTx = await resolveExistingMediaByTarget(trx, target);
+    if (existingInTx) {
+      media = existingInTx.media;
+    } else {
+      if (!prefetchedTmdb) {
+        throw new MediaServiceError(
+          "MEDIA_NOT_FOUND",
+          404,
+          `Target media ${target.canonicalKey} does not exist`,
+        );
+      }
+
+      const createdMedia = await trx
+        .insertInto("media")
+        .values({
+          type: prefetchedTmdb.type,
+          baseline: "tmdb",
+          title: prefetchedTmdb.snapshot.title,
+          original_title: prefetchedTmdb.snapshot.originalTitle,
+          year: prefetchedTmdb.snapshot.year,
+          seasons: JSON.stringify(prefetchedTmdb.snapshot.seasons),
+        })
+        .returning([
+          "id",
+          "type",
+          "baseline",
+          "title",
+          "original_title",
+          "year",
+          "seasons",
+          "merged_into_media_id",
+        ])
+        .executeTakeFirstOrThrow();
+
+      // Sync TMDB + IMDb + TVDB + Trakt external IDs
+      await trx
+        .insertInto("external_ids")
+        .values({
+          media_id: createdMedia.id,
+          namespace: "tmdb",
+          native_id: prefetchedTmdb.externalIds.tmdb,
+          source: "sync",
+        })
+        .execute();
+
+      const secondaryExternalIds: Array<{ namespace: ExternalIdNamespace; nativeId: string }> = [];
+      if (prefetchedTmdb.externalIds.imdb) {
+        secondaryExternalIds.push({
+          namespace: "imdb",
+          nativeId: prefetchedTmdb.externalIds.imdb,
+        });
+      }
+      if (prefetchedTmdb.externalIds.tvdb) {
+        secondaryExternalIds.push({
+          namespace: "tvdb",
+          nativeId: prefetchedTmdb.externalIds.tvdb,
+        });
+      }
+      if (prefetchedTmdb.externalIds.trakt) {
+        secondaryExternalIds.push({
+          namespace: "trakt",
+          nativeId: prefetchedTmdb.externalIds.trakt,
+        });
+      }
+
+      for (const ext of secondaryExternalIds) {
         await trx
           .insertInto("external_ids")
           .values({
             media_id: createdMedia.id,
-            namespace: "tmdb",
-            native_id: prefetchedTmdb.externalIds.tmdb,
+            namespace: ext.namespace,
+            native_id: ext.nativeId,
             source: "sync",
           })
+          .onConflict((oc) => oc.doNothing())
           .execute();
-
-        const secondaryExternalIds: Array<{ namespace: ExternalIdNamespace; nativeId: string }> =
-          [];
-        if (prefetchedTmdb.externalIds.imdb) {
-          secondaryExternalIds.push({
-            namespace: "imdb",
-            nativeId: prefetchedTmdb.externalIds.imdb,
-          });
-        }
-        if (prefetchedTmdb.externalIds.tvdb) {
-          secondaryExternalIds.push({
-            namespace: "tvdb",
-            nativeId: prefetchedTmdb.externalIds.tvdb,
-          });
-        }
-        if (prefetchedTmdb.externalIds.trakt) {
-          secondaryExternalIds.push({
-            namespace: "trakt",
-            nativeId: prefetchedTmdb.externalIds.trakt,
-          });
-        }
-
-        for (const ext of secondaryExternalIds) {
-          await trx
-            .insertInto("external_ids")
-            .values({
-              media_id: createdMedia.id,
-              namespace: ext.namespace,
-              native_id: ext.nativeId,
-              source: "sync",
-            })
-            .onConflict((oc) => oc.doNothing())
-            .execute();
-        }
-
-        await mergeExternalKeyDemandsIntoMedia(trx, {
-          mediaId: createdMedia.id,
-          externalKeys: [
-            formatExternalKey({ namespace: "tmdb", nativeId: prefetchedTmdb.externalIds.tmdb }),
-            ...secondaryExternalIds.map((ext) => formatExternalKey(ext)),
-          ],
-          seasons: prefetchedTmdb.snapshot.seasons,
-          mediaType: createdMedia.type,
-        });
-
-        media = createdMedia;
       }
+
+      await mergeExternalKeyDemandsIntoMedia(trx, {
+        mediaId: createdMedia.id,
+        externalKeys: [
+          formatExternalKey({ namespace: "tmdb", nativeId: prefetchedTmdb.externalIds.tmdb }),
+          ...secondaryExternalIds.map((ext) => formatExternalKey(ext)),
+        ],
+        seasons: prefetchedTmdb.snapshot.seasons,
+        mediaType: createdMedia.type,
+        now: input.now,
+      });
+
+      media = createdMedia;
     }
+  }
 
-    const mediaId = media.id;
-    const namespace = cr.namespace;
-    const nativeId = cr.native_id;
-    const now = new Date();
+  const mediaId = media.id;
+  const namespace = cr.namespace;
+  const nativeId = cr.native_id;
+  const now = input.now ?? new Date();
 
-    // 2. Lock media + namespace before resolving/creating variants & reading sibling associations
-    await acquireAdvisoryLock(trx, LOCK_CLASS_MEDIA_NAMESPACE, `${mediaId}:${namespace}`);
+  // 2. Lock media + namespace before resolving/creating variants & reading sibling associations
+  await acquireAdvisoryLock(trx, LOCK_CLASS_MEDIA_NAMESPACE, `${mediaId}:${namespace}`);
 
-    let resolvedVariantId: string | null = null;
-    if (isPlatformNamespace(namespace)) {
-      if (cr.variant_id) {
-        const variantRow = await trx
-          .selectFrom("variants")
-          .select(["id", "is_default"])
-          .where("id", "=", cr.variant_id)
+  let resolvedVariantId: string | null = null;
+  if (isPlatformNamespace(namespace)) {
+    if (cr.variant_id) {
+      const variantRow = await trx
+        .selectFrom("variants")
+        .select(["id", "is_default"])
+        .where("id", "=", cr.variant_id)
+        .where("media_id", "=", mediaId)
+        .where("platform", "=", namespace)
+        .executeTakeFirst();
+
+      if (!variantRow) {
+        throw new MediaServiceError(
+          "INVALID_VARIANT",
+          400,
+          "Target variant no longer exists for this media and platform",
+        );
+      }
+
+      if (cr.set_default_variant && !variantRow.is_default) {
+        await trx
+          .updateTable("variants")
+          .set({ is_default: false, updated_at: now })
           .where("media_id", "=", mediaId)
           .where("platform", "=", namespace)
-          .executeTakeFirst();
+          .where("is_default", "=", true)
+          .execute();
 
-        if (!variantRow) {
-          throw new MediaServiceError(
-            "INVALID_VARIANT",
-            400,
-            "Target variant no longer exists for this media and platform",
-          );
-        }
+        await trx
+          .updateTable("variants")
+          .set({ is_default: true, updated_at: now })
+          .where("id", "=", variantRow.id)
+          .execute();
+      }
 
-        if (cr.set_default_variant && !variantRow.is_default) {
+      resolvedVariantId = variantRow.id;
+    } else {
+      const description = cr.variant_description?.trim();
+      if (!description) {
+        throw new MediaServiceError(
+          "VARIANT_REQUIRED",
+          400,
+          "Platform change request must provide variantId or variantDescription",
+        );
+      }
+
+      const existingByDescription = await trx
+        .selectFrom("variants")
+        .select(["id", "is_default"])
+        .where("media_id", "=", mediaId)
+        .where("platform", "=", namespace)
+        .where("description", "=", description)
+        .executeTakeFirst();
+
+      if (existingByDescription) {
+        if (cr.set_default_variant && !existingByDescription.is_default) {
           await trx
             .updateTable("variants")
             .set({ is_default: false, updated_at: now })
@@ -1137,269 +1301,236 @@ export async function approveChangeRequest(
           await trx
             .updateTable("variants")
             .set({ is_default: true, updated_at: now })
-            .where("id", "=", variantRow.id)
+            .where("id", "=", existingByDescription.id)
+            .execute();
+        }
+        resolvedVariantId = existingByDescription.id;
+      } else {
+        const existingDefault = await trx
+          .selectFrom("variants")
+          .select("id")
+          .where("media_id", "=", mediaId)
+          .where("platform", "=", namespace)
+          .where("is_default", "=", true)
+          .executeTakeFirst();
+
+        const shouldBeDefault = !existingDefault || Boolean(cr.set_default_variant);
+        if (shouldBeDefault && existingDefault) {
+          await trx
+            .updateTable("variants")
+            .set({ is_default: false, updated_at: now })
+            .where("id", "=", existingDefault.id)
             .execute();
         }
 
-        resolvedVariantId = variantRow.id;
-      } else {
-        const description = cr.variant_description?.trim();
-        if (!description) {
-          throw new MediaServiceError(
-            "VARIANT_REQUIRED",
-            400,
-            "Platform change request must provide variantId or variantDescription",
-          );
-        }
+        const createdVariant = await trx
+          .insertInto("variants")
+          .values({
+            media_id: mediaId,
+            platform: namespace,
+            description,
+            is_default: shouldBeDefault,
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
 
-        const existingByDescription = await trx
-          .selectFrom("variants")
-          .select(["id", "is_default"])
-          .where("media_id", "=", mediaId)
-          .where("platform", "=", namespace)
-          .where("description", "=", description)
-          .executeTakeFirst();
-
-        if (existingByDescription) {
-          if (cr.set_default_variant && !existingByDescription.is_default) {
-            await trx
-              .updateTable("variants")
-              .set({ is_default: false, updated_at: now })
-              .where("media_id", "=", mediaId)
-              .where("platform", "=", namespace)
-              .where("is_default", "=", true)
-              .execute();
-
-            await trx
-              .updateTable("variants")
-              .set({ is_default: true, updated_at: now })
-              .where("id", "=", existingByDescription.id)
-              .execute();
-          }
-          resolvedVariantId = existingByDescription.id;
-        } else {
-          const existingDefault = await trx
-            .selectFrom("variants")
-            .select("id")
-            .where("media_id", "=", mediaId)
-            .where("platform", "=", namespace)
-            .where("is_default", "=", true)
-            .executeTakeFirst();
-
-          const shouldBeDefault = !existingDefault || Boolean(cr.set_default_variant);
-          if (shouldBeDefault && existingDefault) {
-            await trx
-              .updateTable("variants")
-              .set({ is_default: false, updated_at: now })
-              .where("id", "=", existingDefault.id)
-              .execute();
-          }
-
-          const createdVariant = await trx
-            .insertInto("variants")
-            .values({
-              media_id: mediaId,
-              platform: namespace,
-              description,
-              is_default: shouldBeDefault,
-            })
-            .returning("id")
-            .executeTakeFirstOrThrow();
-
-          resolvedVariantId = createdVariant.id;
-        }
+        resolvedVariantId = createdVariant.id;
       }
-
-      // 3. Acquire explicit variant advisory lock (per-variant serialization invariant)
-      await acquireAdvisoryLock(trx, LOCK_CLASS_VARIANT, resolvedVariantId);
     }
 
-    // 4. Acquire shared collection advisory lock
-    await acquireAdvisoryLock(trx, LOCK_CLASS_COLLECTION, `${namespace}:${nativeId}`);
+    // 3. Acquire explicit variant advisory lock (per-variant serialization invariant)
+    await acquireAdvisoryLock(trx, LOCK_CLASS_VARIANT, resolvedVariantId);
+  }
 
-    // 5. Re-read active associations & segments inside the locked transaction and validate via @media-ref/client
-    const storedSegments = parseJsonArray<StoredSegmentJson>(cr.segments);
-    const normalizedSegments = normalizeSegments(storedSegments);
+  // 4. Acquire shared collection advisory lock
+  await acquireAdvisoryLock(trx, LOCK_CLASS_COLLECTION, `${namespace}:${nativeId}`);
 
-    const existingAssociation = await trx
-      .selectFrom("associations")
-      .select(["id", "variant_id"])
-      .where("media_id", "=", mediaId)
-      .where("namespace", "=", namespace)
-      .where("native_id", "=", nativeId)
-      .executeTakeFirst();
+  // 5. Re-read active associations & segments inside the locked transaction and validate via @media-ref/client
+  const storedSegments = parseJsonArray<StoredSegmentJson>(cr.segments);
+  const normalizedSegments = normalizeSegments(storedSegments);
 
-    const siblingAssociations = isPlatformNamespace(namespace)
-      ? await loadActiveAssociationsWithSegments(trx, {
-          variantId: resolvedVariantId!,
-          excludeAssociationId: existingAssociation?.id,
-        })
-      : await loadActiveAssociationsWithSegments(trx, {
-          mediaId,
-          catalogNamespace: namespace,
-          excludeAssociationId: existingAssociation?.id,
-        });
+  const existingAssociation = await trx
+    .selectFrom("associations")
+    .select(["id", "variant_id"])
+    .where("media_id", "=", mediaId)
+    .where("namespace", "=", namespace)
+    .where("native_id", "=", nativeId)
+    .executeTakeFirst();
 
-    const variantValidation = validateVariantSegments(
-      [
-        ...siblingAssociations.map((a) => ({ associationId: a.id, segments: a.segments })),
-        {
-          associationId: existingAssociation?.id ?? "candidate",
-          segments: normalizedSegments,
-        },
-      ],
-      { baseline: media.baseline },
-    );
-
-    if (!variantValidation.valid) {
-      const classified = classifyValidationErrorStatus(variantValidation.errors, 409);
-      throw new MediaServiceError(
-        classified.code,
-        classified.status,
-        variantValidation.errors[0].message,
-        variantValidation.errors,
-      );
-    }
-
-    const collectionAssociations = await loadActiveAssociationsWithSegments(trx, {
-      collection: { namespace, nativeId },
-      excludeAssociationId: existingAssociation?.id,
-    });
-
-    const sharedValidation = validateSharedCollectionSegments([
-      ...collectionAssociations.map((a) => ({
-        mediaId: a.mediaId,
-        associationId: a.id,
-        segments: a.segments,
-      })),
-      {
+  const siblingAssociations = isPlatformNamespace(namespace)
+    ? await loadActiveAssociationsWithSegments(trx, {
+        variantId: resolvedVariantId!,
+        excludeAssociationId: existingAssociation?.id,
+      })
+    : await loadActiveAssociationsWithSegments(trx, {
         mediaId,
+        catalogNamespace: namespace,
+        excludeAssociationId: existingAssociation?.id,
+      });
+
+  const variantValidation = validateVariantSegments(
+    [
+      ...siblingAssociations.map((a) => ({ associationId: a.id, segments: a.segments })),
+      {
         associationId: existingAssociation?.id ?? "candidate",
         segments: normalizedSegments,
       },
-    ]);
+    ],
+    { baseline: media.baseline },
+  );
 
-    if (!sharedValidation.valid) {
-      const classified = classifyValidationErrorStatus(sharedValidation.errors, 409);
-      throw new MediaServiceError(
-        classified.code,
-        classified.status,
-        sharedValidation.errors[0].message,
-        sharedValidation.errors,
-      );
-    }
+  if (!variantValidation.valid) {
+    const classified = classifyValidationErrorStatus(variantValidation.errors, 409);
+    throw new MediaServiceError(
+      classified.code,
+      classified.status,
+      variantValidation.errors[0].message,
+      variantValidation.errors,
+    );
+  }
 
-    // 6. Upsert association, replace segments, insert new revision, and mark change request approved
-    let associationId: string;
-    let nextRevisionNumber: number;
+  const collectionAssociations = await loadActiveAssociationsWithSegments(trx, {
+    collection: { namespace, nativeId },
+    excludeAssociationId: existingAssociation?.id,
+  });
 
-    if (existingAssociation) {
-      associationId = existingAssociation.id;
-      await trx
-        .updateTable("associations")
-        .set({
-          variant_id: resolvedVariantId,
-          status: "confirmed",
-          needs_review: false,
-          updated_at: now,
-        })
-        .where("id", "=", associationId)
-        .execute();
+  const sharedValidation = validateSharedCollectionSegments([
+    ...collectionAssociations.map((a) => ({
+      mediaId: a.mediaId,
+      associationId: a.id,
+      segments: a.segments,
+    })),
+    {
+      mediaId,
+      associationId: existingAssociation?.id ?? "candidate",
+      segments: normalizedSegments,
+    },
+  ]);
 
-      await trx.deleteFrom("segments").where("association_id", "=", associationId).execute();
+  if (!sharedValidation.valid) {
+    const classified = classifyValidationErrorStatus(sharedValidation.errors, 409);
+    throw new MediaServiceError(
+      classified.code,
+      classified.status,
+      sharedValidation.errors[0].message,
+      sharedValidation.errors,
+    );
+  }
 
-      const maxRevRow = await trx
-        .selectFrom("association_revisions")
-        .select(sql<number | null>`max(revision_number)`.as("max_rev"))
-        .where("association_id", "=", associationId)
-        .executeTakeFirst();
+  // 6. Upsert association, replace segments, insert new revision, and mark change request approved
+  let associationId: string;
+  let nextRevisionNumber: number;
 
-      nextRevisionNumber = (maxRevRow?.max_rev ?? 0) + 1;
-    } else {
-      const createdAssoc = await trx
-        .insertInto("associations")
-        .values({
-          media_id: mediaId,
-          namespace,
-          native_id: nativeId,
-          variant_id: resolvedVariantId,
-          status: "confirmed",
-          needs_review: false,
-          locked: false,
-        })
-        .returning("id")
-        .executeTakeFirstOrThrow();
-
-      associationId = createdAssoc.id;
-      nextRevisionNumber = 1;
-    }
-
-    if (normalizedSegments.length > 0) {
-      await trx
-        .insertInto("segments")
-        .values(
-          normalizedSegments.map((seg) => ({
-            association_id: associationId,
-            season: seg.season,
-            episode_start: seg.episodeStart,
-            episode_end: seg.episodeEnd,
-            target_episode_start: seg.targetEpisodeStart,
-            baseline: seg.baseline,
-            non_linear: seg.nonLinear,
-            needs_review: seg.needsReview,
-          })),
-        )
-        .execute();
-    }
-
-    const revision = await trx
-      .insertInto("association_revisions")
-      .values({
-        association_id: associationId,
-        revision_number: nextRevisionNumber,
-        change_request_id: cr.id,
-        variant_id: resolvedVariantId,
-        status: "confirmed",
-        segments: JSON.stringify(normalizedSegments),
-        actor_user_id: input.reviewerUserId,
-        reason,
-      })
-      .returning("id")
-      .executeTakeFirstOrThrow();
-
+  if (existingAssociation) {
+    associationId = existingAssociation.id;
     await trx
       .updateTable("associations")
       .set({
-        current_revision_id: revision.id,
+        variant_id: resolvedVariantId,
+        status: "confirmed",
+        needs_review: false,
         updated_at: now,
       })
       .where("id", "=", associationId)
       .execute();
 
-    const updatedCr = await trx
-      .updateTable("change_requests")
-      .set({
-        status: "approved",
+    await trx.deleteFrom("segments").where("association_id", "=", associationId).execute();
+
+    const maxRevRow = await trx
+      .selectFrom("association_revisions")
+      .select(sql<number | null>`max(revision_number)`.as("max_rev"))
+      .where("association_id", "=", associationId)
+      .executeTakeFirst();
+
+    nextRevisionNumber = (maxRevRow?.max_rev ?? 0) + 1;
+  } else {
+    const createdAssoc = await trx
+      .insertInto("associations")
+      .values({
         media_id: mediaId,
+        namespace,
+        native_id: nativeId,
         variant_id: resolvedVariantId,
-        decision_reason: reason,
-        reviewer_user_id: input.reviewerUserId,
-        reviewed_at: now,
-        applied_association_id: associationId,
-        applied_revision_id: revision.id,
-        updated_at: now,
+        status: "confirmed",
+        needs_review: false,
+        locked: false,
       })
-      .where("id", "=", cr.id)
-      .returningAll()
+      .returning("id")
       .executeTakeFirstOrThrow();
 
-    return {
-      changeRequest: toChangeRequestRecord(updatedCr),
-      mediaId,
-      associationId,
-      revisionId: revision.id,
-    };
-  });
+    associationId = createdAssoc.id;
+    nextRevisionNumber = 1;
+  }
+
+  if (normalizedSegments.length > 0) {
+    await trx
+      .insertInto("segments")
+      .values(
+        normalizedSegments.map((seg) => ({
+          association_id: associationId,
+          season: seg.season,
+          episode_start: seg.episodeStart,
+          episode_end: seg.episodeEnd,
+          target_episode_start: seg.targetEpisodeStart,
+          baseline: seg.baseline,
+          non_linear: seg.nonLinear,
+          needs_review: seg.needsReview,
+        })),
+      )
+      .execute();
+  }
+
+  const revision = await trx
+    .insertInto("association_revisions")
+    .values({
+      association_id: associationId,
+      revision_number: nextRevisionNumber,
+      change_request_id: cr.id,
+      variant_id: resolvedVariantId,
+      status: "confirmed",
+      segments: JSON.stringify(normalizedSegments),
+      actor_user_id: input.reviewerUserId,
+      reason,
+    })
+    .returning("id")
+    .executeTakeFirstOrThrow();
+
+  await trx
+    .updateTable("associations")
+    .set({
+      current_revision_id: revision.id,
+      updated_at: now,
+    })
+    .where("id", "=", associationId)
+    .execute();
+
+  const updatedCr = await trx
+    .updateTable("change_requests")
+    .set({
+      status: "approved",
+      media_id: mediaId,
+      variant_id: resolvedVariantId,
+      decision_reason: reason,
+      reviewer_user_id: input.reviewerUserId,
+      reviewed_at: now,
+      applied_association_id: associationId,
+      applied_revision_id: revision.id,
+      ...(input.evidence !== undefined
+        ? { evidence: input.evidence === null ? null : JSON.stringify(input.evidence) }
+        : {}),
+      ...(input.conflictReason !== undefined ? { conflict_reason: input.conflictReason } : {}),
+      updated_at: now,
+    })
+    .where("id", "=", cr.id)
+    .returningAll()
+    .executeTakeFirstOrThrow();
+
+  return {
+    changeRequest: toChangeRequestRecord(updatedCr),
+    mediaId,
+    associationId,
+    revisionId: revision.id,
+  };
 }
 
 export async function rejectChangeRequest(

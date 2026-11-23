@@ -7,14 +7,23 @@ import {
   claimDueJobs,
   completeJobWithFencing,
   createDefaultJobHandlers,
+  createEvidenceCheckJobHandler,
+  createTmdbSyncJobHandler,
+  enqueueTmdbDailySyncIfDue,
+  EVIDENCE_CHECK_JOB_TYPE,
   failJobWithFencing,
   getJobById,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
+  TMDB_SYNC_JOB_TYPE,
+  type AdapterRegistry,
+  type EvidenceGateStep2Evaluator,
   type JobHandlerRegistry,
   type JobQueueMessage,
   type JobQueueSender,
   type OutboundClient,
+  type TmdbGateway,
+  type TmdbGatewayConfig,
 } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 
@@ -28,12 +37,17 @@ export interface BackgroundWorkerConfig {
   dispatchFailureRetryDelayMs?: number;
   defaultRetryDelayMs?: number;
   jobTypes?: readonly string[];
+  tmdb?: TmdbGatewayConfig;
+  enableDailyTmdbSync?: boolean;
 }
 
 export interface BackgroundWorkerDeps {
   db: Db;
   outbound: OutboundClient;
   queue: JobQueueSender;
+  adapterRegistry?: AdapterRegistry;
+  tmdbGateway?: TmdbGateway;
+  evaluateStep2?: EvidenceGateStep2Evaluator;
   handlers?: JobHandlerRegistry;
   config?: BackgroundWorkerConfig;
   now?: () => Date;
@@ -110,12 +124,30 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
   const defaultRetryDelayMs = deps.config?.defaultRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const handlers: JobHandlerRegistry = {
     ...createDefaultJobHandlers(),
+    [EVIDENCE_CHECK_JOB_TYPE]: createEvidenceCheckJobHandler({
+      adapterRegistry: deps.adapterRegistry,
+      tmdbConfig: deps.config?.tmdb,
+      tmdbGateway: deps.tmdbGateway,
+      evaluateStep2: deps.evaluateStep2,
+    }),
+    [TMDB_SYNC_JOB_TYPE]: createTmdbSyncJobHandler({
+      tmdbConfig: deps.config?.tmdb,
+      tmdbGateway: deps.tmdbGateway,
+    }),
     ...deps.handlers,
   };
 
   return {
     async scheduled(controller) {
       const now = resolveScheduledNow(controller, deps.now);
+      const shouldCheckTmdbSync =
+        deps.config?.enableDailyTmdbSync !== false &&
+        (!deps.config?.jobTypes || deps.config.jobTypes.includes(TMDB_SYNC_JOB_TYPE));
+
+      if (shouldCheckTmdbSync) {
+        await enqueueTmdbDailySyncIfDue(deps.db, { now });
+      }
+
       const claimedJobs = await claimDueJobs(deps.db, {
         now,
         batchSize,

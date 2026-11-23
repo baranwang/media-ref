@@ -1,8 +1,11 @@
-import type {
-  ExternalTargetKind,
-  OutboundClient,
-  TmdbGateway,
-  TmdbGatewayConfig,
+import {
+  createDefaultAdapterRegistry,
+  type AdapterRegistry,
+  type ExternalTargetKind,
+  type OutboundClient,
+  type ReputationTier,
+  type TmdbGateway,
+  type TmdbGatewayConfig,
 } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { Hono } from "hono";
@@ -19,22 +22,41 @@ import {
 } from "./auth.ts";
 import { registerChangeRequestRoutes } from "./change-requests.ts";
 import { registerLeadRoutes } from "./leads.ts";
+import { registerMediaAdminRoutes } from "./media-admin.ts";
 import { registerMediaRoutes } from "./media.ts";
+import {
+  createReadRateLimitRuntime,
+  resolveSubmissionQuotaConfig,
+  type RateLimitBinding,
+  type RateLimitConfig,
+} from "./rate-limit.ts";
 import { registerReviewerRoutes } from "./reviewer.ts";
 
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
   now?: () => Date;
   tmdb?: TmdbGatewayConfig;
+  rateLimits?: RateLimitConfig;
+  readKeyLimit?: number;
+  readIpLimit?: number;
+  readPeriodSeconds?: number;
+  readRetryAfterSeconds?: number;
+  submitBaseHourlyLimit?: number;
+  submitWindowSeconds?: number;
+  reputationTiers?: readonly ReputationTier[];
+  roleHourlyLimits?: Partial<Record<string, number>>;
 }
 
 export interface ApiDeps {
   dbRead: Db;
   dbWrite: Db;
   outbound: OutboundClient;
+  adapterRegistry?: AdapterRegistry;
   tmdbGateway?: TmdbGateway;
   onBackgroundTask?: (promise: Promise<unknown>) => void;
   onBackgroundTaskError?: (error: unknown) => void;
+  readKeyLimiter?: RateLimitBinding;
+  readIpLimiter?: RateLimitBinding;
   config: ApiConfig;
 }
 
@@ -62,7 +84,32 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     return cachedAuth;
   };
 
+  const hasCustomClock = deps.config.now !== undefined;
   const now = deps.config.now ?? (() => new Date());
+  const adapterRegistry = deps.adapterRegistry ?? createDefaultAdapterRegistry();
+  const readRateLimit = createReadRateLimitRuntime({
+    readKeyLimiter: deps.readKeyLimiter,
+    readIpLimiter: deps.readIpLimiter,
+    config: {
+      ...deps.config.rateLimits,
+      ...(deps.config.readKeyLimit !== undefined ? { readKeyLimit: deps.config.readKeyLimit } : {}),
+      ...(deps.config.readIpLimit !== undefined ? { readIpLimit: deps.config.readIpLimit } : {}),
+      ...(deps.config.readPeriodSeconds !== undefined
+        ? { readPeriodSeconds: deps.config.readPeriodSeconds }
+        : {}),
+      ...(deps.config.readRetryAfterSeconds !== undefined
+        ? { readRetryAfterSeconds: deps.config.readRetryAfterSeconds }
+        : {}),
+    },
+    now,
+  });
+  const submissionQuota = resolveSubmissionQuotaConfig({
+    rateLimits: deps.config.rateLimits,
+    submitBaseHourlyLimit: deps.config.submitBaseHourlyLimit,
+    submitWindowSeconds: deps.config.submitWindowSeconds,
+    reputationTiers: deps.config.reputationTiers,
+    roleHourlyLimits: deps.config.roleHourlyLimits,
+  });
 
   app.use(
     "*",
@@ -78,11 +125,15 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     c.set("dbRead", deps.dbRead);
     c.set("dbWrite", deps.dbWrite);
     c.set("outbound", deps.outbound);
+    c.set("adapterRegistry", adapterRegistry);
     c.set("tmdbConfig", deps.config.tmdb);
     c.set("tmdbGateway", deps.tmdbGateway);
     c.set("now", now);
     c.set("onBackgroundTask", deps.onBackgroundTask);
     c.set("onBackgroundTaskError", deps.onBackgroundTaskError);
+    c.set("hasCustomClock", hasCustomClock);
+    c.set("readRateLimit", readRateLimit);
+    c.set("submissionQuota", submissionQuota);
     c.set("session", null);
     c.set("apiKey", null);
     if (c.req.path !== "/health" && c.req.path !== "/health/outbound") {
@@ -157,6 +208,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
   registerChangeRequestRoutes(app);
   registerLeadRoutes(app);
   registerReviewerRoutes(app);
+  registerMediaAdminRoutes(app);
   registerMediaRoutes(app);
 
   return app;

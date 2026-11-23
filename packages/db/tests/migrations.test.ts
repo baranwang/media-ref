@@ -1,3 +1,4 @@
+import { sql } from "kysely";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { runMigrations } from "../src/index.ts";
 import { createTestDb, type TestDbHandle } from "../src/testing.ts";
@@ -53,6 +54,16 @@ describe("packages/db migrations", () => {
       },
       {
         migrationName: "0007_platform_status",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0008_reputation_rate_limits",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0009_sync_state",
         direction: "Up",
         status: "Success",
       },
@@ -161,7 +172,7 @@ describe("packages/db migrations", () => {
 
     const userRow = await testDb.readDb
       .selectFrom("user")
-      .select(["id", "email", "emailVerified", "role"])
+      .select(["id", "email", "emailVerified", "role", "reputation"])
       .where("id", "=", "user_1")
       .executeTakeFirst();
 
@@ -170,6 +181,7 @@ describe("packages/db migrations", () => {
       email: "dev@mediaref.org",
       emailVerified: false,
       role: "user",
+      reputation: 0,
     });
 
     const insertedJob = await testDb.writeDb
@@ -377,6 +389,17 @@ describe("packages/db migrations", () => {
       submitter_type: "human",
     });
 
+    const submitterCreatedIdx = await sql<{ indexdef: string }>`
+      select indexdef
+      from pg_indexes
+      where schemaname = 'public'
+        and tablename = 'change_requests'
+        and indexname = 'change_requests_submitter_created_idx'
+    `.execute(testDb.readDb);
+
+    expect(submitterCreatedIdx.rows).toHaveLength(1);
+    expect(submitterCreatedIdx.rows[0]?.indexdef).toMatch(/submitter_user_id,\s*created_at DESC/i);
+
     const insertedLead = await testDb.writeDb
       .insertInto("leads")
       .values({
@@ -509,6 +532,70 @@ describe("packages/db migrations", () => {
           status: "not_found",
           checked_at: checkedAt,
           attempt_count: 0,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Sync state and review alerts tables from 0009_sync_state
+    const insertedSync = await testDb.writeDb
+      .insertInto("sync_state")
+      .values({
+        sync_key: "tmdb_changes_tv",
+        last_synced_date: "2026-11-23",
+        metadata: JSON.stringify({ mode: "changes", refreshedCount: 1 }),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedSync).toMatchObject({
+      sync_key: "tmdb_changes_tv",
+      last_synced_date: "2026-11-23",
+    });
+    expect(insertedSync.updated_at).toBeInstanceOf(Date);
+
+    // Rejects malformed last_synced_date
+    await expect(
+      testDb.writeDb
+        .insertInto("sync_state")
+        .values({
+          sync_key: "tmdb_changes_bad",
+          last_synced_date: "2026/11/23",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    const insertedAlert = await testDb.writeDb
+      .insertInto("review_alerts")
+      .values({
+        alert_type: "tmdb_missing_or_merged",
+        media_id: insertedMedia.id,
+        association_id: assoc.id,
+        details: JSON.stringify({ tmdbExternalKey: "tmdb:tv:95479" }),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedAlert).toMatchObject({
+      alert_type: "tmdb_missing_or_merged",
+      media_id: insertedMedia.id,
+      association_id: assoc.id,
+      status: "open",
+      resolved_at: null,
+      resolved_by_user_id: null,
+    });
+    expect(insertedAlert.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(insertedAlert.created_at).toBeInstanceOf(Date);
+
+    // Rejects invalid review_alerts status
+    await expect(
+      testDb.writeDb
+        .insertInto("review_alerts")
+        .values({
+          alert_type: "tmdb_missing_or_merged",
+          media_id: insertedMedia.id,
+          status: "invalid_status" as "open",
         })
         .execute(),
     ).rejects.toThrow();
