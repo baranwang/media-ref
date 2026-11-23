@@ -30,6 +30,9 @@ export {
   type VerifyApiKeyResult,
 } from "./api-keys.ts";
 export { createApiApp, type ApiConfig, type ApiDeps } from "./app.ts";
+export { registerChangeRequestRoutes } from "./change-requests.ts";
+export { registerMediaRoutes } from "./media.ts";
+export { registerReviewerRoutes, requireOwner, requireReviewer } from "./reviewer.ts";
 export {
   buildOAuthAuthOptions,
   parseOAuthConfigFromEnv,
@@ -72,6 +75,10 @@ export interface ApiWorkerEnv {
   TRAKT_CLIENT_SECRET?: string;
   OUTBOUND_PROXY_CONFIG?: string;
   ENABLE_HEALTH_OUTBOUND_PROBE?: string;
+  TMDB_ACCESS_TOKEN?: string;
+  TMDB_API_KEY?: string;
+  TMDB_API_BASE_URL?: string;
+  TRAKT_API_BASE_URL?: string;
 }
 
 function parseTrustedOrigins(raw: string | undefined): string[] | undefined {
@@ -105,6 +112,13 @@ const worker = {
         cookieDomain: env.COOKIE_DOMAIN,
         emailFrom: env.EMAIL_FROM,
         trustedOrigins: parseTrustedOrigins(env.TRUSTED_ORIGINS),
+        tmdb: {
+          accessToken: env.TMDB_ACCESS_TOKEN,
+          apiKey: env.TMDB_API_KEY,
+          apiBaseUrl: env.TMDB_API_BASE_URL,
+          traktClientId: env.TRAKT_CLIENT_ID,
+          traktApiBaseUrl: env.TRAKT_API_BASE_URL,
+        },
         oauth: parseOAuthConfigFromEnv(env),
       },
     });

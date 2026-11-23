@@ -1,4 +1,9 @@
-import type { ExternalTargetKind, OutboundClient } from "@media-ref/core";
+import type {
+  ExternalTargetKind,
+  OutboundClient,
+  TmdbGateway,
+  TmdbGatewayConfig,
+} from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -12,17 +17,22 @@ import {
   type AuthConfig,
   type AuthInstance,
 } from "./auth.ts";
+import { registerChangeRequestRoutes } from "./change-requests.ts";
 import { registerLeadRoutes } from "./leads.ts";
+import { registerMediaRoutes } from "./media.ts";
+import { registerReviewerRoutes } from "./reviewer.ts";
 
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
   now?: () => Date;
+  tmdb?: TmdbGatewayConfig;
 }
 
 export interface ApiDeps {
   dbRead: Db;
   dbWrite: Db;
   outbound: OutboundClient;
+  tmdbGateway?: TmdbGateway;
   config: ApiConfig;
 }
 
@@ -65,6 +75,9 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
   app.use("*", async (c, next) => {
     c.set("dbRead", deps.dbRead);
     c.set("dbWrite", deps.dbWrite);
+    c.set("outbound", deps.outbound);
+    c.set("tmdbConfig", deps.config.tmdb);
+    c.set("tmdbGateway", deps.tmdbGateway);
     c.set("now", now);
     c.set("session", null);
     c.set("apiKey", null);
@@ -137,7 +150,10 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
   });
 
   registerApiKeyRoutes(app);
+  registerChangeRequestRoutes(app);
   registerLeadRoutes(app);
+  registerReviewerRoutes(app);
+  registerMediaRoutes(app);
 
   return app;
 }
