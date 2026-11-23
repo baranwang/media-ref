@@ -1,5 +1,6 @@
 import {
   createDefaultAdapterRegistry,
+  resolveAnonymousInvalidationThreshold,
   type AdapterRegistry,
   type ExternalTargetKind,
   type OutboundClient,
@@ -21,6 +22,7 @@ import {
   type AuthInstance,
 } from "./auth.ts";
 import { registerChangeRequestRoutes } from "./change-requests.ts";
+import { registerInvalidationRoutes } from "./invalidation.ts";
 import { registerLeadRoutes } from "./leads.ts";
 import { registerMediaAdminRoutes } from "./media-admin.ts";
 import { registerMediaRoutes } from "./media.ts";
@@ -45,6 +47,7 @@ export interface ApiConfig extends AuthConfig {
   submitWindowSeconds?: number;
   reputationTiers?: readonly ReputationTier[];
   roleHourlyLimits?: Partial<Record<string, number>>;
+  anonymousInvalidationThreshold?: number;
 }
 
 export interface ApiDeps {
@@ -110,6 +113,9 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     reputationTiers: deps.config.reputationTiers,
     roleHourlyLimits: deps.config.roleHourlyLimits,
   });
+  const anonymousInvalidationThreshold = resolveAnonymousInvalidationThreshold(
+    deps.config.anonymousInvalidationThreshold,
+  );
 
   app.use(
     "*",
@@ -134,6 +140,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     c.set("hasCustomClock", hasCustomClock);
     c.set("readRateLimit", readRateLimit);
     c.set("submissionQuota", submissionQuota);
+    c.set("anonymousInvalidationThreshold", anonymousInvalidationThreshold);
     c.set("session", null);
     c.set("apiKey", null);
     if (c.req.path !== "/health" && c.req.path !== "/health/outbound") {
@@ -206,6 +213,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
 
   registerApiKeyRoutes(app);
   registerChangeRequestRoutes(app);
+  registerInvalidationRoutes(app);
   registerLeadRoutes(app);
   registerReviewerRoutes(app);
   registerMediaAdminRoutes(app);
