@@ -150,6 +150,7 @@ const worker = {
   async fetch(request: Request, env: ApiWorkerEnv, ctx: ExecutionContext): Promise<Response> {
     const dbRead = createDb(env.HYPERDRIVE_READ.connectionString, { max: 5 });
     const dbWrite = createDb(env.HYPERDRIVE_WRITE.connectionString, { max: 5 });
+    const backgroundTasks: Promise<unknown>[] = [];
 
     const app = createApiApp({
       dbRead,
@@ -159,6 +160,12 @@ const worker = {
         emailBinding: env.EMAIL,
         defaultEmailFrom: env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM,
       }),
+      onBackgroundTask: (promise) => {
+        backgroundTasks.push(promise);
+      },
+      onBackgroundTaskError: (error) => {
+        console.error("API background task failed:", error);
+      },
       readKeyLimiter: env.RATE_LIMITER_READ_KEY,
       readIpLimiter: env.RATE_LIMITER_READ_IP,
       config: {
@@ -181,9 +188,13 @@ const worker = {
     });
 
     try {
-      return await app.fetch(request);
+      return await app.fetch(request, env, ctx);
     } finally {
-      ctx.waitUntil(Promise.allSettled([dbRead.destroy(), dbWrite.destroy()]));
+      ctx.waitUntil(
+        Promise.allSettled(backgroundTasks).finally(() =>
+          Promise.allSettled([dbRead.destroy(), dbWrite.destroy()]),
+        ),
+      );
     }
   },
 };
