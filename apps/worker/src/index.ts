@@ -8,12 +8,17 @@ import type {
 } from "@cloudflare/workers-types";
 import {
   createLiveOutboundClient,
+  DEFAULT_AI_MODEL,
+  DEFAULT_AI_PROVIDER,
   DEFAULT_EXPLORATION_BATCH_SIZE,
   DEFAULT_EXPLORATION_DAILY_BUDGET,
   DEFAULT_EXPLORATION_LEASE_DURATION_MS,
+  DEFAULT_EXPLORATION_MAX_DURATION_MS,
+  DEFAULT_EXPLORATION_MAX_STEPS,
   DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
   parseExplorationBackoffSeconds,
   parseOutboundProxyConfig,
+  type CloudflareAiBinding,
   type JobQueueMessage,
 } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
@@ -40,6 +45,9 @@ export interface BackgroundWorkerEnv {
   HYPERDRIVE_WRITE: Hyperdrive;
   JOBS_QUEUE: Queue<JobQueueMessage>;
   AI?: Ai;
+  AI_GATEWAY_ID?: string;
+  AI_PROVIDER?: string;
+  AI_MODEL?: string;
   OUTBOUND_PROXY_CONFIG?: string;
   JOB_BATCH_SIZE?: string;
   JOB_LEASE_DURATION_MS?: string;
@@ -47,11 +55,49 @@ export interface BackgroundWorkerEnv {
   EXPLORATION_BATCH_SIZE?: string;
   EXPLORATION_LEASE_DURATION_MS?: string;
   EXPLORATION_BACKOFF_SECONDS?: string;
+  EXPLORATION_MAX_STEPS?: string;
+  EXPLORATION_MAX_DURATION_MS?: string;
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
   TMDB_API_BASE_URL?: string;
   TRAKT_CLIENT_ID?: string;
   TRAKT_API_BASE_URL?: string;
+}
+
+function adaptCloudflareAiBinding(ai: Ai | undefined): CloudflareAiBinding | undefined {
+  if (!ai) {
+    return undefined;
+  }
+  return {
+    run(model, input, options) {
+      return (
+        ai.run as (
+          modelName: string,
+          modelInput: Record<string, unknown>,
+          runOptions?: Record<string, unknown>,
+        ) => Promise<unknown>
+      )(model, input, options);
+    },
+    gateway(gatewayId) {
+      const gw = ai.gateway(gatewayId);
+      return {
+        run(data, options) {
+          return gw.run(
+            data as Parameters<typeof gw.run>[0],
+            options as Parameters<typeof gw.run>[1],
+          );
+        },
+      };
+    },
+  };
+}
+
+function parseOptionalString(raw: string | undefined): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -71,6 +117,7 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
 }
 
 export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerConfig {
+  const gatewayId = parseOptionalString(env.AI_GATEWAY_ID);
   return {
     batchSize: parsePositiveInt(env.JOB_BATCH_SIZE, DEFAULT_JOB_BATCH_SIZE),
     leaseDurationMs: parsePositiveInt(env.JOB_LEASE_DURATION_MS, DEFAULT_LEASE_DURATION_MS),
@@ -89,6 +136,16 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
         DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
       ),
     },
+    explorationAgent: {
+      ...(gatewayId ? { gatewayId } : {}),
+      provider: parseOptionalString(env.AI_PROVIDER) ?? DEFAULT_AI_PROVIDER,
+      model: parseOptionalString(env.AI_MODEL) ?? DEFAULT_AI_MODEL,
+      maxSteps: parsePositiveInt(env.EXPLORATION_MAX_STEPS, DEFAULT_EXPLORATION_MAX_STEPS),
+      maxDurationMs: parsePositiveInt(
+        env.EXPLORATION_MAX_DURATION_MS,
+        DEFAULT_EXPLORATION_MAX_DURATION_MS,
+      ),
+    },
     tmdb: {
       accessToken: env.TMDB_ACCESS_TOKEN,
       apiKey: env.TMDB_API_KEY,
@@ -97,6 +154,16 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
       traktApiBaseUrl: env.TRAKT_API_BASE_URL,
     },
   };
+}
+
+function createWorkerOutboundClient(env: BackgroundWorkerEnv) {
+  return createLiveOutboundClient({
+    proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
+    aiBinding: adaptCloudflareAiBinding(env.AI),
+    aiGatewayId: parseOptionalString(env.AI_GATEWAY_ID),
+    aiProvider: parseOptionalString(env.AI_PROVIDER) ?? DEFAULT_AI_PROVIDER,
+    aiModel: parseOptionalString(env.AI_MODEL) ?? DEFAULT_AI_MODEL,
+  });
 }
 
 const worker = {
@@ -108,9 +175,7 @@ const worker = {
     const db = createDb(env.HYPERDRIVE_WRITE.connectionString, { max: 5 });
     const instance = createBackgroundWorker({
       db,
-      outbound: createLiveOutboundClient({
-        proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
-      }),
+      outbound: createWorkerOutboundClient(env),
       queue: env.JOBS_QUEUE,
       config: parseWorkerConfig(env),
     });
@@ -130,9 +195,7 @@ const worker = {
     const db = createDb(env.HYPERDRIVE_WRITE.connectionString, { max: 5 });
     const instance = createBackgroundWorker({
       db,
-      outbound: createLiveOutboundClient({
-        proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
-      }),
+      outbound: createWorkerOutboundClient(env),
       queue: env.JOBS_QUEUE,
       config: parseWorkerConfig(env),
     });

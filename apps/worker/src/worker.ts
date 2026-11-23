@@ -8,6 +8,7 @@ import {
   completeJobWithFencing,
   createDefaultJobHandlers,
   createEvidenceCheckJobHandler,
+  createExplorationAgentExecutor,
   createExplorationJobHandler,
   createInvalidationRecheckJobHandler,
   createSeedEvidenceCheckJobHandler,
@@ -25,6 +26,7 @@ import {
   TMDB_SYNC_JOB_TYPE,
   type AdapterRegistry,
   type EvidenceGateStep2Evaluator,
+  type ExplorationAgentConfig,
   type ExplorationExecutor,
   type ExplorationSchedulerConfig,
   type ExternalKeyCatalogVerifier,
@@ -50,6 +52,7 @@ export interface BackgroundWorkerConfig {
   tmdb?: TmdbGatewayConfig;
   enableDailyTmdbSync?: boolean;
   exploration?: Partial<ExplorationSchedulerConfig>;
+  explorationAgent?: ExplorationAgentConfig;
   enableExplorationScheduling?: boolean;
 }
 
@@ -162,7 +165,12 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
       config: deps.config?.exploration,
-      executor: deps.explorationExecutor,
+      executor:
+        deps.explorationExecutor ??
+        createExplorationAgentExecutor({
+          adapterRegistry: deps.adapterRegistry,
+          ...deps.config?.explorationAgent,
+        }),
       catalogVerifier: deps.explorationCatalogVerifier,
     }),
     ...deps.handlers,
