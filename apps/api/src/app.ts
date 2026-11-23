@@ -2,6 +2,7 @@ import type { ExternalTargetKind, OutboundClient } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { registerApiKeyRoutes } from "./api-keys.ts";
 import {
   AUTH_BASE_PATH,
   createAuth,
@@ -14,6 +15,7 @@ import {
 
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
+  now?: () => Date;
 }
 
 export interface ApiDeps {
@@ -47,18 +49,24 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     return cachedAuth;
   };
 
+  const now = deps.config.now ?? (() => new Date());
+
   app.use(
     "*",
     cors({
       origin: (origin) => (isAllowedCorsOrigin(origin, deps.config) ? origin : ""),
-      allowHeaders: ["Content-Type", "Authorization"],
+      allowHeaders: ["Content-Type", "Authorization", "X-API-Key"],
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       credentials: true,
     }),
   );
 
   app.use("*", async (c, next) => {
+    c.set("dbRead", deps.dbRead);
+    c.set("dbWrite", deps.dbWrite);
+    c.set("now", now);
     c.set("session", null);
+    c.set("apiKey", null);
     if (c.req.path !== "/health" && c.req.path !== "/health/outbound") {
       c.set("auth", getAuth());
     }
@@ -126,6 +134,8 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     }
     return c.json(session.user, 200);
   });
+
+  registerApiKeyRoutes(app);
 
   return app;
 }

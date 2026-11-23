@@ -36,6 +36,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0004_api_keys",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -98,6 +103,41 @@ describe("packages/db migrations", () => {
         updatedAt: now,
       })
       .execute();
+
+    await testDb.writeDb
+      .insertInto("apikey")
+      .values({
+        id: "key_1",
+        configId: "default",
+        name: "CLI Key",
+        start: "mref_abcdef",
+        referenceId: "user_1",
+        prefix: "mref_",
+        key: "hashed-key-digest",
+        enabled: true,
+        rateLimitEnabled: false,
+        requestCount: 0,
+        expiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+        permissions: JSON.stringify({ media: ["read", "report"] }),
+      })
+      .execute();
+
+    const apiKeyRow = await testDb.readDb
+      .selectFrom("apikey")
+      .select(["id", "configId", "referenceId", "key", "enabled", "permissions"])
+      .where("key", "=", "hashed-key-digest")
+      .executeTakeFirst();
+
+    expect(apiKeyRow).toEqual({
+      id: "key_1",
+      configId: "default",
+      referenceId: "user_1",
+      key: "hashed-key-digest",
+      enabled: true,
+      permissions: JSON.stringify({ media: ["read", "report"] }),
+    });
 
     const userRow = await testDb.readDb
       .selectFrom("user")

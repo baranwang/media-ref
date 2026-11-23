@@ -1,7 +1,9 @@
+import { apiKey } from "@better-auth/api-key";
 import type { OutboundClient } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { betterAuth } from "better-auth";
 import type { MiddlewareHandler } from "hono";
+import type { VerifiedApiKey } from "./api-keys.ts";
 import { buildOAuthAuthOptions, type OAuthConfig } from "./oauth.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
@@ -126,12 +128,37 @@ export function createAuth(deps: AuthDeps) {
       db: deps.dbWrite,
       type: "postgres",
     },
+    disabledPaths: ["/api-key/create"],
     trustedOrigins,
     socialProviders: oauthOptions.socialProviders,
-    plugins: [...oauthOptions.plugins],
     account: {
       accountLinking: oauthOptions.accountLinking,
     },
+    plugins: [
+      apiKey({
+        defaultPrefix: "mref_",
+        startingCharactersConfig: {
+          shouldStore: true,
+          charactersLength: 11,
+        },
+        maximumNameLength: 64,
+        rateLimit: {
+          enabled: false,
+        },
+        enableSessionForAPIKeys: false,
+        permissions: {
+          defaultPermissions: {
+            media: ["read", "report"],
+          },
+        },
+        keyExpiration: {
+          defaultExpiresIn: null,
+          minExpiresIn: 0,
+          maxExpiresIn: 365,
+        },
+      }),
+      ...oauthOptions.plugins,
+    ],
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
@@ -159,14 +186,19 @@ export function createAuth(deps: AuthDeps) {
         },
       },
     },
-    advanced: cookieDomain
-      ? {
-          crossSubDomainCookies: {
-            enabled: true,
-            domain: cookieDomain,
-          },
-        }
-      : undefined,
+    advanced: {
+      database: {
+        validateSchema: false,
+      },
+      ...(cookieDomain
+        ? {
+            crossSubDomainCookies: {
+              enabled: true,
+              domain: cookieDomain,
+            },
+          }
+        : {}),
+    },
   });
 }
 
@@ -175,7 +207,11 @@ export type AuthInstance = ReturnType<typeof createAuth>;
 export interface ApiEnv {
   Variables: {
     auth: AuthInstance;
+    dbRead: Db;
+    dbWrite: Db;
+    now: () => Date;
     session: AuthenticatedSession | null;
+    apiKey: VerifiedApiKey | null;
   };
 }
 
