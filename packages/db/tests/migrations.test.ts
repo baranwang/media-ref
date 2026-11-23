@@ -41,6 +41,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0005_media_domain",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -210,6 +215,152 @@ describe("packages/db migrations", () => {
       .executeTakeFirstOrThrow();
 
     expect(rescheduled.id).not.toBe(insertedJob.id);
+
+    // Media domain tables from 0005_media_domain
+    const insertedMedia = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "咒术回战",
+        original_title: "呪術廻戦",
+        year: 2020,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 47, airYear: 2020 }]),
+      })
+      .returning(["id", "type", "baseline", "title"])
+      .executeTakeFirstOrThrow();
+
+    expect(insertedMedia).toMatchObject({
+      type: "tv",
+      baseline: "tmdb",
+      title: "咒术回战",
+    });
+
+    await testDb.writeDb
+      .insertInto("external_ids")
+      .values({
+        media_id: insertedMedia.id,
+        namespace: "tmdb",
+        native_id: "tv:95479",
+      })
+      .execute();
+
+    // Unique (namespace, native_id) rejects duplicate external IDs
+    await expect(
+      testDb.writeDb
+        .insertInto("external_ids")
+        .values({
+          media_id: insertedMedia.id,
+          namespace: "tmdb",
+          native_id: "tv:95479",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    const defaultVariant = await testDb.writeDb
+      .insertInto("variants")
+      .values({
+        media_id: insertedMedia.id,
+        platform: "bilibili",
+        description: "原声",
+        is_default: true,
+      })
+      .returning(["id", "is_default"])
+      .executeTakeFirstOrThrow();
+
+    expect(defaultVariant.is_default).toBe(true);
+
+    // Partial unique index prevents two default variants for the same (media_id, platform)
+    await expect(
+      testDb.writeDb
+        .insertInto("variants")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "bilibili",
+          description: "中配",
+          is_default: true,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Non-default variant for the same (media_id, platform) succeeds
+    await testDb.writeDb
+      .insertInto("variants")
+      .values({
+        media_id: insertedMedia.id,
+        platform: "bilibili",
+        description: "中配",
+        is_default: false,
+      })
+      .execute();
+
+    const assoc = await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: insertedMedia.id,
+        namespace: "bilibili",
+        native_id: "ss34430",
+        variant_id: defaultVariant.id,
+        status: "confirmed",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const rev = await testDb.writeDb
+      .insertInto("association_revisions")
+      .values({
+        association_id: assoc.id,
+        revision_number: 1,
+        variant_id: defaultVariant.id,
+        status: "confirmed",
+        segments: JSON.stringify([
+          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+        ]),
+        actor_user_id: "user_1",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    await testDb.writeDb
+      .updateTable("associations")
+      .set({ current_revision_id: rev.id })
+      .where("id", "=", assoc.id)
+      .execute();
+
+    await testDb.writeDb
+      .insertInto("segments")
+      .values({
+        association_id: assoc.id,
+        season: 1,
+        episode_start: 1,
+        episode_end: 24,
+        target_episode_start: 1,
+        baseline: "tmdb",
+      })
+      .execute();
+
+    const cr = await testDb.writeDb
+      .insertInto("change_requests")
+      .values({
+        status: "needs_review",
+        submitter_user_id: "user_1",
+        media_id: insertedMedia.id,
+        target_external_key: "tmdb:tv:95479",
+        namespace: "bilibili",
+        raw_native_id: "ss45574",
+        native_id: "ss45574",
+        variant_id: defaultVariant.id,
+        segments: JSON.stringify([
+          { season: 1, episodeStart: 25, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
+        ]),
+      })
+      .returning(["id", "status", "submitter_type"])
+      .executeTakeFirstOrThrow();
+
+    expect(cr).toMatchObject({
+      status: "needs_review",
+      submitter_type: "human",
+    });
 
     const rerunResults = await runMigrations(testDb.writeDb);
     expect(rerunResults).toEqual([]);

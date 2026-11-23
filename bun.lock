@@ -14,6 +14,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@better-auth/api-key": "1.7.27",
+        "@media-ref/client": "workspace:*",
         "@media-ref/core": "workspace:*",
         "@media-ref/db": "workspace:*",
         "better-auth": "1.7.27",
@@ -79,6 +80,7 @@
       "name": "@media-ref/core",
       "version": "0.0.0",
       "dependencies": {
+        "@media-ref/client": "workspace:*",
         "@media-ref/db": "workspace:*",
         "kysely": "^0.29.9",
       },

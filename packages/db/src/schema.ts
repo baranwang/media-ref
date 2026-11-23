@@ -106,6 +106,150 @@ export interface ApiKeyTable {
   metadata: string | null;
 }
 
+export type MediaTypeRow = "movie" | "tv";
+export type BaselineSourceRow = "tmdb" | "tvdb" | "imdb" | "bangumi" | "douban";
+export type ExternalIdNamespaceRow = "tmdb" | "imdb" | "tvdb" | "trakt";
+export type ExternalIdSourceRow = "sync" | "reviewer" | "submission";
+export type PlatformNamespaceRow = "tencent" | "iqiyi" | "youku" | "bilibili" | "mgtv";
+export type AssociationNamespaceRow = PlatformNamespaceRow | "douban" | "bangumi";
+export type AssociationStatusRow = "confirmed" | "seed_unconfirmed" | "delisted";
+export type ChangeRequestStatusRow = "pending_evidence" | "approved" | "needs_review" | "rejected";
+export type SubmitterTypeRow = "human" | "agent";
+
+export interface SeasonSnapshotRow {
+  season: number;
+  episodeCount: number;
+  airYear: number | null;
+}
+
+export interface StoredSegmentJson {
+  season: number;
+  episodeStart: number;
+  episodeEnd: number | null;
+  targetEpisodeStart: number;
+  baseline: BaselineSourceRow;
+  nonLinear: boolean;
+  needsReview: boolean;
+}
+
+export interface MediaTable {
+  id: Generated<string>;
+  type: MediaTypeRow;
+  baseline: BaselineSourceRow | null;
+  title: string;
+  original_title: string | null;
+  year: number | null;
+  seasons: ColumnType<
+    SeasonSnapshotRow[],
+    SeasonSnapshotRow[] | string | undefined,
+    SeasonSnapshotRow[] | string
+  >;
+  merged_into_media_id: string | null;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+export interface ExternalIdsTable {
+  id: Generated<string>;
+  media_id: string;
+  namespace: ExternalIdNamespaceRow;
+  native_id: string;
+  locked: Generated<boolean>;
+  source: Generated<ExternalIdSourceRow>;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+export interface VariantsTable {
+  id: Generated<string>;
+  media_id: string;
+  platform: PlatformNamespaceRow;
+  description: string;
+  is_default: Generated<boolean>;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+export interface AssociationsTable {
+  id: Generated<string>;
+  media_id: string;
+  namespace: AssociationNamespaceRow;
+  native_id: string;
+  variant_id: string | null;
+  status: AssociationStatusRow;
+  needs_review: Generated<boolean>;
+  locked: Generated<boolean>;
+  current_revision_id: string | null;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+export interface AssociationRevisionsTable {
+  id: Generated<string>;
+  association_id: string;
+  revision_number: number;
+  change_request_id: string | null;
+  variant_id: string | null;
+  status: AssociationStatusRow;
+  segments: ColumnType<
+    StoredSegmentJson[],
+    StoredSegmentJson[] | string | undefined,
+    StoredSegmentJson[] | string
+  >;
+  actor_user_id: string | null;
+  reason: string | null;
+  created_at: Generated<Date>;
+}
+
+export interface SegmentsTable {
+  id: Generated<string>;
+  association_id: string;
+  season: number;
+  episode_start: number;
+  episode_end: number | null;
+  target_episode_start: number;
+  baseline: BaselineSourceRow;
+  non_linear: Generated<boolean>;
+  needs_review: Generated<boolean>;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+export interface ChangeRequestsTable {
+  id: Generated<string>;
+  status: ChangeRequestStatusRow;
+  submitter_user_id: string;
+  submitter_key_id: string | null;
+  submitter_type: Generated<SubmitterTypeRow>;
+  task_id: string | null;
+  media_id: string | null;
+  target_external_key: string;
+  namespace: AssociationNamespaceRow;
+  raw_native_id: string;
+  native_id: string;
+  variant_id: string | null;
+  variant_description: string | null;
+  set_default_variant: Generated<boolean>;
+  segments: ColumnType<
+    StoredSegmentJson[],
+    StoredSegmentJson[] | string | undefined,
+    StoredSegmentJson[] | string
+  >;
+  evidence: ColumnType<
+    JsonObject | null,
+    JsonObject | string | null | undefined,
+    JsonObject | string | null
+  >;
+  conflict_reason: string | null;
+  decision_reason: string | null;
+  reviewer_user_id: string | null;
+  reviewed_at: Date | null;
+  applied_association_id: string | null;
+  applied_revision_id: string | null;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
 export interface Database {
   schema_meta: SchemaMetaTable;
   user: UserTable;
@@ -114,4 +258,11 @@ export interface Database {
   verification: VerificationTable;
   background_jobs: BackgroundJobsTable;
   apikey: ApiKeyTable;
+  media: MediaTable;
+  external_ids: ExternalIdsTable;
+  variants: VariantsTable;
+  associations: AssociationsTable;
+  association_revisions: AssociationRevisionsTable;
+  segments: SegmentsTable;
+  change_requests: ChangeRequestsTable;
 }

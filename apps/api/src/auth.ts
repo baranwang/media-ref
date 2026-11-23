@@ -1,5 +1,5 @@
 import { apiKey } from "@better-auth/api-key";
-import type { OutboundClient } from "@media-ref/core";
+import type { OutboundClient, TmdbGateway, TmdbGatewayConfig } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { betterAuth } from "better-auth";
 import type { MiddlewareHandler } from "hono";
@@ -201,6 +201,9 @@ export interface ApiEnv {
     auth: AuthInstance;
     dbRead: Db;
     dbWrite: Db;
+    outbound: OutboundClient;
+    tmdbConfig: TmdbGatewayConfig | undefined;
+    tmdbGateway: TmdbGateway | undefined;
     now: () => Date;
     session: AuthenticatedSession | null;
     apiKey: VerifiedApiKey | null;
