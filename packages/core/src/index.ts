@@ -58,6 +58,18 @@ export {
   type RejectChangeRequestInput,
 } from "./media-service.ts";
 export {
+  BatchMediaQueryError,
+  MAX_BATCH_MEDIA_KEYS,
+  queryMediaBatch,
+  queryMediaByKey,
+  type BatchMediaQueryErrorCode,
+  type BatchMediaQueryInput,
+  type BatchMediaQueryResult,
+  type MediaQueryItem,
+  type QueryMediaByKeyResult,
+  type ReadMediaOptions,
+} from "./read-media.ts";
+export {
   createTmdbGateway,
   DEFAULT_TMDB_API_BASE_URL,
   DEFAULT_TMDB_LANGUAGE,

@@ -1541,7 +1541,33 @@ export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeM
       await trx.deleteFrom("variants").where("id", "in", variantsToDelete).execute();
     }
 
-    // 4. Resolve open tmdb_missing_or_merged alerts on source & move remaining open alerts to target
+    // 4. Migrate non-conflicting platform_checks from source to canonicalTarget
+    const [sourceChecks, targetChecks] = await Promise.all([
+      trx
+        .selectFrom("platform_checks")
+        .select(["id", "platform"])
+        .where("media_id", "=", source.id)
+        .execute(),
+      trx
+        .selectFrom("platform_checks")
+        .select(["platform"])
+        .where("media_id", "=", canonicalTarget.id)
+        .execute(),
+    ]);
+
+    const targetCheckedPlatforms = new Set(targetChecks.map((row) => row.platform));
+    for (const check of sourceChecks) {
+      if (!targetCheckedPlatforms.has(check.platform)) {
+        await trx
+          .updateTable("platform_checks")
+          .set({ media_id: canonicalTarget.id, updated_at: now })
+          .where("id", "=", check.id)
+          .execute();
+        targetCheckedPlatforms.add(check.platform);
+      }
+    }
+
+    // 5. Resolve open tmdb_missing_or_merged alerts on source & move remaining open alerts to target
     const resolvedAlerts = await trx
       .updateTable("review_alerts")
       .set({

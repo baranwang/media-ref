@@ -3,6 +3,7 @@ import { createLiveOutboundClient, parseOutboundProxyConfig } from "@media-ref/c
 import { createDb } from "@media-ref/db";
 import { createApiApp } from "./app.ts";
 import { DEFAULT_EMAIL_FROM } from "./auth.ts";
+import type { InternalMediaWorkerEnv } from "./internal.ts";
 import { parseOAuthConfigFromEnv } from "./oauth.ts";
 
 export {
@@ -32,7 +33,11 @@ export {
 export { createApiApp, type ApiConfig, type ApiDeps } from "./app.ts";
 export { registerChangeRequestRoutes } from "./change-requests.ts";
 export { registerMediaAdminRoutes } from "./media-admin.ts";
-export { registerMediaRoutes } from "./media.ts";
+export {
+  registerMediaRoutes,
+  type BatchMediaReadResponse,
+  type MediaReadResponse,
+} from "./media.ts";
 export { registerReviewerRoutes, requireOwner, requireReviewer } from "./reviewer.ts";
 export {
   buildOAuthAuthOptions,
@@ -60,9 +65,25 @@ export {
   type AuthInstance,
 } from "./auth.ts";
 export { registerLeadRoutes, type CreateLeadResponse, type LeadResponse } from "./leads.ts";
+export {
+  CLIENT_IP_HEADER,
+  createCloudflareRateLimiterAdapter,
+  createInMemoryIpRateLimiter,
+  createInternalMediaApp,
+  DEFAULT_ANONYMOUS_IP_RATE_LIMIT,
+  DEFAULT_ANONYMOUS_IP_RATE_WINDOW_SECONDS,
+  extractClientIp,
+  INTERNAL_MEDIA_PATH_PREFIX,
+  InternalMediaEntrypoint,
+  type AnonymousIpRateLimitDecision,
+  type AnonymousIpRateLimiter,
+  type InMemoryIpRateLimiterOptions,
+  type InternalMediaDeps,
+  type InternalMediaRpcResult,
+  type InternalMediaWorkerEnv,
+} from "./internal.ts";
 
-export interface ApiWorkerEnv {
-  HYPERDRIVE_READ: Hyperdrive;
+export interface ApiWorkerEnv extends InternalMediaWorkerEnv {
   HYPERDRIVE_WRITE: Hyperdrive;
   EMAIL?: SendEmail;
   EMAIL_FROM?: string;
