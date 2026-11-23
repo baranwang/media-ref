@@ -2,6 +2,7 @@ import {
   isPlatformNamespace,
   type CatalogNamespace,
   type Namespace,
+  type NormalizedSegment,
   type SeasonSnapshot,
 } from "@media-ref/client";
 import type { Database, Db, JsonObject, SeasonSnapshotRow, StoredSegmentJson } from "@media-ref/db";
@@ -14,6 +15,7 @@ import {
 } from "./adapters/index.ts";
 import { evaluateEvidenceGateStep1, type CatalogEvidence } from "./evidence-gate.ts";
 import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { isUuid } from "./media-service.ts";
 
 export const INVALIDATION_RECHECK_JOB_TYPE = "invalidation_recheck";
@@ -23,8 +25,6 @@ export const MAX_INVALIDATION_REASON_LENGTH = 500;
 export const LOCKED_ASSOCIATION_DELISTED_ALERT_TYPE = "locked_association_delisted";
 export const ASSOCIATION_CONTENT_MISMATCH_ALERT_TYPE = "association_content_mismatch";
 export const DELISTED_BY_RECHECK_REASON = "confirmed_delisted_by_recheck";
-
-const LOCK_CLASS_MEDIA_NAMESPACE = 1002;
 
 export type InvalidationErrorCode =
   | "INVALID_ASSOCIATION_ID"
@@ -124,9 +124,7 @@ export async function reportInvalidAssociation(
   const dedupeKey = `${INVALIDATION_RECHECK_JOB_TYPE}:${associationId}`;
 
   return dbWrite.transaction().execute(async (trx) => {
-    await sql`select pg_advisory_xact_lock(hashtext(${`invalidation:${associationId}`}::text))`.execute(
-      trx,
-    );
+    await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.INVALIDATION, associationId);
 
     const association = await trx
       .selectFrom("associations")
@@ -467,8 +465,10 @@ async function handleConfirmedNotFoundInTx(
   outcome: "skipped" | "locked_alert" | "delisted";
   platformMarkedNotFound: boolean;
 }> {
-  await sql`select pg_advisory_xact_lock(${LOCK_CLASS_MEDIA_NAMESPACE}::int4, hashtext(${`${input.mediaId}:${input.namespace}`}::text))`.execute(
+  await acquireAdvisoryLock(
     trx,
+    ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE,
+    `${input.mediaId}:${input.namespace}`,
   );
 
   const currentAssoc = await trx
@@ -737,7 +737,25 @@ export function createInvalidationRecheckJobHandler(
     }
 
     // Case C: page still exists -> re-run Evidence Gate Step 1 against current catalog snapshot
-    const catalogEvidence = await loadCatalogEvidenceForMedia(ctx.db, association.media_id);
+    const [catalogEvidence, segmentRows] = await Promise.all([
+      loadCatalogEvidenceForMedia(ctx.db, association.media_id),
+      ctx.db
+        .selectFrom("segments")
+        .select([
+          "season",
+          "episode_start",
+          "episode_end",
+          "target_episode_start",
+          "baseline",
+          "non_linear",
+          "needs_review",
+        ])
+        .where("association_id", "=", association.id)
+        .orderBy("season", "asc")
+        .orderBy("episode_start", "asc")
+        .orderBy("id", "asc")
+        .execute(),
+    ]);
     if (!catalogEvidence) {
       return {
         status: "completed",
@@ -749,7 +767,17 @@ export function createInvalidationRecheckJobHandler(
       };
     }
 
-    const step1 = evaluateEvidenceGateStep1(catalogEvidence, collectionResult.info);
+    const segments: NormalizedSegment[] = segmentRows.map((seg) => ({
+      season: seg.season,
+      episodeStart: seg.episode_start,
+      episodeEnd: seg.episode_end,
+      targetEpisodeStart: seg.target_episode_start,
+      baseline: seg.baseline,
+      nonLinear: Boolean(seg.non_linear),
+      needsReview: Boolean(seg.needs_review),
+    }));
+
+    const step1 = evaluateEvidenceGateStep1(catalogEvidence, collectionResult.info, { segments });
     if (step1.decision === "pass") {
       return {
         status: "completed",

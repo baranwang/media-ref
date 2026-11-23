@@ -1,6 +1,6 @@
 import type { Hyperdrive, RateLimit } from "@cloudflare/workers-types";
 import type { MediaDocument } from "@media-ref/client";
-import { readMediaDocument } from "@media-ref/core";
+import { queryMediaByKey, type MediaQueryItem } from "@media-ref/core";
 import { createDb, type Db } from "@media-ref/db";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { Hono } from "hono";
@@ -47,6 +47,7 @@ export type InternalMediaRpcResult =
       status: 200;
       document: MediaDocument;
       matchedAssociationId: string | null;
+      items: MediaQueryItem[];
     }
   | {
       status: 400;
@@ -232,7 +233,7 @@ export function createInternalMediaApp(deps: InternalMediaDeps): Hono {
     }
 
     const rawKey = c.req.param("key").trim();
-    const result = await readMediaDocument(deps.dbRead, rawKey);
+    const result = await queryMediaByKey(deps.dbRead, rawKey, { includeUnconfirmed: false });
 
     if (result.kind === "invalid_key") {
       return c.json({ error: "INVALID_KEY", message: result.message }, 400);
@@ -242,10 +243,12 @@ export function createInternalMediaApp(deps: InternalMediaDeps): Hono {
       return c.json({ error: "MEDIA_NOT_FOUND", message: "Media not found" }, 404);
     }
 
+    const primary = result.items[0]!;
     return c.json(
       {
-        document: result.document,
-        matchedAssociationId: result.matchedAssociationId,
+        document: primary.document,
+        matchedAssociationId: primary.matchedAssociationId,
+        items: result.items,
       },
       200,
     );
@@ -289,11 +292,18 @@ export class InternalMediaEntrypoint extends WorkerEntrypoint<InternalMediaWorke
       const body = (await response.json()) as {
         document: MediaDocument;
         matchedAssociationId: string | null;
+        items?: MediaQueryItem[];
       };
       return {
         status: 200,
         document: body.document,
         matchedAssociationId: body.matchedAssociationId,
+        items: body.items ?? [
+          {
+            document: body.document,
+            matchedAssociationId: body.matchedAssociationId,
+          },
+        ],
       };
     }
 

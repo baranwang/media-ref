@@ -178,7 +178,7 @@ export async function recordLead(dbWrite: Db, input: RecordLeadInput): Promise<L
 
 /**
  * Lists stored Leads matching a target external key (and optional namespace / season)
- * for Exploration agents to consult as reference hints.
+ * for Exploration agents to consult as reference leads.
  */
 export async function listLeadsForTarget(db: Db, query: ListLeadsForTargetQuery): Promise<Lead[]> {
   if (typeof query.targetExternalKey !== "string" || !parseExternalKey(query.targetExternalKey)) {

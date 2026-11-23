@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { createDb } from "@media-ref/db";
 import { createLiveOutboundClient, parseOutboundProxyConfig } from "./outbound.ts";
 import {
+  createSeedLeadsReporter,
   importBangumiDataSeeds,
   importDoubanBridgeMovieSeeds,
   importDoubanMovieSeeds,
@@ -213,12 +214,16 @@ export async function runSeedCli(argv: readonly string[]): Promise<SeedImportSum
         });
         break;
       case "bangumi-data":
-        summary = await importBangumiDataSeeds(db, payload as BangumiDataInput, { outbound });
+        summary = await importBangumiDataSeeds(db, payload as BangumiDataInput, {
+          outbound,
+          leadsReporter: createSeedLeadsReporter(db),
+        });
         break;
       case "douban-bridge":
         summary = await importDoubanBridgeMovieSeeds(db, payload as DoubanBridgeInput, {
           outbound,
           tmdbConfig,
+          leadsReporter: createSeedLeadsReporter(db),
         });
         break;
     }

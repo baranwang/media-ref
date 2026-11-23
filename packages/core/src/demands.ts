@@ -2,13 +2,23 @@ import {
   formatExternalKey,
   getNamespaceGroup,
   parseExternalKey,
+  PLATFORM_NAMESPACES,
   type Association,
   type MediaDocument,
   type MediaType,
+  type Namespace,
   type NamespaceGroup,
   type SeasonSnapshot,
+  type Segment,
 } from "@media-ref/client";
-import type { Database, Db, DemandStatusRow, DemandsTable, SeasonSnapshotRow } from "@media-ref/db";
+import type {
+  AssociationNamespaceRow,
+  Database,
+  Db,
+  DemandStatusRow,
+  DemandsTable,
+  SeasonSnapshotRow,
+} from "@media-ref/db";
 import { sql, type Selectable, type Transaction } from "kysely";
 import type { BatchMediaQueryResult, QueryMediaByKeyResult } from "./read-media.ts";
 
@@ -683,4 +693,99 @@ export async function listDemands(
     .execute();
 
   return rows.map(toDemandRecord);
+}
+
+const ASSOCIATION_CATALOG_NAMESPACES: readonly AssociationNamespaceRow[] = ["douban", "bangumi"];
+
+export interface FulfillCoveredDemandsInput {
+  mediaId: string;
+  namespace: Namespace;
+  segments: readonly Pick<Segment, "season">[];
+  now?: Date;
+}
+
+/**
+ * Marks open or not_found demands for `(mediaId, season, namespaceGroup)` as `fulfilled`
+ * once a confirmed association covers them. Whole-media associations (`segments: []`)
+ * fulfill all seasons in that namespace group.
+ */
+export async function fulfillCoveredDemandsForAssociationInTx(
+  executor: DbExecutor,
+  input: FulfillCoveredDemandsInput,
+): Promise<number> {
+  const namespaceGroup = getNamespaceGroup(input.namespace);
+  const now = input.now ?? new Date();
+
+  let query = executor
+    .updateTable("demands")
+    .set({
+      status: "fulfilled",
+      lease_expires_at: null,
+      updated_at: now,
+    })
+    .where("media_id", "=", input.mediaId)
+    .where("namespace_group", "=", namespaceGroup)
+    .where("status", "in", ["open", "not_found"]);
+
+  if (input.segments.length > 0) {
+    const coveredSeasons = [...new Set(input.segments.map((seg) => seg.season))];
+    query = query.where((eb) =>
+      eb.or([eb("season", "is", null), eb("season", "in", coveredSeasons)]),
+    );
+  }
+
+  const updated = await query.returning("id").execute();
+  return updated.length;
+}
+
+export interface CheckMediaDemandCoveredInput {
+  mediaId: string;
+  season: number | null;
+  namespaceGroup: NamespaceGroup;
+}
+
+/**
+ * Checks whether `(mediaId, season, namespaceGroup)` is already covered by at least one
+ * confirmed association (matching `isSeasonCoveredInGroup` semantics).
+ */
+export async function isMediaDemandCoveredInTx(
+  executor: DbExecutor,
+  input: CheckMediaDemandCoveredInput,
+): Promise<boolean> {
+  const namespaces: readonly AssociationNamespaceRow[] =
+    input.namespaceGroup === "platform" ? PLATFORM_NAMESPACES : ASSOCIATION_CATALOG_NAMESPACES;
+
+  const confirmedAssociations = await executor
+    .selectFrom("associations")
+    .select("id")
+    .where("media_id", "=", input.mediaId)
+    .where("status", "=", "confirmed")
+    .where("namespace", "in", [...namespaces])
+    .execute();
+
+  if (confirmedAssociations.length === 0) {
+    return false;
+  }
+
+  if (input.season === null) {
+    return true;
+  }
+
+  const assocIds = confirmedAssociations.map((row) => row.id);
+  const segmentRows = await executor
+    .selectFrom("segments")
+    .select(["association_id", "season"])
+    .where("association_id", "in", assocIds)
+    .execute();
+
+  const assocIdsWithSegments = new Set<string>();
+  for (const seg of segmentRows) {
+    assocIdsWithSegments.add(seg.association_id);
+    if (seg.season === input.season) {
+      return true;
+    }
+  }
+
+  // Any confirmed whole-media association (0 segments) covers every season.
+  return assocIds.some((id) => !assocIdsWithSegments.has(id));
 }

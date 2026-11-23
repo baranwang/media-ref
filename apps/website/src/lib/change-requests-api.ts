@@ -125,6 +125,7 @@ export interface ChangeRequestRecord {
   variantId: string | null;
   variantDescription: string | null;
   setDefaultVariant: boolean;
+  replacesAssociationId?: string | null;
   segments: NormalizedSegment[];
   evidence: Record<string, unknown> | null;
   conflictReason: string | null;
@@ -145,6 +146,7 @@ export interface SubmitChangeRequestInput {
   variantId?: string | null;
   variantDescription?: string | null;
   setDefaultVariant?: boolean;
+  replacesAssociationId?: string | null;
   segments?: SegmentInput[];
 }
 
@@ -293,8 +295,28 @@ export function extractLinkedAssociationId(cr: ChangeRequestRecord): string | nu
     return cr.appliedAssociationId;
   }
 
+  if (cr.replacesAssociationId && isUuid(cr.replacesAssociationId)) {
+    return cr.replacesAssociationId;
+  }
+
   if (cr.evidence && typeof cr.evidence === "object") {
+    const conflict =
+      typeof cr.evidence.conflict === "object" &&
+      cr.evidence.conflict !== null &&
+      !Array.isArray(cr.evidence.conflict)
+        ? (cr.evidence.conflict as Record<string, unknown>)
+        : null;
+    const existingEvidence =
+      typeof cr.evidence.existingEvidence === "object" &&
+      cr.evidence.existingEvidence !== null &&
+      !Array.isArray(cr.evidence.existingEvidence)
+        ? (cr.evidence.existingEvidence as Record<string, unknown>)
+        : null;
+
     const candidates = [
+      conflict?.existingAssociationId,
+      existingEvidence?.associationId,
+      cr.evidence.replacesAssociationId,
       cr.evidence.associationId,
       cr.evidence.existingAssociationId,
       cr.evidence.conflictingAssociationId,
@@ -356,7 +378,7 @@ export function formatSegmentValidationError(error: SegmentValidationError): str
     case "SHARED_COLLECTION_WHOLE_MEDIA":
       return "被多部媒体共用的合集必须明确填写段，不能整部对整部";
     case "OVERLAPPING_SHARED_COLLECTION_TARGET_RANGE":
-      return `${rowPrefix}共用合集上的对方集号区间与其他媒体发生重叠`;
+      return `${rowPrefix}共用合集上的对方集号段与其他媒体发生重叠`;
     default:
       return `${rowPrefix}${error.message}`;
   }
@@ -373,7 +395,7 @@ export function formatChangeRequestApiError(
 
     switch (error.code) {
       case "INVALID_TARGET_KEY":
-        return "目标媒体外部键无效。若媒体尚未建档，请使用 TMDB 外部键（例如 tmdb:tv:95479 或 tmdb:movie:603）";
+        return "目标媒体外部键无效。若媒体尚未建档，请使用目录外部键（支持 TMDB、TVDB、IMDb、Bangumi、豆瓣、Trakt，例如 tmdb:tv:95479、tvdb:series:385376、imdb:tt12343534、bangumi:302076、douban:35208463、trakt:show:160072）";
       case "INVALID_NAMESPACE":
         return "所选命名空间不支持作为关联提交";
       case "INVALID_NATIVE_ID":
@@ -384,12 +406,20 @@ export function formatChangeRequestApiError(
         return "目录关联（豆瓣 / Bangumi）不能指定变体";
       case "INVALID_VARIANT":
         return "指定的变体 ID 无效，或不属于当前媒体与平台";
+      case "INVALID_REPLACES_ASSOCIATION":
+        return "指定的拟替换关联 ID 无效，请确认其为合法 UUID 且属于当前媒体";
+      case "ASSOCIATION_NOT_FOUND":
+        return "未找到指定的关联记录，请检查关联 ID";
+      case "ASSOCIATION_LOCKED":
+        return "目标关联已被锁定，无法自动覆盖，需由审核员介入处理";
       case "INVALID_SEGMENTS":
         return `段参数校验未通过：${error.message}`;
+      case "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE":
+        return "该媒体暂无基准编号，关联只能留空段（整部对整部）";
       case "SEGMENT_OVERLAP":
         return `段与同一变体或共用合集里已有的段发生重叠：${error.message}`;
       case "MEDIA_NOT_FOUND":
-        return "未找到指定的媒体 ID，请检查媒体 UUID 或改用 TMDB 外部键";
+        return "未找到指定的媒体 ID，请检查媒体 UUID 或改用目录外部键（TMDB、TVDB、IMDb、Bangumi、豆瓣、Trakt）";
       case "CHANGE_REQUEST_NOT_FOUND":
         return "未找到该变更单，请检查变更单编号";
       case "INVALID_CHANGE_REQUEST_ID":
@@ -400,9 +430,14 @@ export function formatChangeRequestApiError(
         return "TMDB 上未找到对应的电影或剧集，无法自动建档";
       case "TMDB_UPSTREAM_ERROR":
         return "连接 TMDB 获取媒体信息失败，请稍后重试";
+      case "CATALOG_MEDIA_NOT_FOUND":
+        return "目标目录上未找到对应的电影或剧集，无法自动建档";
+      case "CATALOG_UPSTREAM_ERROR":
+        return "连接目标目录获取媒体信息失败，请稍后重试";
       case "FORBIDDEN":
         return "需要审核员权限才能执行此操作";
-      case "RATE_LIMIT_EXCEEDED":
+      case "SUBMISSION_RATE_LIMITED":
+      case "RATE_LIMITED":
         return "提交过于频繁，已达到当前账号的小时提交上限，请稍后再试";
       default:
         break;
@@ -515,6 +550,11 @@ export async function submitChangeRequest(
       body.variantDescription = trimmedVariantDescription;
     }
     body.setDefaultVariant = Boolean(payload.setDefaultVariant);
+  }
+
+  const trimmedReplacesAssociationId = payload.replacesAssociationId?.trim() || null;
+  if (trimmedReplacesAssociationId) {
+    body.replacesAssociationId = trimmedReplacesAssociationId;
   }
 
   const result = await changeRequestFetch<{ changeRequest: ChangeRequestRecord }>(

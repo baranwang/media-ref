@@ -2,7 +2,10 @@ import type { Message, MessageBatch, ScheduledController } from "@cloudflare/wor
 import { createApiApp } from "@media-ref/api/app";
 import { resolveEpisode, type MediaDocument } from "@media-ref/client";
 import {
+  bilibiliAdapter,
+  createAdapterRegistry,
   createFakeOutboundClient,
+  createTier1Adapter,
   type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
@@ -1419,5 +1422,150 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       "ss34430",
       "ss77777",
     ]);
+  });
+
+  test("evidence_check preserves replacesAssociationId in change_requests.evidence across non-conflict failure paths so reviewer approval still replaces target association", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T16:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+
+    const user = await setupUser(app, outbound, "preserve-replace-user@example.com");
+    const reviewer = await setupUser(app, outbound, "preserve-replace-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    // Seed an existing confirmed association ss34430
+    const existing = await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss34430",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now: t0,
+    });
+
+    // Submit a replacement change request for a Tier 1 adapter (or collection_not_found on non-conflicting media)
+    // Using a Tier 1 adapter registry hits the early Tier-1 branch in evidence-job.ts (which previously overwrote evidence!).
+    const tier1Worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      adapterRegistry: createAdapterRegistry([
+        createTier1Adapter({
+          namespace: "bilibili",
+          parseInput: (raw) => bilibiliAdapter.parseInput(raw),
+        }),
+      ]),
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    const replaceCrRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34431",
+          variantDescription: "原声",
+          replacesAssociationId: existing.associationId,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(replaceCrRes.status).toBe(201);
+    const replaceCr = (await replaceCrRes.json()) as { changeRequest: { id: string } };
+
+    // Run evidence_check via Tier-1 worker -> marks needs_review, MUST preserve replacesAssociationId!
+    await tier1Worker.scheduled(createScheduledController(t0));
+    const qSummary = await tier1Worker.queue(
+      createQueueBatch(emitted.splice(0, emitted.length), t0).batch,
+    );
+    expect(qSummary.completed).toBe(1);
+
+    const crAfterCheck = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${replaceCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as {
+      changeRequest: {
+        status: string;
+        evidence: Record<string, unknown> | null;
+      };
+    };
+    expect(crAfterCheck.changeRequest.status).toBe("needs_review");
+    expect(crAfterCheck.changeRequest.evidence?.replacesAssociationId).toBe(existing.associationId);
+    expect(crAfterCheck.changeRequest.evidence?.adapterTier).toBe(1);
+
+    // Reviewer approves -> MUST replace (delist) existing.associationId using preserved replacesAssociationId!
+    const approveRes = await app.fetch(
+      new Request(
+        `${TEST_BASE_URL}/v1/reviewer/change-requests/${replaceCr.changeRequest.id}/approve`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: reviewer.cookie },
+          body: JSON.stringify({ reason: "Verified replacement after Tier 1 review" }),
+        },
+      ),
+    );
+    expect(approveRes.status).toBe(200);
+
+    const mediaAfter = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaAfter.document.associations).toHaveLength(1);
+    expect(mediaAfter.document.associations[0]?.nativeId).toBe("ss34431");
+
+    const oldAssoc = await testDb.readDb
+      .selectFrom("associations")
+      .select("status")
+      .where("id", "=", existing.associationId)
+      .executeTakeFirstOrThrow();
+    expect(oldAssoc.status).toBe("delisted");
   });
 });

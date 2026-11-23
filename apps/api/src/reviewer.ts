@@ -154,6 +154,7 @@ export function registerReviewerRoutes(app: Hono<ApiEnv>): void {
         changeRequestId: c.req.param("id").trim(),
         reviewerUserId: session.user.id,
         reason: body.reason,
+        catalogConfig: c.get("catalogConfig"),
         tmdbConfig: c.get("tmdbConfig"),
         tmdbGateway: c.get("tmdbGateway"),
       });

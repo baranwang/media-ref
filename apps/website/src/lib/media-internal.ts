@@ -1,21 +1,47 @@
+import {
+  PLATFORM_NAMESPACES,
+  isPlatformNamespace,
+  type Association,
+  type AssociationStatus,
+  type BaselineSource,
+  type CatalogNamespace,
+  type ExternalId,
+  type ExternalIdNamespace,
+  type Media,
+  type MediaDocument,
+  type MediaSnapshot,
+  type MediaType,
+  type Namespace,
+  type PlatformNamespace,
+  type PlatformStatusEntry,
+  type SeasonSnapshot,
+  type Segment,
+  type Variant,
+} from "@media-ref/client";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequestHeader } from "@tanstack/react-start/server";
 
-export type MediaType = "movie" | "tv";
-export type PlatformNamespace = "tencent" | "iqiyi" | "youku" | "bilibili" | "mgtv";
-export type CatalogNamespace = "tmdb" | "douban" | "imdb" | "tvdb" | "trakt" | "bangumi";
-export type Namespace = PlatformNamespace | CatalogNamespace;
-export type BaselineSource = "tmdb" | "tvdb" | "imdb" | "bangumi" | "douban";
-export type ExternalIdNamespace = "tmdb" | "imdb" | "tvdb" | "trakt";
-export type AssociationStatus = "confirmed" | "seed_unconfirmed" | "delisted";
+export { isPlatformNamespace };
+export type {
+  Association,
+  AssociationStatus,
+  BaselineSource,
+  CatalogNamespace,
+  ExternalId,
+  ExternalIdNamespace,
+  Media,
+  MediaDocument,
+  MediaSnapshot,
+  MediaType,
+  Namespace,
+  PlatformNamespace,
+  PlatformStatusEntry,
+  SeasonSnapshot,
+  Segment,
+  Variant,
+};
 
-export const PLATFORM_ORDER: PlatformNamespace[] = [
-  "tencent",
-  "iqiyi",
-  "youku",
-  "bilibili",
-  "mgtv",
-];
+export const PLATFORM_ORDER: readonly PlatformNamespace[] = PLATFORM_NAMESPACES;
 
 export const PLATFORM_LABELS: Record<PlatformNamespace, string> = {
   tencent: "腾讯视频",
@@ -46,78 +72,6 @@ export const BASELINE_LABELS: Record<BaselineSource, string> = {
   bangumi: "Bangumi",
   douban: "豆瓣",
 };
-
-export interface ExternalId {
-  namespace: ExternalIdNamespace;
-  nativeId: string;
-  locked?: boolean;
-}
-
-export interface SeasonSnapshot {
-  season: number;
-  episodeCount: number;
-  airYear: number | null;
-}
-
-export interface MediaSnapshot {
-  title: string;
-  originalTitle: string | null;
-  year: number | null;
-  type: MediaType;
-  seasons: SeasonSnapshot[];
-}
-
-export interface Media {
-  id: string;
-  type: MediaType;
-  baseline: BaselineSource | null;
-  snapshot: MediaSnapshot;
-}
-
-export interface Variant {
-  id: string;
-  mediaId?: string;
-  namespace: PlatformNamespace;
-  label: string;
-  isDefault: boolean;
-}
-
-export interface Segment {
-  season: number;
-  episodeStart: number;
-  episodeEnd: number | null;
-  targetEpisodeStart: number;
-  baseline: BaselineSource;
-  nonLinear?: boolean;
-  needsReview?: boolean;
-}
-
-export interface Association {
-  id: string;
-  mediaId?: string;
-  namespace: Namespace;
-  nativeId: string;
-  variantId: string | null;
-  status: AssociationStatus;
-  segments: Segment[];
-  needsReview?: boolean;
-  locked?: boolean;
-  unconfirmed?: boolean;
-}
-
-export type PlatformStatusEntry =
-  | { status: "associated" }
-  | { status: "not_found"; checkedAt: string }
-  | { status: "unchecked" };
-
-export interface MediaDocument {
-  media: Media;
-  externalIds: ExternalId[];
-  variants: Variant[];
-  associations: Association[];
-  matchedAssociationIds?: string[];
-  platformStatuses?: Partial<Record<PlatformNamespace, PlatformStatusEntry>>;
-}
 
 export type AnonymousMediaResult =
   | {
@@ -222,16 +176,6 @@ function parseRetryAfterSeconds(response: Response, body: RawInternalResponseBod
     return Math.ceil(body.retryAfter);
   }
   return null;
-}
-
-export function isPlatformNamespace(namespace: Namespace): namespace is PlatformNamespace {
-  return (
-    namespace === "tencent" ||
-    namespace === "iqiyi" ||
-    namespace === "youku" ||
-    namespace === "bilibili" ||
-    namespace === "mgtv"
-  );
 }
 
 /**

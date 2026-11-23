@@ -1,5 +1,5 @@
 import type { MediaType, Namespace } from "@media-ref/client";
-import type { ExternalHttpResponse } from "../outbound.ts";
+import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 import {
   InvalidNativeIdError,
   type CollectionEvidenceResult,
@@ -15,7 +15,12 @@ const DOUBAN_DESKTOP_PATH_PATTERN = /^\/subject\/([1-9]\d*)\/?$/;
 const DOUBAN_MOBILE_PATH_PATTERN = /^\/(?:movie\/)?subject\/([1-9]\d*)\/?$/;
 const IMDB_ID_PATTERN = /\b(tt\d+)\b/i;
 
-const DOUBAN_REXXAR_API_BASE = "https://m.douban.com/rexxar/api/v2/movie";
+export const DEFAULT_DOUBAN_API_BASE_URL = "https://m.douban.com/rexxar/api/v2/movie";
+
+export interface DoubanFetchOptions {
+  apiBaseUrl?: string;
+  timeoutMs?: number;
+}
 
 function nonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") {
@@ -184,6 +189,111 @@ export function parseDoubanInput(raw: string): ParsedNativeIdInput | null {
   return null;
 }
 
+export async function fetchDoubanCollection(
+  canonicalId: string,
+  outbound: OutboundClient,
+  options: DoubanFetchOptions = {},
+): Promise<CollectionEvidenceResult> {
+  const subjectId = canonicalId.trim();
+  if (!DOUBAN_SUBJECT_ID_PATTERN.test(subjectId)) {
+    return { status: "not_found", reason: "invalid_canonical_id" };
+  }
+
+  const baseUrl = (options.apiBaseUrl ?? DEFAULT_DOUBAN_API_BASE_URL).replace(/\/+$/, "");
+  const url = `${baseUrl}/${encodeURIComponent(subjectId)}`;
+  const referer = `https://m.douban.com/movie/subject/${encodeURIComponent(subjectId)}/`;
+
+  let response: ExternalHttpResponse;
+  try {
+    response = await outbound.fetchExternal({
+      kind: "catalog",
+      namespace: "douban",
+      url,
+      method: "GET",
+      headers: {
+        referer,
+        accept: "application/json",
+      },
+      timeoutMs: options.timeoutMs,
+    });
+  } catch (error) {
+    return {
+      status: "transient_error",
+      reason: error instanceof Error ? error.message : "douban_request_failed",
+    };
+  }
+
+  if (response.status === 404) {
+    return { status: "not_found", reason: "http_404" };
+  }
+
+  if (response.status < 200 || response.status >= 300) {
+    return {
+      status: "transient_error",
+      reason: `http_${response.status}`,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(response.body);
+  } catch {
+    return { status: "transient_error", reason: "invalid_json" };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { status: "transient_error", reason: "unexpected_payload" };
+  }
+
+  const record = parsed as Record<string, unknown>;
+  if (record.code === 404) {
+    return {
+      status: "not_found",
+      reason: nonEmptyString(record.msg) ?? "douban_not_found",
+    };
+  }
+
+  const title = nonEmptyString(record.title) ?? nonEmptyString(record.original_title);
+  if (!title) {
+    return { status: "transient_error", reason: "missing_title" };
+  }
+
+  const originalTitle = nonEmptyString(record.original_title);
+  const aliases = collectDoubanAliases(record, title, originalTitle);
+  const year = parseDoubanYear(record);
+  const mediaType: MediaType =
+    record.is_tv === true || record.type === "tv" || record.subtype === "tv" ? "tv" : "movie";
+
+  let featureEpisodeCount: number | null;
+  let featureEpisodes: FeatureEpisode[];
+  if (mediaType === "movie") {
+    featureEpisodeCount = 1;
+    featureEpisodes = [{ index: 1 }];
+  } else {
+    const episodesCount = parsePositiveInt(record.episodes_count ?? record.episode_count);
+    featureEpisodeCount = episodesCount;
+    featureEpisodes = episodesCount !== null ? buildOrdinalEpisodes(episodesCount) : [];
+  }
+
+  const externalIds = extractDoubanExternalIds(record);
+
+  return {
+    status: "found",
+    info: {
+      namespace: "douban",
+      canonicalId: subjectId,
+      title,
+      ...(originalTitle ? { originalTitle } : {}),
+      ...(aliases.length > 0 ? { aliases } : {}),
+      year,
+      mediaType,
+      featureEpisodeCount,
+      featureEpisodes,
+      ...(externalIds ? { externalIds } : {}),
+    },
+  };
+}
+
 export const doubanAdapter: Tier2Adapter<"douban"> = {
   namespace: "douban",
   tier: 2,
@@ -202,102 +312,7 @@ export const doubanAdapter: Tier2Adapter<"douban"> = {
     return parsed.canonicalId;
   },
 
-  async fetchCollection(canonicalId, outbound): Promise<CollectionEvidenceResult> {
-    const subjectId = canonicalId.trim();
-    if (!DOUBAN_SUBJECT_ID_PATTERN.test(subjectId)) {
-      return { status: "not_found", reason: "invalid_canonical_id" };
-    }
-
-    const url = `${DOUBAN_REXXAR_API_BASE}/${encodeURIComponent(subjectId)}`;
-    const referer = `https://m.douban.com/movie/subject/${encodeURIComponent(subjectId)}/`;
-
-    let response: ExternalHttpResponse;
-    try {
-      response = await outbound.fetchExternal({
-        kind: "catalog",
-        namespace: "douban",
-        url,
-        method: "GET",
-        headers: {
-          referer,
-          accept: "application/json",
-        },
-      });
-    } catch (error) {
-      return {
-        status: "transient_error",
-        reason: error instanceof Error ? error.message : "douban_request_failed",
-      };
-    }
-
-    if (response.status === 404) {
-      return { status: "not_found", reason: "http_404" };
-    }
-
-    if (response.status < 200 || response.status >= 300) {
-      return {
-        status: "transient_error",
-        reason: `http_${response.status}`,
-      };
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(response.body);
-    } catch {
-      return { status: "transient_error", reason: "invalid_json" };
-    }
-
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { status: "transient_error", reason: "unexpected_payload" };
-    }
-
-    const record = parsed as Record<string, unknown>;
-    if (record.code === 404) {
-      return {
-        status: "not_found",
-        reason: nonEmptyString(record.msg) ?? "douban_not_found",
-      };
-    }
-
-    const title = nonEmptyString(record.title) ?? nonEmptyString(record.original_title);
-    if (!title) {
-      return { status: "transient_error", reason: "missing_title" };
-    }
-
-    const originalTitle = nonEmptyString(record.original_title);
-    const aliases = collectDoubanAliases(record, title, originalTitle);
-    const year = parseDoubanYear(record);
-    const mediaType: MediaType =
-      record.is_tv === true || record.type === "tv" || record.subtype === "tv" ? "tv" : "movie";
-
-    let featureEpisodeCount: number | null;
-    let featureEpisodes: FeatureEpisode[];
-    if (mediaType === "movie") {
-      featureEpisodeCount = 1;
-      featureEpisodes = [{ index: 1 }];
-    } else {
-      const episodesCount = parsePositiveInt(record.episodes_count ?? record.episode_count);
-      featureEpisodeCount = episodesCount;
-      featureEpisodes = episodesCount !== null ? buildOrdinalEpisodes(episodesCount) : [];
-    }
-
-    const externalIds = extractDoubanExternalIds(record);
-
-    return {
-      status: "found",
-      info: {
-        namespace: "douban",
-        canonicalId: subjectId,
-        title,
-        ...(originalTitle ? { originalTitle } : {}),
-        ...(aliases.length > 0 ? { aliases } : {}),
-        year,
-        mediaType,
-        featureEpisodeCount,
-        featureEpisodes,
-        ...(externalIds ? { externalIds } : {}),
-      },
-    };
+  fetchCollection(canonicalId, outbound): Promise<CollectionEvidenceResult> {
+    return fetchDoubanCollection(canonicalId, outbound);
   },
 };

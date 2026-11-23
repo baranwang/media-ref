@@ -265,7 +265,7 @@ function ChangeRequestStatusPage() {
                     </a>
                   ) : (
                     <span className="text-xs text-[var(--sea-ink-soft)]">
-                      尚未建档（通过时按 TMDB 自动建档）
+                      尚未建档（通过时按目标目录自动建档）
                     </span>
                   )}
                 </dd>

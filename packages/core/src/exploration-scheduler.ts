@@ -2,7 +2,6 @@ import {
   EXTERNAL_ID_NAMESPACES,
   formatExternalKey,
   getNamespaceGroup,
-  isBaselineSource,
   isPlatformNamespace,
   parseExternalKey,
   type BaselineSource,
@@ -12,36 +11,43 @@ import {
   type MediaType,
   type Namespace,
   type NamespaceGroup,
+  type NormalizedSegment,
   type SeasonSnapshot,
 } from "@media-ref/client";
 import type { Database, Db, SeasonSnapshotRow } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import {
   createDefaultAdapterRegistry,
-  isTier2Adapter,
   isTier3Adapter,
   type AdapterRegistry,
 } from "./adapters/index.ts";
-import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
+import {
+  parseCatalogTargetKey,
+  resolveCatalogTargetSnapshot,
+  type CatalogGatewayConfig,
+  type CatalogTargetInitialAssociation,
+} from "./catalog-gateway.ts";
+import { isMediaDemandCoveredInTx, mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
 import {
   enqueueJob,
   type BackgroundJob,
   type JobExecutionOutcome,
   type JobHandler,
 } from "./jobs.ts";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { isAssociationNamespace, isUuid } from "./media-service.ts";
 import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
 import { formatUtcDate } from "./tmdb-sync.ts";
 import {
   createTmdbGateway,
-  DEFAULT_TRAKT_API_BASE_URL,
   parseTmdbNativeId,
-  TmdbGatewayError,
   type TmdbGateway,
   type TmdbGatewayConfig,
 } from "./tmdb.ts";
 
 export const EXPLORATION_JOB_TYPE = "exploration";
+export const TMDB_DAILY_EXPORTS_JOB_TYPE = "tmdb_daily_exports";
+export const TMDB_DAILY_EXPORTS_SYNC_KEY = "tmdb_daily_exports";
 export const DEFAULT_TMDB_EXPORTS_BASE_URL = "https://files.tmdb.org/p/exports";
 export const DEFAULT_EXPLORATION_DAILY_BUDGET = 100;
 export const DEFAULT_EXPLORATION_BATCH_SIZE = 10;
@@ -49,12 +55,8 @@ export const DEFAULT_EXPLORATION_LEASE_DURATION_MS = 15 * 60 * 1000;
 export const DEFAULT_NOT_FOUND_BACKOFF_SECONDS = [86_400, 259_200, 604_800, 2_592_000] as const;
 export const DEFAULT_EXPLORATION_JOB_MAX_ATTEMPTS = 3;
 
-const LOCK_CLASS_MEDIA_KEY = 1001;
 const UTC_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const POSITIVE_INT_STRING_PATTERN = /^[1-9]\d*$/;
-const IMDB_ID_PATTERN = /^tt\d+$/;
-const TVDB_ID_PATTERN = /^(?:(movie|series):)?([1-9]\d*)$/;
-const TRAKT_ID_PATTERN = /^(?:(movie|show):)?([a-z0-9-]+)$/i;
 const EXPORT_UPSERT_CHUNK_SIZE = 1000;
 const EXTERNAL_ID_NAMESPACE_SET: ReadonlySet<string> = new Set(EXTERNAL_ID_NAMESPACES);
 
@@ -96,6 +98,25 @@ export interface SeedTmdbExportIdEntry {
   mediaType: MediaType;
   tmdbId: string;
   exportedDate?: string;
+}
+
+export interface EnqueueTmdbDailyExportsOptions {
+  now?: Date;
+  date?: string | Date;
+  priority?: number;
+  maxAttempts?: number;
+}
+
+export interface EnqueueTmdbDailyExportsResult {
+  enqueued: boolean;
+  reason: "enqueued" | "already_active" | "already_synced_today" | "failed_today";
+  exportDate: string;
+  job?: BackgroundJob;
+}
+
+export interface CreateTmdbDailyExportsJobHandlerOptions {
+  exportBaseUrl?: string;
+  timeoutMs?: number;
 }
 
 export interface ScheduleExplorationJobsOptions {
@@ -186,6 +207,7 @@ export type CatalogVerificationResult =
       baseline: BaselineSource | null;
       snapshot: MediaSnapshot;
       externalIds?: Partial<Record<ExternalIdNamespace, string>>;
+      initialAssociation?: CatalogTargetInitialAssociation | null;
     }
   | {
       status: "not_found";
@@ -202,6 +224,7 @@ export interface CatalogVerifierDeps {
   adapterRegistry: AdapterRegistry;
   tmdbGateway: TmdbGateway;
   tmdbConfig?: TmdbGatewayConfig;
+  catalogConfig?: CatalogGatewayConfig;
 }
 
 export type ExternalKeyCatalogVerifier = (
@@ -211,6 +234,7 @@ export type ExternalKeyCatalogVerifier = (
 
 export interface ExplorationJobHandlerOptions {
   adapterRegistry?: AdapterRegistry;
+  catalogConfig?: CatalogGatewayConfig;
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   config?: Partial<ExplorationSchedulerConfig>;
@@ -224,14 +248,6 @@ function isExternalIdNamespace(value: string): value is ExternalIdNamespace {
   return EXTERNAL_ID_NAMESPACE_SET.has(value);
 }
 
-function nonEmptyString(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
 function parsePositiveIdString(value: unknown): string | null {
   if (typeof value === "number" && Number.isInteger(value) && value > 0) {
     return String(value);
@@ -243,21 +259,6 @@ function parsePositiveIdString(value: unknown): string | null {
     }
   }
   return null;
-}
-
-function parseFourDigitYear(value: unknown): number | null {
-  if (typeof value === "number" && Number.isInteger(value) && value >= 1800 && value <= 3000) {
-    return value;
-  }
-  if (typeof value !== "string") {
-    return null;
-  }
-  const match = value.trim().match(/^(\d{4})/);
-  if (!match) {
-    return null;
-  }
-  const year = Number(match[1]);
-  return Number.isInteger(year) && year >= 1800 && year <= 3000 ? year : null;
 }
 
 function parseSeasonsSnapshotJson(raw: unknown): SeasonSnapshot[] {
@@ -668,6 +669,123 @@ export async function syncTmdbDailyExports(
   return result;
 }
 
+export async function enqueueTmdbDailyExportsIfDue(
+  db: Db,
+  options: EnqueueTmdbDailyExportsOptions = {},
+): Promise<EnqueueTmdbDailyExportsResult> {
+  const now = options.now ?? new Date();
+  const exportDate = options.date ? resolveUtcDateString(options.date) : formatUtcDate(now);
+
+  const cursorRow = await db
+    .selectFrom("sync_state")
+    .select("last_synced_date")
+    .where("sync_key", "=", TMDB_DAILY_EXPORTS_SYNC_KEY)
+    .executeTakeFirst();
+
+  if (cursorRow && cursorRow.last_synced_date >= exportDate) {
+    return {
+      enqueued: false,
+      reason: "already_synced_today",
+      exportDate,
+    };
+  }
+
+  const dedupeKey = `${TMDB_DAILY_EXPORTS_JOB_TYPE}:${exportDate}`;
+  const failedToday = await db
+    .selectFrom("background_jobs")
+    .select("id")
+    .where("dedupe_key", "=", dedupeKey)
+    .where("status", "=", "failed")
+    .executeTakeFirst();
+
+  if (failedToday) {
+    return {
+      enqueued: false,
+      reason: "failed_today",
+      exportDate,
+    };
+  }
+
+  const enqueued = await enqueueJob(db, {
+    jobType: TMDB_DAILY_EXPORTS_JOB_TYPE,
+    dedupeKey,
+    payload: { exportDate },
+    priority: options.priority ?? 0,
+    runAfter: now,
+    maxAttempts: options.maxAttempts ?? 5,
+  });
+
+  return {
+    enqueued: enqueued.created,
+    reason: enqueued.created ? "enqueued" : "already_active",
+    exportDate,
+    job: enqueued.job,
+  };
+}
+
+export function createTmdbDailyExportsJobHandler(
+  options: CreateTmdbDailyExportsJobHandlerOptions = {},
+): JobHandler {
+  return async (ctx): Promise<JobExecutionOutcome> => {
+    const rawDate = ctx.job.payload.exportDate;
+    const exportDate =
+      typeof rawDate === "string" && UTC_DATE_PATTERN.test(rawDate.trim())
+        ? rawDate.trim()
+        : formatUtcDate(ctx.now);
+
+    const summary = await syncTmdbDailyExports(ctx.db, ctx.outbound, {
+      date: exportDate,
+      exportBaseUrl: options.exportBaseUrl,
+      timeoutMs: options.timeoutMs,
+    });
+
+    const errors: string[] = [];
+    if (!summary.movie?.ok) {
+      errors.push(summary.movie?.error ?? "movie export sync failed");
+    }
+    if (!summary.tv?.ok) {
+      errors.push(summary.tv?.error ?? "tv export sync failed");
+    }
+
+    if (errors.length > 0) {
+      return {
+        status: "retry",
+        errorMessage: errors.join("; "),
+      };
+    }
+
+    return {
+      status: "completed",
+      result: summary as unknown as Record<string, unknown>,
+      async onCommit(trx) {
+        const metadata = {
+          movieCount: summary.movie?.count ?? 0,
+          tvCount: summary.tv?.count ?? 0,
+          totalSynced: summary.totalSynced,
+          lastRunAt: ctx.now.toISOString(),
+        };
+
+        await trx
+          .insertInto("sync_state")
+          .values({
+            sync_key: TMDB_DAILY_EXPORTS_SYNC_KEY,
+            last_synced_date: exportDate,
+            metadata: JSON.stringify(metadata),
+            updated_at: ctx.now,
+          })
+          .onConflict((oc) =>
+            oc.column("sync_key").doUpdateSet({
+              last_synced_date: sql<string>`greatest(sync_state.last_synced_date, excluded.last_synced_date)`,
+              metadata: JSON.stringify(metadata),
+              updated_at: ctx.now,
+            }),
+          )
+          .execute();
+      },
+    };
+  };
+}
+
 export async function scheduleExplorationJobs(
   db: Db,
   options: ScheduleExplorationJobsOptions = {},
@@ -784,7 +902,7 @@ export async function scheduleExplorationJobs(
         break;
       }
 
-      let invalidInBatch = 0;
+      let skippedInBatch = 0;
 
       for (const demand of candidates) {
         if (demand.media_id === null) {
@@ -800,8 +918,26 @@ export async function scheduleExplorationJobs(
               .where("id", "=", demand.id)
               .execute();
             invalidKeysMarked += 1;
-            invalidInBatch += 1;
+            skippedInBatch += 1;
             continue;
+          }
+
+          if (!parseCatalogTargetKey(demand.external_key!)) {
+            const existingByKey = await findExistingMediaIdByExternalKey(trx, demand.external_key!);
+            if (!existingByKey) {
+              await trx
+                .updateTable("demands")
+                .set({
+                  status: "invalid_key",
+                  lease_expires_at: null,
+                  updated_at: now,
+                })
+                .where("id", "=", demand.id)
+                .execute();
+              invalidKeysMarked += 1;
+              skippedInBatch += 1;
+              continue;
+            }
           }
 
           if (parsedKey.namespace === "tmdb") {
@@ -817,7 +953,7 @@ export async function scheduleExplorationJobs(
                 .where("id", "=", demand.id)
                 .execute();
               invalidKeysMarked += 1;
-              invalidInBatch += 1;
+              skippedInBatch += 1;
               continue;
             }
 
@@ -840,10 +976,29 @@ export async function scheduleExplorationJobs(
                   .where("id", "=", demand.id)
                   .execute();
                 invalidKeysMarked += 1;
-                invalidInBatch += 1;
+                skippedInBatch += 1;
                 continue;
               }
             }
+          }
+        } else {
+          const alreadyCovered = await isMediaDemandCoveredInTx(trx, {
+            mediaId: demand.media_id,
+            season: demand.season,
+            namespaceGroup: demand.namespace_group,
+          });
+          if (alreadyCovered) {
+            await trx
+              .updateTable("demands")
+              .set({
+                status: "fulfilled",
+                lease_expires_at: null,
+                updated_at: now,
+              })
+              .where("id", "=", demand.id)
+              .execute();
+            skippedInBatch += 1;
+            continue;
           }
         }
 
@@ -903,7 +1058,7 @@ export async function scheduleExplorationJobs(
         consumedDelta += 1;
       }
 
-      if (invalidInBatch === 0) {
+      if (skippedInBatch === 0) {
         break;
       }
     }
@@ -933,544 +1088,45 @@ export async function scheduleExplorationJobs(
   });
 }
 
-async function verifyDoubanKey(
-  nativeId: string,
-  outbound: OutboundClient,
-): Promise<CatalogVerificationResult> {
-  if (!POSITIVE_INT_STRING_PATTERN.test(nativeId)) {
-    return { status: "not_found", reason: "invalid_douban_id" };
-  }
-
-  let response: ExternalHttpResponse;
-  try {
-    response = await outbound.fetchExternal({
-      kind: "catalog",
-      namespace: "douban",
-      url: `https://m.douban.com/rexxar/api/v2/movie/${encodeURIComponent(nativeId)}`,
-      method: "GET",
-      headers: {
-        referer: `https://m.douban.com/movie/subject/${encodeURIComponent(nativeId)}/`,
-        accept: "application/json",
-      },
-    });
-  } catch (error) {
-    return {
-      status: "transient_error",
-      reason: error instanceof Error ? error.message : "douban_request_failed",
-    };
-  }
-
-  if (response.status === 404) {
-    return { status: "not_found", reason: "douban_http_404" };
-  }
-  if (response.status < 200 || response.status >= 300) {
-    return { status: "transient_error", reason: `douban_http_${response.status}` };
-  }
-
-  let data: Record<string, unknown>;
-  try {
-    const parsed: unknown = JSON.parse(response.body);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { status: "transient_error", reason: "douban_invalid_payload" };
-    }
-    data = parsed as Record<string, unknown>;
-  } catch {
-    return { status: "transient_error", reason: "douban_invalid_json" };
-  }
-
-  if (data.code === 404) {
-    return { status: "not_found", reason: "douban_code_404" };
-  }
-
-  const title = nonEmptyString(data.title) ?? nonEmptyString(data.original_title);
-  if (!title) {
-    return { status: "transient_error", reason: "douban_missing_title" };
-  }
-
-  const mediaType: MediaType = data.is_tv === true || data.type === "tv" ? "tv" : "movie";
-  const year = parseFourDigitYear(data.year);
-  const episodesCount =
-    typeof data.episodes_count === "number" &&
-    Number.isInteger(data.episodes_count) &&
-    data.episodes_count > 0
-      ? data.episodes_count
-      : 0;
-  const seasons: SeasonSnapshot[] =
-    mediaType === "tv" && episodesCount > 0
-      ? [{ season: 1, episodeCount: episodesCount, airYear: year }]
-      : [];
-
-  return {
-    status: "found",
-    mediaType,
-    baseline: "douban",
-    snapshot: {
-      title,
-      originalTitle: nonEmptyString(data.original_title),
-      year,
-      type: mediaType,
-      seasons,
-    },
-  };
-}
-
-async function verifyBangumiKey(
-  nativeId: string,
-  outbound: OutboundClient,
-): Promise<CatalogVerificationResult> {
-  if (!POSITIVE_INT_STRING_PATTERN.test(nativeId)) {
-    return { status: "not_found", reason: "invalid_bangumi_id" };
-  }
-
-  let response: ExternalHttpResponse;
-  try {
-    response = await outbound.fetchExternal({
-      kind: "catalog",
-      namespace: "bangumi",
-      url: `https://api.bgm.tv/v0/subjects/${encodeURIComponent(nativeId)}`,
-      method: "GET",
-      headers: {
-        accept: "application/json",
-        "user-agent": "media-ref/0.1 (https://mediaref.org)",
-      },
-    });
-  } catch (error) {
-    return {
-      status: "transient_error",
-      reason: error instanceof Error ? error.message : "bangumi_request_failed",
-    };
-  }
-
-  if (response.status === 404) {
-    return { status: "not_found", reason: "bangumi_http_404" };
-  }
-  if (response.status < 200 || response.status >= 300) {
-    return { status: "transient_error", reason: `bangumi_http_${response.status}` };
-  }
-
-  let data: Record<string, unknown>;
-  try {
-    const parsed: unknown = JSON.parse(response.body);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { status: "transient_error", reason: "bangumi_invalid_payload" };
-    }
-    data = parsed as Record<string, unknown>;
-  } catch {
-    return { status: "transient_error", reason: "bangumi_invalid_json" };
-  }
-
-  if (typeof data.type === "number" && data.type !== 2 && data.type !== 6) {
-    return { status: "not_found", reason: `bangumi_unsupported_subject_type_${data.type}` };
-  }
-
-  const title = nonEmptyString(data.name_cn) ?? nonEmptyString(data.name);
-  if (!title) {
-    return { status: "transient_error", reason: "bangumi_missing_title" };
-  }
-
-  const platformStr = nonEmptyString(data.platform);
-  const mediaType: MediaType = platformStr === "剧场版" || platformStr === "电影" ? "movie" : "tv";
-  const year = parseFourDigitYear(data.date);
-  const epsCount =
-    typeof data.eps === "number" && Number.isInteger(data.eps) && data.eps > 0 ? data.eps : 0;
-  const seasons: SeasonSnapshot[] =
-    mediaType === "tv" && epsCount > 0
-      ? [{ season: 1, episodeCount: epsCount, airYear: year }]
-      : [];
-
-  let imdbId: string | undefined;
-  if (Array.isArray(data.infobox)) {
-    for (const item of data.infobox) {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        continue;
-      }
-      const record = item as Record<string, unknown>;
-      if (record.key === "IMDb_id" && typeof record.value === "string") {
-        const candidate = record.value.trim();
-        if (IMDB_ID_PATTERN.test(candidate)) {
-          imdbId = candidate;
-        }
-      }
-    }
-  }
-
-  return {
-    status: "found",
-    mediaType,
-    baseline: "bangumi",
-    snapshot: {
-      title,
-      originalTitle: nonEmptyString(data.name),
-      year,
-      type: mediaType,
-      seasons,
-    },
-    ...(imdbId ? { externalIds: { imdb: imdbId } } : {}),
-  };
-}
-
-async function verifyImdbKey(
-  nativeId: string,
-  outbound: OutboundClient,
-): Promise<CatalogVerificationResult> {
-  if (!IMDB_ID_PATTERN.test(nativeId)) {
-    return { status: "not_found", reason: "invalid_imdb_id" };
-  }
-
-  let response: ExternalHttpResponse;
-  try {
-    response = await outbound.fetchExternal({
-      kind: "catalog",
-      namespace: "imdb",
-      url: `https://www.imdb.com/title/${encodeURIComponent(nativeId)}/`,
-      method: "GET",
-      headers: {
-        accept: "application/json, text/html",
-      },
-    });
-  } catch (error) {
-    return {
-      status: "transient_error",
-      reason: error instanceof Error ? error.message : "imdb_request_failed",
-    };
-  }
-
-  if (response.status === 404) {
-    return { status: "not_found", reason: "imdb_http_404" };
-  }
-  if (response.status < 200 || response.status >= 300) {
-    return { status: "transient_error", reason: `imdb_http_${response.status}` };
-  }
-
-  let title: string = nativeId;
-  let originalTitle: string | null = null;
-  let year: number | null = null;
-  let mediaType: MediaType = "movie";
-
-  try {
-    const parsed: unknown = JSON.parse(response.body);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const record = parsed as Record<string, unknown>;
-      title = nonEmptyString(record.title) ?? nonEmptyString(record.name) ?? nativeId;
-      originalTitle = nonEmptyString(record.original_title) ?? nonEmptyString(record.originalTitle);
-      year = parseFourDigitYear(record.year);
-      if (record.type === "tv" || record.mediaType === "tv" || record["@type"] === "TVSeries") {
-        mediaType = "tv";
-      }
-    }
-  } catch {
-    const titleMatch = response.body.match(/<title[^>]*>([^<]+)<\/title>/i);
-    if (titleMatch?.[1]) {
-      const cleaned = titleMatch[1].replace(/\s*-\s*IMDb\s*$/i, "").trim();
-      if (cleaned.length > 0) {
-        title = cleaned;
-      }
-    }
-  }
-
-  return {
-    status: "found",
-    mediaType,
-    baseline: "imdb",
-    snapshot: {
-      title,
-      originalTitle,
-      year,
-      type: mediaType,
-      seasons: [],
-    },
-    externalIds: { imdb: nativeId },
-  };
-}
-
-async function verifyTvdbKey(
-  nativeId: string,
-  outbound: OutboundClient,
-): Promise<CatalogVerificationResult> {
-  const match = nativeId.match(TVDB_ID_PATTERN);
-  if (!match) {
-    return { status: "not_found", reason: "invalid_tvdb_id" };
-  }
-
-  const kindPrefix = match[1];
-  const numericId = match[2]!;
-  const isMovie = kindPrefix === "movie";
-  const endpoint = isMovie ? "movies" : "series";
-
-  let response: ExternalHttpResponse;
-  try {
-    response = await outbound.fetchExternal({
-      kind: "catalog",
-      namespace: "tvdb",
-      url: `https://api4.thetvdb.com/v4/${endpoint}/${encodeURIComponent(numericId)}`,
-      method: "GET",
-      headers: {
-        accept: "application/json",
-      },
-    });
-  } catch (error) {
-    return {
-      status: "transient_error",
-      reason: error instanceof Error ? error.message : "tvdb_request_failed",
-    };
-  }
-
-  if (response.status === 404) {
-    return { status: "not_found", reason: "tvdb_http_404" };
-  }
-  if (response.status < 200 || response.status >= 300) {
-    return { status: "transient_error", reason: `tvdb_http_${response.status}` };
-  }
-
-  let title: string = nativeId;
-  let originalTitle: string | null = null;
-  let year: number | null = null;
-  const mediaType: MediaType = isMovie ? "movie" : "tv";
-
-  try {
-    const parsed: unknown = JSON.parse(response.body);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const root = parsed as Record<string, unknown>;
-      const data =
-        root.data && typeof root.data === "object" && !Array.isArray(root.data)
-          ? (root.data as Record<string, unknown>)
-          : root;
-      title = nonEmptyString(data.name) ?? nonEmptyString(data.title) ?? nativeId;
-      originalTitle = nonEmptyString(data.originalName) ?? nonEmptyString(data.original_name);
-      year = parseFourDigitYear(data.year ?? data.firstAired);
-    }
-  } catch {
-    return { status: "transient_error", reason: "tvdb_invalid_json" };
-  }
-
-  return {
-    status: "found",
-    mediaType,
-    baseline: "tvdb",
-    snapshot: {
-      title,
-      originalTitle,
-      year,
-      type: mediaType,
-      seasons: [],
-    },
-    externalIds: { tvdb: nativeId },
-  };
-}
-
-async function verifyTraktKey(
-  nativeId: string,
-  outbound: OutboundClient,
-  tmdbConfig?: TmdbGatewayConfig,
-): Promise<CatalogVerificationResult> {
-  const match = nativeId.match(TRAKT_ID_PATTERN);
-  if (!match) {
-    return { status: "not_found", reason: "invalid_trakt_id" };
-  }
-
-  const kindPrefix = match[1]?.toLowerCase();
-  const idPart = match[2]!;
-  const isMovie = kindPrefix === "movie";
-  const baseUrl = trimTrailingSlash(tmdbConfig?.traktApiBaseUrl ?? DEFAULT_TRAKT_API_BASE_URL);
-  const url = `${baseUrl}/${isMovie ? "movies" : "shows"}/${encodeURIComponent(idPart)}`;
-
-  const headers: Record<string, string> = {
-    accept: "application/json",
-    "trakt-api-version": "2",
-  };
-  if (tmdbConfig?.traktClientId) {
-    headers["trakt-api-key"] = tmdbConfig.traktClientId;
-  }
-
-  let response: ExternalHttpResponse;
-  try {
-    response = await outbound.fetchExternal({
-      kind: "catalog",
-      namespace: "trakt",
-      url,
-      method: "GET",
-      headers,
-    });
-  } catch (error) {
-    return {
-      status: "transient_error",
-      reason: error instanceof Error ? error.message : "trakt_request_failed",
-    };
-  }
-
-  if (response.status === 404) {
-    return { status: "not_found", reason: "trakt_http_404" };
-  }
-  if (response.status < 200 || response.status >= 300) {
-    return { status: "transient_error", reason: `trakt_http_${response.status}` };
-  }
-
-  let data: Record<string, unknown>;
-  try {
-    const parsed: unknown = JSON.parse(response.body);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { status: "transient_error", reason: "trakt_invalid_payload" };
-    }
-    data = parsed as Record<string, unknown>;
-  } catch {
-    return { status: "transient_error", reason: "trakt_invalid_json" };
-  }
-
-  const title = nonEmptyString(data.title) ?? nativeId;
-  const year = parseFourDigitYear(data.year);
-  const mediaType: MediaType = isMovie ? "movie" : "tv";
-  const externalIds: Partial<Record<ExternalIdNamespace, string>> = {
-    trakt: nativeId,
-  };
-
-  const ids =
-    data.ids && typeof data.ids === "object" && !Array.isArray(data.ids)
-      ? (data.ids as Record<string, unknown>)
-      : null;
-  if (ids) {
-    const tmdbNum = parsePositiveIdString(ids.tmdb);
-    if (tmdbNum) {
-      externalIds.tmdb = `${mediaType}:${tmdbNum}`;
-    }
-    const imdbStr = nonEmptyString(ids.imdb);
-    if (imdbStr && IMDB_ID_PATTERN.test(imdbStr)) {
-      externalIds.imdb = imdbStr;
-    }
-    const tvdbNum = parsePositiveIdString(ids.tvdb);
-    if (tvdbNum) {
-      externalIds.tvdb = tvdbNum;
-    }
-  }
-
-  return {
-    status: "found",
-    mediaType,
-    baseline: externalIds.tmdb ? "tmdb" : null,
-    snapshot: {
-      title,
-      originalTitle: null,
-      year,
-      type: mediaType,
-      seasons: [],
-    },
-    externalIds,
-  };
-}
-
 export async function verifyExternalKeyInCatalog(
   externalKey: string,
   deps: CatalogVerifierDeps,
 ): Promise<CatalogVerificationResult> {
-  const parsed = parseExternalKey(externalKey);
+  const parsed = parseCatalogTargetKey(externalKey);
   if (!parsed) {
-    return { status: "not_found", reason: "invalid_external_key" };
+    return { status: "not_found", reason: "unsupported_or_invalid_catalog_key" };
   }
 
-  if (parsed.namespace === "tmdb") {
-    const tmdbParsed = parseTmdbNativeId(parsed.nativeId);
-    if (!tmdbParsed) {
-      return { status: "not_found", reason: "invalid_tmdb_native_id" };
-    }
+  const resolved = await resolveCatalogTargetSnapshot(parsed.canonicalKey, deps.outbound, {
+    ...deps.catalogConfig,
+    tmdb: deps.catalogConfig?.tmdb ?? deps.tmdbConfig,
+    tmdbGateway: deps.catalogConfig?.tmdbGateway ?? deps.tmdbGateway,
+  });
 
-    try {
-      const fetched = await deps.tmdbGateway.fetchMediaSnapshotAndExternalIds(
-        tmdbParsed.type,
-        tmdbParsed.id,
-      );
-      if (!fetched) {
-        return { status: "not_found", reason: "tmdb_not_found" };
-      }
-
-      const externalIds: Partial<Record<ExternalIdNamespace, string>> = {
-        tmdb: fetched.externalIds.tmdb,
-      };
-      if (fetched.externalIds.imdb) {
-        externalIds.imdb = fetched.externalIds.imdb;
-      }
-      if (fetched.externalIds.tvdb) {
-        externalIds.tvdb = fetched.externalIds.tvdb;
-      }
-      if (fetched.externalIds.trakt) {
-        externalIds.trakt = fetched.externalIds.trakt;
-      }
-
-      return {
-        status: "found",
-        mediaType: fetched.type,
-        baseline: "tmdb",
-        snapshot: fetched.snapshot,
-        externalIds,
-      };
-    } catch (error) {
-      if (error instanceof TmdbGatewayError && error.code === "TMDB_NOT_FOUND") {
-        return { status: "not_found", reason: error.message };
-      }
-      return {
-        status: "transient_error",
-        reason: error instanceof Error ? error.message : "tmdb_upstream_error",
-      };
-    }
-  }
-
-  const registeredAdapter = deps.adapterRegistry.get(parsed.namespace);
-  if (registeredAdapter && isTier2Adapter(registeredAdapter)) {
-    const evidence = await registeredAdapter.fetchCollection(parsed.nativeId, deps.outbound);
-    if (evidence.status === "not_found") {
-      return { status: "not_found", reason: evidence.reason ?? `${parsed.namespace}_not_found` };
-    }
-    if (evidence.status === "transient_error") {
-      return {
-        status: "transient_error",
-        reason: evidence.reason,
-        ...(evidence.retryAfterMs !== undefined ? { retryAfterMs: evidence.retryAfterMs } : {}),
-      };
-    }
-
-    const info = evidence.info;
-    const mediaType: MediaType = info.mediaType ?? "tv";
-    const externalIds: Partial<Record<ExternalIdNamespace, string>> = {};
-    if (info.externalIds) {
-      for (const ns of EXTERNAL_ID_NAMESPACES) {
-        const val = info.externalIds[ns];
-        if (val) {
-          externalIds[ns] = val;
-        }
-      }
-    }
-    const seasons: SeasonSnapshot[] =
-      mediaType === "tv" && info.featureEpisodeCount && info.featureEpisodeCount > 0
-        ? [{ season: 1, episodeCount: info.featureEpisodeCount, airYear: info.year }]
-        : [];
-
+  if (resolved.status === "transient_error") {
     return {
-      status: "found",
-      mediaType,
-      baseline: isBaselineSource(parsed.namespace) ? parsed.namespace : null,
-      snapshot: {
-        title: info.title,
-        originalTitle: info.originalTitle ?? null,
-        year: info.year,
-        type: mediaType,
-        seasons,
-      },
-      ...(Object.keys(externalIds).length > 0 ? { externalIds } : {}),
+      status: "transient_error",
+      reason: resolved.reason,
+      ...(resolved.retryAfterMs !== undefined ? { retryAfterMs: resolved.retryAfterMs } : {}),
     };
   }
 
-  switch (parsed.namespace) {
-    case "douban":
-      return verifyDoubanKey(parsed.nativeId, deps.outbound);
-    case "bangumi":
-      return verifyBangumiKey(parsed.nativeId, deps.outbound);
-    case "imdb":
-      return verifyImdbKey(parsed.nativeId, deps.outbound);
-    case "tvdb":
-      return verifyTvdbKey(parsed.nativeId, deps.outbound);
-    case "trakt":
-      return verifyTraktKey(parsed.nativeId, deps.outbound, deps.tmdbConfig);
-    default:
-      return { status: "not_found", reason: `unsupported_catalog_namespace_${parsed.namespace}` };
+  if (resolved.status === "not_found" || resolved.status === "invalid_key") {
+    return {
+      status: "not_found",
+      reason: resolved.reason ?? `${parsed.namespace}_not_found`,
+    };
   }
+
+  const target = resolved.target;
+  return {
+    status: "found",
+    mediaType: target.type,
+    baseline: target.baseline,
+    snapshot: target.snapshot,
+    ...(Object.keys(target.externalIds).length > 0 ? { externalIds: target.externalIds } : {}),
+    initialAssociation: target.initialAssociation,
+  };
 }
 
 async function resolveCanonicalMediaId(db: DbExecutor, mediaId: string): Promise<string | null> {
@@ -1756,12 +1412,15 @@ export function createExplorationJobHandler(
 
       if (!existingMediaId) {
         const tmdbGateway =
-          options.tmdbGateway ?? createTmdbGateway(ctx.outbound, options.tmdbConfig);
+          options.tmdbGateway ??
+          options.catalogConfig?.tmdbGateway ??
+          createTmdbGateway(ctx.outbound, options.catalogConfig?.tmdb ?? options.tmdbConfig);
         const verification = await catalogVerifier(externalKey, {
           outbound: ctx.outbound,
           adapterRegistry,
           tmdbGateway,
-          tmdbConfig: options.tmdbConfig,
+          tmdbConfig: options.catalogConfig?.tmdb ?? options.tmdbConfig,
+          catalogConfig: options.catalogConfig,
         });
 
         if (verification.status === "transient_error") {
@@ -1830,9 +1489,7 @@ export function createExplorationJobHandler(
           return { kind: "stale" as const };
         }
 
-        await sql`select pg_advisory_xact_lock(${LOCK_CLASS_MEDIA_KEY}::int4, hashtext(${externalKey}::text))`.execute(
-          trx,
-        );
+        await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_KEY, externalKey);
 
         let resolvedMediaId =
           existingMediaId ?? (await findExistingMediaIdByExternalKey(trx, externalKey));
@@ -1872,7 +1529,7 @@ export function createExplorationJobHandler(
               year: verifiedCatalog!.snapshot.year,
               seasons: JSON.stringify(verifiedCatalog!.snapshot.seasons),
             })
-            .returning(["id", "type", "seasons"])
+            .returning(["id", "type", "baseline", "seasons"])
             .executeTakeFirstOrThrow();
 
           resolvedMediaId = created.id;
@@ -1897,6 +1554,91 @@ export function createExplorationJobHandler(
                 .execute();
               mergeExternalKeys.add(formatExternalKey({ namespace: ns, nativeId: nativeVal }));
             }
+          }
+
+          // When lazily created from a Douban or Bangumi catalog entry, establish the initial
+          // confirmed catalog association immediately so GET /v1/media/douban:<id> or bangumi:<id> resolves it.
+          const parsedCatalogKey = parseCatalogTargetKey(externalKey);
+          const initAssoc: CatalogTargetInitialAssociation | null =
+            verifiedCatalog!.initialAssociation !== undefined
+              ? verifiedCatalog!.initialAssociation
+              : parsedCatalogKey &&
+                  (parsedCatalogKey.namespace === "douban" ||
+                    parsedCatalogKey.namespace === "bangumi")
+                ? {
+                    namespace: parsedCatalogKey.namespace,
+                    nativeId: parsedCatalogKey.nativeId,
+                  }
+                : null;
+
+          if (initAssoc) {
+            const createdInitAssoc = await trx
+              .insertInto("associations")
+              .values({
+                media_id: created.id,
+                namespace: initAssoc.namespace,
+                native_id: initAssoc.nativeId,
+                variant_id: null,
+                status: "confirmed",
+                needs_review: false,
+                locked: false,
+              })
+              .returning("id")
+              .executeTakeFirstOrThrow();
+
+            const initSegments: NormalizedSegment[] = [];
+            if (created.type === "tv" && created.baseline !== null) {
+              const season1 = verifiedCatalog!.snapshot.seasons.find((s) => s.season === 1);
+              initSegments.push({
+                season: 1,
+                episodeStart: 1,
+                episodeEnd: season1 && season1.episodeCount > 0 ? season1.episodeCount : null,
+                targetEpisodeStart: 1,
+                baseline: created.baseline,
+                nonLinear: false,
+                needsReview: false,
+              });
+              await trx
+                .insertInto("segments")
+                .values(
+                  initSegments.map((seg) => ({
+                    association_id: createdInitAssoc.id,
+                    season: seg.season,
+                    episode_start: seg.episodeStart,
+                    episode_end: seg.episodeEnd,
+                    target_episode_start: seg.targetEpisodeStart,
+                    baseline: seg.baseline,
+                    non_linear: seg.nonLinear,
+                    needs_review: seg.needsReview,
+                  })),
+                )
+                .execute();
+            }
+
+            const initRev = await trx
+              .insertInto("association_revisions")
+              .values({
+                association_id: createdInitAssoc.id,
+                revision_number: 1,
+                change_request_id: null,
+                variant_id: null,
+                status: "confirmed",
+                segments: JSON.stringify(initSegments),
+                actor_user_id: null,
+                reason: "initial_catalog_target",
+              })
+              .returning("id")
+              .executeTakeFirstOrThrow();
+
+            await trx
+              .updateTable("associations")
+              .set({ current_revision_id: initRev.id })
+              .where("id", "=", createdInitAssoc.id)
+              .execute();
+
+            mergeExternalKeys.add(
+              formatExternalKey({ namespace: initAssoc.namespace, nativeId: initAssoc.nativeId }),
+            );
           }
         } else {
           const mediaRow = await trx

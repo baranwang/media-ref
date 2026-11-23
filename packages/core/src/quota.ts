@@ -1,5 +1,6 @@
 import type { Database } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 
 export interface ReputationTier {
   minReputation: number;
@@ -168,9 +169,7 @@ export async function enforceSubmissionQuotaInTx(
       ? Math.floor(input.config.windowSeconds)
       : DEFAULT_SUBMISSION_WINDOW_SECONDS;
 
-  await sql`select pg_advisory_xact_lock(hashtext('submit-quota:' || ${input.submitterUserId}::text))`.execute(
-    trx,
-  );
+  await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.SUBMIT_QUOTA, input.submitterUserId);
 
   const userRow = await trx
     .selectFrom("user")

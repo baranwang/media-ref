@@ -28,14 +28,13 @@ import {
   type EvidenceGateResult,
   type EvidenceGateStep2Evaluator,
 } from "./evidence-gate.ts";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { isUuid, type ChangeRequestRecord } from "./media-service.ts";
 import type { OutboundClient } from "./outbound.ts";
 import { parseTmdbNativeId } from "./tmdb.ts";
 import { REVIEW_ALERT_TYPES } from "./tmdb-sync.ts";
 
 const EXTERNAL_ID_NAMESPACE_SET: ReadonlySet<string> = new Set(EXTERNAL_ID_NAMESPACES);
-const LOCK_CLASS_EXTERNAL_ID_MEDIA = 1006;
-const LOCK_CLASS_EXTERNAL_ID_KEY = 1007;
 const MAX_MERGE_HOPS = 10;
 
 export const CONFLICT_REASONS = {
@@ -294,16 +293,6 @@ async function resolveCanonicalMediaId(db: DbExecutor, mediaId: string): Promise
   return null;
 }
 
-async function acquireAdvisoryLock(
-  trx: Transaction<Database>,
-  lockClass: number,
-  lockKey: string,
-): Promise<void> {
-  await sql`select pg_advisory_xact_lock(${lockClass}::int4, hashtext(${lockKey}::text))`.execute(
-    trx,
-  );
-}
-
 export async function listAssociationRevisions(
   db: Db,
   associationId: string,
@@ -532,10 +521,14 @@ export async function overrideMediaExternalId(
 
       await acquireAdvisoryLock(
         trx,
-        LOCK_CLASS_EXTERNAL_ID_MEDIA,
+        ADVISORY_LOCK_CLASSES.EXTERNAL_ID_MEDIA,
         `${canonicalMediaId}:${namespace}`,
       );
-      await acquireAdvisoryLock(trx, LOCK_CLASS_EXTERNAL_ID_KEY, `${namespace}:${nativeId}`);
+      await acquireAdvisoryLock(
+        trx,
+        ADVISORY_LOCK_CLASSES.EXTERNAL_ID_KEY,
+        `${namespace}:${nativeId}`,
+      );
 
       const claimedByOther = await trx
         .selectFrom("external_ids")

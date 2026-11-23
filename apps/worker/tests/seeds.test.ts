@@ -877,4 +877,138 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     );
     expect(reverseAfterConfirm.status).toBe(200);
   });
+
+  test("default read does NOT leak empty variants created solely for seed_unconfirmed rows, while ?includeUnconfirmed=true exposes them and confirmation promotes them", async () => {
+    const testDb = await setupDb();
+    const now = new Date("2026-11-24T08:00:00.000Z");
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal: async (req: ExternalHttpRequest) => {
+        if (req.namespace === "tmdb" && req.url.includes("/tv/95479")) {
+          return jsonResponse(req.url, {
+            id: 95479,
+            name: "咒术回战",
+            original_name: "呪術廻戦",
+            first_air_date: "2020-10-03",
+            seasons: [{ season_number: 1, episode_count: 24, air_date: "2020-10-03" }],
+            external_ids: { imdb_id: "tt12343534" },
+          });
+        }
+        if (req.namespace === "bilibili" && req.url.includes("season_id=34430")) {
+          return jsonResponse(req.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 34430,
+              title: "咒术回战",
+              jp_title: "呪術廻戦",
+              type: 1,
+              publish: { pub_time: "2020-10-03 01:25:00" },
+              episodes: makeBilibiliEpisodes(24),
+            },
+          });
+        }
+        return jsonResponse(req.url, { error: "not_found" }, 404);
+      },
+    });
+
+    await importBangumiDataSeeds(
+      testDb.writeDb,
+      {
+        items: [
+          {
+            title: "呪術廻戦",
+            type: "tv",
+            begin: "2020-10-03T00:00:00.000Z",
+            sites: [
+              { site: "tmdb", id: "tv/95479/season/1" },
+              { site: "bilibili", id: "ss34430" },
+            ],
+          },
+        ],
+      },
+      { outbound, now },
+    );
+
+    // Verify DB actually has a variant created for the platform seed_unconfirmed association
+    const variantsInDb = await testDb.readDb.selectFrom("variants").selectAll().execute();
+    expect(variantsInDb).toHaveLength(1);
+    expect(variantsInDb[0]?.platform).toBe("bilibili");
+
+    const bgTasks: Promise<unknown>[] = [];
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      onBackgroundTask: (p) => {
+        bgTasks.push(p);
+      },
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => now,
+      },
+    });
+    const readKey = await createReadApiKey(app, outbound, "seed-variant-leak@example.com");
+
+    // 1. Default read MUST NOT leak the empty variant created solely for seed_unconfirmed
+    const defaultRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+        headers: { "x-api-key": readKey },
+      }),
+    );
+    expect(defaultRes.status).toBe(200);
+    const defaultBody = (await defaultRes.json()) as { document: MediaDocument };
+    expect(defaultBody.document.associations).toEqual([]);
+    expect(defaultBody.document.variants).toEqual([]);
+    await Promise.all(bgTasks.splice(0));
+
+    // 2. ?includeUnconfirmed=true MUST return both the variant and the seed_unconfirmed association
+    const unconfirmedRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?includeUnconfirmed=true`, {
+        headers: { "x-api-key": readKey },
+      }),
+    );
+    expect(unconfirmedRes.status).toBe(200);
+    const unconfirmedBody = (await unconfirmedRes.json()) as { document: MediaDocument };
+    expect(unconfirmedBody.document.associations).toHaveLength(1);
+    expect(unconfirmedBody.document.associations[0]?.status).toBe("seed_unconfirmed");
+    expect(unconfirmedBody.document.variants).toHaveLength(1);
+    expect(unconfirmedBody.document.variants[0]?.id).toBe(variantsInDb[0]?.id);
+
+    // 3. After seed_evidence_check promotes the association to confirmed, default read includes the variant
+    const dispatched: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(msg) {
+          dispatched.push(msg);
+        },
+      },
+      config: {
+        enableDailyTmdbSync: false,
+        enableExplorationScheduling: false,
+        jobTypes: [SEED_EVIDENCE_CHECK_JOB_TYPE],
+      },
+      now: () => now,
+    });
+    await worker.scheduled(createScheduledController(now));
+    expect(dispatched).toHaveLength(1);
+    const { batch } = createQueueBatch(dispatched, now);
+    const summary = await worker.queue(batch);
+    expect(summary.completed).toBe(1);
+
+    const confirmedRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+        headers: { "x-api-key": readKey },
+      }),
+    );
+    expect(confirmedRes.status).toBe(200);
+    const confirmedBody = (await confirmedRes.json()) as { document: MediaDocument };
+    expect(confirmedBody.document.associations).toHaveLength(1);
+    expect(confirmedBody.document.associations[0]?.status).toBe("confirmed");
+    expect(confirmedBody.document.variants).toHaveLength(1);
+    expect(confirmedBody.document.variants[0]?.id).toBe(variantsInDb[0]?.id);
+  });
 });

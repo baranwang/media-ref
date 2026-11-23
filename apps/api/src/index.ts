@@ -129,6 +129,11 @@ export interface ApiWorkerEnv extends InternalMediaWorkerEnv {
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
   TMDB_API_BASE_URL?: string;
+  TVDB_BEARER_TOKEN?: string;
+  TVDB_API_BASE_URL?: string;
+  DOUBAN_API_BASE_URL?: string;
+  BANGUMI_API_BASE_URL?: string;
+  IMDB_API_BASE_URL?: string;
   TRAKT_API_BASE_URL?: string;
   RATE_LIMITER_READ_KEY?: RateLimitBinding;
   RATE_LIMITER_READ_IP?: RateLimitBinding;
@@ -187,6 +192,22 @@ const worker = {
           accessToken: env.TMDB_ACCESS_TOKEN,
           apiKey: env.TMDB_API_KEY,
           apiBaseUrl: env.TMDB_API_BASE_URL,
+          traktClientId: env.TRAKT_CLIENT_ID,
+          traktApiBaseUrl: env.TRAKT_API_BASE_URL,
+        },
+        catalog: {
+          tmdb: {
+            accessToken: env.TMDB_ACCESS_TOKEN,
+            apiKey: env.TMDB_API_KEY,
+            apiBaseUrl: env.TMDB_API_BASE_URL,
+            traktClientId: env.TRAKT_CLIENT_ID,
+            traktApiBaseUrl: env.TRAKT_API_BASE_URL,
+          },
+          tvdbBearerToken: env.TVDB_BEARER_TOKEN,
+          tvdbApiBaseUrl: env.TVDB_API_BASE_URL,
+          doubanApiBaseUrl: env.DOUBAN_API_BASE_URL,
+          bangumiApiBaseUrl: env.BANGUMI_API_BASE_URL,
+          imdbApiBaseUrl: env.IMDB_API_BASE_URL,
           traktClientId: env.TRAKT_CLIENT_ID,
           traktApiBaseUrl: env.TRAKT_API_BASE_URL,
         },

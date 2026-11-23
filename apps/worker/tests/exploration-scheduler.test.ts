@@ -2,6 +2,7 @@ import { gzipSync } from "node:zlib";
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import type { PlatformNamespace } from "@media-ref/client";
 import {
+  approveChangeRequest,
   bilibiliAdapter,
   createAdapterRegistry,
   createChangeRequest,
@@ -15,6 +16,8 @@ import {
   recordDemandForRead,
   seedTmdbExportIds,
   syncTmdbDailyExports,
+  TMDB_DAILY_EXPORTS_JOB_TYPE,
+  TMDB_DAILY_EXPORTS_SYNC_KEY,
   type AdapterRegistry,
   type ExplorationExecutionContext,
   type ExplorationExecutionResult,
@@ -1246,5 +1249,508 @@ describe("Exploration scheduler (#28)", () => {
       EXPLORATION_DAILY_BUDGET: "0",
     } as unknown as BackgroundWorkerEnv);
     expect(pausedConfig.exploration?.dailyBudget).toBe(0);
+    expect(pausedConfig.enableDailyTmdbExportsSync).toBe(true);
+
+    const disabledExportsConfig = parseWorkerConfig({
+      ENABLE_DAILY_TMDB_EXPORTS_SYNC: "false",
+      TVDB_BEARER_TOKEN: "tvdb-secret-token",
+      TVDB_API_BASE_URL: "https://tvdb.custom.test/v4",
+      DOUBAN_API_BASE_URL: "https://douban.custom.test",
+      BANGUMI_API_BASE_URL: "https://bangumi.custom.test",
+      IMDB_API_BASE_URL: "https://imdb.custom.test",
+      TMDB_EXPORTS_BASE_URL: "https://exports.custom.test",
+    } as unknown as BackgroundWorkerEnv);
+    expect(disabledExportsConfig.enableDailyTmdbExportsSync).toBe(false);
+    expect(disabledExportsConfig.tmdbExportsBaseUrl).toBe("https://exports.custom.test");
+    expect(disabledExportsConfig.catalog).toMatchObject({
+      tvdbBearerToken: "tvdb-secret-token",
+      tvdbApiBaseUrl: "https://tvdb.custom.test/v4",
+      doubanApiBaseUrl: "https://douban.custom.test",
+      bangumiApiBaseUrl: "https://bangumi.custom.test",
+      imdbApiBaseUrl: "https://imdb.custom.test",
+    });
+  });
+
+  test("scheduled + queue runs daily tmdb_daily_exports sync once per UTC day and populates tmdb_daily_export_ids", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    let now = new Date("2026-11-23T09:00:00.000Z");
+    const gzippedMovies = gzipSync(
+      Buffer.from('{"adult":false,"id":550,"original_title":"Fight Club"}\n', "utf8"),
+    );
+    const gzippedTv = gzipSync(
+      Buffer.from('{"id":95479,"original_name":"Jujutsu Kaisen"}\n', "utf8"),
+    );
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.url.includes("movie_ids_")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/gzip" },
+            body: gzippedMovies.toString("latin1"),
+            url: request.url,
+          };
+        }
+        if (request.url.includes("tv_series_ids_")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/gzip" },
+            body: gzippedTv.toString("latin1"),
+            url: request.url,
+          };
+        }
+        return {
+          status: 404,
+          headers: { "content-type": "text/plain" },
+          body: "not found",
+          url: request.url,
+        };
+      },
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: {
+        enableDailyTmdbSync: false,
+        enableDailyTmdbExportsSync: true,
+        enableExplorationScheduling: false,
+      },
+      now: () => now,
+    });
+
+    // Day 1 Tick 1: schedules & runs tmdb_daily_exports
+    await worker.scheduled(createScheduledController(now));
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.jobType).toBe(TMDB_DAILY_EXPORTS_JOB_TYPE);
+
+    const batch1 = createQueueBatch(emitted.splice(0, emitted.length), now);
+    const summary1 = await worker.queue(batch1.batch);
+    expect(summary1.completed).toBe(1);
+
+    const exportRows = await testDb.readDb
+      .selectFrom("tmdb_daily_export_ids")
+      .select(["media_type", "tmdb_id"])
+      .execute();
+    expect(exportRows).toHaveLength(2);
+    expect(exportRows).toEqual(
+      expect.arrayContaining([
+        { media_type: "movie", tmdb_id: "550" },
+        { media_type: "tv", tmdb_id: "95479" },
+      ]),
+    );
+
+    const syncState = await testDb.readDb
+      .selectFrom("sync_state")
+      .selectAll()
+      .where("sync_key", "=", TMDB_DAILY_EXPORTS_SYNC_KEY)
+      .executeTakeFirstOrThrow();
+    expect(syncState.last_synced_date).toBe("2026-11-23");
+
+    // Day 1 Tick 2 (later same UTC day): MUST NOT re-schedule!
+    now = new Date("2026-11-23T18:00:00.000Z");
+    await worker.scheduled(createScheduledController(now));
+    expect(emitted).toHaveLength(0);
+
+    // Day 2 Tick 1 (next UTC day): schedules again!
+    now = new Date("2026-11-24T01:00:00.000Z");
+    await worker.scheduled(createScheduledController(now));
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.jobType).toBe(TMDB_DAILY_EXPORTS_JOB_TYPE);
+  });
+
+  test("lazy media creation rejects platform keys, creates initial catalog associations for douban/bangumi, and honors tvdb > imdb > bangumi > douban baseline priority via catalog-gateway", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T10:00:00.000Z");
+
+    // Record 4 external-key demands:
+    // 1. Platform key (bilibili:ss99999) -> MUST be rejected invalid_key with zero budget & zero orphan media!
+    // 2. Douban movie (douban:1292052) -> creates media + initial confirmed douban association!
+    // 3. Bangumi TV with IMDb ID (bangumi:302076) -> creates media with baseline="imdb" (imdb > bangumi) + initial confirmed bangumi association!
+    // 4. TVDB series with IMDb ID (tvdb:series:385376) -> creates media with baseline="tvdb" (tvdb > imdb) using configured TVDB bearer token!
+    await testDb.writeDb
+      .insertInto("demands")
+      .values([
+        {
+          media_id: null,
+          external_key: "bilibili:ss99999",
+          season: null,
+          namespace_group: "platform",
+          demand_count: 10,
+          status: "open",
+          next_eligible_at: t0,
+          last_demanded_at: t0,
+        },
+        {
+          media_id: null,
+          external_key: "douban:1292052",
+          season: null,
+          namespace_group: "platform",
+          demand_count: 9,
+          status: "open",
+          next_eligible_at: t0,
+          last_demanded_at: t0,
+        },
+        {
+          media_id: null,
+          external_key: "bangumi:302076",
+          season: null,
+          namespace_group: "platform",
+          demand_count: 8,
+          status: "open",
+          next_eligible_at: t0,
+          last_demanded_at: t0,
+        },
+        {
+          media_id: null,
+          external_key: "tvdb:series:385376",
+          season: null,
+          namespace_group: "platform",
+          demand_count: 7,
+          status: "open",
+          next_eligible_at: t0,
+          last_demanded_at: t0,
+        },
+      ])
+      .execute();
+
+    const seenTvdbAuthHeaders: string[] = [];
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.namespace === "douban" && request.url.includes("douban.custom.test")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: "1292052",
+              title: "肖申克的救赎",
+              original_title: "The Shawshank Redemption",
+              year: "1994",
+              type: "movie",
+              is_tv: false,
+              episodes_count: 0,
+            }),
+          };
+        }
+        if (request.namespace === "bangumi" && request.url.includes("bangumi.custom.test")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 302076,
+              type: 2,
+              name: "呪術廻戦",
+              name_cn: "咒术回战",
+              date: "2020-10-03",
+              platform: "TV",
+              eps: 24,
+              infobox: [{ key: "IMDb_id", value: "tt12343534" }],
+            }),
+          };
+        }
+        if (request.namespace === "tvdb" && request.url.includes("tvdb.custom.test")) {
+          if (request.headers?.authorization) {
+            seenTvdbAuthHeaders.push(request.headers.authorization);
+          }
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              data: {
+                id: 385376,
+                name: "TVDB Priority Show",
+                firstAired: "2021-05-01",
+                remoteIds: [{ sourceName: "IMDB", id: "tt9876543" }],
+                seasons: [{ number: 1, type: { id: 1 } }],
+                episodes: [
+                  { seasonNumber: 1, number: 1 },
+                  { seasonNumber: 1, number: 2 },
+                ],
+              },
+            }),
+          };
+        }
+        return {
+          status: 404,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ error: "not_found" }),
+          url: request.url,
+        };
+      },
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      adapterRegistry: createTier3PlatformRegistry(),
+      explorationExecutor: async () => ({
+        platformOutcomes: [{ namespace: "bilibili", status: "not_found", reason: "no_results" }],
+      }),
+      config: {
+        enableDailyTmdbSync: false,
+        catalog: {
+          tvdbBearerToken: "test-tvdb-token",
+          tvdbApiBaseUrl: "https://tvdb.custom.test/v4",
+          doubanApiBaseUrl: "https://douban.custom.test",
+          bangumiApiBaseUrl: "https://bangumi.custom.test",
+        },
+        exploration: { dailyBudget: 10 },
+      },
+      now: () => t0,
+    });
+
+    await worker.scheduled(createScheduledController(t0));
+    // Platform key rejected at scheduling time -> ONLY the 3 catalog demands consume budget & enqueue!
+    expect(emitted).toHaveLength(3);
+
+    const platformDemand = await testDb.readDb
+      .selectFrom("demands")
+      .select(["status", "media_id"])
+      .where("external_key", "=", "bilibili:ss99999")
+      .executeTakeFirstOrThrow();
+    expect(platformDemand.status).toBe("invalid_key");
+    expect(platformDemand.media_id).toBeNull();
+
+    const budgetRow = await testDb.readDb
+      .selectFrom("exploration_daily_budget")
+      .select("consumed")
+      .where("budget_date", "=", "2026-11-23")
+      .executeTakeFirstOrThrow();
+    expect(budgetRow.consumed).toBe(3);
+
+    const summary = await worker.queue(createQueueBatch(emitted, t0).batch);
+    expect(summary.completed).toBe(3);
+
+    // Total media created MUST be 3 (NO orphan media for bilibili:ss99999!)
+    const allMedia = await testDb.readDb.selectFrom("media").selectAll().execute();
+    expect(allMedia).toHaveLength(3);
+
+    // 1. douban:1292052 resolves immediately via queryMediaByKey because initial catalog association was created!
+    const doubanRead = await queryMediaByKey(testDb.readDb, "douban:1292052");
+    expect(doubanRead.kind).toBe("ok");
+    if (doubanRead.kind === "ok") {
+      expect(doubanRead.items[0]?.document.media.baseline).toBe("douban");
+      expect(doubanRead.items[0]?.document.associations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            namespace: "douban",
+            nativeId: "1292052",
+            variantId: null,
+            status: "confirmed",
+          }),
+        ]),
+      );
+    }
+
+    // 2. bangumi:302076 resolves immediately AND has baseline="imdb" (imdb > bangumi)!
+    const bangumiRead = await queryMediaByKey(testDb.readDb, "bangumi:302076");
+    expect(bangumiRead.kind).toBe("ok");
+    if (bangumiRead.kind === "ok") {
+      expect(bangumiRead.items[0]?.document.media.baseline).toBe("imdb");
+      expect(bangumiRead.items[0]?.document.associations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            namespace: "bangumi",
+            nativeId: "302076",
+            variantId: null,
+            status: "confirmed",
+          }),
+        ]),
+      );
+    }
+
+    // 3. tvdb:series:385376 normalizes to tvdb:385376, has baseline="tvdb" (tvdb > imdb), and used configured TVDB bearer token!
+    expect(seenTvdbAuthHeaders).toEqual(["Bearer test-tvdb-token"]);
+    const tvdbRead = await queryMediaByKey(testDb.readDb, "tvdb:385376");
+    expect(tvdbRead.kind).toBe("ok");
+    if (tvdbRead.kind === "ok") {
+      expect(tvdbRead.items[0]?.document.media.baseline).toBe("tvdb");
+    }
+  });
+
+  test("already-covered demands are marked fulfilled on approval and in scheduler without consuming exploration budget", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T12:00:00.000Z");
+
+    // Create two media items
+    const mediaScheduledSkip = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "Already Covered Show",
+        original_title: "Already Covered Show",
+        year: 2023,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 12, airYear: 2023 }]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const mediaApprovalFulfill = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "tmdb",
+        title: "Approval Fulfill Movie",
+        original_title: "Approval Fulfill Movie",
+        year: 2024,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    // Case 1: mediaScheduledSkip ALREADY has a confirmed platform association covering S1, plus a stale open demand
+    const existingVar = await testDb.writeDb
+      .insertInto("variants")
+      .values({
+        media_id: mediaScheduledSkip.id,
+        platform: "bilibili",
+        description: "原声",
+        is_default: true,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const existingAssoc = await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: mediaScheduledSkip.id,
+        namespace: "bilibili",
+        native_id: "ss34430",
+        variant_id: existingVar.id,
+        status: "confirmed",
+        needs_review: false,
+        locked: false,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("segments")
+      .values({
+        association_id: existingAssoc.id,
+        season: 1,
+        episode_start: 1,
+        episode_end: 12,
+        target_episode_start: 1,
+        baseline: "tmdb",
+        non_linear: false,
+        needs_review: false,
+      })
+      .execute();
+
+    await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: mediaScheduledSkip.id,
+        season: 1,
+        namespace_group: "platform",
+        demand_count: 10,
+        status: "open",
+        next_eligible_at: t0,
+        last_demanded_at: t0,
+      })
+      .execute();
+
+    // Case 2: mediaApprovalFulfill has an open demand, then a human CR is approved for it
+    await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: mediaApprovalFulfill.id,
+        season: null,
+        namespace_group: "platform",
+        demand_count: 7,
+        status: "open",
+        next_eligible_at: t0,
+        last_demanded_at: t0,
+      })
+      .execute();
+
+    const userId = "demand-fulfill-user";
+    await testDb.writeDb
+      .insertInto("user")
+      .values({
+        id: userId,
+        name: "Submitter",
+        email: "demand-fulfill@example.com",
+        emailVerified: true,
+        role: "reviewer",
+        createdAt: t0,
+        updatedAt: t0,
+      })
+      .execute();
+
+    const cr = await createChangeRequest(testDb.writeDb, {
+      submitterUserId: userId,
+      targetExternalKey: mediaApprovalFulfill.id,
+      namespace: "bilibili",
+      nativeId: "ss34431",
+      variantDescription: "原声",
+      segments: [],
+      now: t0,
+    });
+    await approveChangeRequest(testDb.writeDb, createFakeOutboundClient(), {
+      changeRequestId: cr.id,
+      reviewerUserId: userId,
+      reason: "Confirmed manually",
+      now: t0,
+    });
+
+    // Approval MUST immediately mark mediaApprovalFulfill's open demand as fulfilled!
+    const demandAfterApprove = (
+      await listDemands(testDb.readDb, { mediaId: mediaApprovalFulfill.id })
+    )[0]!;
+    expect(demandAfterApprove.status).toBe("fulfilled");
+
+    // Now run scheduled tick: mediaScheduledSkip's stale open demand MUST be marked fulfilled with ZERO jobs & ZERO budget consumed!
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      adapterRegistry: createTier3PlatformRegistry(),
+      config: {
+        enableDailyTmdbSync: false,
+        exploration: { dailyBudget: 10 },
+      },
+      now: () => t0,
+    });
+
+    await worker.scheduled(createScheduledController(t0));
+    expect(emitted).toHaveLength(0);
+
+    const demandAfterSchedule = (
+      await listDemands(testDb.readDb, { mediaId: mediaScheduledSkip.id })
+    )[0]!;
+    expect(demandAfterSchedule.status).toBe("fulfilled");
+
+    const budgetRows = await testDb.readDb
+      .selectFrom("exploration_daily_budget")
+      .selectAll()
+      .execute();
+    expect(budgetRows.reduce((sum, row) => sum + row.consumed, 0)).toBe(0);
   });
 });

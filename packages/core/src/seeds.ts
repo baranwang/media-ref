@@ -27,8 +27,11 @@ import {
   type CatalogGatewayConfig,
   type CatalogTargetSnapshot,
 } from "./catalog-gateway.ts";
+import { fulfillCoveredDemandsForAssociationInTx } from "./demands.ts";
 import { evaluateEvidenceGate, type EvidenceGateStep2Evaluator } from "./evidence-gate.ts";
 import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
+import { recordLead } from "./leads.ts";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { isUuid, type AssociationNamespace } from "./media-service.ts";
 import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
 import {
@@ -41,11 +44,11 @@ import {
 export const SEED_EVIDENCE_CHECK_JOB_TYPE = "seed_evidence_check";
 export const SEED_EVIDENCE_FAILED_ALERT_TYPE = "seed_evidence_failed";
 export const DEFAULT_SEED_VARIANT_DESCRIPTION = "原声";
+export const SEED_IMPORTER_USER_ID = "system:seed-importer";
+export const SEED_IMPORTER_USER_EMAIL = "seed-importer@system.mediaref.internal";
+export const SEED_IMPORTER_USER_NAME = "Seed Importer";
+export const SEED_IMPORTER_KEY_ID = "system:seed-importer";
 
-const LOCK_CLASS_MEDIA_KEY = 1001;
-const LOCK_CLASS_MEDIA_NAMESPACE = 1002;
-const LOCK_CLASS_VARIANT = 1003;
-const LOCK_CLASS_COLLECTION = 1004;
 const MAX_MERGE_HOPS = 10;
 
 const POSITIVE_INT_PATTERN = /^[1-9]\d*$/;
@@ -405,14 +408,42 @@ function pickField(record: Record<string, unknown>, keys: readonly string[]): un
   return undefined;
 }
 
-async function acquireAdvisoryLock(
-  trx: Transaction<Database>,
-  lockClass: number,
-  lockKey: string,
-): Promise<void> {
-  await sql`select pg_advisory_xact_lock(${lockClass}::int4, hashtext(${lockKey}::text))`.execute(
-    trx,
-  );
+/**
+ * Ensures the deterministic system seed-importer user row exists in `"user"`
+ * so seed CLI runs can persist ambiguous entries to `leads` without dropping them.
+ */
+export async function ensureSeedImporterUser(dbWrite: Db): Promise<string> {
+  await dbWrite
+    .insertInto("user")
+    .values({
+      id: SEED_IMPORTER_USER_ID,
+      name: SEED_IMPORTER_USER_NAME,
+      email: SEED_IMPORTER_USER_EMAIL,
+      emailVerified: true,
+      image: null,
+      role: "user",
+      reputation: 0,
+    })
+    .onConflict((oc) => oc.column("id").doNothing())
+    .execute();
+
+  return SEED_IMPORTER_USER_ID;
+}
+
+export function createSeedLeadsReporter(dbWrite: Db): SeedLeadReporter {
+  let userEnsuredPromise: Promise<string> | null = null;
+  return async (lead) => {
+    userEnsuredPromise ??= ensureSeedImporterUser(dbWrite);
+    const reporterUserId = await userEnsuredPromise;
+    await recordLead(dbWrite, {
+      targetExternalKey: lead.targetExternalKey,
+      namespace: lead.namespace,
+      nativeId: lead.nativeId,
+      notes: `[seed:${lead.source}] ${lead.notes}`,
+      reporterUserId,
+      reporterKeyId: SEED_IMPORTER_KEY_ID,
+    });
+  };
 }
 
 async function resolveCanonicalMediaById(
@@ -536,7 +567,7 @@ async function upsertSeedAssociation(
   const normalizedSegments = normalizeSegments(input.segments);
 
   return dbWrite.transaction().execute(async (trx) => {
-    await acquireAdvisoryLock(trx, LOCK_CLASS_MEDIA_KEY, tmdbCanonicalKey);
+    await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_KEY, tmdbCanonicalKey);
 
     let media: ResolvedMediaRow | null = null;
     let mediaCreated = false;
@@ -659,7 +690,11 @@ async function upsertSeedAssociation(
         .execute();
     }
 
-    await acquireAdvisoryLock(trx, LOCK_CLASS_MEDIA_NAMESPACE, `${media.id}:${input.namespace}`);
+    await acquireAdvisoryLock(
+      trx,
+      ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE,
+      `${media.id}:${input.namespace}`,
+    );
 
     const existingAssociation = await trx
       .selectFrom("associations")
@@ -707,10 +742,14 @@ async function upsertSeedAssociation(
     }
 
     if (existingVariantId !== null) {
-      await acquireAdvisoryLock(trx, LOCK_CLASS_VARIANT, existingVariantId);
+      await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.VARIANT, existingVariantId);
     }
 
-    await acquireAdvisoryLock(trx, LOCK_CLASS_COLLECTION, `${input.namespace}:${input.nativeId}`);
+    await acquireAdvisoryLock(
+      trx,
+      ADVISORY_LOCK_CLASSES.COLLECTION,
+      `${input.namespace}:${input.nativeId}`,
+    );
 
     if (platformNamespace !== null) {
       if (existingVariantId !== null) {
@@ -811,7 +850,7 @@ async function upsertSeedAssociation(
         .executeTakeFirstOrThrow();
 
       resolvedVariantId = createdVariant.id;
-      await acquireAdvisoryLock(trx, LOCK_CLASS_VARIANT, resolvedVariantId);
+      await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.VARIANT, resolvedVariantId);
     }
 
     const insertedAssoc = await trx
@@ -2652,15 +2691,15 @@ export function createSeedEvidenceCheckJobHandler(
 
           await acquireAdvisoryLock(
             trx,
-            LOCK_CLASS_MEDIA_NAMESPACE,
+            ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE,
             `${media.id}:${current.namespace}`,
           );
           if (current.variant_id !== null) {
-            await acquireAdvisoryLock(trx, LOCK_CLASS_VARIANT, current.variant_id);
+            await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.VARIANT, current.variant_id);
           }
           await acquireAdvisoryLock(
             trx,
-            LOCK_CLASS_COLLECTION,
+            ADVISORY_LOCK_CLASSES.COLLECTION,
             `${current.namespace}:${current.native_id}`,
           );
 
@@ -2782,6 +2821,13 @@ export function createSeedEvidenceCheckJobHandler(
             })
             .where("id", "=", current.id)
             .execute();
+
+          await fulfillCoveredDemandsForAssociationInTx(trx, {
+            mediaId: media.id,
+            namespace: current.namespace,
+            segments: currentSegments,
+            now: ctx.now,
+          });
         },
       };
     }
