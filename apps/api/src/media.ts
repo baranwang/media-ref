@@ -1,9 +1,11 @@
-import type { MediaDocument, NamespaceGroup } from "@media-ref/client";
+import { parseExternalKey, type MediaDocument, type NamespaceGroup } from "@media-ref/client";
 import {
   BatchMediaQueryError,
   computeDemandTargetsForBatchRead,
   computeDemandTargetsForRead,
   DEFAULT_DEMAND_NAMESPACE_GROUP,
+  enqueueSeedEvidenceChecksForMedia,
+  isAssociationNamespace,
   MAX_BATCH_MEDIA_KEYS,
   queryMediaBatch,
   queryMediaByKey,
@@ -11,6 +13,7 @@ import {
   recordDemandsForBatchRead,
   type BatchMediaQueryResult,
   type MediaQueryItem,
+  type UnmatchedAssociationLookupKey,
 } from "@media-ref/core";
 import type { Context, Hono } from "hono";
 import { requireApiKey } from "./api-keys.ts";
@@ -219,6 +222,34 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
         );
       }
 
+      const resolvedBatchMediaIds: string[] = [];
+      const unmatchedBatchAssocKeys: UnmatchedAssociationLookupKey[] = [];
+      for (const entry of results) {
+        if (entry.ok) {
+          for (const item of entry.items) {
+            resolvedBatchMediaIds.push(item.document.media.id);
+          }
+        } else if (entry.error === "NOT_FOUND") {
+          const parsedKey = parseExternalKey(entry.key.trim());
+          if (parsedKey && isAssociationNamespace(parsedKey.namespace)) {
+            unmatchedBatchAssocKeys.push({
+              namespace: parsedKey.namespace,
+              nativeId: parsedKey.nativeId,
+            });
+          }
+        }
+      }
+      if (resolvedBatchMediaIds.length > 0 || unmatchedBatchAssocKeys.length > 0) {
+        const dbWrite = c.get("dbWrite");
+        const now = c.get("now")();
+        scheduleBackgroundTask(c, () =>
+          enqueueSeedEvidenceChecksForMedia(dbWrite, resolvedBatchMediaIds, {
+            now,
+            unmatchedAssociationKeys: unmatchedBatchAssocKeys,
+          }),
+        );
+      }
+
       const response: BatchMediaReadResponse = { results };
       return c.json(response, 200);
     } catch (error) {
@@ -289,7 +320,34 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
     }
 
     if (result.kind === "not_found") {
+      const parsedMissingKey = parseExternalKey(rawKey);
+      if (parsedMissingKey && isAssociationNamespace(parsedMissingKey.namespace)) {
+        const missingNamespace = parsedMissingKey.namespace;
+        const missingNativeId = parsedMissingKey.nativeId;
+        const dbWrite = c.get("dbWrite");
+        const now = c.get("now")();
+        scheduleBackgroundTask(c, () =>
+          enqueueSeedEvidenceChecksForMedia(dbWrite, [], {
+            now,
+            unmatchedAssociationKeys: [
+              {
+                namespace: missingNamespace,
+                nativeId: missingNativeId,
+              },
+            ],
+          }),
+        );
+      }
       return c.json({ error: "MEDIA_NOT_FOUND", message: "Media not found" }, 404);
+    }
+
+    const resolvedMediaIds = [...new Set(result.items.map((item) => item.document.media.id))];
+    if (resolvedMediaIds.length > 0) {
+      const dbWrite = c.get("dbWrite");
+      const now = c.get("now")();
+      scheduleBackgroundTask(c, () =>
+        enqueueSeedEvidenceChecksForMedia(dbWrite, resolvedMediaIds, { now }),
+      );
     }
 
     const primary = result.items[0]!;
