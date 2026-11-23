@@ -1,5 +1,5 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
-import { createApiApp } from "@media-ref/api";
+import { createApiApp } from "@media-ref/api/app";
 import { resolveEpisode, type MediaDocument } from "@media-ref/client";
 import {
   bilibiliAdapter,

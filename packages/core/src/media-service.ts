@@ -36,6 +36,7 @@ import {
 } from "./adapters/index.ts";
 import { enqueueJob } from "./jobs.ts";
 import type { OutboundClient } from "./outbound.ts";
+import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
 import {
   TmdbGatewayError,
   createTmdbGateway,
@@ -140,6 +141,8 @@ export interface CreateChangeRequestInput {
   setDefaultVariant?: boolean;
   segments?: readonly SegmentInput[];
   initialStatus?: "needs_review" | "pending_evidence";
+  submissionQuota?: SubmissionQuotaConfig;
+  now?: Date;
 }
 
 export interface CreateChangeRequestOptions {
@@ -881,8 +884,15 @@ export async function createChangeRequest(
       ? TIER1_MANUAL_REVIEW_REASON
       : null;
   const shouldEnqueueEvidenceCheck = resolvedStatus === "pending_evidence";
+  const effectiveNow = input.now ?? options.now;
 
   const inserted = await dbWrite.transaction().execute(async (trx) => {
+    const quota = await enforceSubmissionQuotaInTx(trx, {
+      submitterUserId: input.submitterUserId,
+      config: input.submissionQuota,
+      now: effectiveNow,
+    });
+
     const row = await trx
       .insertInto("change_requests")
       .values({
@@ -901,6 +911,7 @@ export async function createChangeRequest(
         set_default_variant: setDefaultVariant,
         segments: JSON.stringify(normalizedSegments),
         decision_reason: initialDecisionReason,
+        ...(effectiveNow ? { created_at: quota.referenceNow, updated_at: quota.referenceNow } : {}),
       })
       .returningAll()
       .executeTakeFirstOrThrow();
@@ -910,7 +921,7 @@ export async function createChangeRequest(
         jobType: EVIDENCE_CHECK_JOB_TYPE,
         payload: { changeRequestId: row.id },
         dedupeKey: `${EVIDENCE_CHECK_JOB_TYPE}:${row.id}`,
-        runAfter: options.now,
+        runAfter: effectiveNow ?? quota.referenceNow,
       });
     }
 

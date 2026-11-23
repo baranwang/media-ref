@@ -43,7 +43,7 @@ export function sanitizeRedirectPath(raw: unknown): string | undefined {
 }
 
 export function isReviewer(user: CurrentUser | null | undefined): boolean {
-  return user?.role === "reviewer" || user?.role === "admin";
+  return user?.role === "reviewer" || user?.role === "owner" || user?.role === "admin";
 }
 
 export const fetchCurrentUser = createIsomorphicFn()

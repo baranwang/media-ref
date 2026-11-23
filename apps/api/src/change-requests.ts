@@ -4,6 +4,7 @@ import {
   getChangeRequestById,
   isUuid,
   MediaServiceError,
+  SubmissionQuotaExceededError,
 } from "@media-ref/core";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -229,16 +230,33 @@ export function registerChangeRequestRoutes(app: Hono<ApiEnv>): void {
             typeof rawVariantDescription === "string" ? rawVariantDescription : null,
           setDefaultVariant: Boolean(body.setDefaultVariant),
           segments: (body.segments as SegmentInput[] | undefined) ?? [],
+          submissionQuota: c.get("submissionQuota"),
+          now: c.get("hasCustomClock") ? c.get("now")() : undefined,
         },
         {
           adapterRegistry: c.get("adapterRegistry"),
           outbound: c.get("outbound"),
-          now: c.get("now")(),
+          now: c.get("hasCustomClock") ? c.get("now")() : undefined,
         },
       );
 
       return c.json({ changeRequest }, 201);
     } catch (error) {
+      if (error instanceof SubmissionQuotaExceededError) {
+        c.header("Retry-After", String(error.retryAfterSeconds));
+        return c.json(
+          {
+            error: error.code,
+            scope: error.scope,
+            limit: error.limit,
+            used: error.used,
+            windowSeconds: error.windowSeconds,
+            retryAfterSeconds: error.retryAfterSeconds,
+            message: error.message,
+          },
+          429,
+        );
+      }
       if (error instanceof MediaServiceError) {
         return handleMediaServiceError(c, error);
       }

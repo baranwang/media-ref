@@ -79,11 +79,14 @@ export interface Variant {
   namespace: PlatformNamespace;
   label: string;
   isDefault: boolean;
+  unconfirmed?: boolean;
 }
 
 export type AssociationStatus = "confirmed" | "seed_unconfirmed" | "delisted";
 
 export type ChangeRequestStatus = "pending_evidence" | "approved" | "needs_review" | "rejected";
+
+export type UnconfirmedAssociationSource = "seed_unconfirmed" | "change_request";
 
 export type PlatformStatus = "associated" | "not_found" | "unchecked";
 
@@ -140,6 +143,9 @@ export interface Association {
   needsReview?: boolean;
   locked?: boolean;
   unconfirmed?: boolean;
+  unconfirmedSource?: UnconfirmedAssociationSource;
+  changeRequestId?: string;
+  changeRequestStatus?: Extract<ChangeRequestStatus, "pending_evidence" | "needs_review">;
 }
 
 export interface MediaDocument {

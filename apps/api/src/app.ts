@@ -3,6 +3,7 @@ import {
   type AdapterRegistry,
   type ExternalTargetKind,
   type OutboundClient,
+  type ReputationTier,
   type TmdbGateway,
   type TmdbGatewayConfig,
 } from "@media-ref/core";
@@ -22,12 +23,27 @@ import {
 import { registerChangeRequestRoutes } from "./change-requests.ts";
 import { registerLeadRoutes } from "./leads.ts";
 import { registerMediaRoutes } from "./media.ts";
+import {
+  createReadRateLimitRuntime,
+  resolveSubmissionQuotaConfig,
+  type RateLimitBinding,
+  type RateLimitConfig,
+} from "./rate-limit.ts";
 import { registerReviewerRoutes } from "./reviewer.ts";
 
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
   now?: () => Date;
   tmdb?: TmdbGatewayConfig;
+  rateLimits?: RateLimitConfig;
+  readKeyLimit?: number;
+  readIpLimit?: number;
+  readPeriodSeconds?: number;
+  readRetryAfterSeconds?: number;
+  submitBaseHourlyLimit?: number;
+  submitWindowSeconds?: number;
+  reputationTiers?: readonly ReputationTier[];
+  roleHourlyLimits?: Partial<Record<string, number>>;
 }
 
 export interface ApiDeps {
@@ -36,6 +52,8 @@ export interface ApiDeps {
   outbound: OutboundClient;
   adapterRegistry?: AdapterRegistry;
   tmdbGateway?: TmdbGateway;
+  readKeyLimiter?: RateLimitBinding;
+  readIpLimiter?: RateLimitBinding;
   config: ApiConfig;
 }
 
@@ -63,8 +81,32 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     return cachedAuth;
   };
 
+  const hasCustomClock = deps.config.now !== undefined;
   const now = deps.config.now ?? (() => new Date());
   const adapterRegistry = deps.adapterRegistry ?? createDefaultAdapterRegistry();
+  const readRateLimit = createReadRateLimitRuntime({
+    readKeyLimiter: deps.readKeyLimiter,
+    readIpLimiter: deps.readIpLimiter,
+    config: {
+      ...deps.config.rateLimits,
+      ...(deps.config.readKeyLimit !== undefined ? { readKeyLimit: deps.config.readKeyLimit } : {}),
+      ...(deps.config.readIpLimit !== undefined ? { readIpLimit: deps.config.readIpLimit } : {}),
+      ...(deps.config.readPeriodSeconds !== undefined
+        ? { readPeriodSeconds: deps.config.readPeriodSeconds }
+        : {}),
+      ...(deps.config.readRetryAfterSeconds !== undefined
+        ? { readRetryAfterSeconds: deps.config.readRetryAfterSeconds }
+        : {}),
+    },
+    now,
+  });
+  const submissionQuota = resolveSubmissionQuotaConfig({
+    rateLimits: deps.config.rateLimits,
+    submitBaseHourlyLimit: deps.config.submitBaseHourlyLimit,
+    submitWindowSeconds: deps.config.submitWindowSeconds,
+    reputationTiers: deps.config.reputationTiers,
+    roleHourlyLimits: deps.config.roleHourlyLimits,
+  });
 
   app.use(
     "*",
@@ -84,6 +126,9 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     c.set("tmdbConfig", deps.config.tmdb);
     c.set("tmdbGateway", deps.tmdbGateway);
     c.set("now", now);
+    c.set("hasCustomClock", hasCustomClock);
+    c.set("readRateLimit", readRateLimit);
+    c.set("submissionQuota", submissionQuota);
     c.set("session", null);
     c.set("apiKey", null);
     if (c.req.path !== "/health" && c.req.path !== "/health/outbound") {

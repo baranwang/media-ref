@@ -1,3 +1,4 @@
+import { sql } from "kysely";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { runMigrations } from "../src/index.ts";
 import { createTestDb, type TestDbHandle } from "../src/testing.ts";
@@ -48,6 +49,16 @@ describe("packages/db migrations", () => {
       },
       {
         migrationName: "0006_leads",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0007_platform_status",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0008_reputation_rate_limits",
         direction: "Up",
         status: "Success",
       },
@@ -151,7 +162,7 @@ describe("packages/db migrations", () => {
 
     const userRow = await testDb.readDb
       .selectFrom("user")
-      .select(["id", "email", "emailVerified", "role"])
+      .select(["id", "email", "emailVerified", "role", "reputation"])
       .where("id", "=", "user_1")
       .executeTakeFirst();
 
@@ -160,6 +171,7 @@ describe("packages/db migrations", () => {
       email: "dev@mediaref.org",
       emailVerified: false,
       role: "user",
+      reputation: 0,
     });
 
     const insertedJob = await testDb.writeDb
@@ -367,6 +379,17 @@ describe("packages/db migrations", () => {
       submitter_type: "human",
     });
 
+    const submitterCreatedIdx = await sql<{ indexdef: string }>`
+      select indexdef
+      from pg_indexes
+      where schemaname = 'public'
+        and tablename = 'change_requests'
+        and indexname = 'change_requests_submitter_created_idx'
+    `.execute(testDb.readDb);
+
+    expect(submitterCreatedIdx.rows).toHaveLength(1);
+    expect(submitterCreatedIdx.rows[0]?.indexdef).toMatch(/submitter_user_id,\s*created_at DESC/i);
+
     const insertedLead = await testDb.writeDb
       .insertInto("leads")
       .values({
@@ -421,6 +444,84 @@ describe("packages/db migrations", () => {
           native_id: "ss34430",
           reporter_user_id: "nonexistent_user",
           reporter_key_id: "key_1",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Platform checks table from 0007_platform_status
+    const checkedAt = new Date("2026-11-20T12:00:00.000Z");
+    const nextRetryAt = new Date("2026-11-27T12:00:00.000Z");
+    const insertedCheck = await testDb.writeDb
+      .insertInto("platform_checks")
+      .values({
+        media_id: insertedMedia.id,
+        platform: "iqiyi",
+        status: "not_found",
+        checked_at: checkedAt,
+        next_retry_at: nextRetryAt,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedCheck).toMatchObject({
+      media_id: insertedMedia.id,
+      platform: "iqiyi",
+      status: "not_found",
+      attempt_count: 1,
+    });
+    expect(insertedCheck.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(insertedCheck.checked_at.toISOString()).toBe(checkedAt.toISOString());
+    expect(insertedCheck.next_retry_at?.toISOString()).toBe(nextRetryAt.toISOString());
+
+    // Unique (media_id, platform) prevents duplicate check rows for the same platform
+    await expect(
+      testDb.writeDb
+        .insertInto("platform_checks")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "iqiyi",
+          status: "not_found",
+          checked_at: checkedAt,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Rejects invalid platform, invalid status, and attempt_count < 1
+    await expect(
+      testDb.writeDb
+        .insertInto("platform_checks")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "douban" as any,
+          status: "not_found",
+          checked_at: checkedAt,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("platform_checks")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "youku",
+          status: "associated" as any,
+          checked_at: checkedAt,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("platform_checks")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "youku",
+          status: "not_found",
+          checked_at: checkedAt,
+          attempt_count: 0,
         })
         .execute(),
     ).rejects.toThrow();
