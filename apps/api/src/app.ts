@@ -1,8 +1,18 @@
 import type { ExternalTargetKind, OutboundClient } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
+import {
+  AUTH_BASE_PATH,
+  createAuth,
+  isAllowedCorsOrigin,
+  requireAuthenticatedSession,
+  type ApiEnv,
+  type AuthConfig,
+  type AuthInstance,
+} from "./auth.ts";
 
-export interface ApiConfig {
+export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
 }
 
@@ -24,8 +34,36 @@ function isValidHttpUrl(raw: string): boolean {
   }
 }
 
-export function createApiApp(deps: ApiDeps): Hono {
-  const app = new Hono();
+export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
+  const app = new Hono<ApiEnv>();
+  let cachedAuth: AuthInstance | undefined;
+
+  const getAuth = (): AuthInstance => {
+    cachedAuth ??= createAuth({
+      dbWrite: deps.dbWrite,
+      outbound: deps.outbound,
+      config: deps.config,
+    });
+    return cachedAuth;
+  };
+
+  app.use(
+    "*",
+    cors({
+      origin: (origin) => (isAllowedCorsOrigin(origin, deps.config) ? origin : ""),
+      allowHeaders: ["Content-Type", "Authorization"],
+      allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      credentials: true,
+    }),
+  );
+
+  app.use("*", async (c, next) => {
+    c.set("session", null);
+    if (c.req.path !== "/health" && c.req.path !== "/health/outbound") {
+      c.set("auth", getAuth());
+    }
+    await next();
+  });
 
   app.get("/health", async (c) => {
     try {
@@ -78,6 +116,16 @@ export function createApiApp(deps: ApiDeps): Hono {
       }
     });
   }
+
+  app.on(["GET", "POST"], `${AUTH_BASE_PATH}/*`, (c) => c.get("auth").handler(c.req.raw));
+
+  app.get("/v1/me", requireAuthenticatedSession, (c) => {
+    const session = c.get("session");
+    if (!session) {
+      return c.json({ error: "UNAUTHORIZED", message: "Authentication required" }, 401);
+    }
+    return c.json(session.user, 200);
+  });
 
   return app;
 }

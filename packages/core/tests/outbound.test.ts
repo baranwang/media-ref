@@ -82,6 +82,62 @@ describe("OutboundClient live HTTP routing", () => {
     expect(captured[0]?.headers.get("user-agent")).toBe("media-ref-bot");
     expect(captured[1]?.url).toBe("https://api.themoviedb.org/3/tv/95479");
   });
+
+  test("sends email via Cloudflare Email Service binding when emailBinding is configured", async () => {
+    const sentPayloads: unknown[] = [];
+    const emailBinding = {
+      async send(builder: {
+        from: string;
+        to: string | string[];
+        subject: string;
+        text?: string;
+        html?: string;
+      }) {
+        sentPayloads.push(builder);
+        return { messageId: "msg_123" };
+      },
+    };
+
+    const outbound = createLiveOutboundClient({
+      emailBinding,
+      defaultEmailFrom: "noreply@mediaref.org",
+    });
+
+    await outbound.sendEmail({
+      to: "dev@example.com",
+      subject: "Verify your email",
+      text: "Open https://api.mediaref.org/api/auth/verify-email?token=abc",
+      html: '<a href="https://api.mediaref.org/api/auth/verify-email?token=abc">Verify</a>',
+    });
+
+    expect(sentPayloads).toEqual([
+      {
+        from: "noreply@mediaref.org",
+        to: "dev@example.com",
+        subject: "Verify your email",
+        text: "Open https://api.mediaref.org/api/auth/verify-email?token=abc",
+        html: '<a href="https://api.mediaref.org/api/auth/verify-email?token=abc">Verify</a>',
+      },
+    ]);
+  });
+
+  test("rejects emailBinding delivery when neither message.from nor defaultEmailFrom is provided", async () => {
+    const emailBinding = {
+      async send() {
+        return { messageId: "msg_123" };
+      },
+    };
+
+    const outbound = createLiveOutboundClient({ emailBinding });
+
+    await expect(
+      outbound.sendEmail({
+        to: "dev@example.com",
+        subject: "Verify your email",
+        text: "Hello",
+      }),
+    ).rejects.toThrow(/sender/i);
+  });
 });
 
 describe("createFakeOutboundClient", () => {

@@ -28,6 +28,8 @@ export {
   createFakeOutboundClient,
   createLiveOutboundClient,
   parseOutboundProxyConfig,
+  type CloudflareSendEmailBinding,
+  type CloudflareSendEmailPayload,
   type EmailMessage,
   type ExternalHttpMethod,
   type ExternalHttpRequest,
