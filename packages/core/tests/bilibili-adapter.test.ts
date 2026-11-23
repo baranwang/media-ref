@@ -340,7 +340,7 @@ describe("Bilibili Tier 1 & Tier 2 adapter", () => {
     expect(bili && isTier2Adapter(bili)).toBe(true);
     expect(bili && isTier3Adapter(bili)).toBe(true);
     expect(defaultRegistry.listByMinTier(2).map((a) => a.namespace)).toContain("bilibili");
-    expect(defaultRegistry.listByMinTier(3).map((a) => a.namespace)).toEqual(["bilibili"]);
+    expect(defaultRegistry.listByMinTier(3).map((a) => a.namespace)).toEqual(["bilibili", "iqiyi"]);
 
     const tier1Stub = createTier1Adapter({
       namespace: "youku",

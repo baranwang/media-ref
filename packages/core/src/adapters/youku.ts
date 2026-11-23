@@ -36,6 +36,14 @@ import {
  *   rather than fabricating episode counts or auto-approving.
  * - Alibaba TMD/Baxia CAPTCHA (`_____tmd_____/punish`) is NEVER bypassed and returns
  *   `transient_error` (or `AdapterTransientError` during Tier 1 resolution).
+ *
+ * Tier 3 search status (intentionally stays Tier 2 — Ticket #30):
+ * - Empirically verified unauthenticated search blocks (no CAPTCHA/auth bypassing):
+ *   - `GET https://so.youku.com/search_video/q_<keyword>` is gated by Alibaba TMD/Baxia CAPTCHA
+ *     (`_____tmd_____/punish`, `window._config_ = {"action":"captcha", ...}`).
+ *   - Alibaba MTOP search endpoints require dynamic `mtop_tk` session cookies + MD5 signing.
+ * - Therefore `youkuAdapter` intentionally remains `tier: 2` (no `search` method) and is excluded
+ *   from automated exploration job target lists.
  */
 
 const YOUKU_SHOW_HOSTS = new Set(["youku.com", "www.youku.com", "list.youku.com", "m.youku.com"]);

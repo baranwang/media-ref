@@ -33,7 +33,15 @@ import {
  * - Feature episode list: `page_id: "vsite_episode_list"`, paginated across `module_params.tabs[].page_context`.
  *   Strictly filters feature episodes (`is_trailer === "0"` and numeric `title`/`c_title_output` for series,
  *   excluding trailers and bonus `彩蛋` clips).
- * - Tencent Video stays at Tier 2: unauthenticated search endpoints (`HttpSearch` / `GetSmartbox`) return `ret: 10401`.
+ * ## Tier 3 Search Status (Intentionally Stays Tier 2 — Ticket #30)
+ * Empirically verified unauthenticated search blocks (no auth/CAPTCHA bypassing):
+ * - `pbaccess` `MultiTerminalSearch/HttpSearch` & `SmartboxCgi/GetSmartbox` return HTTP 200
+ *   `{"ret":10401,"msg":"unknow error."}` without signed/authenticated client context.
+ * - `https://v.qq.com/x/search/?q=...` returns a ~2.8 KB client-only SPA shell with no SSR results.
+ * - Legacy `union.video.qq.com/fcgi-bin/data` returns `{"errorno":-111013,"errormsg":"禁止外部访问接口"}`
+ *   (partner auth required), and `s.video.qq.com` times out on TLS handshake.
+ * - Therefore `tencentAdapter` intentionally remains `tier: 2` (no `search` method) and is excluded
+ *   from automated exploration job target lists.
  */
 
 const TENCENT_ALLOWED_HOSTS = new Set(["v.qq.com", "m.v.qq.com"]);

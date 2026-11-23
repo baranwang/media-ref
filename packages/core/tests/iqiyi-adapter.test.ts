@@ -250,14 +250,15 @@ describe("iQIYI Tier 1 & Tier 2 adapter (#14)", () => {
     ).rejects.toBeInstanceOf(AdapterTransientError);
   });
 
-  test("registers iqiyiAdapter at Tier 2 in createDefaultAdapterRegistry()", () => {
+  test("registers iqiyiAdapter at Tier 3 in createDefaultAdapterRegistry()", () => {
     const registry = createDefaultAdapterRegistry();
     const adapter = registry.get("iqiyi");
     expect(adapter).toBeDefined();
-    expect(adapter?.tier).toBe(2);
+    expect(adapter?.tier).toBe(3);
     expect(adapter && isTier2Adapter(adapter)).toBe(true);
-    expect(adapter && isTier3Adapter(adapter)).toBe(false);
+    expect(adapter && isTier3Adapter(adapter)).toBe(true);
     expect(registry.listByMinTier(2).map((a) => a.namespace)).toContain("iqiyi");
+    expect(registry.listByMinTier(3).map((a) => a.namespace)).toContain("iqiyi");
   });
 
   test("fetches TV album metadata, paginates epsodelist (size=50), filters contentType === 1, and uses firstVideo.period over data.period", async () => {
@@ -769,5 +770,381 @@ describe("iQIYI Tier 1 & Tier 2 adapter (#14)", () => {
     expect((await iqiyiAdapter.fetchCollection("600000001", outbound)).status).toBe(
       "transient_error",
     );
+  });
+});
+
+describe("iQIYI Tier 3 search (#30)", () => {
+  test("searches search.video.iqiyi.com/o, filters siteId === 'iqiyi', maps TV & movie channels, parses releaseDate & itemTotalNumber, and deduplicates by canonicalId", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        expect(request.kind).toBe("platform");
+        expect(request.namespace).toBe("iqiyi");
+        expect(request.method).toBe("GET");
+
+        const url = new URL(request.url);
+        expect(url.origin + url.pathname).toBe("https://search.video.iqiyi.com/o");
+        expect(url.searchParams.get("if")).toBe("html5");
+        expect(url.searchParams.get("key")).toBe("流浪地球");
+        expect(url.searchParams.get("pageNum")).toBe("1");
+        expect(url.searchParams.get("pageSize")).toBe("10");
+        expect(url.searchParams.get("site")).toBe("iqiyi");
+
+        return jsonResponse(request.url, {
+          code: "A00000",
+          data: {
+            code: 0,
+            docinfos: [
+              // Valid iQIYI movie (00-suffix)
+              {
+                qipu_id: 923452300,
+                albumDocInfo: {
+                  albumId: 923452300,
+                  qipu_id: 923452300,
+                  albumTitle: "流浪地球",
+                  albumEnglishTitle: "The Wandering Earth",
+                  channel: "电影,1",
+                  releaseDate: "20190205",
+                  itemTotalNumber: 1,
+                  albumLink: "https://www.iqiyi.com/v_19rrfe142o.html",
+                  siteId: "iqiyi",
+                },
+              },
+              // Duplicate albumId -> must be deduplicated
+              {
+                qipu_id: 923452300,
+                albumDocInfo: {
+                  albumId: 923452300,
+                  albumTitle: "流浪地球（重复）",
+                  channel: "电影,1",
+                  releaseDate: "20190205",
+                  itemTotalNumber: 1,
+                  siteId: "iqiyi",
+                },
+              },
+              // Third-party siteId (qq / youku) -> must be excluded
+              {
+                qipu_id: 888888801,
+                albumDocInfo: {
+                  albumId: 888888801,
+                  albumTitle: "流浪地球（腾讯站外）",
+                  channel: "电影,1",
+                  releaseDate: "20190205",
+                  itemTotalNumber: 1,
+                  siteId: "qq",
+                },
+              },
+              // Valid iQIYI documentary TV series using qipu_id fallback
+              {
+                qipu_id: 4606537651261201,
+                albumDocInfo: {
+                  qipu_id: 4606537651261201,
+                  albumTitle: "流浪地球 幕后纪录片",
+                  channel: "纪录片,3",
+                  releaseDate: "20250626",
+                  itemTotalNumber: 10,
+                  albumLink: "http://www.iqiyi.com/a_18schl0p4sd.html",
+                  siteId: "iqiyi",
+                },
+              },
+              // Valid iQIYI TV drama with parent docinfo qipu_id fallback
+              {
+                qipu_id: 5328486914190101,
+                albumDocInfo: {
+                  albumTitle: "狂飙",
+                  albumEnglishTitle: "The Knockout",
+                  channel: "电视剧,2",
+                  releaseDate: "2023-01-14",
+                  itemTotalNumber: "39",
+                  albumLink: "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+                  siteId: "iqiyi",
+                },
+              },
+              // Anime / Variety / Unrecognized channel + missing year & zero itemTotalNumber
+              {
+                albumDocInfo: {
+                  albumId: 202861101,
+                  albumTitle: "航海王",
+                  channel: "动漫,4",
+                  releaseDate: "19991020",
+                  itemTotalNumber: 1100,
+                  siteId: "iqiyi",
+                },
+              },
+              {
+                albumDocInfo: {
+                  albumId: 300000001,
+                  albumTitle: "快乐综艺",
+                  channel: "综艺,6",
+                  releaseDate: "",
+                  itemTotalNumber: 0,
+                  siteId: "iqiyi",
+                },
+              },
+              {
+                albumDocInfo: {
+                  albumId: 2380527423901501,
+                  albumTitle: "流浪地球解说",
+                  channel: "原创,27",
+                  releaseDate: "",
+                  itemTotalNumber: 8,
+                  siteId: "iqiyi",
+                },
+              },
+              // Invalid albumId (too short / zero) -> must be skipped
+              {
+                albumDocInfo: {
+                  albumId: 0,
+                  albumTitle: "无效合集",
+                  channel: "电视剧,2",
+                  siteId: "iqiyi",
+                },
+              },
+            ],
+          },
+        });
+      },
+    });
+
+    if (!isTier3Adapter(iqiyiAdapter)) {
+      throw new Error("Expected iqiyiAdapter to implement Tier 3 search");
+    }
+
+    const result = await iqiyiAdapter.search({ title: "流浪地球" }, outbound);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") {
+      return;
+    }
+
+    expect(outbound.httpRequests).toHaveLength(1);
+    expect(result.candidates).toEqual([
+      {
+        canonicalId: "923452300",
+        title: "流浪地球",
+        originalTitle: "The Wandering Earth",
+        year: 2019,
+        mediaType: "movie",
+        episodeCount: 1,
+        url: "https://www.iqiyi.com/v_19rrfe142o.html",
+      },
+      {
+        canonicalId: "4606537651261201",
+        title: "流浪地球 幕后纪录片",
+        year: 2025,
+        mediaType: "tv",
+        episodeCount: 10,
+        url: "http://www.iqiyi.com/a_18schl0p4sd.html",
+      },
+      {
+        canonicalId: "5328486914190101",
+        title: "狂飙",
+        originalTitle: "The Knockout",
+        year: 2023,
+        mediaType: "tv",
+        episodeCount: 39,
+        url: "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+      },
+      {
+        canonicalId: "202861101",
+        title: "航海王",
+        year: 1999,
+        mediaType: "tv",
+        episodeCount: 1100,
+      },
+      {
+        canonicalId: "300000001",
+        title: "快乐综艺",
+        year: null,
+        mediaType: "tv",
+        episodeCount: null,
+      },
+      {
+        canonicalId: "2380527423901501",
+        title: "流浪地球解说",
+        year: null,
+        mediaType: null,
+        episodeCount: 8,
+      },
+    ]);
+  });
+
+  test("maps empty search results and blank queries cleanly to { status: 'ok', candidates: [] } and respects page & limit", async () => {
+    const emptyOutbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        const key = url.searchParams.get("key");
+        if (key === "空数组") {
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: { code: 0, docinfos: [] },
+          });
+        }
+        if (key === "无docinfos字段") {
+          // Empirically observed iQIYI empty-result envelope: code "A00000", data without docinfos/code
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: { result_num: 0 },
+          });
+        }
+        if (key === "nullData") {
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: null,
+          });
+        }
+        throw new Error(`Unexpected search query: ${key}`);
+      },
+    });
+
+    // Blank query makes zero outbound requests
+    expect(await iqiyiAdapter.search({ title: "   " }, emptyOutbound)).toEqual({
+      status: "ok",
+      candidates: [],
+    });
+    expect(emptyOutbound.httpRequests).toHaveLength(0);
+
+    expect(await iqiyiAdapter.search({ title: "空数组" }, emptyOutbound)).toEqual({
+      status: "ok",
+      candidates: [],
+    });
+    expect(await iqiyiAdapter.search({ title: "无docinfos字段" }, emptyOutbound)).toEqual({
+      status: "ok",
+      candidates: [],
+    });
+    expect(await iqiyiAdapter.search({ title: "nullData" }, emptyOutbound)).toEqual({
+      status: "ok",
+      candidates: [],
+    });
+
+    const pagedOutbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        expect(url.searchParams.get("pageNum")).toBe("2");
+        expect(url.searchParams.get("pageSize")).toBe("2");
+        return jsonResponse(request.url, {
+          code: "A00000",
+          data: {
+            code: 0,
+            docinfos: [
+              {
+                albumDocInfo: {
+                  albumId: 100000101,
+                  albumTitle: "剧A",
+                  channel: "电视剧,2",
+                  releaseDate: "20240101",
+                  itemTotalNumber: 24,
+                  siteId: "iqiyi",
+                },
+              },
+              {
+                albumDocInfo: {
+                  albumId: 100000201,
+                  albumTitle: "剧B",
+                  channel: "电视剧,2",
+                  releaseDate: "20240201",
+                  itemTotalNumber: 30,
+                  siteId: "iqiyi",
+                },
+              },
+              {
+                albumDocInfo: {
+                  albumId: 100000301,
+                  albumTitle: "剧C",
+                  channel: "电视剧,2",
+                  releaseDate: "20240301",
+                  itemTotalNumber: 12,
+                  siteId: "iqiyi",
+                },
+              },
+            ],
+          },
+        });
+      },
+    });
+
+    const limited = await iqiyiAdapter.search({ title: "剧", page: 2, limit: 2 }, pagedOutbound);
+    expect(limited.status).toBe("ok");
+    if (limited.status === "ok") {
+      expect(limited.candidates.map((c) => c.canonicalId)).toEqual(["100000101", "100000201"]);
+    }
+  });
+
+  test("maps 5xx, 429 (with retry-after), timeouts, invalid JSON, non-A00000, and non-zero data.code to transient_error", async () => {
+    const scenarios: Array<{
+      label: string;
+      handler: () => ExternalHttpResponse | Promise<ExternalHttpResponse>;
+      expectedReasonPattern: RegExp;
+      expectedRetryAfterMs?: number;
+    }> = [
+      {
+        label: "http 503 upstream failure",
+        handler: () => ({
+          status: 503,
+          headers: {},
+          body: "Service Unavailable",
+          url: "https://search.video.iqiyi.com/o",
+        }),
+        expectedReasonPattern: /503/,
+      },
+      {
+        label: "http 429 rate limited with retry-after",
+        handler: () => ({
+          status: 429,
+          headers: { "retry-after": "45" },
+          body: "Too Many Requests",
+          url: "https://search.video.iqiyi.com/o",
+        }),
+        expectedReasonPattern: /429/,
+        expectedRetryAfterMs: 45_000,
+      },
+      {
+        label: "network timeout",
+        handler: async () => {
+          throw new Error("ETIMEDOUT connecting to search.video.iqiyi.com");
+        },
+        expectedReasonPattern: /ETIMEDOUT/,
+      },
+      {
+        label: "invalid JSON body",
+        handler: () => ({
+          status: 200,
+          headers: { "content-type": "text/html" },
+          body: "<html>gateway error</html>",
+          url: "https://search.video.iqiyi.com/o",
+        }),
+        expectedReasonPattern: /invalid_json/,
+      },
+      {
+        label: "non-A00000 top-level code",
+        handler: () =>
+          jsonResponse("https://search.video.iqiyi.com/o", {
+            code: "Q00304",
+            msg: "service busy",
+          }),
+        expectedReasonPattern: /Q00304/,
+      },
+      {
+        label: "non-zero nested data.code",
+        handler: () =>
+          jsonResponse("https://search.video.iqiyi.com/o", {
+            code: "A00000",
+            data: { code: -1, docinfos: [] },
+          }),
+        expectedReasonPattern: /data_code_-1/,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const outbound = createFakeOutboundClient({
+        fetchExternal: scenario.handler,
+      });
+      const result = await iqiyiAdapter.search({ title: "狂飙" }, outbound);
+      expect(result.status, scenario.label).toBe("transient_error");
+      if (result.status === "transient_error") {
+        expect(result.reason, scenario.label).toMatch(scenario.expectedReasonPattern);
+        if (scenario.expectedRetryAfterMs !== undefined) {
+          expect(result.retryAfterMs, scenario.label).toBe(scenario.expectedRetryAfterMs);
+        }
+      }
+    }
   });
 });

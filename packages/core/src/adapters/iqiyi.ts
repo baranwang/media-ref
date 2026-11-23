@@ -3,14 +3,17 @@ import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 import {
   AdapterTransientError,
   InvalidNativeIdError,
+  type AdapterSearchCandidate,
+  type AdapterSearchQuery,
+  type AdapterSearchResult,
   type CollectionEvidenceResult,
   type FeatureEpisode,
   type ParsedNativeIdInput,
-  type Tier2Adapter,
+  type Tier3Adapter,
 } from "./types.ts";
 
 /**
- * iQIYI (`iqiyi`) Platform Adapter (Tier 1 & Tier 2).
+ * iQIYI (`iqiyi`) Platform Adapter (Tier 1, Tier 2 & Tier 3).
  *
  * Canonical ID (`canonicalId`):
  * - Numeric `qipuId` / `albumId` string matching `/^[1-9]\d{5,}$/` (typically 9-16 digits):
@@ -44,6 +47,12 @@ import {
  * - Movies (`id` ending in `00`, or fallback when `album/album/baseinfo` returns `A00001`):
  *   - `GET https://pcw-api.iqiyi.com/video/video/baseinfo/<id>` for title, `channelId`, release
  *     year (`period` / `publishTime`), and 1 feature item.
+ *
+ * Tier 3 Search (`search`, Ticket #30):
+ * - Unauthenticated `GET https://search.video.iqiyi.com/o?if=html5&key=<keyword>&pageNum=<page>&pageSize=<size>&site=iqiyi`.
+ * - Parses `data.docinfos[].albumDocInfo`, filtering strictly to `siteId === "iqiyi"` and valid
+ *   numeric `albumId` / `qipu_id`, deduplicating by `canonicalId`, and mapping `channel`,
+ *   `releaseDate`, and `itemTotalNumber`.
  */
 
 const IQIYI_ALLOWED_HOSTS = new Set(["iqiyi.com", "www.iqiyi.com", "m.iqiyi.com"]);
@@ -60,10 +69,15 @@ const IQIYI_MOBILE_VIDEO_BASE = "https://m.iqiyi.com";
 const IQIYI_ALBUM_BASEINFO_API = "https://pcw-api.iqiyi.com/album/album/baseinfo";
 const IQIYI_ALBUM_AVLIST_API = "https://pcw-api.iqiyi.com/albums/album/avlistinfo";
 const IQIYI_VIDEO_BASEINFO_API = "https://pcw-api.iqiyi.com/video/video/baseinfo";
+const IQIYI_SEARCH_API = "https://search.video.iqiyi.com/o";
 
 const IQIYI_AVLIST_PAGE_SIZE = 50;
 const IQIYI_MAX_AVLIST_PAGES = 100;
+const IQIYI_SEARCH_DEFAULT_PAGE_SIZE = 10;
+const IQIYI_SEARCH_MAX_PAGE_SIZE = 20;
 const CST_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+const IQIYI_TV_CHANNEL_NAMES = new Set(["电视剧", "纪录片", "动漫", "综艺", "儿童", "少儿"]);
 
 const IQIYI_API_HEADERS: Record<string, string> = {
   referer: "https://www.iqiyi.com/",
@@ -251,6 +265,51 @@ function mapIqiyiMediaType(rawChannelId: unknown): MediaType | null {
     channelId === 6 ||
     channelId === 15
   ) {
+    return "tv";
+  }
+  return null;
+}
+
+function parseRetryAfterMs(headers: Record<string, string>): number | undefined {
+  const raw = headers["retry-after"];
+  if (!raw) {
+    return undefined;
+  }
+  const seconds = Number.parseInt(raw.trim(), 10);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return seconds * 1000;
+  }
+  return undefined;
+}
+
+function parseHttpUrl(raw: unknown): string | null {
+  const value = nonEmptyString(raw);
+  if (!value) {
+    return null;
+  }
+  return /^https?:\/\//i.test(value) ? value : null;
+}
+
+function mapIqiyiSearchChannel(rawChannel: unknown): MediaType | null {
+  if (typeof rawChannel === "number") {
+    return mapIqiyiMediaType(rawChannel);
+  }
+  const raw = nonEmptyString(rawChannel);
+  if (!raw) {
+    return null;
+  }
+  const parts = raw.split(/[,，]/).map((part) => part.trim());
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const mappedId = mapIqiyiMediaType(parts[i]);
+    if (mappedId !== null) {
+      return mappedId;
+    }
+  }
+  const label = parts[0];
+  if (label === "电影") {
+    return "movie";
+  }
+  if (label && IQIYI_TV_CHANNEL_NAMES.has(label)) {
     return "tv";
   }
   return null;
@@ -838,9 +897,9 @@ async function fetchMovieVideoCollection(
   };
 }
 
-export const iqiyiAdapter: Tier2Adapter<"iqiyi"> = {
+export const iqiyiAdapter: Tier3Adapter<"iqiyi"> = {
   namespace: "iqiyi",
-  tier: 2,
+  tier: 3,
 
   parseInput: parseIqiyiInput,
 
@@ -885,5 +944,149 @@ export const iqiyiAdapter: Tier2Adapter<"iqiyi"> = {
       return fetchMovieVideoCollection(trimmed, outbound);
     }
     return albumResult;
+  },
+
+  async search(query: AdapterSearchQuery, outbound: OutboundClient): Promise<AdapterSearchResult> {
+    const keyword = query.title.trim();
+    if (keyword.length === 0) {
+      return { status: "ok", candidates: [] };
+    }
+
+    const page =
+      query.page !== undefined && Number.isInteger(query.page) && query.page > 0 ? query.page : 1;
+    const limit =
+      query.limit !== undefined && Number.isInteger(query.limit) && query.limit > 0
+        ? query.limit
+        : null;
+    const pageSize =
+      limit !== null ? Math.min(limit, IQIYI_SEARCH_MAX_PAGE_SIZE) : IQIYI_SEARCH_DEFAULT_PAGE_SIZE;
+
+    const url = `${IQIYI_SEARCH_API}?if=html5&key=${encodeURIComponent(keyword)}&pageNum=${page}&pageSize=${pageSize}&site=iqiyi`;
+
+    let response: ExternalHttpResponse;
+    try {
+      response = await outbound.fetchExternal({
+        kind: "platform",
+        namespace: "iqiyi",
+        url,
+        method: "GET",
+        headers: IQIYI_API_HEADERS,
+      });
+    } catch (error) {
+      return {
+        status: "transient_error",
+        reason: error instanceof Error ? error.message : "iqiyi_search_request_failed",
+      };
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      const retryAfterMs =
+        response.status === 429 ? parseRetryAfterMs(response.headers) : undefined;
+      return {
+        status: "transient_error",
+        reason: `http_${response.status}`,
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response.body);
+    } catch {
+      return {
+        status: "transient_error",
+        reason: "invalid_json",
+      };
+    }
+
+    const root = asRecord(parsed);
+    if (!root) {
+      return {
+        status: "transient_error",
+        reason: "unexpected_payload",
+      };
+    }
+
+    const code = nonEmptyString(root.code);
+    if (!code) {
+      return {
+        status: "transient_error",
+        reason: "missing_code",
+      };
+    }
+    if (code !== "A00000") {
+      return {
+        status: "transient_error",
+        reason: `iqiyi_code_${code}`,
+      };
+    }
+
+    const data = asRecord(root.data);
+    if (!data) {
+      return { status: "ok", candidates: [] };
+    }
+
+    if (typeof data.code === "number" && data.code !== 0) {
+      return {
+        status: "transient_error",
+        reason: `iqiyi_search_data_code_${data.code}`,
+      };
+    }
+
+    const rawDocInfos = data.docinfos;
+    if (!Array.isArray(rawDocInfos)) {
+      return { status: "ok", candidates: [] };
+    }
+
+    const seenCanonicalIds = new Set<string>();
+    const candidates: AdapterSearchCandidate[] = [];
+
+    for (const rawDoc of rawDocInfos) {
+      const doc = asRecord(rawDoc);
+      const album = asRecord(doc?.albumDocInfo);
+      if (!doc || !album) {
+        continue;
+      }
+
+      const siteId = nonEmptyString(album.siteId)?.toLowerCase();
+      if (siteId !== "iqiyi") {
+        continue;
+      }
+
+      const canonicalId =
+        parseQipuId(album.albumId) ?? parseQipuId(album.qipu_id) ?? parseQipuId(doc.qipu_id);
+      if (!canonicalId || seenCanonicalIds.has(canonicalId)) {
+        continue;
+      }
+
+      const title = nonEmptyString(album.albumTitle);
+      if (!title) {
+        continue;
+      }
+
+      seenCanonicalIds.add(canonicalId);
+
+      const originalTitle = nonEmptyString(album.albumEnglishTitle);
+      const year = parseFourDigitYear(album.releaseDate);
+      const mediaType = mapIqiyiSearchChannel(album.channel);
+      const episodeCount = parsePositiveInt(album.itemTotalNumber);
+      const itemUrl = parseHttpUrl(album.albumLink);
+
+      candidates.push({
+        canonicalId,
+        title,
+        ...(originalTitle && originalTitle !== title ? { originalTitle } : {}),
+        year,
+        mediaType,
+        episodeCount,
+        ...(itemUrl ? { url: itemUrl } : {}),
+      });
+
+      if (limit !== null && candidates.length >= limit) {
+        break;
+      }
+    }
+
+    return { status: "ok", candidates };
   },
 };

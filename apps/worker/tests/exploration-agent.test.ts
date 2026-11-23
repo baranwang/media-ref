@@ -3,6 +3,7 @@ import { createApiApp } from "@media-ref/api/app";
 import { resolveEpisode, type MediaDocument } from "@media-ref/client";
 import {
   createFakeOutboundClient,
+  deriveExplorationTaskId,
   EVIDENCE_CHECK_JOB_TYPE,
   EXPLORATION_AGENT_USER_ID,
   EXPLORATION_JOB_TYPE,
@@ -280,6 +281,12 @@ function createJjkOutboundHttpHandler() {
         },
       });
     }
+    if (
+      request.namespace === "iqiyi" &&
+      request.url.startsWith("https://search.video.iqiyi.com/o")
+    ) {
+      return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
+    }
     throw new Error(`Unexpected outbound request: ${request.namespace} ${request.url}`);
   };
 }
@@ -289,12 +296,40 @@ function createSeasonAwareJjkModelHandler(): (
 ) => ModelInvocationResponse {
   return (request) => {
     const userPrompt = request.messages.find((m) => m.role === "user")?.content ?? "";
+    const isIqiyi = userPrompt.includes('"targetPlatform": "iqiyi"');
     const isSeason2 = userPrompt.includes('"requestedSeason": 2');
     const season = isSeason2 ? 2 : 1;
     const nativeId = isSeason2 ? "ss45574" : "ss34430";
     const episodeEnd = isSeason2 ? 23 : 24;
 
     const toolResults = request.messages.filter((m) => m.role === "tool");
+    if (isIqiyi) {
+      if (toolResults.length === 0) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: `call_iqiyi_search_s${season}`,
+              name: "search_platform",
+              arguments: { keyword: isSeason2 ? "咒术回战 第二季" : "咒术回战" },
+            },
+          ],
+          model: request.model ?? "test-model",
+        };
+      }
+      return {
+        content: null,
+        toolCalls: [
+          {
+            id: `call_iqiyi_nf_s${season}`,
+            name: "mark_not_found",
+            arguments: { reason: "not_on_iqiyi" },
+          },
+        ],
+        model: request.model ?? "test-model",
+      };
+    }
+
     if (toolResults.length === 0) {
       return {
         content: null,
@@ -424,19 +459,21 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     expect(emitted[0]?.jobType).toBe(EXPLORATION_JOB_TYPE);
     const explorationJobId = emitted[0]!.jobId;
 
-    // 5. queue executes exploration agent -> creates media lazily -> searches Bilibili -> inspects ss34430 -> submits CR + enqueues evidence_check
+    // 5. queue executes exploration agent -> creates media lazily -> searches Tier 3 platforms (bilibili & iqiyi) -> inspects ss34430 -> submits CR + enqueues evidence_check
     const expSummary = await worker.queue(createQueueBatch(emitted, t0).batch);
     expect(expSummary.completed).toBe(1);
-    expect(outbound.modelRequests).toHaveLength(3);
+    const modelCallsAfterExploration = outbound.modelRequests.length;
+    expect(modelCallsAfterExploration).toBe(5); // 3 for bilibili (search/inspect/submit) + 2 for iqiyi (search/not_found)
 
     const completedExpJob = await getJobById(testDb.readDb, explorationJobId);
     expect(completedExpJob?.status).toBe("completed");
     expect(typeof completedExpJob?.result?.durationMs).toBe("number");
 
+    const expectedBilibiliTaskId = await deriveExplorationTaskId(explorationJobId, "bilibili", 2);
     const agentCrs = await testDb.readDb
       .selectFrom("change_requests")
       .selectAll()
-      .where("task_id", "=", explorationJobId)
+      .where("task_id", "=", expectedBilibiliTaskId)
       .execute();
     expect(agentCrs).toHaveLength(1);
     expect(agentCrs[0]?.submitter_type).toBe("agent");
@@ -464,7 +501,7 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     expect(evSummary.completed).toBe(1);
 
     // Zero second LLM review model calls — Evidence Gate is purely deterministic code!
-    expect(outbound.modelRequests).toHaveLength(3);
+    expect(outbound.modelRequests).toHaveLength(modelCallsAfterExploration);
 
     // 7. Read again -> 200 with confirmed Bilibili ss34430 & resolvable via @media-ref/client
     const hitRes = await apiApp.fetch(
@@ -777,10 +814,35 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
             },
           });
         }
+        if (
+          request.namespace === "iqiyi" &&
+          request.url.startsWith("https://search.video.iqiyi.com/o")
+        ) {
+          return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
+        }
         throw new Error(`Unexpected outbound request: ${request.namespace} ${request.url}`);
       },
       invokeModel(request) {
+        const userPrompt = request.messages.find((m) => m.role === "user")?.content ?? "";
         const toolResults = request.messages.filter((m) => m.role === "tool");
+        if (userPrompt.includes('"targetPlatform": "iqiyi"')) {
+          if (toolResults.length === 0) {
+            return {
+              content: null,
+              toolCalls: [
+                { id: "c_iq1", name: "search_platform", arguments: { keyword: "咒术回战" } },
+              ],
+              model: request.model ?? "test-model",
+            };
+          }
+          return {
+            content: null,
+            toolCalls: [
+              { id: "c_iq2", name: "mark_not_found", arguments: { reason: "not_on_iqiyi" } },
+            ],
+            model: request.model ?? "test-model",
+          };
+        }
         if (toolResults.length === 0) {
           return {
             content: null,
@@ -969,7 +1031,7 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
       .where("media_id", "=", seqMediaId)
       .execute();
     expect(seqCrs).toHaveLength(1);
-    expect(seqCrs[0]?.task_id).toBe(seqMsg.jobId);
+    expect(seqCrs[0]?.task_id).toBe(await deriveExplorationTaskId(seqMsg.jobId, "bilibili", 2));
 
     const budgetAfterSeq = await testDb.readDb
       .selectFrom("exploration_daily_budget")
@@ -998,7 +1060,7 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
       .where("media_id", "=", raceMediaId)
       .execute();
     expect(raceCrs).toHaveLength(1);
-    expect(raceCrs[0]?.task_id).toBe(raceMsg.jobId);
+    expect(raceCrs[0]?.task_id).toBe(await deriveExplorationTaskId(raceMsg.jobId, "bilibili", 2));
 
     // Total daily budget strictly 2 (1 for sequential + 1 for concurrent)
     const budgetAfterRace = await testDb.readDb
@@ -1066,11 +1128,14 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
       fetchExternal(request) {
         if (request.url.includes(encodeURIComponent("遇到412风控的电影"))) {
           return {
-            status: 412,
+            status: request.namespace === "bilibili" ? 412 : 503,
             headers: { "content-type": "text/html" },
             body: "<html>risk control</html>",
             url: request.url,
           };
+        }
+        if (request.namespace === "iqiyi") {
+          return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
         }
         return jsonResponse(request.url, { code: 0, data: { numResults: 0, result: [] } });
       },
@@ -1264,10 +1329,39 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
             },
           });
         }
+        if (
+          request.namespace === "iqiyi" &&
+          request.url.startsWith("https://search.video.iqiyi.com/o")
+        ) {
+          return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
+        }
         throw new Error(`Unexpected outbound request: ${request.namespace} ${request.url}`);
       },
       invokeModel(request) {
+        const userPrompt = request.messages.find((m) => m.role === "user")?.content ?? "";
         const toolResults = request.messages.filter((m) => m.role === "tool");
+        if (userPrompt.includes('"targetPlatform": "iqiyi"')) {
+          if (toolResults.length === 0) {
+            return {
+              content: null,
+              toolCalls: [
+                {
+                  id: "c_iq1",
+                  name: "search_platform",
+                  arguments: { keyword: "哈利·波特与魔法石" },
+                },
+              ],
+              model: request.model ?? "custom-model",
+            };
+          }
+          return {
+            content: null,
+            toolCalls: [
+              { id: "c_iq2", name: "mark_not_found", arguments: { reason: "not_on_iqiyi" } },
+            ],
+            model: request.model ?? "custom-model",
+          };
+        }
         if (toolResults.length === 0) {
           return {
             content: null,
@@ -1462,12 +1556,34 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
 
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
+        if (request.namespace === "iqiyi") {
+          return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
+        }
         return jsonResponse(request.url, { code: 0, data: { result: [] } });
       },
       invokeModel(request) {
         const userPrompt = request.messages.find((m) => m.role === "user")?.content ?? "";
         if (userPrompt.includes("模型超时电影")) {
           throw new Error("AI Gateway 503 Service Unavailable");
+        }
+        if (userPrompt.includes('"targetPlatform": "iqiyi"')) {
+          const toolResults = request.messages.filter((m) => m.role === "tool");
+          if (toolResults.length === 0) {
+            return {
+              content: null,
+              toolCalls: [
+                { id: "call_iq_s", name: "search_platform", arguments: { keyword: "电影" } },
+              ],
+              model: request.model ?? "test-model",
+            };
+          }
+          return {
+            content: null,
+            toolCalls: [
+              { id: "call_iq_nf", name: "mark_not_found", arguments: { reason: "not_on_iqiyi" } },
+            ],
+            model: request.model ?? "test-model",
+          };
         }
         const match = userPrompt.match(/批量探索电影 (\d+)/);
         const idx = match ? Number(match[1]) : 1;
