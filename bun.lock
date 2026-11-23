@@ -50,6 +50,21 @@
         "wrangler": "^4.70.0",
       },
     },
+    "apps/worker": {
+      "name": "@media-ref/worker",
+      "version": "0.0.0",
+      "dependencies": {
+        "@media-ref/core": "workspace:*",
+        "@media-ref/db": "workspace:*",
+      },
+      "devDependencies": {
+        "@cloudflare/workers-types": "^5.20261123.1",
+        "@types/node": "^26.6.5",
+        "typescript": "catalog:",
+        "vite-plus": "catalog:",
+        "wrangler": "^4.70.0",
+      },
+    },
     "packages/client": {
       "name": "@media-ref/client",
       "version": "0.0.0",
@@ -61,6 +76,10 @@
     "packages/core": {
       "name": "@media-ref/core",
       "version": "0.0.0",
+      "dependencies": {
+        "@media-ref/db": "workspace:*",
+        "kysely": "^0.29.9",
+      },
       "devDependencies": {
         "@types/node": "^26.6.5",
         "typescript": "catalog:",
@@ -390,6 +409,8 @@
     "@media-ref/ui": ["@media-ref/ui@workspace:packages/ui"],
 
     "@media-ref/website": ["@media-ref/website@workspace:apps/website"],
+
+    "@media-ref/worker": ["@media-ref/worker@workspace:apps/worker"],
 
     "@modelcontextprotocol/core": ["@modelcontextprotocol/core@2.4.0", "", { "dependencies": { "zod": "^4.2.0" } }, "sha512-z8QBKqdfXLPzkLQuG4xp8hrVEMm1PZ1IgxMN2sMbJiFiAKOWXnAzogXn2W4aqIBlP1ea6U5yiqVquvUNM1Cj6Q=="],
 
