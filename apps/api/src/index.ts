@@ -33,6 +33,7 @@ export {
   type VerifyApiKeyResult,
 } from "./api-keys.ts";
 export { createApiApp, type ApiConfig, type ApiDeps } from "./app.ts";
+export { registerAssociationRoutes } from "./associations.ts";
 export { registerChangeRequestRoutes } from "./change-requests.ts";
 export {
   parseAnonymousInvalidationThresholdFromEnv,

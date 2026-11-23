@@ -1264,13 +1264,14 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
             },
           });
         }
-        if (request.url.includes("season_id=45574")) {
+        if (request.url.includes("season_id=45574") || request.url.includes("season_id=45575")) {
           // Split S1 part 2 (2020, 23 eps: eps 25..47)
+          const seasonId = request.url.includes("season_id=45575") ? 45575 : 45574;
           return jsonResponse(request.url, {
             code: 0,
             message: "success",
             result: {
-              season_id: 45574,
+              season_id: seasonId,
               title: "咒术回战 Part 2",
               jp_title: "呪術廻戦",
               type: 1,
@@ -1729,7 +1730,7 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
         body: JSON.stringify({
           targetExternalKey: "tmdb:tv:95480",
           namespace: "bilibili",
-          nativeId: "ss45574",
+          nativeId: "ss45575",
           variantDescription: "错偏移变体",
           segments: [
             {
@@ -2240,7 +2241,40 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
     expect(neutralVariant?.isDefault).toBe(true);
     expect(dubVariant?.isDefault).toBe(false);
 
-    // 4. Attempting to override the existing default by referencing dub variantId with setDefaultVariant: true -> needs_review
+    // 4a. Submitting a new collection (S2 ss45600) referencing dub variantId with setDefaultVariant: true -> needs_review (non_original_default_variant)
+    const newColOverrideRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss45600",
+          variantId: dubVariant!.id,
+          setDefaultVariant: true,
+          segments: [
+            { season: 2, episodeStart: 1, episodeEnd: 23, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(newColOverrideRes.status).toBe(201);
+    const newColOverrideCr = (await newColOverrideRes.json()) as { changeRequest: { id: string } };
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
+    const newColOverrideState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${newColOverrideCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+    expect(newColOverrideState.changeRequest).toMatchObject({
+      status: "needs_review",
+      conflictReason: "non_original_default_variant",
+    });
+
+    // 4b. Re-submitting already-confirmed ss34432 with dub variantId and setDefaultVariant: true -> conflict re-check catches Step 2 non_original_default_variant
     const overrideRes = await app.fetch(
       new Request(`${TEST_BASE_URL}/v1/change-requests`, {
         method: "POST",
@@ -2267,11 +2301,25 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
           headers: { "x-api-key": user.readKey },
         }),
       )
-    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+    ).json()) as {
+      changeRequest: {
+        status: string;
+        conflictReason: string | null;
+        evidence: {
+          gate?: {
+            decision?: string;
+            step2?: { conflicts?: Array<{ code: string }> };
+          };
+        } | null;
+      };
+    };
     expect(overrideState.changeRequest).toMatchObject({
       status: "needs_review",
-      conflictReason: "non_original_default_variant",
+      conflictReason: "new_failed_old_passed",
     });
+    expect(overrideState.changeRequest.evidence?.gate?.step2?.conflicts?.[0]?.code).toBe(
+      "non_original_default_variant",
+    );
 
     // Default variant remains unchanged ("标准版")
     const mediaFinal = (await (

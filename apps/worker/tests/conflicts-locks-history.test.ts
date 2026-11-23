@@ -1,0 +1,1423 @@
+import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
+import { createApiApp } from "@media-ref/api/app";
+import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import {
+  createFakeOutboundClient,
+  type EmailMessage,
+  type ExternalHttpRequest,
+  type ExternalHttpResponse,
+  type JobQueueMessage,
+} from "@media-ref/core";
+import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
+import { afterEach, describe, expect, test } from "vite-plus/test";
+import { createBackgroundWorker } from "../src/index.ts";
+
+const TEST_BASE_URL = "https://api.mediaref.org";
+const TEST_AUTH_SECRET = "test-secret-for-conflicts-locks-history-integration-0123456789";
+
+function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
+  return {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(payload),
+    url,
+  };
+}
+
+function makeBilibiliEpisodes(count: number) {
+  const episodes: Array<Record<string, unknown>> = [];
+  for (let i = 1; i <= count; i += 1) {
+    episodes.push({
+      id: 400000 + i,
+      title: String(i),
+      long_title: `第${i}话`,
+      badge: "",
+      badge_type: 0,
+      section_type: 0,
+      duration: 1435000,
+    });
+  }
+  return episodes;
+}
+
+function extractCookieHeader(response: Response): string {
+  const setCookies = response.headers.getSetCookie();
+  return setCookies
+    .map((entry) => entry.split(";")[0]?.trim())
+    .filter((pair): pair is string => Boolean(pair))
+    .join("; ");
+}
+
+function extractVerificationUrl(email: EmailMessage): string {
+  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
+  if (!match) {
+    throw new Error(`No verification URL found in email text: ${email.text}`);
+  }
+  return match[0];
+}
+
+async function setupUser(
+  app: ReturnType<typeof createApiApp>,
+  outbound: ReturnType<typeof createFakeOutboundClient>,
+  email: string,
+) {
+  const emailsBefore = outbound.sentEmails.length;
+  const signUpRes = await app.fetch(
+    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password: "StrongPassword123!",
+        name: email.split("@")[0] ?? "User",
+      }),
+    }),
+  );
+  expect(signUpRes.status).toBe(200);
+  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
+  let cookie = extractCookieHeader(signUpRes);
+
+  const verificationEmail = outbound.sentEmails[emailsBefore];
+  expect(verificationEmail).toBeDefined();
+  const verifyRes = await app.fetch(
+    new Request(extractVerificationUrl(verificationEmail!), {
+      method: "GET",
+      headers: { cookie },
+    }),
+  );
+  expect([200, 302]).toContain(verifyRes.status);
+  const refreshed = extractCookieHeader(verifyRes);
+  if (refreshed) {
+    cookie = refreshed;
+  }
+
+  const submitKey = (await (
+    await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ name: "Submit Key", canSubmit: true }),
+      }),
+    )
+  ).json()) as { id: string; key: string };
+
+  const readKey = (await (
+    await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ name: "Read Key", canSubmit: false }),
+      }),
+    )
+  ).json()) as { id: string; key: string };
+
+  return {
+    userId: signUpBody.user.id,
+    cookie,
+    submitKey: submitKey.key,
+    readKey: readKey.key,
+  };
+}
+
+function createScheduledController(scheduledTime: Date): ScheduledController {
+  return {
+    scheduledTime: scheduledTime.getTime(),
+    cron: "* * * * *",
+    noRetry() {},
+  };
+}
+
+function createQueueBatch(bodies: JobQueueMessage[], timestamp: Date = new Date()) {
+  const tracked = bodies.map((body, index) => {
+    const entry = {
+      acked: false,
+      retried: false,
+      message: {
+        id: `msg-${index + 1}-${body.jobId}-gen-${body.leaseGeneration}`,
+        timestamp,
+        body,
+        attempts: 1,
+        ack() {
+          entry.acked = true;
+        },
+        retry() {
+          entry.retried = true;
+        },
+      } as Message<JobQueueMessage>,
+    };
+    return entry;
+  });
+
+  const batch: MessageBatch<JobQueueMessage> = {
+    queue: "media-ref-jobs",
+    messages: tracked.map((entry) => entry.message),
+    metadata: { metrics: { backlogCount: tracked.length, backlogBytes: 0 } },
+    ackAll() {
+      for (const entry of tracked) {
+        entry.acked = true;
+      }
+    },
+    retryAll() {
+      for (const entry of tracked) {
+        entry.retried = true;
+      }
+    },
+  };
+
+  return { batch, tracked };
+}
+
+function createConflictTestStub(
+  customBilibili?: (seasonId: string, url: string) => ExternalHttpResponse | undefined,
+) {
+  return (request: ExternalHttpRequest): ExternalHttpResponse => {
+    if (request.kind === "catalog" && request.namespace === "tmdb") {
+      if (request.url.includes("/tv/95479")) {
+        return jsonResponse(request.url, {
+          id: 95479,
+          name: "咒术回战",
+          original_name: "呪術廻戦",
+          first_air_date: "2020-10-03",
+          seasons: [{ season_number: 1, episode_count: 24, air_date: "2020-10-03" }],
+          external_ids: {
+            imdb_id: "tt12343534",
+            tvdb_id: 377543,
+          },
+        });
+      }
+      return jsonResponse(request.url, { status_code: 34, status_message: "Not found" }, 404);
+    }
+
+    if (request.kind === "catalog" && request.namespace === "trakt") {
+      return jsonResponse(request.url, []);
+    }
+
+    if (request.kind === "platform" && request.namespace === "bilibili") {
+      const match = request.url.match(/season_id=(\d+)/);
+      const seasonId = match?.[1] ?? "";
+      if (customBilibili) {
+        const overridden = customBilibili(seasonId, request.url);
+        if (overridden) {
+          return overridden;
+        }
+      }
+
+      if (seasonId === "34430" || seasonId === "34431") {
+        // Passes Step 1 for TMDB tv:95479
+        return jsonResponse(request.url, {
+          code: 0,
+          message: "success",
+          result: {
+            season_id: Number(seasonId),
+            title: "咒术回战",
+            jp_title: "呪術廻戦",
+            type: 1,
+            publish: { pub_time: "2020-10-03 01:25:00" },
+            episodes: makeBilibiliEpisodes(24),
+          },
+        });
+      }
+
+      if (seasonId === "77777" || seasonId === "88888") {
+        // Fails Step 1: wrong year (2024 vs 2020)
+        return jsonResponse(request.url, {
+          code: 0,
+          message: "success",
+          result: {
+            season_id: Number(seasonId),
+            title: "咒术回战",
+            jp_title: "呪術廻戦",
+            type: 1,
+            publish: { pub_time: "2024-07-01 00:00:00" },
+            episodes: makeBilibiliEpisodes(24),
+          },
+        });
+      }
+
+      if (seasonId === "404404") {
+        return jsonResponse(request.url, { code: -404, message: "啥都木有" });
+      }
+
+      return jsonResponse(request.url, { code: -404, message: "not found" });
+    }
+
+    throw new Error(
+      `Unexpected outbound request: ${request.kind}:${request.namespace} ${request.url}`,
+    );
+  };
+}
+
+async function seedConfirmedAssociation(
+  app: ReturnType<typeof createApiApp>,
+  worker: ReturnType<typeof createBackgroundWorker>,
+  emitted: JobQueueMessage[],
+  opts: {
+    submitKey: string;
+    reviewerCookie: string;
+    nativeId: string;
+    segments: Array<{
+      season: number;
+      episodeStart: number;
+      episodeEnd: number | null;
+      targetEpisodeStart: number;
+      baseline: "tmdb";
+    }>;
+    now: Date;
+    approveManually?: boolean;
+  },
+): Promise<{ mediaId: string; associationId: string; changeRequestId: string }> {
+  const crRes = await app.fetch(
+    new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": opts.submitKey },
+      body: JSON.stringify({
+        targetExternalKey: "tmdb:tv:95479",
+        namespace: "bilibili",
+        nativeId: opts.nativeId,
+        variantDescription: "原声",
+        segments: opts.segments,
+      }),
+    }),
+  );
+  expect(crRes.status).toBe(201);
+  const crBody = (await crRes.json()) as { changeRequest: { id: string } };
+  const crId = crBody.changeRequest.id;
+
+  await worker.scheduled(createScheduledController(opts.now));
+  const messages = emitted.splice(0, emitted.length);
+  expect(messages.length).toBeGreaterThanOrEqual(1);
+  await worker.queue(createQueueBatch(messages, opts.now).batch);
+
+  if (opts.approveManually) {
+    const approveRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${crId}/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: opts.reviewerCookie },
+        body: JSON.stringify({ reason: "Seeded by reviewer" }),
+      }),
+    );
+    expect(approveRes.status).toBe(200);
+    const approved = (await approveRes.json()) as { mediaId: string; associationId: string };
+    return {
+      mediaId: approved.mediaId,
+      associationId: approved.associationId,
+      changeRequestId: crId,
+    };
+  }
+
+  const crCheck = (await (
+    await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests/${crId}`, {
+        headers: { cookie: opts.reviewerCookie },
+      }),
+    )
+  ).json()) as {
+    changeRequest: { status: string; mediaId: string; appliedAssociationId: string };
+  };
+  expect(crCheck.changeRequest.status).toBe("approved");
+  return {
+    mediaId: crCheck.changeRequest.mediaId,
+    associationId: crCheck.changeRequest.appliedAssociationId,
+    changeRequestId: crId,
+  };
+}
+
+describe("Conflict resolution 4-way matrix, timeouts, locks, and revision history (#12)", () => {
+  const handles: TestDbHandle[] = [];
+
+  afterEach(async () => {
+    while (handles.length > 0) {
+      const handle = handles.pop();
+      if (handle) {
+        await handle.cleanup();
+      }
+    }
+  });
+
+  test("Matrix (new=PASS, old=FAIL): auto-replaces same-collection update and preserves revision 1 and revision 2 in history", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T10:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+
+    const user = await setupUser(app, outbound, "same-coll-user@example.com");
+    const reviewer = await setupUser(app, outbound, "same-coll-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    // Uses the built-in Evidence Gate Step 2 (#11) to verify segment episode coverage on both sides
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    // Seed confirmed association rev 1 with outdated segments E1-12 (fails Step 2 because ss34430 has 24 eps)
+    const seeded = await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss34430",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now: t0,
+      approveManually: true,
+    });
+
+    // Submit updated CR for the SAME ss34430 covering full E1-24 (passes Step 1 & Step 2)
+    const updateRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          variantDescription: "原声",
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(updateRes.status).toBe(201);
+    const updateCr = (await updateRes.json()) as { changeRequest: { id: string; status: string } };
+    expect(updateCr.changeRequest.status).toBe("pending_evidence");
+
+    await worker.scheduled(createScheduledController(t0));
+    const messages = emitted.splice(0, emitted.length);
+    expect(messages).toHaveLength(1);
+    const qSummary = await worker.queue(createQueueBatch(messages, t0).batch);
+    expect(qSummary.completed).toBe(1);
+
+    // CR auto-approved with both newEvidence and existingEvidence recorded
+    const crState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${updateCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as {
+      changeRequest: {
+        status: string;
+        appliedAssociationId: string;
+        evidence: Record<string, unknown> | null;
+      };
+    };
+    expect(crState.changeRequest.status).toBe("approved");
+    expect(crState.changeRequest.appliedAssociationId).toBe(seeded.associationId);
+    expect(crState.changeRequest.evidence?.newEvidence).toBeDefined();
+    expect(crState.changeRequest.evidence?.existingEvidence).toBeDefined();
+    const existingEvidence = crState.changeRequest.evidence?.existingEvidence as {
+      gate?: { step2?: { conflicts?: Array<{ code: string }> } };
+    };
+    expect(existingEvidence?.gate?.step2?.conflicts?.[0]?.code).toBe(
+      "segment_episode_count_mismatch",
+    );
+
+    // Read API returns updated E1-24 segments
+    const mediaBody = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    const resolved = resolveEpisode(mediaBody.document, {
+      namespace: "bilibili",
+      season: 1,
+      episode: 20,
+    });
+    expect(resolved).toMatchObject({ kind: "mapped", nativeId: "ss34430", targetEpisode: 20 });
+
+    // Revision history preserves BOTH revision 1 (old E1-12) and revision 2 (new E1-24)
+    const revRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/associations/${seeded.associationId}/revisions`, {
+        headers: { "x-api-key": user.readKey },
+      }),
+    );
+    expect(revRes.status).toBe(200);
+    const revBody = (await revRes.json()) as {
+      revisions: Array<{
+        revisionNumber: number;
+        status: string;
+        segments: Array<{ episodeStart: number; episodeEnd: number | null }>;
+      }>;
+    };
+    expect(revBody.revisions.map((r) => r.revisionNumber)).toEqual([1, 2]);
+    expect(revBody.revisions[0]?.segments[0]).toMatchObject({ episodeStart: 1, episodeEnd: 12 });
+    expect(revBody.revisions[1]?.segments[0]).toMatchObject({ episodeStart: 1, episodeEnd: 24 });
+  });
+
+  test("Matrix (new=PASS, old=FAIL) via replacesAssociationId: auto-delists old collection, activates new one, preserves histories, and still rejects accidental overlap without replacesAssociationId", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T11:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+
+    const user = await setupUser(app, outbound, "replace-user@example.com");
+    const reviewer = await setupUser(app, outbound, "replace-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    // Seed failing collection ss77777 (wrong year 2024) as confirmed
+    const oldAssoc = await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss77777",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now: t0,
+      approveManually: true,
+    });
+
+    // Accidental overlapping submission WITHOUT replacesAssociationId is still rejected (US #38)
+    const accidentalOverlapRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          variantDescription: "原声",
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(accidentalOverlapRes.status).toBe(400);
+    expect(((await accidentalOverlapRes.json()) as { error: string }).error).toBe(
+      "SEGMENT_OVERLAP",
+    );
+
+    // Explicit challenge WITH replacesAssociationId is accepted
+    const challengeRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          variantDescription: "原声",
+          replacesAssociationId: oldAssoc.associationId,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(challengeRes.status).toBe(201);
+    const challengeCr = (await challengeRes.json()) as {
+      changeRequest: { id: string; replacesAssociationId: string | null };
+    };
+    expect(challengeCr.changeRequest.replacesAssociationId).toBe(oldAssoc.associationId);
+
+    await worker.scheduled(createScheduledController(t0));
+    const messages = emitted.splice(0, emitted.length);
+    await worker.queue(createQueueBatch(messages, t0).batch);
+
+    const crAfter = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${challengeCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as {
+      changeRequest: {
+        status: string;
+        appliedAssociationId: string;
+        evidence: Record<string, unknown> | null;
+      };
+    };
+    expect(crAfter.changeRequest.status).toBe("approved");
+    expect(crAfter.changeRequest.appliedAssociationId).not.toBe(oldAssoc.associationId);
+    expect(crAfter.changeRequest.evidence?.newEvidence).toBeDefined();
+    expect(crAfter.changeRequest.evidence?.existingEvidence).toBeDefined();
+
+    // Read API returns ONLY the new collection ss34430
+    const mediaBody = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaBody.document.associations).toHaveLength(1);
+    expect(mediaBody.document.associations[0]?.nativeId).toBe("ss34430");
+
+    // Old association's revision history preserves rev 1 (confirmed) and rev 2 (delisted)
+    const oldRevRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/associations/${oldAssoc.associationId}/revisions`, {
+        headers: { "x-api-key": user.readKey },
+      }),
+    );
+    expect(oldRevRes.status).toBe(200);
+    const oldRevBody = (await oldRevRes.json()) as {
+      association: { status: string };
+      revisions: Array<{ revisionNumber: number; status: string; changeRequestId: string | null }>;
+    };
+    expect(oldRevBody.association.status).toBe("delisted");
+    expect(oldRevBody.revisions.map((r) => ({ n: r.revisionNumber, s: r.status }))).toEqual([
+      { n: 1, s: "confirmed" },
+      { n: 2, s: "delisted" },
+    ]);
+    expect(oldRevBody.revisions[1]?.changeRequestId).toBe(challengeCr.changeRequest.id);
+
+    // New association's revision history starts at rev 1 (confirmed)
+    const newRevBody = (await (
+      await app.fetch(
+        new Request(
+          `${TEST_BASE_URL}/v1/associations/${crAfter.changeRequest.appliedAssociationId}/revisions`,
+          { headers: { "x-api-key": user.readKey } },
+        ),
+      )
+    ).json()) as {
+      association: { nativeId: string; status: string };
+      revisions: Array<{ revisionNumber: number; status: string; changeRequestId: string | null }>;
+    };
+    expect(newRevBody.association.nativeId).toBe("ss34430");
+    expect(newRevBody.association.status).toBe("confirmed");
+    expect(newRevBody.revisions).toHaveLength(1);
+    expect(newRevBody.revisions[0]?.changeRequestId).toBe(challengeCr.changeRequest.id);
+  });
+
+  test("Matrix (new=PASS, old=PASS), (new=FAIL, old=PASS), and (new=FAIL, old=FAIL) all route to needs_review without changing existing association", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T12:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+        submitBaseHourlyLimit: 20,
+      },
+    });
+
+    const user = await setupUser(app, outbound, "matrix-user@example.com");
+    const reviewer = await setupUser(app, outbound, "matrix-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    // Seed PASSING association ss34430
+    const passingAssoc = await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss34430",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now: t0,
+    });
+
+    const submitChallenge = async (nativeId: string, replacesAssociationId: string) => {
+      const res = await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+          body: JSON.stringify({
+            targetExternalKey: "tmdb:tv:95479",
+            namespace: "bilibili",
+            nativeId,
+            variantDescription: "原声",
+            replacesAssociationId,
+            segments: [
+              {
+                season: 1,
+                episodeStart: 1,
+                episodeEnd: 24,
+                targetEpisodeStart: 1,
+                baseline: "tmdb",
+              },
+            ],
+          }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { changeRequest: { id: string } };
+      await worker.scheduled(createScheduledController(t0));
+      const messages = emitted.splice(0, emitted.length);
+      await worker.queue(createQueueBatch(messages, t0).batch);
+      return (await (
+        await app.fetch(
+          new Request(`${TEST_BASE_URL}/v1/change-requests/${body.changeRequest.id}`, {
+            headers: { "x-api-key": user.readKey },
+          }),
+        )
+      ).json()) as {
+        changeRequest: {
+          status: string;
+          conflictReason: string | null;
+          evidence: Record<string, unknown> | null;
+        };
+      };
+    };
+
+    // Case 2: new=PASS (ss34431) vs old=PASS (ss34430) -> needs_review (both_passed_evidence_gate)
+    const bothPass = await submitChallenge("ss34431", passingAssoc.associationId);
+    expect(bothPass.changeRequest.status).toBe("needs_review");
+    expect(bothPass.changeRequest.conflictReason).toBe("both_passed_evidence_gate");
+    expect(bothPass.changeRequest.evidence?.newEvidence).toBeDefined();
+    expect(bothPass.changeRequest.evidence?.existingEvidence).toBeDefined();
+
+    // Case 3: new=FAIL (ss77777) vs old=PASS (ss34430) -> needs_review (new_failed_old_passed)
+    const newFailOldPass = await submitChallenge("ss77777", passingAssoc.associationId);
+    expect(newFailOldPass.changeRequest.status).toBe("needs_review");
+    expect(newFailOldPass.changeRequest.conflictReason).toBe("new_failed_old_passed");
+    expect(newFailOldPass.changeRequest.evidence?.newEvidence).toBeDefined();
+    expect(newFailOldPass.changeRequest.evidence?.existingEvidence).toBeDefined();
+
+    // Existing association ss34430 is COMPLETELY UNCHANGED
+    const mediaAfterCases2And3 = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaAfterCases2And3.document.associations).toHaveLength(1);
+    expect(mediaAfterCases2And3.document.associations[0]?.nativeId).toBe("ss34430");
+
+    // Now test Case 4: new=FAIL (ss88888) vs old=FAIL (ss77777) on a fresh variant "中配"
+    const failingAssocRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss77777",
+          variantDescription: "中配",
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    const failingCr = (await failingAssocRes.json()) as { changeRequest: { id: string } };
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+    const failingApproved = (await (
+      await app.fetch(
+        new Request(
+          `${TEST_BASE_URL}/v1/reviewer/change-requests/${failingCr.changeRequest.id}/approve`,
+          {
+            method: "POST",
+            headers: { cookie: reviewer.cookie },
+          },
+        ),
+      )
+    ).json()) as { associationId: string };
+
+    const bothFailRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss88888",
+          variantDescription: "中配",
+          replacesAssociationId: failingApproved.associationId,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(bothFailRes.status).toBe(201);
+    const bothFailCr = (await bothFailRes.json()) as { changeRequest: { id: string } };
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+
+    const bothFailState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${bothFailCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as {
+      changeRequest: {
+        status: string;
+        conflictReason: string | null;
+        evidence: Record<string, unknown> | null;
+      };
+    };
+    expect(bothFailState.changeRequest.status).toBe("needs_review");
+    expect(bothFailState.changeRequest.conflictReason).toBe("both_failed_evidence_gate");
+    expect(bothFailState.changeRequest.evidence?.newEvidence).toBeDefined();
+    expect(bothFailState.changeRequest.evidence?.existingEvidence).toBeDefined();
+
+    // Failing old association ss77777 is STILL unchanged (not auto-delisted or replaced)
+    const mediaAfterCase4 = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaAfterCase4.document.associations.map((a) => a.nativeId).sort()).toEqual([
+      "ss34430",
+      "ss77777",
+    ]);
+  });
+
+  test("Old record timeout (transient_error) retries instead of treating old as failed, leaving old association untouched until recovery", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    let now = new Date("2026-11-23T13:00:00.000Z");
+    let oldShouldTimeout = false;
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub((seasonId, url) => {
+        if (seasonId === "77777" && oldShouldTimeout) {
+          return {
+            status: 503,
+            headers: { "content-type": "text/plain" },
+            body: "upstream gateway timeout",
+            url,
+          };
+        }
+        return undefined;
+      }),
+    });
+
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => now,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+
+    const user = await setupUser(app, outbound, "timeout-user@example.com");
+    const reviewer = await setupUser(app, outbound, "timeout-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: {
+        defaultRetryDelayMs: 60_000,
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+      },
+      now: () => now,
+    });
+
+    const oldAssoc = await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss77777",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now,
+      approveManually: true,
+    });
+
+    // Now make the old record return transient 503 during conflict re-check
+    oldShouldTimeout = true;
+
+    const challengeRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          variantDescription: "原声",
+          replacesAssociationId: oldAssoc.associationId,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(challengeRes.status).toBe(201);
+    const challengeCr = (await challengeRes.json()) as { changeRequest: { id: string } };
+
+    // Attempt 1: new passes, old returns 503 -> MUST retry, NOT auto-replace!
+    await worker.scheduled(createScheduledController(now));
+    const retrySummary = await worker.queue(
+      createQueueBatch(emitted.splice(0, emitted.length), now).batch,
+    );
+    expect(retrySummary.rescheduled).toBe(1);
+    expect(retrySummary.completed).toBe(0);
+
+    const crPending = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${challengeCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string } };
+    expect(crPending.changeRequest.status).toBe("pending_evidence");
+
+    // Old association ss77777 is STILL active in read API!
+    const mediaDuringTimeout = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaDuringTimeout.document.associations).toHaveLength(1);
+    expect(mediaDuringTimeout.document.associations[0]?.nativeId).toBe("ss77777");
+
+    // Attempt 2: after backoff, old recovers with definitive failing response (year 2024) -> auto-replaces!
+    oldShouldTimeout = false;
+    now = new Date(now.getTime() + 65_000);
+    await worker.scheduled(createScheduledController(now));
+    const recoveredSummary = await worker.queue(
+      createQueueBatch(emitted.splice(0, emitted.length), now).batch,
+    );
+    expect(recoveredSummary.completed).toBe(1);
+
+    const crApproved = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${challengeCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string } };
+    expect(crApproved.changeRequest.status).toBe("approved");
+
+    const mediaAfterRecovery = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaAfterRecovery.document.associations).toHaveLength(1);
+    expect(mediaAfterRecovery.document.associations[0]?.nativeId).toBe("ss34430");
+  });
+
+  test("Locked association is never auto-modified even when new passes and old fails, emits open review_alert, and allows explicit reviewer approval", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T14:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+
+    const user = await setupUser(app, outbound, "locked-user@example.com");
+    const reviewer = await setupUser(app, outbound, "locked-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    // Seed failing collection ss77777 and LOCK it via reviewer endpoint
+    const lockedAssoc = await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss77777",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now: t0,
+      approveManually: true,
+    });
+
+    const lockRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/reviewer/associations/${lockedAssoc.associationId}/lock`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: reviewer.cookie },
+        body: JSON.stringify({ locked: true }),
+      }),
+    );
+    expect(lockRes.status).toBe(200);
+
+    // Challenge locked ss77777 with PASSING ss34430
+    const challengeRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          variantDescription: "原声",
+          replacesAssociationId: lockedAssoc.associationId,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(challengeRes.status).toBe(201);
+    const challengeCr = (await challengeRes.json()) as { changeRequest: { id: string } };
+
+    await worker.scheduled(createScheduledController(t0));
+    const qSummary = await worker.queue(
+      createQueueBatch(emitted.splice(0, emitted.length), t0).batch,
+    );
+    expect(qSummary.completed).toBe(1);
+
+    // MUST NOT auto-replace! Goes to needs_review with locked_association_challenged
+    const crState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${challengeCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+    expect(crState.changeRequest.status).toBe("needs_review");
+    expect(crState.changeRequest.conflictReason).toBe("locked_association_challenged");
+
+    // Read API STILL shows locked ss77777
+    const mediaStillLocked = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaStillLocked.document.associations).toHaveLength(1);
+    expect(mediaStillLocked.document.associations[0]?.nativeId).toBe("ss77777");
+    expect(mediaStillLocked.document.associations[0]?.locked).toBe(true);
+
+    // Reviewer alerts endpoint surfaces the open locked_association_challenged alert
+    const alertsRes = await app.fetch(
+      new Request(
+        `${TEST_BASE_URL}/v1/reviewer/alerts?status=open&alertType=locked_association_challenged`,
+        {
+          headers: { cookie: reviewer.cookie },
+        },
+      ),
+    );
+    expect(alertsRes.status).toBe(200);
+    const alertsBody = (await alertsRes.json()) as {
+      alerts: Array<{
+        alertType: string;
+        mediaId: string | null;
+        associationId: string | null;
+        status: string;
+        details: Record<string, unknown>;
+      }>;
+      total: number;
+    };
+    expect(alertsBody.total).toBe(1);
+    expect(alertsBody.alerts[0]).toMatchObject({
+      alertType: "locked_association_challenged",
+      mediaId: lockedAssoc.mediaId,
+      associationId: lockedAssoc.associationId,
+      status: "open",
+    });
+    expect(alertsBody.alerts[0]?.details.changeRequestId).toBe(challengeCr.changeRequest.id);
+
+    // Human reviewer CAN explicitly approve the replacement after reviewing the alert
+    const manualApproveRes = await app.fetch(
+      new Request(
+        `${TEST_BASE_URL}/v1/reviewer/change-requests/${challengeCr.changeRequest.id}/approve`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: reviewer.cookie },
+          body: JSON.stringify({ reason: "Verified ss34430 supersedes locked ss77777" }),
+        },
+      ),
+    );
+    expect(manualApproveRes.status).toBe(200);
+
+    const mediaAfterManualApprove = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaAfterManualApprove.document.associations).toHaveLength(1);
+    expect(mediaAfterManualApprove.document.associations[0]?.nativeId).toBe("ss34430");
+
+    // Old locked association's history preserves rev 1 (confirmed) and rev 2 (delisted)
+    const oldHistory = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/associations/${lockedAssoc.associationId}/revisions`, {
+          headers: { cookie: reviewer.cookie },
+        }),
+      )
+    ).json()) as {
+      association: { status: string };
+      revisions: Array<{ revisionNumber: number; status: string; actorUserId: string | null }>;
+    };
+    expect(oldHistory.association.status).toBe("delisted");
+    expect(oldHistory.revisions).toHaveLength(2);
+    expect(oldHistory.revisions[1]).toMatchObject({
+      revisionNumber: 2,
+      status: "delisted",
+      actorUserId: reviewer.userId,
+    });
+
+    // Submitting a challenge targeting the now-delisted association is rejected with 409
+    const delistedChallengeRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34431",
+          replacesAssociationId: lockedAssoc.associationId,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(delistedChallengeRes.status).toBe(409);
+
+    // Same-collection lock: lock the newly confirmed ss34430 and submit a segment update against it
+    const newAssocId = mediaAfterManualApprove.document.associations[0]!.id;
+    const lockNewRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/reviewer/associations/${newAssocId}/lock`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: reviewer.cookie },
+        body: JSON.stringify({ locked: true }),
+      }),
+    );
+    expect(lockNewRes.status).toBe(200);
+
+    const sameCollectionChallengeRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          variantDescription: "原声",
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(sameCollectionChallengeRes.status).toBe(201);
+    const sameCollectionCr = (await sameCollectionChallengeRes.json()) as {
+      changeRequest: { id: string };
+    };
+
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+
+    const sameCollectionState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${sameCollectionCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+    expect(sameCollectionState.changeRequest.status).toBe("needs_review");
+    expect(sameCollectionState.changeRequest.conflictReason).toBe("locked_association_challenged");
+
+    const allAlertsBody = (await (
+      await app.fetch(
+        new Request(
+          `${TEST_BASE_URL}/v1/reviewer/alerts?status=open&alertType=locked_association_challenged`,
+          { headers: { cookie: reviewer.cookie } },
+        ),
+      )
+    ).json()) as {
+      alerts: Array<{ associationId: string | null; details: Record<string, unknown> }>;
+      total: number;
+    };
+    expect(allAlertsBody.total).toBe(2);
+    expect(
+      allAlertsBody.alerts.some(
+        (a) =>
+          a.associationId === newAssocId &&
+          a.details.changeRequestId === sameCollectionCr.changeRequest.id,
+      ),
+    ).toBe(true);
+  });
+
+  test("Conflict re-check resolves variantId description fallback for Step 2 non_original_default_variant protection", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T15:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+
+    const user = await setupUser(app, outbound, "step2-conflict-user@example.com");
+    const reviewer = await setupUser(app, outbound, "step2-conflict-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    // Seed an original default variant first
+    await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss34430",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now: t0,
+    });
+
+    // Seed a failing non-default dub association ("中配", ss77777 fails Step 1 wrong year 2024)
+    const dubCrRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss77777",
+          variantDescription: "中配",
+          setDefaultVariant: false,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(dubCrRes.status).toBe(201);
+    const dubCr = (await dubCrRes.json()) as { changeRequest: { id: string } };
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+    const dubApproved = (await (
+      await app.fetch(
+        new Request(
+          `${TEST_BASE_URL}/v1/reviewer/change-requests/${dubCr.changeRequest.id}/approve`,
+          {
+            method: "POST",
+            headers: { cookie: reviewer.cookie },
+          },
+        ),
+      )
+    ).json()) as { associationId: string };
+
+    const mediaBefore = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    const dubVariant = mediaBefore.document.variants.find((v) => v.label === "中配");
+    expect(dubVariant?.isDefault).toBe(false);
+
+    // Challenge failing dub association ss77777 with valid ss34431, referencing dub variantId and setDefaultVariant: true
+    const challengeRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34431",
+          variantId: dubVariant!.id,
+          setDefaultVariant: true,
+          replacesAssociationId: dubApproved.associationId,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(challengeRes.status).toBe(201);
+    const challengeCr = (await challengeRes.json()) as { changeRequest: { id: string } };
+
+    // Explicitly null out variant_description to verify DB fallback resolution from variantId in conflict path
+    await testDb.writeDb
+      .updateTable("change_requests")
+      .set({ variant_description: null })
+      .where("id", "=", challengeCr.changeRequest.id)
+      .execute();
+
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+
+    const crAfter = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${challengeCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as {
+      changeRequest: {
+        status: string;
+        conflictReason: string | null;
+        evidence: {
+          gate?: { step2?: { conflicts?: Array<{ code: string }> } };
+        } | null;
+      };
+    };
+
+    // Even though old ss77777 fails Step 1, new CR MUST fail Step 2 (non_original_default_variant) -> needs_review!
+    expect(crAfter.changeRequest.status).toBe("needs_review");
+    expect(crAfter.changeRequest.conflictReason).toBe("both_failed_evidence_gate");
+    expect(crAfter.changeRequest.evidence?.gate?.step2?.conflicts?.[0]?.code).toBe(
+      "non_original_default_variant",
+    );
+
+    const mediaAfter = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaAfter.document.variants.find((v) => v.label === "原声")?.isDefault).toBe(true);
+    expect(mediaAfter.document.variants.find((v) => v.label === "中配")?.isDefault).toBe(false);
+    expect(mediaAfter.document.associations.map((a) => a.nativeId).sort()).toEqual([
+      "ss34430",
+      "ss77777",
+    ]);
+  });
+});
