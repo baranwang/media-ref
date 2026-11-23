@@ -318,6 +318,19 @@ export interface DemandsTable {
   updated_at: Generated<Date>;
 }
 
+export type InvalidationReporterTypeRow = "user" | "api_key";
+
+export interface InvalidationReportsTable {
+  id: Generated<string>;
+  association_id: string;
+  reporter_type: InvalidationReporterTypeRow;
+  reporter_user_id: string | null;
+  reporter_key_id: string | null;
+  reason: string | null;
+  recheck_job_id: string | null;
+  created_at: Generated<Date>;
+}
+
 export interface ExplorationDailyBudgetTable {
   budget_date: string;
   consumed: Generated<number>;
@@ -350,6 +363,7 @@ export interface Database {
   sync_state: SyncStateTable;
   review_alerts: ReviewAlertsTable;
   demands: DemandsTable;
+  invalidation_reports: InvalidationReportsTable;
   exploration_daily_budget: ExplorationDailyBudgetTable;
   tmdb_daily_export_ids: TmdbDailyExportIdsTable;
 }

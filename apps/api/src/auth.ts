@@ -226,6 +226,7 @@ export interface ApiEnv {
     hasCustomClock: boolean;
     readRateLimit: ReadRateLimitRuntime;
     submissionQuota: SubmissionQuotaConfig | undefined;
+    anonymousInvalidationThreshold: number;
     session: AuthenticatedSession | null;
     apiKey: VerifiedApiKey | null;
   };

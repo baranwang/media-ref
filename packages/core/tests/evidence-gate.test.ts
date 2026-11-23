@@ -2,6 +2,8 @@ import { describe, expect, test } from "vite-plus/test";
 import {
   evaluateEvidenceGate,
   evaluateEvidenceGateStep1,
+  evaluateEvidenceGateStep2,
+  isNonOriginalVariantDescription,
   normalizeTitleForComparison,
   type CatalogEvidence,
   type CollectionInfo,
@@ -366,5 +368,933 @@ describe("Evidence Gate Step 1", () => {
     expect(vetoedByStep2.step2?.decision).toBe("needs_review");
     expect(vetoedByStep2.decision).toBe("needs_review");
     expect(vetoedByStep2.conflicts.some((c) => c.step === 2)).toBe(true);
+  });
+});
+
+describe("Evidence Gate Step 2", () => {
+  test("skips Step 2 for movie media", () => {
+    const movieCatalog = makeTvCatalog({
+      canonicalId: "movie:550",
+      mediaType: "movie",
+      title: "搏击俱乐部",
+      originalTitle: "Fight Club",
+      year: 1999,
+      seasons: [],
+      externalIds: { tmdb: "movie:550", imdb: "tt0137523" },
+    });
+    const movieCollection = makeBilibiliCollection({
+      canonicalId: "ss28281",
+      mediaType: "movie",
+      title: "搏击俱乐部",
+      originalTitle: "Fight Club",
+      year: 1999,
+      featureEpisodeCount: 1,
+      featureEpisodes: [{ index: 1 }],
+    });
+
+    const gate = evaluateEvidenceGate({
+      catalog: movieCatalog,
+      collection: movieCollection,
+      segments: [],
+      variantDescription: "原声",
+    });
+
+    expect(gate.decision).toBe("pass");
+    expect(gate.step1.decision).toBe("pass");
+    expect(gate.step2).toEqual({
+      decision: "pass",
+      skipped: true,
+      conflicts: [],
+      reasons: [],
+    });
+
+    // Direct Step 2 call on a movie skips segment verification even if segments were supplied
+    const directStep2 = evaluateEvidenceGateStep2({
+      catalog: movieCatalog,
+      collection: movieCollection,
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 2,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+      step1: gate.step1,
+    });
+    expect(directStep2.decision).toBe("pass");
+    expect(directStep2.skipped).toBe(true);
+  });
+
+  test("runs default Step 2 automatically in evaluateEvidenceGate and checks season year, targetEpisodeStart, and episode count", () => {
+    const catalog = makeTvCatalog({
+      year: 2020,
+      seasons: [
+        { season: 1, episodeCount: 24, airYear: 2020 },
+        { season: 2, episodeCount: 23, airYear: 2023 },
+      ],
+    });
+
+    // Matching S1 1..24 target 1 -> auto-passes Step 1 & Step 2
+    const valid = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({ year: 2020, featureEpisodeCount: 24 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+      variantDescription: "原声",
+    });
+    expect(valid.decision).toBe("pass");
+    expect(valid.step2?.decision).toBe("pass");
+    expect(valid.step2?.skipped).toBe(false);
+
+    // Wrong season: S2 collection (2023, 23 eps) erroneously submitted as S1 (2020)
+    const wrongSeason = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({ year: 2023, featureEpisodeCount: 23 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 23,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(wrongSeason.decision).toBe("needs_review");
+    expect(wrongSeason.step1.decision).toBe("pass");
+    expect(wrongSeason.step2?.decision).toBe("needs_review");
+    expect(wrongSeason.step2?.conflicts.some((c) => c.code === "segment_year_mismatch")).toBe(true);
+
+    // Non-existent season (Season 9)
+    const missingSeason = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({ year: 2020, featureEpisodeCount: 24 }),
+      segments: [
+        {
+          season: 9,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(missingSeason.decision).toBe("needs_review");
+    expect(missingSeason.step2?.conflicts.some((c) => c.code === "segment_season_not_found")).toBe(
+      true,
+    );
+
+    // Wrong targetEpisodeStart: 2 instead of 1 on a 24-ep collection
+    const wrongTargetStart = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({ year: 2020, featureEpisodeCount: 24 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 2,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(wrongTargetStart.decision).toBe("needs_review");
+    expect(wrongTargetStart.step1.decision).toBe("pass");
+    expect(
+      wrongTargetStart.step2?.conflicts.some((c) => c.code === "target_episode_start_mismatch"),
+    ).toBe(true);
+
+    // Wrong episode count: segment covers 12 eps on a 24-ep collection
+    const wrongCount = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({ year: 2020, featureEpisodeCount: 24 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(wrongCount.decision).toBe("needs_review");
+    expect(wrongCount.step1.decision).toBe("pass");
+    expect(
+      wrongCount.step2?.conflicts.some((c) => c.code === "segment_episode_count_mismatch"),
+    ).toBe(true);
+
+    // Segment episodeEnd exceeds catalog season episodeCount (shared ID passes Step 1)
+    const outOfRange = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({
+        year: 2020,
+        featureEpisodeCount: 30,
+        externalIds: { imdb: "tt12343534" },
+      }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 30,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(outOfRange.decision).toBe("needs_review");
+    expect(outOfRange.step2?.conflicts.some((c) => c.code === "segment_episode_out_of_range")).toBe(
+      true,
+    );
+  });
+
+  test("harmonizes Step 1 and Step 2 for split seasons (e.g. S1 47 eps split into 1..24 and 25..47)", () => {
+    const jjkSplitCatalog = makeTvCatalog({
+      year: 2020,
+      seasons: [{ season: 1, episodeCount: 47, airYear: 2020 }],
+    });
+
+    const part1 = evaluateEvidenceGate({
+      catalog: jjkSplitCatalog,
+      collection: makeBilibiliCollection({
+        canonicalId: "ss34430",
+        year: 2020,
+        featureEpisodeCount: 24,
+      }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+      variantDescription: "原声",
+    });
+    expect(part1.step1.decision).toBe("pass");
+    expect(part1.step2?.decision).toBe("pass");
+    expect(part1.decision).toBe("pass");
+
+    const part2 = evaluateEvidenceGate({
+      catalog: jjkSplitCatalog,
+      collection: makeBilibiliCollection({
+        canonicalId: "ss45574",
+        year: 2020,
+        featureEpisodeCount: 23,
+      }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 25,
+          episodeEnd: 47,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+      variantDescription: "原声",
+    });
+    expect(part2.step1.decision).toBe("pass");
+    expect(part2.step2?.decision).toBe("pass");
+    expect(part2.decision).toBe("pass");
+
+    // Common mistake: setting targetEpisodeStart to 25 instead of 1 on the second split collection
+    const wrongSplitTargetStart = evaluateEvidenceGate({
+      catalog: jjkSplitCatalog,
+      collection: makeBilibiliCollection({
+        canonicalId: "ss45574",
+        year: 2020,
+        featureEpisodeCount: 23,
+      }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 25,
+          episodeEnd: 47,
+          targetEpisodeStart: 25,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(wrongSplitTargetStart.step1.decision).toBe("pass");
+    expect(wrongSplitTargetStart.decision).toBe("needs_review");
+    expect(
+      wrongSplitTargetStart.step2?.conflicts.some(
+        (c) => c.code === "target_episode_start_mismatch",
+      ),
+    ).toBe(true);
+  });
+
+  test("verifies multi-season merged collections by summed episode count, earliest season year, and contiguous target offsets", () => {
+    const multiSeasonCatalog = makeTvCatalog({
+      year: 2022,
+      seasons: [
+        { season: 1, episodeCount: 12, airYear: 2022 },
+        { season: 2, episodeCount: 12, airYear: 2024 },
+      ],
+    });
+
+    const mergedCollection = makeBilibiliCollection({
+      year: 2022,
+      featureEpisodeCount: 24,
+    });
+
+    // Valid multi-season merged collection
+    const validMerged = evaluateEvidenceGate({
+      catalog: multiSeasonCatalog,
+      collection: mergedCollection,
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+        {
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 13,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(validMerged.decision).toBe("pass");
+
+    // Reversed input array order still passes when chronological target mapping is contiguous
+    const reversedOrder = evaluateEvidenceGate({
+      catalog: multiSeasonCatalog,
+      collection: mergedCollection,
+      segments: [
+        {
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 13,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(reversedOrder.decision).toBe("pass");
+
+    // Wrong year: collection year matches S2 (2024) instead of earliest season S1 (2022)
+    const wrongYearMerged = evaluateEvidenceGate({
+      catalog: multiSeasonCatalog,
+      collection: makeBilibiliCollection({ year: 2024, featureEpisodeCount: 24 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+        {
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 13,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(wrongYearMerged.decision).toBe("needs_review");
+    expect(wrongYearMerged.step2?.conflicts.some((c) => c.code === "segment_year_mismatch")).toBe(
+      true,
+    );
+
+    // Wrong second segment targetEpisodeStart (overlapping target slot 12 instead of 13)
+    const overlappingTarget = evaluateEvidenceGate({
+      catalog: multiSeasonCatalog,
+      collection: mergedCollection,
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+        {
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 12,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(overlappingTarget.decision).toBe("needs_review");
+    expect(
+      overlappingTarget.step2?.conflicts.some((c) => c.code === "target_episode_start_mismatch"),
+    ).toBe(true);
+
+    // Swapped target starts (S1 mapped to 13, S2 mapped to 1)
+    const swappedTargets = evaluateEvidenceGate({
+      catalog: multiSeasonCatalog,
+      collection: mergedCollection,
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 13,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+        {
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(swappedTargets.decision).toBe("needs_review");
+    expect(
+      swappedTargets.step2?.conflicts.some((c) => c.code === "target_episode_start_mismatch"),
+    ).toBe(true);
+
+    // Summed episode count mismatch (segments cover 12 + 6 = 18 eps, collection has 24 eps)
+    const wrongMergedSum = evaluateEvidenceGate({
+      catalog: multiSeasonCatalog,
+      collection: mergedCollection,
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+        {
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 6,
+          targetEpisodeStart: 13,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(wrongMergedSum.decision).toBe("needs_review");
+    expect(
+      wrongMergedSum.step2?.conflicts.some((c) => c.code === "segment_episode_count_mismatch"),
+    ).toBe(true);
+  });
+
+  test("handles open-ended ongoing seasons (episodeEnd: null) in both Step 1 and Step 2", () => {
+    const ongoingCatalog = makeTvCatalog({
+      year: 2026,
+      seasons: [
+        { season: 1, episodeCount: 24, airYear: 2026 },
+        { season: 2, episodeCount: 12, airYear: 2027 },
+      ],
+    });
+
+    // Ongoing S1 with 10 aired episodes <= 24 -> auto-passes Step 1 & Step 2
+    const ongoingPass = evaluateEvidenceGate({
+      catalog: ongoingCatalog,
+      collection: makeBilibiliCollection({ year: 2026, featureEpisodeCount: 10 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(ongoingPass.step1.decision).toBe("pass");
+    expect(ongoingPass.step2?.decision).toBe("pass");
+    expect(ongoingPass.decision).toBe("pass");
+
+    // Split ongoing S1 (episodeStart 15..null -> max remaining 10 eps) with 8 eps -> pass
+    const splitOngoingPass = evaluateEvidenceGate({
+      catalog: ongoingCatalog,
+      collection: makeBilibiliCollection({ year: 2026, featureEpisodeCount: 8 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 15,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(splitOngoingPass.decision).toBe("pass");
+
+    // Split ongoing exceeding remaining episodes (11 > 10) -> needs_review
+    const splitOngoingTooMany = evaluateEvidenceGate({
+      catalog: ongoingCatalog,
+      collection: makeBilibiliCollection({ year: 2026, featureEpisodeCount: 11 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 15,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(splitOngoingTooMany.decision).toBe("needs_review");
+
+    // Ongoing season exceeding total season episodeCount (25 > 24) -> needs_review
+    const ongoingExceeds = evaluateEvidenceGate({
+      catalog: ongoingCatalog,
+      collection: makeBilibiliCollection({
+        year: 2026,
+        featureEpisodeCount: 25,
+        externalIds: { imdb: "tt12343534" },
+      }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(ongoingExceeds.decision).toBe("needs_review");
+    expect(
+      ongoingExceeds.step2?.conflicts.some((c) => c.code === "segment_episode_count_mismatch"),
+    ).toBe(true);
+
+    // Ongoing season with wrong targetEpisodeStart (2 instead of 1) -> needs_review
+    const ongoingBadTarget = evaluateEvidenceGate({
+      catalog: ongoingCatalog,
+      collection: makeBilibiliCollection({ year: 2026, featureEpisodeCount: 10 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 2,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(ongoingBadTarget.decision).toBe("needs_review");
+    expect(
+      ongoingBadTarget.step2?.conflicts.some((c) => c.code === "target_episode_start_mismatch"),
+    ).toBe(true);
+
+    // Multi-season collection where S2 is ongoing (S1 24 eps + S2 5 aired = 29 eps, max 36)
+    const multiOngoingPass = evaluateEvidenceGate({
+      catalog: ongoingCatalog,
+      collection: makeBilibiliCollection({ year: 2026, featureEpisodeCount: 29 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+        {
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 25,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(multiOngoingPass.decision).toBe("pass");
+  });
+
+  test("only checks season premiere year for nonLinear segments (skips episode count comparison)", () => {
+    const varietyCatalog = makeTvCatalog({
+      year: 2023,
+      seasons: [
+        { season: 1, episodeCount: 12, airYear: 2023 },
+        { season: 2, episodeCount: 12, airYear: 2024 },
+      ],
+    });
+
+    // Mismatched episode count (30 vs 12) + matching season year (2023) -> passes Step 1 & Step 2
+    const nonLinearPass = evaluateEvidenceGate({
+      catalog: varietyCatalog,
+      collection: makeBilibiliCollection({ year: 2023, featureEpisodeCount: 30 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: true,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(nonLinearPass.step1.decision).toBe("pass");
+    expect(nonLinearPass.step1.fieldChecks.episodeCount).toBe("skipped");
+    expect(nonLinearPass.step2?.decision).toBe("pass");
+    expect(nonLinearPass.decision).toBe("pass");
+
+    // Non-linear segment with wrong season year (S1 2023 against 2024 collection) -> needs_review
+    const nonLinearWrongYear = evaluateEvidenceGate({
+      catalog: varietyCatalog,
+      collection: makeBilibiliCollection({ year: 2024, featureEpisodeCount: 30 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: true,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(nonLinearWrongYear.step1.decision).toBe("pass");
+    expect(nonLinearWrongYear.decision).toBe("needs_review");
+    expect(
+      nonLinearWrongYear.step2?.conflicts.some((c) => c.code === "segment_year_mismatch"),
+    ).toBe(true);
+  });
+
+  test("handles whole-media TV associations, Season 0 specials, and missing Step 2 metadata", () => {
+    const catalog = makeTvCatalog({
+      year: 2020,
+      seasons: [
+        { season: 0, episodeCount: 5, airYear: 2021 },
+        { season: 1, episodeCount: 24, airYear: 2020 },
+        { season: 2, episodeCount: 23, airYear: 2023 },
+      ],
+    });
+
+    // Whole-media TV with matching premiere year -> pass
+    const wholeMediaPass = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({ year: 2020, featureEpisodeCount: 47 }),
+      segments: [],
+    });
+    expect(wholeMediaPass.decision).toBe("pass");
+
+    // Whole-media TV with S2 year (2023) instead of media premiere year (2020) -> needs_review
+    const wholeMediaWrongYear = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({ year: 2023, featureEpisodeCount: 23 }),
+      segments: [],
+    });
+    expect(wholeMediaWrongYear.decision).toBe("needs_review");
+    expect(
+      wholeMediaWrongYear.step2?.conflicts.some((c) => c.code === "segment_year_mismatch"),
+    ).toBe(true);
+
+    // Season 0 specials segment matches S0 airYear (2021) and episodeCount (5) -> pass
+    const specialsPass = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({ year: 2021, featureEpisodeCount: 5 }),
+      segments: [
+        {
+          season: 0,
+          episodeStart: 1,
+          episodeEnd: 5,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(specialsPass.decision).toBe("pass");
+
+    // Missing catalog season airYear -> needs_review (segment_year_missing)
+    const missingAirYear = evaluateEvidenceGate({
+      catalog: makeTvCatalog({
+        year: 2020,
+        seasons: [{ season: 1, episodeCount: 24, airYear: null }],
+      }),
+      collection: makeBilibiliCollection({ year: 2020, featureEpisodeCount: 24 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(missingAirYear.decision).toBe("needs_review");
+    expect(missingAirYear.step2?.conflicts.some((c) => c.code === "segment_year_missing")).toBe(
+      true,
+    );
+
+    // Missing collection.featureEpisodeCount for linear segments (shared ID passes Step 1) -> needs_review
+    const missingFeatureCount = evaluateEvidenceGate({
+      catalog,
+      collection: makeBilibiliCollection({
+        year: 2020,
+        featureEpisodeCount: null,
+        featureEpisodes: [],
+        externalIds: { imdb: "tt12343534" },
+      }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(missingFeatureCount.decision).toBe("needs_review");
+    expect(
+      missingFeatureCount.step2?.conflicts.some((c) => c.code === "segment_episode_count_missing"),
+    ).toBe(true);
+  });
+
+  test("routes non-original variants marked as setDefaultVariant=true to needs_review while allowing original, neutral, or non-default variants", () => {
+    // Non-original descriptions (dubs, alternate cuts, simplified & traditional Chinese, English)
+    for (const label of [
+      "中配",
+      "国配",
+      "國配",
+      "配音",
+      "配音版",
+      "粤语",
+      "粵語版",
+      "台配",
+      "臺配",
+      "英语配音",
+      "日配",
+      "国语版",
+      "dub",
+      "English Dub",
+      "dubbed",
+      "Director's Cut",
+      "导演剪辑版",
+      "導演剪輯版",
+      "删减版",
+      "精编版",
+      "解说版",
+      "原声导演剪辑版",
+    ]) {
+      expect(isNonOriginalVariantDescription(label), `expected non-original: ${label}`).toBe(true);
+    }
+
+    // Original or neutral descriptions
+    for (const label of [
+      "原声",
+      "原声版",
+      "原版",
+      "日语原声",
+      "粤语原声",
+      "国语原声",
+      "original",
+      "Original Audio",
+      "sub",
+      "中字",
+      "标准版",
+      "正片",
+      "",
+      null,
+      undefined,
+    ]) {
+      expect(isNonOriginalVariantDescription(label), `expected original/neutral: ${label}`).toBe(
+        false,
+      );
+    }
+
+    // TV submission marking "中配" as default -> needs_review (non_original_default_variant)
+    const dubDefaultTv = evaluateEvidenceGate({
+      catalog: makeTvCatalog(),
+      collection: makeBilibiliCollection(),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+      variantDescription: "中配",
+      setDefaultVariant: true,
+    });
+    expect(dubDefaultTv.step1.decision).toBe("pass");
+    expect(dubDefaultTv.decision).toBe("needs_review");
+    expect(
+      dubDefaultTv.step2?.conflicts.some((c) => c.code === "non_original_default_variant"),
+    ).toBe(true);
+
+    // Movie submission marking "中配" as default -> ALSO needs_review (non_original_default_variant)
+    const dubDefaultMovie = evaluateEvidenceGate({
+      catalog: makeTvCatalog({
+        canonicalId: "movie:550",
+        mediaType: "movie",
+        title: "搏击俱乐部",
+        originalTitle: "Fight Club",
+        year: 1999,
+        seasons: [],
+      }),
+      collection: makeBilibiliCollection({
+        canonicalId: "ss28281",
+        mediaType: "movie",
+        title: "搏击俱乐部",
+        originalTitle: "Fight Club",
+        year: 1999,
+        featureEpisodeCount: 1,
+        featureEpisodes: [{ index: 1 }],
+      }),
+      segments: [],
+      variantDescription: "中配",
+      setDefaultVariant: true,
+    });
+    expect(dubDefaultMovie.decision).toBe("needs_review");
+    expect(
+      dubDefaultMovie.step2?.conflicts.some((c) => c.code === "non_original_default_variant"),
+    ).toBe(true);
+
+    // Non-original variant NOT marked as default (setDefaultVariant: false) -> passes
+    const dubNonDefault = evaluateEvidenceGate({
+      catalog: makeTvCatalog(),
+      collection: makeBilibiliCollection(),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+      variantDescription: "中配",
+      setDefaultVariant: false,
+    });
+    expect(dubNonDefault.decision).toBe("pass");
+
+    // Original variant marked as default -> passes
+    const originalDefault = evaluateEvidenceGate({
+      catalog: makeTvCatalog(),
+      collection: makeBilibiliCollection(),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+      variantDescription: "原声",
+      setDefaultVariant: true,
+    });
+    expect(originalDefault.decision).toBe("pass");
+
+    // Neutral variant marked as default -> passes
+    const neutralDefault = evaluateEvidenceGate({
+      catalog: makeTvCatalog(),
+      collection: makeBilibiliCollection(),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+      variantDescription: "标准版",
+      setDefaultVariant: true,
+    });
+    expect(neutralDefault.decision).toBe("pass");
   });
 });

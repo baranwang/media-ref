@@ -4,6 +4,7 @@ import { createDb } from "@media-ref/db";
 import { createApiApp } from "./app.ts";
 import { DEFAULT_EMAIL_FROM } from "./auth.ts";
 import type { InternalMediaWorkerEnv } from "./internal.ts";
+import { parseAnonymousInvalidationThresholdFromEnv } from "./invalidation.ts";
 import { parseOAuthConfigFromEnv } from "./oauth.ts";
 import { parseRateLimitConfigFromEnv, type RateLimitBinding } from "./rate-limit.ts";
 
@@ -32,7 +33,13 @@ export {
   type VerifyApiKeyResult,
 } from "./api-keys.ts";
 export { createApiApp, type ApiConfig, type ApiDeps } from "./app.ts";
+export { registerAssociationRoutes } from "./associations.ts";
 export { registerChangeRequestRoutes } from "./change-requests.ts";
+export {
+  parseAnonymousInvalidationThresholdFromEnv,
+  registerInvalidationRoutes,
+  type ReportInvalidationResponse,
+} from "./invalidation.ts";
 export { registerMediaAdminRoutes } from "./media-admin.ts";
 export {
   registerMediaRoutes,
@@ -133,6 +140,7 @@ export interface ApiWorkerEnv extends InternalMediaWorkerEnv {
   RATE_LIMIT_SUBMIT_WINDOW_SECONDS?: string;
   RATE_LIMIT_REPUTATION_TIERS?: string;
   RATE_LIMIT_ROLE_HOURLY_LIMITS?: string;
+  INVALIDATION_ANON_THRESHOLD?: string;
 }
 
 function parseTrustedOrigins(raw: string | undefined): string[] | undefined {
@@ -184,6 +192,9 @@ const worker = {
         },
         oauth: parseOAuthConfigFromEnv(env),
         rateLimits: parseRateLimitConfigFromEnv(env),
+        anonymousInvalidationThreshold: parseAnonymousInvalidationThresholdFromEnv(
+          env.INVALIDATION_ANON_THRESHOLD,
+        ),
       },
     });
 

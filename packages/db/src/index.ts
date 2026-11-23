@@ -21,6 +21,8 @@ export type {
   ExternalIdNamespaceRow,
   ExternalIdSourceRow,
   ExternalIdsTable,
+  InvalidationReporterTypeRow,
+  InvalidationReportsTable,
   JsonObject,
   LeadsTable,
   MediaTable,
