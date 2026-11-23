@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from "./routes/index";
 import { Route as KeysRouteImport } from "./routes/keys";
 import { Route as LoginRouteImport } from "./routes/login";
 import { Route as RegisterRouteImport } from "./routes/register";
+import { Route as MediaKeyRouteImport } from "./routes/media.$key";
 
 const IndexRoute = IndexRouteImport.update({
   id: "/",
@@ -34,18 +35,25 @@ const RegisterRoute = RegisterRouteImport.update({
   path: "/register",
   getParentRoute: () => rootRouteImport,
 } as any);
+const MediaKeyRoute = MediaKeyRouteImport.update({
+  id: "/media/$key",
+  path: "/media/$key",
+  getParentRoute: () => rootRouteImport,
+} as any);
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/keys": typeof KeysRoute;
   "/login": typeof LoginRoute;
   "/register": typeof RegisterRoute;
+  "/media/$key": typeof MediaKeyRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/keys": typeof KeysRoute;
   "/login": typeof LoginRoute;
   "/register": typeof RegisterRoute;
+  "/media/$key": typeof MediaKeyRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
@@ -53,13 +61,14 @@ export interface FileRoutesById {
   "/keys": typeof KeysRoute;
   "/login": typeof LoginRoute;
   "/register": typeof RegisterRoute;
+  "/media/$key": typeof MediaKeyRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/keys" | "/login" | "/register";
+  fullPaths: "/" | "/keys" | "/login" | "/register" | "/media/$key";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/keys" | "/login" | "/register";
-  id: "__root__" | "/" | "/keys" | "/login" | "/register";
+  to: "/" | "/keys" | "/login" | "/register" | "/media/$key";
+  id: "__root__" | "/" | "/keys" | "/login" | "/register" | "/media/$key";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
@@ -67,6 +76,7 @@ export interface RootRouteChildren {
   KeysRoute: typeof KeysRoute;
   LoginRoute: typeof LoginRoute;
   RegisterRoute: typeof RegisterRoute;
+  MediaKeyRoute: typeof MediaKeyRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -99,6 +109,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof RegisterRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/media/$key": {
+      id: "/media/$key";
+      path: "/media/$key";
+      fullPath: "/media/$key";
+      preLoaderRoute: typeof MediaKeyRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
   }
 }
 
@@ -107,6 +124,7 @@ const rootRouteChildren: RootRouteChildren = {
   KeysRoute: KeysRoute,
   LoginRoute: LoginRoute,
   RegisterRoute: RegisterRoute,
+  MediaKeyRoute: MediaKeyRoute,
 };
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
