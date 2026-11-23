@@ -136,6 +136,7 @@ describe("Mango TV (mgtv) Tier 1 & Tier 2 adapter", () => {
     expect(mgtv && isTier2Adapter(mgtv)).toBe(true);
     expect(mgtv && isTier3Adapter(mgtv)).toBe(false);
     expect(registry.listByMinTier(2).map((a) => a.namespace)).toContain("mgtv");
+    expect(registry.listByMinTier(3).map((a) => a.namespace)).not.toContain("mgtv");
   });
 
   test("paginates episode/list, strictly filters isIntact === '1', and extracts year/type/title from video/info", async () => {

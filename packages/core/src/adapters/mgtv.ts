@@ -30,6 +30,14 @@ import {
  *   Paginated episode list; feature episodes strictly filtered by `isIntact === "1"` (`"3"` = trailer/preview).
  * - `GET https://pcweb.api.mgtv.com/video/info?cid=<id>&vid=<firstVid>`
  *   Extracts `clipName` (title), `fstlvlType` (mediaType), and `detail.releaseTime` (4-digit premiere year).
+ *
+ * Tier 3 search status (intentionally stays Tier 2 — Ticket #30):
+ * - Empirically verified unauthenticated search blocks (no auth/sign bypassing):
+ *   - `GET https://mobileso.bz.mgtv.com/msite/search/v2` returns HTTP 403 (`Forbidden`).
+ *   - `GET https://mobileso.bz.mgtv.com/pc/search/v1` returns HTTP 401 (`{"code":200,"data":{"listItems":[],"totalHits":0,"forbidden":2}}`).
+ *   - `GET https://so.mgtv.com/so?k=...` returns an empty Nuxt SPA shell that loads results client-side from those gated APIs.
+ * - Therefore `mgtvAdapter` intentionally remains `tier: 2` (no `search` method) and is excluded
+ *   from automated exploration job target lists.
  */
 
 const MGTV_ALLOWED_HOSTS = new Set(["mgtv.com", "www.mgtv.com", "m.mgtv.com", "w.mgtv.com"]);
