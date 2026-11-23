@@ -213,6 +213,20 @@ export function registerChangeRequestRoutes(app: Hono<ApiEnv>): void {
       return c.json({ error: "INVALID_TASK_ID", message: "taskId must be a string" }, 400);
     }
 
+    if (
+      body.replacesAssociationId !== undefined &&
+      body.replacesAssociationId !== null &&
+      typeof body.replacesAssociationId !== "string"
+    ) {
+      return c.json(
+        {
+          error: "INVALID_REPLACES_ASSOCIATION",
+          message: "replacesAssociationId must be a string",
+        },
+        400,
+      );
+    }
+
     try {
       const changeRequest = await createChangeRequest(
         c.get("dbWrite"),
@@ -229,6 +243,8 @@ export function registerChangeRequestRoutes(app: Hono<ApiEnv>): void {
           variantDescription:
             typeof rawVariantDescription === "string" ? rawVariantDescription : null,
           setDefaultVariant: Boolean(body.setDefaultVariant),
+          replacesAssociationId:
+            typeof body.replacesAssociationId === "string" ? body.replacesAssociationId : null,
           segments: (body.segments as SegmentInput[] | undefined) ?? [],
           submissionQuota: c.get("submissionQuota"),
           now: c.get("hasCustomClock") ? c.get("now")() : undefined,
