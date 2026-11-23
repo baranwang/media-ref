@@ -83,6 +83,23 @@ export {
 } from "./leads.ts";
 export { createEvidenceCheckJobHandler, type EvidenceCheckJobOptions } from "./evidence-job.ts";
 export {
+  ASSOCIATION_CONTENT_MISMATCH_ALERT_TYPE,
+  createInvalidationRecheckJobHandler,
+  DEFAULT_ANONYMOUS_INVALIDATION_THRESHOLD,
+  DELISTED_BY_RECHECK_REASON,
+  INVALIDATION_RECHECK_JOB_TYPE,
+  InvalidationError,
+  LOCKED_ASSOCIATION_DELISTED_ALERT_TYPE,
+  MAX_INVALIDATION_REASON_LENGTH,
+  reportInvalidAssociation,
+  resolveAnonymousInvalidationThreshold,
+  type InvalidationErrorCode,
+  type InvalidationRecheckJobOptions,
+  type InvalidationReporterInput,
+  type ReportInvalidAssociationInput,
+  type ReportInvalidAssociationResult,
+} from "./invalidation.ts";
+export {
   approveChangeRequest,
   approveChangeRequestInTransaction,
   createChangeRequest,

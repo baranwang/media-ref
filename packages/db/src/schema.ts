@@ -298,6 +298,19 @@ export interface ReviewAlertsTable {
   resolved_by_user_id: string | null;
 }
 
+export type InvalidationReporterTypeRow = "user" | "api_key";
+
+export interface InvalidationReportsTable {
+  id: Generated<string>;
+  association_id: string;
+  reporter_type: InvalidationReporterTypeRow;
+  reporter_user_id: string | null;
+  reporter_key_id: string | null;
+  reason: string | null;
+  recheck_job_id: string | null;
+  created_at: Generated<Date>;
+}
+
 export interface Database {
   schema_meta: SchemaMetaTable;
   user: UserTable;
@@ -317,4 +330,5 @@ export interface Database {
   platform_checks: PlatformChecksTable;
   sync_state: SyncStateTable;
   review_alerts: ReviewAlertsTable;
+  invalidation_reports: InvalidationReportsTable;
 }

@@ -67,6 +67,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0011_invalidation_reports",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -594,6 +599,98 @@ describe("packages/db migrations", () => {
         })
         .execute(),
     ).rejects.toThrow();
+
+    // Invalidation reports table from 0011_invalidation_reports
+    const openAnonReport = await testDb.writeDb
+      .insertInto("invalidation_reports")
+      .values({
+        association_id: assoc.id,
+        reporter_type: "api_key",
+        reporter_user_id: "user_1",
+        reporter_key_id: "key_1",
+        reason: "404 on bilibili",
+        recheck_job_id: null,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(openAnonReport).toMatchObject({
+      association_id: assoc.id,
+      reporter_type: "api_key",
+      reporter_user_id: "user_1",
+      reporter_key_id: "key_1",
+      reason: "404 on bilibili",
+      recheck_job_id: null,
+    });
+    expect(openAnonReport.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(openAnonReport.created_at).toBeInstanceOf(Date);
+
+    // Partial unique index rejects duplicate open anonymous reports from the same API key
+    await expect(
+      testDb.writeDb
+        .insertInto("invalidation_reports")
+        .values({
+          association_id: assoc.id,
+          reporter_type: "api_key",
+          reporter_user_id: "user_1",
+          reporter_key_id: "key_1",
+          reason: "duplicate spam",
+          recheck_job_id: null,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Closing the cycle by attaching recheck_job_id frees the partial unique index for a new cycle
+    await testDb.writeDb
+      .updateTable("invalidation_reports")
+      .set({ recheck_job_id: insertedJob.id })
+      .where("id", "=", openAnonReport.id)
+      .execute();
+
+    const nextCycleReport = await testDb.writeDb
+      .insertInto("invalidation_reports")
+      .values({
+        association_id: assoc.id,
+        reporter_type: "api_key",
+        reporter_user_id: "user_1",
+        reporter_key_id: "key_1",
+        reason: "down again later",
+        recheck_job_id: null,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    expect(nextCycleReport.id).not.toBe(openAnonReport.id);
+
+    // Rejects invalid reporter_type
+    await expect(
+      testDb.writeDb
+        .insertInto("invalidation_reports")
+        .values({
+          association_id: assoc.id,
+          reporter_type: "bot" as "user",
+          reporter_user_id: "user_1",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Logged-in user reports require reporter_user_id and can record multiple reports
+    const userReport = await testDb.writeDb
+      .insertInto("invalidation_reports")
+      .values({
+        association_id: assoc.id,
+        reporter_type: "user",
+        reporter_user_id: "user_1",
+        reporter_key_id: null,
+        reason: "verified gone",
+        recheck_job_id: insertedJob.id,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    expect(userReport.id).toBeTruthy();
 
     const rerunResults = await runMigrations(testDb.writeDb);
     expect(rerunResults).toEqual([]);

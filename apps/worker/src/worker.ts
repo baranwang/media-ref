@@ -8,11 +8,13 @@ import {
   completeJobWithFencing,
   createDefaultJobHandlers,
   createEvidenceCheckJobHandler,
+  createInvalidationRecheckJobHandler,
   createTmdbSyncJobHandler,
   enqueueTmdbDailySyncIfDue,
   EVIDENCE_CHECK_JOB_TYPE,
   failJobWithFencing,
   getJobById,
+  INVALIDATION_RECHECK_JOB_TYPE,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
   TMDB_SYNC_JOB_TYPE,
@@ -129,6 +131,9 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
       evaluateStep2: deps.evaluateStep2,
+    }),
+    [INVALIDATION_RECHECK_JOB_TYPE]: createInvalidationRecheckJobHandler({
+      adapterRegistry: deps.adapterRegistry,
     }),
     [TMDB_SYNC_JOB_TYPE]: createTmdbSyncJobHandler({
       tmdbConfig: deps.config?.tmdb,
