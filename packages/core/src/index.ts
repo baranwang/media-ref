@@ -8,6 +8,8 @@ export {
   isTier2Adapter,
   isTier3Adapter,
   parseBilibiliInput,
+  parseYoukuInput,
+  youkuAdapter,
   type AdapterRegistry,
   type AdapterSearchCandidate,
   type AdapterSearchQuery,

@@ -1,8 +1,10 @@
 import type { Namespace } from "@media-ref/client";
 import { bilibiliAdapter } from "./bilibili.ts";
+import { youkuAdapter } from "./youku.ts";
 import type { AdapterRegistry, AdapterTier, MediaAdapter } from "./types.ts";
 
 export { bilibiliAdapter, parseBilibiliInput } from "./bilibili.ts";
+export { parseYoukuInput, youkuAdapter } from "./youku.ts";
 export {
   AdapterTransientError,
   createTier1Adapter,
@@ -50,5 +52,5 @@ export function createAdapterRegistry(adapters: readonly MediaAdapter[] = []): A
 }
 
 export function createDefaultAdapterRegistry(): AdapterRegistry {
-  return createAdapterRegistry([bilibiliAdapter]);
+  return createAdapterRegistry([bilibiliAdapter, youkuAdapter]);
 }
