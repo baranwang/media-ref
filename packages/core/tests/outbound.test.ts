@@ -37,6 +37,32 @@ describe("OutboundClient live HTTP routing", () => {
     expect(response.body).toBe('{"ok":true}');
   });
 
+  test("forwards redirect mode and supports oauth target kind", async () => {
+    const captured: { url: string; init?: RequestInit }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      captured.push({ url: inputToUrl(input), init });
+      return new Response("", {
+        status: 302,
+        headers: { location: "https://example.invalid/redirect" },
+      });
+    };
+
+    const outbound = createLiveOutboundClient({ fetchImpl });
+    const response = await outbound.fetchExternal({
+      kind: "oauth",
+      namespace: "github",
+      url: "https://github.com/login/oauth/access_token",
+      method: "POST",
+      redirect: "manual",
+      body: "grant_type=authorization_code&code=abc",
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.init?.redirect).toBe("manual");
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toBe("https://example.invalid/redirect");
+  });
+
   test("routes configured namespace through proxyBaseUrl and attaches proxy headers without changing caller", async () => {
     const captured: { url: string; headers: Headers }[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {

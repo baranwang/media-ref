@@ -3,6 +3,7 @@ import { createLiveOutboundClient, parseOutboundProxyConfig } from "@media-ref/c
 import { createDb } from "@media-ref/db";
 import { createApiApp } from "./app.ts";
 import { DEFAULT_EMAIL_FROM } from "./auth.ts";
+import { parseOAuthConfigFromEnv } from "./oauth.ts";
 
 export {
   API_KEY_START_LENGTH,
@@ -33,6 +34,14 @@ export { registerChangeRequestRoutes } from "./change-requests.ts";
 export { registerMediaRoutes } from "./media.ts";
 export { registerReviewerRoutes, requireOwner, requireReviewer } from "./reviewer.ts";
 export {
+  buildOAuthAuthOptions,
+  parseOAuthConfigFromEnv,
+  type OAuthAuthOptions,
+  type OAuthConfig,
+  type OAuthEnvVars,
+  type OAuthProviderCredentials,
+} from "./oauth.ts";
+export {
   AUTH_BASE_PATH,
   createAuth,
   DEFAULT_API_BASE_URL,
@@ -49,6 +58,7 @@ export {
   type AuthenticatedUser,
   type AuthInstance,
 } from "./auth.ts";
+export { registerLeadRoutes, type CreateLeadResponse, type LeadResponse } from "./leads.ts";
 
 export interface ApiWorkerEnv {
   HYPERDRIVE_READ: Hyperdrive;
@@ -59,12 +69,15 @@ export interface ApiWorkerEnv {
   API_BASE_URL?: string;
   COOKIE_DOMAIN?: string;
   TRUSTED_ORIGINS?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  TRAKT_CLIENT_ID?: string;
+  TRAKT_CLIENT_SECRET?: string;
   OUTBOUND_PROXY_CONFIG?: string;
   ENABLE_HEALTH_OUTBOUND_PROBE?: string;
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
   TMDB_API_BASE_URL?: string;
-  TRAKT_CLIENT_ID?: string;
   TRAKT_API_BASE_URL?: string;
 }
 
@@ -106,6 +119,7 @@ const worker = {
           traktClientId: env.TRAKT_CLIENT_ID,
           traktApiBaseUrl: env.TRAKT_API_BASE_URL,
         },
+        oauth: parseOAuthConfigFromEnv(env),
       },
     });
 

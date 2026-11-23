@@ -25,6 +25,18 @@ export {
   type RescheduleJobWithFencingInput,
 } from "./jobs.ts";
 export {
+  LeadValidationError,
+  listLeadsForTarget,
+  MAX_LEAD_NATIVE_ID_LENGTH,
+  MAX_LEAD_NOTES_LENGTH,
+  MAX_LEAD_VARIANT_DESCRIPTION_LENGTH,
+  recordLead,
+  type Lead,
+  type LeadValidationErrorCode,
+  type ListLeadsForTargetQuery,
+  type RecordLeadInput,
+} from "./leads.ts";
+export {
   approveChangeRequest,
   createChangeRequest,
   getChangeRequestById,

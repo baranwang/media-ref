@@ -18,6 +18,7 @@ export type {
   ExternalIdSourceRow,
   ExternalIdsTable,
   JsonObject,
+  LeadsTable,
   MediaTable,
   MediaTypeRow,
   PlatformNamespaceRow,

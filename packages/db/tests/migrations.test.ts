@@ -46,6 +46,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0006_leads",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -361,6 +366,64 @@ describe("packages/db migrations", () => {
       status: "needs_review",
       submitter_type: "human",
     });
+
+    const insertedLead = await testDb.writeDb
+      .insertInto("leads")
+      .values({
+        target_external_key: "tmdb:tv:95479",
+        namespace: "bilibili",
+        native_id: "ss34430",
+        season: 1,
+        variant_description: "原声",
+        notes: "Reported from client player",
+        reporter_user_id: "user_1",
+        reporter_key_id: "key_1",
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedLead).toMatchObject({
+      target_external_key: "tmdb:tv:95479",
+      namespace: "bilibili",
+      native_id: "ss34430",
+      season: 1,
+      variant_description: "原声",
+      notes: "Reported from client player",
+      reporter_user_id: "user_1",
+      reporter_key_id: "key_1",
+    });
+    expect(insertedLead.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(insertedLead.created_at).toBeInstanceOf(Date);
+
+    // Rejects negative season and unknown reporter_user_id at the DB constraint level
+    await expect(
+      testDb.writeDb
+        .insertInto("leads")
+        .values({
+          target_external_key: "tmdb:tv:95479",
+          namespace: "bilibili",
+          native_id: "ss34430",
+          season: -1,
+          reporter_user_id: "user_1",
+          reporter_key_id: "key_1",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("leads")
+        .values({
+          target_external_key: "tmdb:tv:95479",
+          namespace: "bilibili",
+          native_id: "ss34430",
+          reporter_user_id: "nonexistent_user",
+          reporter_key_id: "key_1",
+        })
+        .execute(),
+    ).rejects.toThrow();
 
     const rerunResults = await runMigrations(testDb.writeDb);
     expect(rerunResults).toEqual([]);

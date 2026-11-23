@@ -18,6 +18,7 @@ import {
   type AuthInstance,
 } from "./auth.ts";
 import { registerChangeRequestRoutes } from "./change-requests.ts";
+import { registerLeadRoutes } from "./leads.ts";
 import { registerMediaRoutes } from "./media.ts";
 import { registerReviewerRoutes } from "./reviewer.ts";
 
@@ -150,6 +151,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
 
   registerApiKeyRoutes(app);
   registerChangeRequestRoutes(app);
+  registerLeadRoutes(app);
   registerReviewerRoutes(app);
   registerMediaRoutes(app);
 
