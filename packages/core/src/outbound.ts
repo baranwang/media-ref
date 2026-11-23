@@ -17,6 +17,7 @@ export interface ExternalHttpResponse {
   status: number;
   headers: Record<string, string>;
   body: string;
+  bodyBytes?: Uint8Array;
   url: string;
 }
 
@@ -154,9 +155,28 @@ export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}
           request.timeoutMs !== undefined ? AbortSignal.timeout(request.timeoutMs) : undefined,
       });
 
+      const headers = headersToRecord(response.headers);
+      const contentType = headers["content-type"] ?? "";
+      const isBinaryResponse =
+        contentType.includes("gzip") ||
+        contentType.includes("octet-stream") ||
+        resolved.url.endsWith(".gz");
+
+      if (isBinaryResponse) {
+        const buffer = new Uint8Array(await response.arrayBuffer());
+        const hasGzipMagic = buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b;
+        return {
+          status: response.status,
+          headers,
+          body: hasGzipMagic ? "" : new TextDecoder().decode(buffer),
+          bodyBytes: buffer,
+          url: response.url || resolved.url,
+        };
+      }
+
       return {
         status: response.status,
-        headers: headersToRecord(response.headers),
+        headers,
         body: await response.text(),
         url: response.url || resolved.url,
       };

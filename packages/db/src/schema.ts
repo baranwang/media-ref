@@ -318,6 +318,18 @@ export interface DemandsTable {
   updated_at: Generated<Date>;
 }
 
+export interface ExplorationDailyBudgetTable {
+  budget_date: string;
+  consumed: Generated<number>;
+  updated_at: Generated<Date>;
+}
+
+export interface TmdbDailyExportIdsTable {
+  media_type: MediaTypeRow;
+  tmdb_id: string;
+  exported_date: string;
+}
+
 export interface Database {
   schema_meta: SchemaMetaTable;
   user: UserTable;
@@ -338,4 +350,6 @@ export interface Database {
   sync_state: SyncStateTable;
   review_alerts: ReviewAlertsTable;
   demands: DemandsTable;
+  exploration_daily_budget: ExplorationDailyBudgetTable;
+  tmdb_daily_export_ids: TmdbDailyExportIdsTable;
 }
