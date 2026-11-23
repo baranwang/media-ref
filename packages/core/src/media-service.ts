@@ -34,6 +34,7 @@ import {
   InvalidNativeIdError,
   type AdapterRegistry,
 } from "./adapters/index.ts";
+import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
 import { enqueueJob } from "./jobs.ts";
 import type { OutboundClient } from "./outbound.ts";
 import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
@@ -1362,6 +1363,17 @@ export async function approveChangeRequestInTransaction(
           .onConflict((oc) => oc.doNothing())
           .execute();
       }
+
+      await mergeExternalKeyDemandsIntoMedia(trx, {
+        mediaId: createdMedia.id,
+        externalKeys: [
+          formatExternalKey({ namespace: "tmdb", nativeId: prefetchedTmdb.externalIds.tmdb }),
+          ...secondaryExternalIds.map((ext) => formatExternalKey(ext)),
+        ],
+        seasons: prefetchedTmdb.snapshot.seasons,
+        mediaType: createdMedia.type,
+        now: input.now,
+      });
 
       media = createdMedia;
     }

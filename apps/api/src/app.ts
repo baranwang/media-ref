@@ -54,6 +54,8 @@ export interface ApiDeps {
   outbound: OutboundClient;
   adapterRegistry?: AdapterRegistry;
   tmdbGateway?: TmdbGateway;
+  onBackgroundTask?: (promise: Promise<unknown>) => void;
+  onBackgroundTaskError?: (error: unknown) => void;
   readKeyLimiter?: RateLimitBinding;
   readIpLimiter?: RateLimitBinding;
   config: ApiConfig;
@@ -128,6 +130,8 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     c.set("tmdbConfig", deps.config.tmdb);
     c.set("tmdbGateway", deps.tmdbGateway);
     c.set("now", now);
+    c.set("onBackgroundTask", deps.onBackgroundTask);
+    c.set("onBackgroundTaskError", deps.onBackgroundTaskError);
     c.set("hasCustomClock", hasCustomClock);
     c.set("readRateLimit", readRateLimit);
     c.set("submissionQuota", submissionQuota);
