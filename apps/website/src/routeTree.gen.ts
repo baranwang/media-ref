@@ -13,6 +13,9 @@ import { Route as IndexRouteImport } from "./routes/index";
 import { Route as KeysRouteImport } from "./routes/keys";
 import { Route as LoginRouteImport } from "./routes/login";
 import { Route as RegisterRouteImport } from "./routes/register";
+import { Route as ReviewerRouteImport } from "./routes/reviewer";
+import { Route as SubmitRouteImport } from "./routes/submit";
+import { Route as ChangeRequestsIdRouteImport } from "./routes/change-requests.$id";
 import { Route as MediaKeyRouteImport } from "./routes/media.$key";
 
 const IndexRoute = IndexRouteImport.update({
@@ -35,6 +38,21 @@ const RegisterRoute = RegisterRouteImport.update({
   path: "/register",
   getParentRoute: () => rootRouteImport,
 } as any);
+const ReviewerRoute = ReviewerRouteImport.update({
+  id: "/reviewer",
+  path: "/reviewer",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const SubmitRoute = SubmitRouteImport.update({
+  id: "/submit",
+  path: "/submit",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const ChangeRequestsIdRoute = ChangeRequestsIdRouteImport.update({
+  id: "/change-requests/$id",
+  path: "/change-requests/$id",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const MediaKeyRoute = MediaKeyRouteImport.update({
   id: "/media/$key",
   path: "/media/$key",
@@ -46,6 +64,9 @@ export interface FileRoutesByFullPath {
   "/keys": typeof KeysRoute;
   "/login": typeof LoginRoute;
   "/register": typeof RegisterRoute;
+  "/reviewer": typeof ReviewerRoute;
+  "/submit": typeof SubmitRoute;
+  "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/media/$key": typeof MediaKeyRoute;
 }
 export interface FileRoutesByTo {
@@ -53,6 +74,9 @@ export interface FileRoutesByTo {
   "/keys": typeof KeysRoute;
   "/login": typeof LoginRoute;
   "/register": typeof RegisterRoute;
+  "/reviewer": typeof ReviewerRoute;
+  "/submit": typeof SubmitRoute;
+  "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/media/$key": typeof MediaKeyRoute;
 }
 export interface FileRoutesById {
@@ -61,14 +85,42 @@ export interface FileRoutesById {
   "/keys": typeof KeysRoute;
   "/login": typeof LoginRoute;
   "/register": typeof RegisterRoute;
+  "/reviewer": typeof ReviewerRoute;
+  "/submit": typeof SubmitRoute;
+  "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/media/$key": typeof MediaKeyRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/keys" | "/login" | "/register" | "/media/$key";
+  fullPaths:
+    | "/"
+    | "/keys"
+    | "/login"
+    | "/register"
+    | "/reviewer"
+    | "/submit"
+    | "/change-requests/$id"
+    | "/media/$key";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/keys" | "/login" | "/register" | "/media/$key";
-  id: "__root__" | "/" | "/keys" | "/login" | "/register" | "/media/$key";
+  to:
+    | "/"
+    | "/keys"
+    | "/login"
+    | "/register"
+    | "/reviewer"
+    | "/submit"
+    | "/change-requests/$id"
+    | "/media/$key";
+  id:
+    | "__root__"
+    | "/"
+    | "/keys"
+    | "/login"
+    | "/register"
+    | "/reviewer"
+    | "/submit"
+    | "/change-requests/$id"
+    | "/media/$key";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
@@ -76,6 +128,9 @@ export interface RootRouteChildren {
   KeysRoute: typeof KeysRoute;
   LoginRoute: typeof LoginRoute;
   RegisterRoute: typeof RegisterRoute;
+  ReviewerRoute: typeof ReviewerRoute;
+  SubmitRoute: typeof SubmitRoute;
+  ChangeRequestsIdRoute: typeof ChangeRequestsIdRoute;
   MediaKeyRoute: typeof MediaKeyRoute;
 }
 
@@ -109,6 +164,27 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof RegisterRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/reviewer": {
+      id: "/reviewer";
+      path: "/reviewer";
+      fullPath: "/reviewer";
+      preLoaderRoute: typeof ReviewerRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/submit": {
+      id: "/submit";
+      path: "/submit";
+      fullPath: "/submit";
+      preLoaderRoute: typeof SubmitRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/change-requests/$id": {
+      id: "/change-requests/$id";
+      path: "/change-requests/$id";
+      fullPath: "/change-requests/$id";
+      preLoaderRoute: typeof ChangeRequestsIdRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/media/$key": {
       id: "/media/$key";
       path: "/media/$key";
@@ -124,6 +200,9 @@ const rootRouteChildren: RootRouteChildren = {
   KeysRoute: KeysRoute,
   LoginRoute: LoginRoute,
   RegisterRoute: RegisterRoute,
+  ReviewerRoute: ReviewerRoute,
+  SubmitRoute: SubmitRoute,
+  ChangeRequestsIdRoute: ChangeRequestsIdRoute,
   MediaKeyRoute: MediaKeyRoute,
 };
 export const routeTree = rootRouteImport
