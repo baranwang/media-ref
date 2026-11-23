@@ -209,6 +209,19 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     );
     expect(verifiedActionRes.status).toBe(200);
     expect(await verifiedActionRes.json()).toEqual({ ok: true, userId: me.id });
+
+    // Verified GitHub user can create an API key immediately without additional email verification.
+    const createKeyRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: sessionCookie,
+        },
+        body: JSON.stringify({ name: "GitHub Key" }),
+      }),
+    );
+    expect(createKeyRes.status).toBe(201);
   });
 
   test("GitHub OAuth with unverified primary email keeps emailVerified=false, sends verification email, and unlocks after verification", async () => {
@@ -474,6 +487,22 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       message: "Email verification is required",
     });
 
+    const blockedKeyRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: sessionCookie,
+        },
+        body: JSON.stringify({ name: "Blocked Trakt Key" }),
+      }),
+    );
+    expect(blockedKeyRes.status).toBe(403);
+    expect(await blockedKeyRes.json()).toEqual({
+      error: "EMAIL_NOT_VERIFIED",
+      message: "Email verification is required",
+    });
+
     const verifyUrl = extractVerificationUrl(outbound.sentEmails[0]!);
     const verifyRes = await app.fetch(
       new Request(verifyUrl, { headers: { cookie: sessionCookie } }),
@@ -499,6 +528,18 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     );
     expect(allowedRes.status).toBe(200);
     expect(await allowedRes.json()).toEqual({ ok: true, userId: firstUser.id });
+
+    const allowedKeyRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: verifiedCookie,
+        },
+        body: JSON.stringify({ name: "Verified Trakt Key" }),
+      }),
+    );
+    expect(allowedKeyRes.status).toBe(201);
 
     // Second Trakt sign-in reuses the existing verified user without re-sending verification email.
     const secondInitRes = await app.fetch(
