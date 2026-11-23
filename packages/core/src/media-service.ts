@@ -79,6 +79,9 @@ export type MediaServiceErrorCode =
   | "SEGMENT_OVERLAP"
   | "INVALID_TASK_ID"
   | "MEDIA_NOT_FOUND"
+  | "ASSOCIATION_NOT_FOUND"
+  | "INVALID_REPLACES_ASSOCIATION"
+  | "ASSOCIATION_LOCKED"
   | "CHANGE_REQUEST_NOT_FOUND"
   | "INVALID_CHANGE_REQUEST_STATE"
   | "TMDB_MEDIA_NOT_FOUND"
@@ -128,6 +131,7 @@ export interface ChangeRequestRecord {
   reviewedAt: string | null;
   appliedAssociationId: string | null;
   appliedRevisionId: string | null;
+  replacesAssociationId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -144,6 +148,7 @@ export interface CreateChangeRequestInput {
   variantId?: string | null;
   variantDescription?: string | null;
   setDefaultVariant?: boolean;
+  replacesAssociationId?: string | null;
   segments?: readonly SegmentInput[];
   initialStatus?: "needs_review" | "pending_evidence";
   submissionQuota?: SubmissionQuotaConfig;
@@ -191,6 +196,8 @@ export interface ApproveChangeRequestInTransactionInput {
   prefetchedCatalog?: CatalogTargetSnapshot | null;
   prefetchedTmdb?: TmdbMediaFetchResult | null;
   allowedStatuses?: readonly ChangeRequestStatus[];
+  replacesAssociationId?: string | null;
+  enforceUnlockedCheck?: boolean;
   now?: Date;
 }
 
@@ -274,8 +281,19 @@ function parseSeasonsSnapshot(raw: unknown): SeasonSnapshot[] {
   }));
 }
 
+function extractReplacesAssociationId(rawEvidence: unknown): string | null {
+  const parsed = parseJsonObject(rawEvidence);
+  const value = parsed?.replacesAssociationId;
+  return typeof value === "string" && isUuid(value) ? value : null;
+}
+
 function toChangeRequestRecord(row: Selectable<ChangeRequestsTable>): ChangeRequestRecord {
   const storedSegments = parseJsonArray<StoredSegmentJson>(row.segments);
+  const evidence = parseJsonObject(row.evidence);
+  const replacesAssociationId =
+    typeof evidence?.replacesAssociationId === "string" && isUuid(evidence.replacesAssociationId)
+      ? evidence.replacesAssociationId
+      : null;
   return {
     id: row.id,
     status: row.status,
@@ -300,13 +318,14 @@ function toChangeRequestRecord(row: Selectable<ChangeRequestsTable>): ChangeRequ
       nonLinear: Boolean(seg.nonLinear),
       needsReview: Boolean(seg.needsReview),
     })),
-    evidence: parseJsonObject(row.evidence),
+    evidence,
     conflictReason: row.conflict_reason,
     decisionReason: row.decision_reason,
     reviewerUserId: row.reviewer_user_id,
     reviewedAt: row.reviewed_at ? toIsoString(row.reviewed_at) : null,
     appliedAssociationId: row.applied_association_id,
     appliedRevisionId: row.applied_revision_id,
+    replacesAssociationId,
     createdAt: toIsoString(row.created_at),
     updatedAt: toIsoString(row.updated_at),
   };
@@ -482,6 +501,7 @@ async function loadActiveAssociationsWithSegments(
     catalogNamespace?: AssociationNamespace;
     collection?: { namespace: AssociationNamespace; nativeId: string };
     excludeAssociationId?: string;
+    excludeAssociationIds?: readonly string[];
   },
 ): Promise<Array<{ id: string; mediaId: string; segments: NormalizedSegment[] }>> {
   let query = db
@@ -503,8 +523,14 @@ async function loadActiveAssociationsWithSegments(
       .where("namespace", "=", filter.collection.namespace)
       .where("native_id", "=", filter.collection.nativeId);
   }
-  if (filter.excludeAssociationId !== undefined) {
-    query = query.where("id", "!=", filter.excludeAssociationId);
+  const excludedIds = [
+    ...(filter.excludeAssociationId !== undefined ? [filter.excludeAssociationId] : []),
+    ...(filter.excludeAssociationIds ?? []),
+  ];
+  if (excludedIds.length === 1) {
+    query = query.where("id", "!=", excludedIds[0]!);
+  } else if (excludedIds.length > 1) {
+    query = query.where("id", "not in", excludedIds);
   }
 
   const associations = await query.orderBy("created_at", "asc").orderBy("id", "asc").execute();
@@ -666,13 +692,74 @@ export async function createChangeRequest(
     ? existingMedia.baseline
     : selectBaseline([catalogTarget!.namespace]);
 
+  // Optional explicit replacement target validation
+  let replacesAssociation: {
+    id: string;
+    media_id: string;
+    namespace: AssociationNamespace;
+    native_id: string;
+    variant_id: string | null;
+    status: "confirmed" | "seed_unconfirmed" | "delisted";
+    locked: boolean;
+  } | null = null;
+  const rawReplacesAssociationId = input.replacesAssociationId?.trim() || null;
+  if (rawReplacesAssociationId !== null) {
+    if (!isUuid(rawReplacesAssociationId)) {
+      throw new MediaServiceError(
+        "INVALID_REPLACES_ASSOCIATION",
+        400,
+        "replacesAssociationId must be a valid UUID",
+      );
+    }
+    if (!existingMedia) {
+      throw new MediaServiceError(
+        "ASSOCIATION_NOT_FOUND",
+        404,
+        "Cannot specify replacesAssociationId for a media that does not exist yet",
+      );
+    }
+    const foundReplaced = await dbWrite
+      .selectFrom("associations")
+      .select(["id", "media_id", "namespace", "native_id", "variant_id", "status", "locked"])
+      .where("id", "=", rawReplacesAssociationId)
+      .where("media_id", "=", existingMedia.id)
+      .executeTakeFirst();
+
+    if (!foundReplaced) {
+      throw new MediaServiceError(
+        "ASSOCIATION_NOT_FOUND",
+        404,
+        "Specified replacesAssociationId does not belong to the target media",
+      );
+    }
+    if (foundReplaced.status === "delisted") {
+      throw new MediaServiceError(
+        "INVALID_REPLACES_ASSOCIATION",
+        409,
+        "Cannot replace an already delisted association",
+      );
+    }
+    if (foundReplaced.namespace !== namespace) {
+      throw new MediaServiceError(
+        "INVALID_REPLACES_ASSOCIATION",
+        400,
+        "replacesAssociationId must belong to the same namespace",
+      );
+    }
+    replacesAssociation = foundReplaced;
+  }
+
   // Variant validation
   let resolvedVariantId: string | null = null;
   let variantDescription: string | null = null;
   const setDefaultVariant = Boolean(input.setDefaultVariant);
 
   if (isPlatformNamespace(namespace)) {
-    const rawVariantId = input.variantId?.trim() || null;
+    const rawVariantId =
+      input.variantId?.trim() ||
+      (!input.variantDescription?.trim() && replacesAssociation?.variant_id
+        ? replacesAssociation.variant_id
+        : null);
     const rawDescription = input.variantDescription?.trim() || null;
 
     if (!rawVariantId && !rawDescription) {
@@ -725,6 +812,14 @@ export async function createChangeRequest(
           resolvedVariantId = matchedByDescription.id;
         }
       }
+    }
+
+    if (replacesAssociation && resolvedVariantId !== replacesAssociation.variant_id) {
+      throw new MediaServiceError(
+        "INVALID_REPLACES_ASSOCIATION",
+        400,
+        "replacesAssociationId must belong to the same variant as the replacement submission",
+      );
     }
   } else {
     if (input.variantId || input.variantDescription) {
@@ -801,19 +896,32 @@ export async function createChangeRequest(
   }
 
   // Submit-time overlap check against already-confirmed/active associations in target variant/catalog
+  let existingSameCollection: {
+    id: string;
+    native_id: string;
+    locked: boolean;
+  } | null = null;
   if (existingMedia) {
-    const existingSameCollection = await dbWrite
-      .selectFrom("associations")
-      .select("id")
-      .where("media_id", "=", existingMedia.id)
-      .where("namespace", "=", namespace)
-      .where("native_id", "=", nativeId)
-      .executeTakeFirst();
+    existingSameCollection =
+      (await dbWrite
+        .selectFrom("associations")
+        .select(["id", "native_id", "locked"])
+        .where("media_id", "=", existingMedia.id)
+        .where("namespace", "=", namespace)
+        .where("native_id", "=", nativeId)
+        .executeTakeFirst()) ?? null;
+
+    const excludeAssociationIds = [
+      ...(existingSameCollection ? [existingSameCollection.id] : []),
+      ...(replacesAssociation && replacesAssociation.id !== existingSameCollection?.id
+        ? [replacesAssociation.id]
+        : []),
+    ];
 
     if (isPlatformNamespace(namespace) && resolvedVariantId) {
       const others = await loadActiveAssociationsWithSegments(dbWrite, {
         variantId: resolvedVariantId,
-        excludeAssociationId: existingSameCollection?.id,
+        excludeAssociationIds,
       });
       const variantCheck = validateVariantSegments(
         [
@@ -838,7 +946,7 @@ export async function createChangeRequest(
       const others = await loadActiveAssociationsWithSegments(dbWrite, {
         mediaId: existingMedia.id,
         catalogNamespace: namespace,
-        excludeAssociationId: existingSameCollection?.id,
+        excludeAssociationIds,
       });
       const catalogCheck = validateVariantSegments(
         [
@@ -896,13 +1004,34 @@ export async function createChangeRequest(
   const hasTier2Adapter = Boolean(adapter && adapter.tier >= 2);
   const resolvedStatus: ChangeRequestStatus =
     input.initialStatus ?? (hasTier2Adapter ? "pending_evidence" : "needs_review");
+  const shouldEnqueueEvidenceCheck = resolvedStatus === "pending_evidence";
+  const lockedImmediateTargets: Array<{ id: string; nativeId: string }> = [];
+  if (!shouldEnqueueEvidenceCheck && existingMedia) {
+    if (replacesAssociation?.locked) {
+      lockedImmediateTargets.push({
+        id: replacesAssociation.id,
+        nativeId: replacesAssociation.native_id,
+      });
+    }
+    if (existingSameCollection?.locked && existingSameCollection.id !== replacesAssociation?.id) {
+      lockedImmediateTargets.push({
+        id: existingSameCollection.id,
+        nativeId: existingSameCollection.native_id,
+      });
+    }
+  }
+  const initialConflictReason =
+    lockedImmediateTargets.length > 0 ? "locked_association_challenged" : null;
   const initialDecisionReason =
-    input.initialStatus === undefined &&
+    initialConflictReason ??
+    (input.initialStatus === undefined &&
     resolvedStatus === "needs_review" &&
     options.adapterRegistry
       ? TIER1_MANUAL_REVIEW_REASON
-      : null;
-  const shouldEnqueueEvidenceCheck = resolvedStatus === "pending_evidence";
+      : null);
+  const initialEvidenceJson = replacesAssociation
+    ? JSON.stringify({ replacesAssociationId: replacesAssociation.id })
+    : null;
   const effectiveNow = input.now ?? options.now;
 
   const inserted = await dbWrite.transaction().execute(async (trx) => {
@@ -929,6 +1058,8 @@ export async function createChangeRequest(
         variant_description: variantDescription,
         set_default_variant: setDefaultVariant,
         segments: JSON.stringify(normalizedSegments),
+        evidence: initialEvidenceJson,
+        conflict_reason: initialConflictReason,
         decision_reason: initialDecisionReason,
         ...(effectiveNow ? { created_at: quota.referenceNow, updated_at: quota.referenceNow } : {}),
       })
@@ -938,10 +1069,32 @@ export async function createChangeRequest(
     if (shouldEnqueueEvidenceCheck) {
       await enqueueJob(trx, {
         jobType: EVIDENCE_CHECK_JOB_TYPE,
-        payload: { changeRequestId: row.id },
+        payload: replacesAssociation
+          ? { changeRequestId: row.id, replacesAssociationId: replacesAssociation.id }
+          : { changeRequestId: row.id },
         dedupeKey: `${EVIDENCE_CHECK_JOB_TYPE}:${row.id}`,
         runAfter: effectiveNow ?? quota.referenceNow,
       });
+    } else if (lockedImmediateTargets.length > 0 && existingMedia) {
+      const detectedAt = (effectiveNow ?? quota.referenceNow).toISOString();
+      for (const targetLocked of lockedImmediateTargets) {
+        await trx
+          .insertInto("review_alerts")
+          .values({
+            alert_type: "locked_association_challenged",
+            media_id: existingMedia.id,
+            association_id: targetLocked.id,
+            status: "open",
+            details: JSON.stringify({
+              changeRequestId: row.id,
+              namespace,
+              nativeId,
+              existingNativeId: targetLocked.nativeId,
+              detectedAt,
+            }),
+          })
+          .execute();
+      }
     }
 
     return row;
@@ -1446,6 +1599,10 @@ export async function approveChangeRequestInTransaction(
   // 5. Re-read active associations & segments inside the locked transaction and validate via @media-ref/client
   const storedSegments = parseJsonArray<StoredSegmentJson>(cr.segments);
   const normalizedSegments = normalizeSegments(storedSegments);
+  const effectiveReplacesAssociationId =
+    input.replacesAssociationId !== undefined
+      ? input.replacesAssociationId
+      : extractReplacesAssociationId(cr.evidence);
 
   if (media.baseline === null && normalizedSegments.length > 0) {
     throw new MediaServiceError(
@@ -1457,21 +1614,57 @@ export async function approveChangeRequestInTransaction(
 
   const existingAssociation = await trx
     .selectFrom("associations")
-    .select(["id", "variant_id"])
+    .select(["id", "variant_id", "status", "locked", "native_id"])
     .where("media_id", "=", mediaId)
     .where("namespace", "=", namespace)
     .where("native_id", "=", nativeId)
+    .forUpdate()
     .executeTakeFirst();
+
+  const replacedAssociation =
+    effectiveReplacesAssociationId &&
+    effectiveReplacesAssociationId !== existingAssociation?.id &&
+    isUuid(effectiveReplacesAssociationId)
+      ? await trx
+          .selectFrom("associations")
+          .select(["id", "variant_id", "status", "locked", "native_id", "namespace"])
+          .where("id", "=", effectiveReplacesAssociationId)
+          .where("media_id", "=", mediaId)
+          .forUpdate()
+          .executeTakeFirst()
+      : undefined;
+
+  if (input.enforceUnlockedCheck) {
+    if (existingAssociation?.locked) {
+      throw new MediaServiceError(
+        "ASSOCIATION_LOCKED",
+        409,
+        `Association ${existingAssociation.id} is locked and cannot be automatically modified`,
+      );
+    }
+    if (replacedAssociation?.locked) {
+      throw new MediaServiceError(
+        "ASSOCIATION_LOCKED",
+        409,
+        `Association ${replacedAssociation.id} is locked and cannot be automatically replaced`,
+      );
+    }
+  }
+
+  const excludeAssociationIds = [
+    ...(existingAssociation ? [existingAssociation.id] : []),
+    ...(replacedAssociation ? [replacedAssociation.id] : []),
+  ];
 
   const siblingAssociations = isPlatformNamespace(namespace)
     ? await loadActiveAssociationsWithSegments(trx, {
         variantId: resolvedVariantId!,
-        excludeAssociationId: existingAssociation?.id,
+        excludeAssociationIds,
       })
     : await loadActiveAssociationsWithSegments(trx, {
         mediaId,
         catalogNamespace: namespace,
-        excludeAssociationId: existingAssociation?.id,
+        excludeAssociationIds,
       });
 
   const variantValidation = validateVariantSegments(
@@ -1521,6 +1714,78 @@ export async function approveChangeRequestInTransaction(
       sharedValidation.errors[0].message,
       sharedValidation.errors,
     );
+  }
+
+  // 5b. If replacing a distinct association, atomically delist it and record a new revision preserving history
+  if (replacedAssociation && replacedAssociation.status !== "delisted") {
+    const replacedSegmentRows = await trx
+      .selectFrom("segments")
+      .select([
+        "season",
+        "episode_start",
+        "episode_end",
+        "target_episode_start",
+        "baseline",
+        "non_linear",
+        "needs_review",
+      ])
+      .where("association_id", "=", replacedAssociation.id)
+      .orderBy("season", "asc")
+      .orderBy("episode_start", "asc")
+      .orderBy("id", "asc")
+      .execute();
+
+    const replacedSegmentsSnapshot: NormalizedSegment[] = replacedSegmentRows.map((seg) => ({
+      season: seg.season,
+      episodeStart: seg.episode_start,
+      episodeEnd: seg.episode_end,
+      targetEpisodeStart: seg.target_episode_start,
+      baseline: seg.baseline,
+      nonLinear: Boolean(seg.non_linear),
+      needsReview: Boolean(seg.needs_review),
+    }));
+
+    await trx
+      .updateTable("associations")
+      .set({
+        status: "delisted",
+        updated_at: now,
+      })
+      .where("id", "=", replacedAssociation.id)
+      .execute();
+
+    await trx.deleteFrom("segments").where("association_id", "=", replacedAssociation.id).execute();
+
+    const maxReplacedRevRow = await trx
+      .selectFrom("association_revisions")
+      .select(sql<number | null>`max(revision_number)`.as("max_rev"))
+      .where("association_id", "=", replacedAssociation.id)
+      .executeTakeFirst();
+
+    const nextReplacedRev = (maxReplacedRevRow?.max_rev ?? 0) + 1;
+    const delistedRev = await trx
+      .insertInto("association_revisions")
+      .values({
+        association_id: replacedAssociation.id,
+        revision_number: nextReplacedRev,
+        change_request_id: cr.id,
+        variant_id: replacedAssociation.variant_id,
+        status: "delisted",
+        segments: JSON.stringify(replacedSegmentsSnapshot),
+        actor_user_id: input.reviewerUserId,
+        reason: reason ?? "replaced_by_change_request",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    await trx
+      .updateTable("associations")
+      .set({
+        current_revision_id: delistedRev.id,
+        updated_at: now,
+      })
+      .where("id", "=", replacedAssociation.id)
+      .execute();
   }
 
   // 6. Upsert association, replace segments, insert new revision, and mark change request approved

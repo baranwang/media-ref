@@ -71,9 +71,12 @@ export {
 export {
   evaluateEvidenceGate,
   evaluateEvidenceGateStep1,
+  evaluateEvidenceGateStep2,
+  isNonOriginalVariantDescription,
   normalizeTitleForComparison,
   type CatalogEvidence,
   type EvaluateEvidenceGateInput,
+  type EvaluateEvidenceGateStep1Options,
   type EvidenceGateConflict,
   type EvidenceGateDecision,
   type EvidenceGateResult,
@@ -85,6 +88,7 @@ export {
   type SharedIdMatch,
   type Step1ConflictCode,
   type Step1FieldCheckStatus,
+  type Step2ConflictCode,
 } from "./evidence-gate.ts";
 export {
   claimDueJobs,
@@ -124,6 +128,34 @@ export {
   type ListLeadsForTargetQuery,
   type RecordLeadInput,
 } from "./leads.ts";
+export {
+  CONFLICT_REASONS,
+  ConflictResolutionError,
+  evaluateConflictMatrix,
+  evaluateEvidenceCheckConflict,
+  findConflictingAssociations,
+  listAssociationRevisions,
+  overrideMediaExternalId,
+  recordLockedAssociationAlertInTx,
+  setAssociationLock,
+  setMediaExternalIdLock,
+  type AssociationLockResult,
+  type AssociationRevisionRecord,
+  type AssociationSummaryRecord,
+  type ConflictCheckResolution,
+  type ConflictingAssociationSnapshot,
+  type ConflictMatrixAction,
+  type ConflictMatrixDecision,
+  type ConflictResolutionErrorCode,
+  type EvaluateEvidenceCheckConflictInput,
+  type ExternalIdRecord,
+  type FindConflictingAssociationsInput,
+  type ListAssociationRevisionsOptions,
+  type ListAssociationRevisionsResult,
+  type OverrideMediaExternalIdInput,
+  type SetAssociationLockInput,
+  type SetMediaExternalIdLockInput,
+} from "./conflict-resolution.ts";
 export { createEvidenceCheckJobHandler, type EvidenceCheckJobOptions } from "./evidence-job.ts";
 export {
   ASSOCIATION_CONTENT_MISMATCH_ALERT_TYPE,
