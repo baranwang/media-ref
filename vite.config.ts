@@ -5,11 +5,11 @@ export default defineConfig({
     "*": "vp check --fix",
   },
   fmt: {
-      sortTailwindcss: {
-    stylesheet: "./packages/ui/src/styles/globals.css",
-    functions: ["clsx", "cn"],
-    preserveWhitespace: true,
-  },
+    sortTailwindcss: {
+      stylesheet: "./packages/ui/src/styles/globals.css",
+      functions: ["clsx", "cn"],
+      preserveWhitespace: true,
+    },
   },
   lint: {
     jsPlugins: [{ name: "vite-plus", specifier: "vite-plus/oxlint-plugin" }],
