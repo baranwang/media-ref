@@ -3,7 +3,10 @@ export { migrations, staticMigrationProvider } from "./migrations/index.ts";
 export { runMigrations } from "./migrator.ts";
 export type {
   AccountTable,
+  BackgroundJobStatus,
+  BackgroundJobsTable,
   Database,
+  JsonObject,
   SchemaMetaTable,
   SessionTable,
   UserTable,
