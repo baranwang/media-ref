@@ -40,6 +40,7 @@ export const REVIEW_ALERT_TYPES = {
   LOCKED_ASSOCIATION_CHALLENGED: "locked_association_challenged",
   LOCKED_ASSOCIATION_DELISTED: "locked_association_delisted",
   SEGMENTS_NEEDS_REVIEW: "segments_needs_review",
+  SEED_EVIDENCE_FAILED: "seed_evidence_failed",
 } as const;
 
 export type KnownReviewAlertType = (typeof REVIEW_ALERT_TYPES)[keyof typeof REVIEW_ALERT_TYPES];

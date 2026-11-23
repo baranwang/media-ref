@@ -11,6 +11,7 @@ import {
   createExplorationAgentExecutor,
   createExplorationJobHandler,
   createInvalidationRecheckJobHandler,
+  createSeedEvidenceCheckJobHandler,
   createTmdbSyncJobHandler,
   enqueueTmdbDailySyncIfDue,
   EVIDENCE_CHECK_JOB_TYPE,
@@ -21,6 +22,7 @@ import {
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
   scheduleExplorationJobs,
+  SEED_EVIDENCE_CHECK_JOB_TYPE,
   TMDB_SYNC_JOB_TYPE,
   type AdapterRegistry,
   type EvidenceGateStep2Evaluator,
@@ -140,6 +142,12 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
   const handlers: JobHandlerRegistry = {
     ...createDefaultJobHandlers(),
     [EVIDENCE_CHECK_JOB_TYPE]: createEvidenceCheckJobHandler({
+      adapterRegistry: deps.adapterRegistry,
+      tmdbConfig: deps.config?.tmdb,
+      tmdbGateway: deps.tmdbGateway,
+      evaluateStep2: deps.evaluateStep2,
+    }),
+    [SEED_EVIDENCE_CHECK_JOB_TYPE]: createSeedEvidenceCheckJobHandler({
       adapterRegistry: deps.adapterRegistry,
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
