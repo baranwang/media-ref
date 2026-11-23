@@ -51,6 +51,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0007_platform_status",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -421,6 +426,84 @@ describe("packages/db migrations", () => {
           native_id: "ss34430",
           reporter_user_id: "nonexistent_user",
           reporter_key_id: "key_1",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Platform checks table from 0007_platform_status
+    const checkedAt = new Date("2026-11-20T12:00:00.000Z");
+    const nextRetryAt = new Date("2026-11-27T12:00:00.000Z");
+    const insertedCheck = await testDb.writeDb
+      .insertInto("platform_checks")
+      .values({
+        media_id: insertedMedia.id,
+        platform: "iqiyi",
+        status: "not_found",
+        checked_at: checkedAt,
+        next_retry_at: nextRetryAt,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedCheck).toMatchObject({
+      media_id: insertedMedia.id,
+      platform: "iqiyi",
+      status: "not_found",
+      attempt_count: 1,
+    });
+    expect(insertedCheck.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(insertedCheck.checked_at.toISOString()).toBe(checkedAt.toISOString());
+    expect(insertedCheck.next_retry_at?.toISOString()).toBe(nextRetryAt.toISOString());
+
+    // Unique (media_id, platform) prevents duplicate check rows for the same platform
+    await expect(
+      testDb.writeDb
+        .insertInto("platform_checks")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "iqiyi",
+          status: "not_found",
+          checked_at: checkedAt,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Rejects invalid platform, invalid status, and attempt_count < 1
+    await expect(
+      testDb.writeDb
+        .insertInto("platform_checks")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "douban" as any,
+          status: "not_found",
+          checked_at: checkedAt,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("platform_checks")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "youku",
+          status: "associated" as any,
+          checked_at: checkedAt,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("platform_checks")
+        .values({
+          media_id: insertedMedia.id,
+          platform: "youku",
+          status: "not_found",
+          checked_at: checkedAt,
+          attempt_count: 0,
         })
         .execute(),
     ).rejects.toThrow();
