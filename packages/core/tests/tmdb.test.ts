@@ -90,8 +90,130 @@ describe("TmdbGateway", () => {
 
     const gateway = createTmdbGateway(outbound, { accessToken: "tok" });
     expect(await gateway.fetchMediaSnapshotAndExternalIds("movie", "404")).toBeNull();
-    await expect(gateway.fetchMediaSnapshotAndExternalIds("movie", "500")).rejects.toThrow(
-      TmdbGatewayError,
-    );
+    await expect(
+      gateway.fetchMediaSnapshotAndExternalIds("movie", "404", { throwOnNotFound: true }),
+    ).rejects.toMatchObject({
+      name: "TmdbGatewayError",
+      code: "TMDB_NOT_FOUND",
+      status: 404,
+    });
+    await expect(gateway.fetchMediaSnapshotAndExternalIds("movie", "500")).rejects.toMatchObject({
+      name: "TmdbGatewayError",
+      code: "TMDB_UPSTREAM_ERROR",
+      status: 502,
+    });
+  });
+
+  test("fetchChanges paginates through all total_pages, deduplicates IDs, and distinguishes 404 vs transient 5xx/timeout", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request): ExternalHttpResponse {
+        const parsedUrl = new URL(request.url);
+        if (parsedUrl.pathname.endsWith("/tv/changes")) {
+          const page = parsedUrl.searchParams.get("page");
+          expect(parsedUrl.searchParams.get("start_date")).toBe("2026-11-18");
+          expect(parsedUrl.searchParams.get("end_date")).toBe("2026-11-23");
+
+          if (page === "1") {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              url: request.url,
+              body: JSON.stringify({
+                page: 1,
+                total_pages: 3,
+                total_results: 4,
+                results: [
+                  { id: 95479, adult: false },
+                  { id: 108545, adult: null },
+                ],
+              }),
+            };
+          }
+          if (page === "2") {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              url: request.url,
+              body: JSON.stringify({
+                page: 2,
+                total_pages: 3,
+                total_results: 4,
+                results: [
+                  { id: 108545, adult: false }, // duplicate across pages
+                  { id: 200001, adult: false },
+                ],
+              }),
+            };
+          }
+          if (page === "3") {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              url: request.url,
+              body: JSON.stringify({
+                page: 3,
+                total_pages: 3,
+                total_results: 4,
+                results: [{ id: 300002, adult: false }],
+              }),
+            };
+          }
+        }
+
+        if (parsedUrl.pathname.endsWith("/movie/changes")) {
+          if (parsedUrl.searchParams.get("start_date") === "2026-01-01") {
+            return { status: 404, headers: {}, url: request.url, body: "{}" };
+          }
+          if (parsedUrl.searchParams.get("start_date") === "2026-02-01") {
+            throw new Error("Request timed out");
+          }
+          return { status: 503, headers: {}, url: request.url, body: "Service Unavailable" };
+        }
+
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+
+    const gateway = createTmdbGateway(outbound, { accessToken: "tok" });
+    const changes = await gateway.fetchChanges("tv", {
+      startDate: "2026-11-18",
+      endDate: "2026-11-23",
+    });
+
+    expect(changes).toEqual({
+      mediaType: "tv",
+      startDate: "2026-11-18",
+      endDate: "2026-11-23",
+      changedIds: ["95479", "108545", "200001", "300002"],
+      totalPages: 3,
+      totalResults: 4,
+      pagesFetched: 3,
+    });
+
+    await expect(
+      gateway.fetchChanges("movie", { startDate: "2026-01-01", endDate: "2026-01-02" }),
+    ).rejects.toMatchObject({
+      name: "TmdbGatewayError",
+      code: "TMDB_NOT_FOUND",
+      status: 404,
+    });
+
+    await expect(
+      gateway.fetchChanges("movie", { startDate: "2026-02-01", endDate: "2026-02-02" }),
+    ).rejects.toMatchObject({
+      name: "TmdbGatewayError",
+      code: "TMDB_UPSTREAM_ERROR",
+      status: 502,
+    });
+
+    await expect(
+      gateway.fetchChanges("movie", { startDate: "2026-03-01", endDate: "2026-03-02" }),
+    ).rejects.toMatchObject({
+      name: "TmdbGatewayError",
+      code: "TMDB_UPSTREAM_ERROR",
+      status: 502,
+    });
+
+    expect(TmdbGatewayError).toBeDefined();
   });
 });

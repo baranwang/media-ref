@@ -51,6 +51,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0009_sync_state",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -421,6 +426,70 @@ describe("packages/db migrations", () => {
           native_id: "ss34430",
           reporter_user_id: "nonexistent_user",
           reporter_key_id: "key_1",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Sync state and review alerts tables from 0009_sync_state
+    const insertedSync = await testDb.writeDb
+      .insertInto("sync_state")
+      .values({
+        sync_key: "tmdb_changes_tv",
+        last_synced_date: "2026-11-23",
+        metadata: JSON.stringify({ mode: "changes", refreshedCount: 1 }),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedSync).toMatchObject({
+      sync_key: "tmdb_changes_tv",
+      last_synced_date: "2026-11-23",
+    });
+    expect(insertedSync.updated_at).toBeInstanceOf(Date);
+
+    // Rejects malformed last_synced_date
+    await expect(
+      testDb.writeDb
+        .insertInto("sync_state")
+        .values({
+          sync_key: "tmdb_changes_bad",
+          last_synced_date: "2026/11/23",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    const insertedAlert = await testDb.writeDb
+      .insertInto("review_alerts")
+      .values({
+        alert_type: "tmdb_missing_or_merged",
+        media_id: insertedMedia.id,
+        association_id: assoc.id,
+        details: JSON.stringify({ tmdbExternalKey: "tmdb:tv:95479" }),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedAlert).toMatchObject({
+      alert_type: "tmdb_missing_or_merged",
+      media_id: insertedMedia.id,
+      association_id: assoc.id,
+      status: "open",
+      resolved_at: null,
+      resolved_by_user_id: null,
+    });
+    expect(insertedAlert.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(insertedAlert.created_at).toBeInstanceOf(Date);
+
+    // Rejects invalid review_alerts status
+    await expect(
+      testDb.writeDb
+        .insertInto("review_alerts")
+        .values({
+          alert_type: "tmdb_missing_or_merged",
+          media_id: insertedMedia.id,
+          status: "invalid_status" as "open",
         })
         .execute(),
     ).rejects.toThrow();

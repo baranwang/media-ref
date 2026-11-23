@@ -19,6 +19,7 @@ import {
 } from "./auth.ts";
 import { registerChangeRequestRoutes } from "./change-requests.ts";
 import { registerLeadRoutes } from "./leads.ts";
+import { registerMediaAdminRoutes } from "./media-admin.ts";
 import { registerMediaRoutes } from "./media.ts";
 import { registerReviewerRoutes } from "./reviewer.ts";
 
@@ -153,6 +154,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
   registerChangeRequestRoutes(app);
   registerLeadRoutes(app);
   registerReviewerRoutes(app);
+  registerMediaAdminRoutes(app);
   registerMediaRoutes(app);
 
   return app;
