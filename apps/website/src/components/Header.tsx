@@ -51,12 +51,28 @@ export default function Header({ user }: HeaderProps) {
                 工作台
               </Link>
               <Link
+                to="/submit"
+                className="nav-link"
+                activeProps={{ className: "nav-link is-active" }}
+              >
+                提交关联
+              </Link>
+              <Link
                 to="/keys"
                 className="nav-link"
                 activeProps={{ className: "nav-link is-active" }}
               >
                 接口密钥
               </Link>
+              {isReviewer(user) ? (
+                <Link
+                  to="/reviewer"
+                  className="nav-link"
+                  activeProps={{ className: "nav-link is-active" }}
+                >
+                  审核员队列
+                </Link>
+              ) : null}
             </>
           ) : (
             <>
