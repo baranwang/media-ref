@@ -1,8 +1,10 @@
-import type {
-  ExternalTargetKind,
-  OutboundClient,
-  TmdbGateway,
-  TmdbGatewayConfig,
+import {
+  createDefaultAdapterRegistry,
+  type AdapterRegistry,
+  type ExternalTargetKind,
+  type OutboundClient,
+  type TmdbGateway,
+  type TmdbGatewayConfig,
 } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { Hono } from "hono";
@@ -32,6 +34,7 @@ export interface ApiDeps {
   dbRead: Db;
   dbWrite: Db;
   outbound: OutboundClient;
+  adapterRegistry?: AdapterRegistry;
   tmdbGateway?: TmdbGateway;
   config: ApiConfig;
 }
@@ -61,6 +64,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
   };
 
   const now = deps.config.now ?? (() => new Date());
+  const adapterRegistry = deps.adapterRegistry ?? createDefaultAdapterRegistry();
 
   app.use(
     "*",
@@ -76,6 +80,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     c.set("dbRead", deps.dbRead);
     c.set("dbWrite", deps.dbWrite);
     c.set("outbound", deps.outbound);
+    c.set("adapterRegistry", adapterRegistry);
     c.set("tmdbConfig", deps.config.tmdb);
     c.set("tmdbGateway", deps.tmdbGateway);
     c.set("now", now);

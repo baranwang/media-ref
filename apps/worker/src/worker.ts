@@ -7,14 +7,20 @@ import {
   claimDueJobs,
   completeJobWithFencing,
   createDefaultJobHandlers,
+  createEvidenceCheckJobHandler,
+  EVIDENCE_CHECK_JOB_TYPE,
   failJobWithFencing,
   getJobById,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
+  type AdapterRegistry,
+  type EvidenceGateStep2Evaluator,
   type JobHandlerRegistry,
   type JobQueueMessage,
   type JobQueueSender,
   type OutboundClient,
+  type TmdbGateway,
+  type TmdbGatewayConfig,
 } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 
@@ -28,12 +34,16 @@ export interface BackgroundWorkerConfig {
   dispatchFailureRetryDelayMs?: number;
   defaultRetryDelayMs?: number;
   jobTypes?: readonly string[];
+  tmdb?: TmdbGatewayConfig;
 }
 
 export interface BackgroundWorkerDeps {
   db: Db;
   outbound: OutboundClient;
   queue: JobQueueSender;
+  adapterRegistry?: AdapterRegistry;
+  tmdbGateway?: TmdbGateway;
+  evaluateStep2?: EvidenceGateStep2Evaluator;
   handlers?: JobHandlerRegistry;
   config?: BackgroundWorkerConfig;
   now?: () => Date;
@@ -110,6 +120,12 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
   const defaultRetryDelayMs = deps.config?.defaultRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const handlers: JobHandlerRegistry = {
     ...createDefaultJobHandlers(),
+    [EVIDENCE_CHECK_JOB_TYPE]: createEvidenceCheckJobHandler({
+      adapterRegistry: deps.adapterRegistry,
+      tmdbConfig: deps.config?.tmdb,
+      tmdbGateway: deps.tmdbGateway,
+      evaluateStep2: deps.evaluateStep2,
+    }),
     ...deps.handlers,
   };
 

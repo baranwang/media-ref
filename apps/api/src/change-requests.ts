@@ -213,21 +213,29 @@ export function registerChangeRequestRoutes(app: Hono<ApiEnv>): void {
     }
 
     try {
-      const changeRequest = await createChangeRequest(c.get("dbWrite"), {
-        submitterUserId: authResult.submitter.userId,
-        submitterKeyId: authResult.submitter.keyId,
-        submitterType: "human",
-        taskId: typeof body.taskId === "string" ? body.taskId : null,
-        targetExternalKey,
-        namespace: body.namespace,
-        nativeId: body.nativeId,
-        rawNativeId: typeof body.rawNativeId === "string" ? body.rawNativeId : undefined,
-        variantId,
-        variantDescription:
-          typeof rawVariantDescription === "string" ? rawVariantDescription : null,
-        setDefaultVariant: Boolean(body.setDefaultVariant),
-        segments: (body.segments as SegmentInput[] | undefined) ?? [],
-      });
+      const changeRequest = await createChangeRequest(
+        c.get("dbWrite"),
+        {
+          submitterUserId: authResult.submitter.userId,
+          submitterKeyId: authResult.submitter.keyId,
+          submitterType: "human",
+          taskId: typeof body.taskId === "string" ? body.taskId : null,
+          targetExternalKey,
+          namespace: body.namespace,
+          nativeId: body.nativeId,
+          rawNativeId: typeof body.rawNativeId === "string" ? body.rawNativeId : undefined,
+          variantId,
+          variantDescription:
+            typeof rawVariantDescription === "string" ? rawVariantDescription : null,
+          setDefaultVariant: Boolean(body.setDefaultVariant),
+          segments: (body.segments as SegmentInput[] | undefined) ?? [],
+        },
+        {
+          adapterRegistry: c.get("adapterRegistry"),
+          outbound: c.get("outbound"),
+          now: c.get("now")(),
+        },
+      );
 
       return c.json({ changeRequest }, 201);
     } catch (error) {
