@@ -49,6 +49,21 @@ export type Step1ConflictCode =
   | "episode_count_missing"
   | "episode_count_mismatch";
 
+export type Step2ConflictCode =
+  | "non_original_default_variant"
+  | "segment_season_not_found"
+  | "segment_year_missing"
+  | "segment_year_mismatch"
+  | "segment_episode_count_missing"
+  | "segment_season_episode_count_missing"
+  | "segment_episode_out_of_range"
+  | "segment_episode_count_mismatch"
+  | "target_episode_start_mismatch";
+
+export interface EvaluateEvidenceGateStep1Options {
+  segments?: readonly NormalizedSegment[];
+}
+
 export type Step1FieldCheckStatus = "matched" | "mismatch" | "missing" | "skipped";
 
 export interface EvidenceGateConflict {
@@ -660,19 +675,91 @@ function collectCollectionFetchedIds(
   return ids;
 }
 
-function collectCatalogCandidateYears(catalog: CatalogEvidence): Set<number> {
+function collectCatalogCandidateYears(
+  catalog: CatalogEvidence,
+  segments?: readonly NormalizedSegment[],
+): Set<number> {
   const years = new Set<number>();
   if (catalog.year !== null && Number.isInteger(catalog.year)) {
     years.add(catalog.year);
   }
+  const includeSpecials = Boolean(segments?.some((s) => s.season === 0));
   if (catalog.mediaType === "tv") {
     for (const season of catalog.seasons) {
-      if (season.season >= 1 && season.airYear !== null && Number.isInteger(season.airYear)) {
+      if (
+        (season.season >= 1 || (includeSpecials && season.season === 0)) &&
+        season.airYear !== null &&
+        Number.isInteger(season.airYear)
+      ) {
         years.add(season.airYear);
       }
     }
   }
   return years;
+}
+
+interface LinearSegmentEpisodeRange {
+  hasOpenEnded: boolean;
+  minEpisodes: number;
+  maxEpisodes: number;
+}
+
+function computeLinearSegmentEpisodeRange(
+  catalog: CatalogEvidence,
+  segments: readonly NormalizedSegment[],
+): LinearSegmentEpisodeRange | null {
+  if (segments.length === 0) {
+    return null;
+  }
+
+  const seasonMap = new Map<number, SeasonSnapshot>();
+  for (const season of catalog.seasons) {
+    seasonMap.set(season.season, season);
+  }
+
+  const sorted = [...segments].toSorted((a, b) =>
+    a.season !== b.season ? a.season - b.season : a.episodeStart - b.episodeStart,
+  );
+
+  let hasOpenEnded = false;
+  let minEpisodes = 0;
+  let maxEpisodes = 0;
+
+  for (let i = 0; i < sorted.length; i += 1) {
+    const seg = sorted[i]!;
+    const isLast = i === sorted.length - 1;
+    const seasonSnapshot = seasonMap.get(seg.season);
+    if (
+      !seasonSnapshot ||
+      !Number.isInteger(seasonSnapshot.episodeCount) ||
+      seasonSnapshot.episodeCount <= 0
+    ) {
+      return null;
+    }
+
+    if (seg.episodeStart > seasonSnapshot.episodeCount) {
+      return null;
+    }
+    if (seg.episodeEnd !== null && seg.episodeEnd > seasonSnapshot.episodeCount) {
+      return null;
+    }
+
+    const effectiveEnd = seg.episodeEnd ?? seasonSnapshot.episodeCount;
+    const span = effectiveEnd - seg.episodeStart + 1;
+    if (span <= 0) {
+      return null;
+    }
+
+    maxEpisodes += span;
+    if (seg.episodeEnd === null) {
+      hasOpenEnded = true;
+      minEpisodes += isLast ? 1 : span;
+    } else {
+      minEpisodes += span;
+    }
+  }
+
+  return { hasOpenEnded, minEpisodes, maxEpisodes };
 }
 
 function collectCatalogCandidateEpisodeCounts(catalog: CatalogEvidence): Set<number> {
@@ -716,6 +803,7 @@ function collectCatalogCandidateEpisodeCounts(catalog: CatalogEvidence): Set<num
 export function evaluateEvidenceGateStep1(
   catalog: CatalogEvidence,
   collection: CollectionInfo,
+  options?: EvaluateEvidenceGateStep1Options,
 ): EvidenceGateStep1Result {
   const catalogIds = collectCatalogFetchedIds(catalog);
   const collectionIds = collectCollectionFetchedIds(collection, catalog.namespace);
@@ -814,7 +902,8 @@ export function evaluateEvidenceGateStep1(
 
   // 2. year
   let yearStatus: Step1FieldCheckStatus;
-  const catalogYears = collectCatalogCandidateYears(catalog);
+  const segments = options?.segments;
+  const catalogYears = collectCatalogCandidateYears(catalog, segments);
   if (collection.year === null || catalogYears.size === 0) {
     yearStatus = "missing";
     conflicts.push({
@@ -887,34 +976,55 @@ export function evaluateEvidenceGateStep1(
 
   // 4. episodeCount
   let episodeCountStatus: Step1FieldCheckStatus;
-  const catalogEpisodeCounts = collectCatalogCandidateEpisodeCounts(catalog);
-  if (
-    collection.featureEpisodeCount === null ||
-    !Number.isInteger(collection.featureEpisodeCount) ||
-    collection.featureEpisodeCount <= 0 ||
-    catalogEpisodeCounts.size === 0
-  ) {
-    episodeCountStatus = "missing";
-    conflicts.push({
-      step: 1,
-      code: "episode_count_missing",
-      field: "episodeCount",
-      message: `Missing episode count for comparison: catalogCounts=[${[...catalogEpisodeCounts].join(",")}], collectionCount=${collection.featureEpisodeCount}`,
-      catalogValue: [...catalogEpisodeCounts],
-      collectionValue: collection.featureEpisodeCount,
-    });
-  } else if (!catalogEpisodeCounts.has(collection.featureEpisodeCount)) {
-    episodeCountStatus = "mismatch";
-    conflicts.push({
-      step: 1,
-      code: "episode_count_mismatch",
-      field: "episodeCount",
-      message: `Episode count mismatch: catalogCounts=[${[...catalogEpisodeCounts].join(",")}], collectionCount=${collection.featureEpisodeCount}`,
-      catalogValue: [...catalogEpisodeCounts],
-      collectionValue: collection.featureEpisodeCount,
-    });
+  const hasTvNonLinearSegments =
+    catalog.mediaType === "tv" && segments !== undefined && segments.some((s) => s.nonLinear);
+
+  if (hasTvNonLinearSegments) {
+    episodeCountStatus = "skipped";
   } else {
-    episodeCountStatus = "matched";
+    const catalogEpisodeCounts = collectCatalogCandidateEpisodeCounts(catalog);
+    const segmentRange =
+      catalog.mediaType === "tv" && segments !== undefined && segments.length > 0
+        ? computeLinearSegmentEpisodeRange(catalog, segments)
+        : null;
+
+    const matchesSegmentRange =
+      segmentRange !== null &&
+      collection.featureEpisodeCount !== null &&
+      Number.isInteger(collection.featureEpisodeCount) &&
+      (segmentRange.hasOpenEnded
+        ? collection.featureEpisodeCount >= segmentRange.minEpisodes &&
+          collection.featureEpisodeCount <= segmentRange.maxEpisodes
+        : collection.featureEpisodeCount === segmentRange.maxEpisodes);
+
+    if (
+      collection.featureEpisodeCount === null ||
+      !Number.isInteger(collection.featureEpisodeCount) ||
+      collection.featureEpisodeCount <= 0 ||
+      (catalogEpisodeCounts.size === 0 && segmentRange === null)
+    ) {
+      episodeCountStatus = "missing";
+      conflicts.push({
+        step: 1,
+        code: "episode_count_missing",
+        field: "episodeCount",
+        message: `Missing episode count for comparison: catalogCounts=[${[...catalogEpisodeCounts].join(",")}], collectionCount=${collection.featureEpisodeCount}`,
+        catalogValue: [...catalogEpisodeCounts],
+        collectionValue: collection.featureEpisodeCount,
+      });
+    } else if (!catalogEpisodeCounts.has(collection.featureEpisodeCount) && !matchesSegmentRange) {
+      episodeCountStatus = "mismatch";
+      conflicts.push({
+        step: 1,
+        code: "episode_count_mismatch",
+        field: "episodeCount",
+        message: `Episode count mismatch: catalogCounts=[${[...catalogEpisodeCounts].join(",")}], collectionCount=${collection.featureEpisodeCount}`,
+        catalogValue: [...catalogEpisodeCounts],
+        collectionValue: collection.featureEpisodeCount,
+      });
+    } else {
+      episodeCountStatus = "matched";
+    }
   }
 
   const allMatched = conflicts.length === 0;
@@ -934,8 +1044,326 @@ export function evaluateEvidenceGateStep1(
   };
 }
 
+const EXPLICIT_DUB_VARIANT_PATTERN =
+  /(?:中配|国配|台配|粤配|港配|英配|日配|韩配|法配|德配|俄配|西配|配音|译制|吹替|\bdub(?:bed|bing)?\b|\bvoice[\s-]?over\b)/iu;
+
+const NON_ORIGINAL_CUT_VARIANT_PATTERN =
+  /(?:导演剪辑|导剪|删减|精编|解说|重剪|速看|\bdirector'?s?\s+cut\b|\bextended\s+cut\b|\babridged\b|\bcommentary\b|\brecut\b)/iu;
+
+const EXPLICIT_ORIGINAL_VARIANT_PATTERN = /(?:原声|原版|原音|\boriginal\b)/iu;
+
+const LANGUAGE_DUB_HINT_PATTERN =
+  /(?:粤语|国语|普通话|台语|闽南语|中文版|华语版|\bcantonese\b|\bmandarin\b)/iu;
+
+const VARIANT_EXTRA_FOLD_MAP = new Map<string, string>([
+  ["粵", "粤"],
+  ["導", "导"],
+  ["刪", "删"],
+  ["減", "减"],
+  ["閩", "闽"],
+  ["韓", "韩"],
+  ["製", "制"],
+]);
+
+function normalizeVariantDescriptionForCheck(raw: string): string {
+  const nfkc = raw.normalize("NFKC").toLowerCase();
+  const baseFolded = foldCjkVariants(nfkc);
+  let out = "";
+  for (const ch of baseFolded) {
+    out += VARIANT_EXTRA_FOLD_MAP.get(ch) ?? ch;
+  }
+  return out.trim();
+}
+
+export function isNonOriginalVariantDescription(description: string | null | undefined): boolean {
+  if (!description) {
+    return false;
+  }
+  const normalized = normalizeVariantDescriptionForCheck(description);
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  if (EXPLICIT_DUB_VARIANT_PATTERN.test(normalized)) {
+    return true;
+  }
+  if (NON_ORIGINAL_CUT_VARIANT_PATTERN.test(normalized)) {
+    return true;
+  }
+  if (EXPLICIT_ORIGINAL_VARIANT_PATTERN.test(normalized)) {
+    return false;
+  }
+  return LANGUAGE_DUB_HINT_PATTERN.test(normalized);
+}
+
+export function evaluateEvidenceGateStep2(
+  context: EvidenceGateStep2Context,
+): EvidenceGateStep2Result {
+  const conflicts: EvidenceGateConflict[] = [];
+
+  // 0. Non-original variant explicitly marked as default -> route to human review
+  if (context.setDefaultVariant && isNonOriginalVariantDescription(context.variantDescription)) {
+    conflicts.push({
+      step: 2,
+      code: "non_original_default_variant",
+      field: "variantDescription",
+      message: `Non-original variant "${context.variantDescription}" cannot be auto-approved as default variant`,
+      collectionValue: context.variantDescription ?? null,
+    });
+  }
+
+  // Movies skip segment verification in Step 2
+  if (context.catalog.mediaType === "movie") {
+    return {
+      decision: conflicts.length === 0 ? "pass" : "needs_review",
+      skipped: true,
+      conflicts,
+      reasons: conflicts.map((c) => c.message),
+    };
+  }
+
+  // Whole-media TV association (segments.length === 0)
+  if (context.segments.length === 0) {
+    if (
+      context.step1.matchedBy !== "shared_id" &&
+      context.catalog.year !== null &&
+      Number.isInteger(context.catalog.year) &&
+      context.collection.year !== null &&
+      Number.isInteger(context.collection.year) &&
+      context.collection.year !== context.catalog.year
+    ) {
+      conflicts.push({
+        step: 2,
+        code: "segment_year_mismatch",
+        field: "year",
+        message: `Whole-media TV collection year (${context.collection.year}) does not match media premiere year (${context.catalog.year})`,
+        catalogValue: context.catalog.year,
+        collectionValue: context.collection.year,
+      });
+    }
+
+    return {
+      decision: conflicts.length === 0 ? "pass" : "needs_review",
+      skipped: false,
+      conflicts,
+      reasons: conflicts.map((c) => c.message),
+    };
+  }
+
+  const seasonMap = new Map<number, SeasonSnapshot>();
+  for (const season of context.catalog.seasons) {
+    seasonMap.set(season.season, season);
+  }
+
+  // 1. Ensure every segment refers to an existing season in the catalog snapshot
+  const missingSeasons = new Set<number>();
+  for (const seg of context.segments) {
+    if (!seasonMap.has(seg.season) && !missingSeasons.has(seg.season)) {
+      missingSeasons.add(seg.season);
+      conflicts.push({
+        step: 2,
+        code: "segment_season_not_found",
+        field: "segments.season",
+        message: `Season ${seg.season} does not exist in catalog snapshot for ${context.catalog.namespace}:${context.catalog.canonicalId}`,
+        catalogValue: context.catalog.seasons.map((s) => s.season),
+        collectionValue: seg.season,
+      });
+    }
+  }
+
+  // 2. Year check against the earliest segment season's premiere year
+  const regularSeasonNumbers = context.segments.map((s) => s.season).filter((s) => s >= 1);
+  const earliestSeasonNumber =
+    regularSeasonNumbers.length > 0
+      ? Math.min(...regularSeasonNumbers)
+      : Math.min(...context.segments.map((s) => s.season));
+  const earliestSeason = seasonMap.get(earliestSeasonNumber);
+
+  if (earliestSeason) {
+    const expectedYear = earliestSeason.airYear;
+    if (expectedYear === null || !Number.isInteger(expectedYear)) {
+      conflicts.push({
+        step: 2,
+        code: "segment_year_missing",
+        field: "year",
+        message: `Catalog season ${earliestSeasonNumber} is missing premiere year`,
+        catalogValue: null,
+        collectionValue: context.collection.year,
+      });
+    } else if (context.collection.year === null || !Number.isInteger(context.collection.year)) {
+      conflicts.push({
+        step: 2,
+        code: "segment_year_missing",
+        field: "year",
+        message: `Collection ${context.collection.namespace}:${context.collection.canonicalId} is missing release year`,
+        catalogValue: expectedYear,
+        collectionValue: context.collection.year,
+      });
+    } else if (context.collection.year !== expectedYear) {
+      conflicts.push({
+        step: 2,
+        code: "segment_year_mismatch",
+        field: "year",
+        message: `Collection year (${context.collection.year}) does not match season ${earliestSeasonNumber} premiere year (${expectedYear})`,
+        catalogValue: expectedYear,
+        collectionValue: context.collection.year,
+      });
+    }
+  }
+
+  // 3. Non-linear segments ("集号不对应"): only verify season existence and earliest season premiere year
+  if (context.segments.some((s) => s.nonLinear)) {
+    return {
+      decision: conflicts.length === 0 ? "pass" : "needs_review",
+      skipped: false,
+      conflicts,
+      reasons: conflicts.map((c) => c.message),
+    };
+  }
+
+  // 4. Linear segment checks: featureEpisodeCount & targetEpisodeStart alignment
+  const featureEpisodeCount = context.collection.featureEpisodeCount;
+  if (
+    featureEpisodeCount === null ||
+    !Number.isInteger(featureEpisodeCount) ||
+    featureEpisodeCount <= 0
+  ) {
+    conflicts.push({
+      step: 2,
+      code: "segment_episode_count_missing",
+      field: "featureEpisodeCount",
+      message: `Collection ${context.collection.namespace}:${context.collection.canonicalId} is missing featureEpisodeCount for linear segment verification`,
+      catalogValue: null,
+      collectionValue: featureEpisodeCount,
+    });
+    return {
+      decision: "needs_review",
+      skipped: false,
+      conflicts,
+      reasons: conflicts.map((c) => c.message),
+    };
+  }
+
+  const sortedSegments = [...context.segments].toSorted((a, b) =>
+    a.season !== b.season ? a.season - b.season : a.episodeStart - b.episodeStart,
+  );
+
+  let canVerifyTotals = true;
+  let expectedTargetStart = 1;
+  let totalMinCovered = 0;
+  let totalMaxCovered = 0;
+  let hasOpenEnded = false;
+
+  for (let i = 0; i < sortedSegments.length; i += 1) {
+    const seg = sortedSegments[i]!;
+    const isLast = i === sortedSegments.length - 1;
+    const seasonSnapshot = seasonMap.get(seg.season);
+
+    if (!seasonSnapshot) {
+      canVerifyTotals = false;
+      continue;
+    }
+
+    if (!Number.isInteger(seasonSnapshot.episodeCount) || seasonSnapshot.episodeCount <= 0) {
+      canVerifyTotals = false;
+      conflicts.push({
+        step: 2,
+        code: "segment_season_episode_count_missing",
+        field: "segments.episodeCount",
+        message: `Catalog season ${seg.season} has unknown episodeCount (${seasonSnapshot.episodeCount})`,
+        catalogValue: seasonSnapshot.episodeCount,
+        collectionValue: featureEpisodeCount,
+      });
+      continue;
+    }
+
+    if (seg.episodeStart > seasonSnapshot.episodeCount) {
+      canVerifyTotals = false;
+      conflicts.push({
+        step: 2,
+        code: "segment_episode_out_of_range",
+        field: "segments.episodeStart",
+        message: `Segment episodeStart (${seg.episodeStart}) exceeds season ${seg.season} episodeCount (${seasonSnapshot.episodeCount})`,
+        catalogValue: seasonSnapshot.episodeCount,
+        collectionValue: seg.episodeStart,
+      });
+      continue;
+    }
+
+    if (seg.episodeEnd !== null && seg.episodeEnd > seasonSnapshot.episodeCount) {
+      canVerifyTotals = false;
+      conflicts.push({
+        step: 2,
+        code: "segment_episode_out_of_range",
+        field: "segments.episodeEnd",
+        message: `Segment episodeEnd (${seg.episodeEnd}) exceeds season ${seg.season} episodeCount (${seasonSnapshot.episodeCount})`,
+        catalogValue: seasonSnapshot.episodeCount,
+        collectionValue: seg.episodeEnd,
+      });
+      continue;
+    }
+
+    const effectiveEnd = seg.episodeEnd ?? seasonSnapshot.episodeCount;
+    const maxSpan = effectiveEnd - seg.episodeStart + 1;
+
+    if (seg.targetEpisodeStart !== expectedTargetStart) {
+      conflicts.push({
+        step: 2,
+        code: "target_episode_start_mismatch",
+        field: "segments.targetEpisodeStart",
+        message: `Segment S${seg.season} E${seg.episodeStart}..${seg.episodeEnd ?? ""} has targetEpisodeStart=${seg.targetEpisodeStart}, expected ${expectedTargetStart}`,
+        catalogValue: expectedTargetStart,
+        collectionValue: seg.targetEpisodeStart,
+      });
+    }
+
+    totalMaxCovered += maxSpan;
+    if (seg.episodeEnd === null) {
+      hasOpenEnded = true;
+      totalMinCovered += isLast ? 1 : maxSpan;
+    } else {
+      totalMinCovered += maxSpan;
+    }
+
+    expectedTargetStart += maxSpan;
+  }
+
+  if (canVerifyTotals) {
+    if (hasOpenEnded) {
+      if (featureEpisodeCount < totalMinCovered || featureEpisodeCount > totalMaxCovered) {
+        conflicts.push({
+          step: 2,
+          code: "segment_episode_count_mismatch",
+          field: "featureEpisodeCount",
+          message: `Collection featureEpisodeCount (${featureEpisodeCount}) is outside allowed open-ended segment range [${totalMinCovered}..${totalMaxCovered}]`,
+          catalogValue: { min: totalMinCovered, max: totalMaxCovered },
+          collectionValue: featureEpisodeCount,
+        });
+      }
+    } else if (featureEpisodeCount !== totalMaxCovered) {
+      conflicts.push({
+        step: 2,
+        code: "segment_episode_count_mismatch",
+        field: "featureEpisodeCount",
+        message: `Collection featureEpisodeCount (${featureEpisodeCount}) does not match total segment episodes (${totalMaxCovered})`,
+        catalogValue: totalMaxCovered,
+        collectionValue: featureEpisodeCount,
+      });
+    }
+  }
+
+  return {
+    decision: conflicts.length === 0 ? "pass" : "needs_review",
+    skipped: false,
+    conflicts,
+    reasons: conflicts.map((c) => c.message),
+  };
+}
+
 export function evaluateEvidenceGate(input: EvaluateEvidenceGateInput): EvidenceGateResult {
-  const step1 = evaluateEvidenceGateStep1(input.catalog, input.collection);
+  const step1 = evaluateEvidenceGateStep1(input.catalog, input.collection, {
+    segments: input.segments,
+  });
   if (step1.decision !== "pass") {
     return {
       decision: "needs_review",
@@ -946,17 +1374,8 @@ export function evaluateEvidenceGate(input: EvaluateEvidenceGateInput): Evidence
     };
   }
 
-  if (!input.evaluateStep2) {
-    return {
-      decision: "pass",
-      step1,
-      step2: null,
-      conflicts: [],
-      reasons: [],
-    };
-  }
-
-  const step2 = input.evaluateStep2({
+  const step2Evaluator = input.evaluateStep2 ?? evaluateEvidenceGateStep2;
+  const step2 = step2Evaluator({
     catalog: input.catalog,
     collection: input.collection,
     segments: input.segments ?? [],

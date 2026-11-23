@@ -1165,3 +1165,1123 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     expect(mediaBody.document.associations[0]?.nativeId).toBe("ss34430");
   });
 });
+
+describe("Evidence Gate Step 2 end-to-end (#11)", () => {
+  const handles: TestDbHandle[] = [];
+
+  afterEach(async () => {
+    while (handles.length > 0) {
+      const handle = handles.pop();
+      if (handle) {
+        await handle.cleanup();
+      }
+    }
+  });
+
+  function createStep2Stub() {
+    const baseStub = createDefaultBilibiliAndTmdbStub();
+    return (request: ExternalHttpRequest): ExternalHttpResponse => {
+      if (request.kind === "catalog" && request.namespace === "tmdb") {
+        if (request.url.includes("/tv/95479")) {
+          return jsonResponse(request.url, {
+            id: 95479,
+            name: "咒术回战",
+            original_name: "呪術廻戦",
+            first_air_date: "2020-10-03",
+            seasons: [
+              { season_number: 0, episode_count: 5, air_date: "2020-12-26" },
+              { season_number: 1, episode_count: 24, air_date: "2020-10-03" },
+              { season_number: 2, episode_count: 23, air_date: "2023-07-06" },
+            ],
+            external_ids: {
+              imdb_id: "tt12343534",
+              tvdb_id: 377543,
+            },
+          });
+        }
+        if (request.url.includes("/tv/200100")) {
+          return jsonResponse(request.url, {
+            id: 200100,
+            name: "连载新番",
+            original_name: "連載アニメ",
+            first_air_date: "2026-04-01",
+            seasons: [{ season_number: 1, episode_count: 24, air_date: "2026-04-01" }],
+            external_ids: { imdb_id: "tt20010001" },
+          });
+        }
+        if (request.url.includes("/tv/200200")) {
+          return jsonResponse(request.url, {
+            id: 200200,
+            name: "双季合集剧",
+            original_name: "双季合集剧",
+            first_air_date: "2022-01-10",
+            seasons: [
+              { season_number: 1, episode_count: 12, air_date: "2022-01-10" },
+              { season_number: 2, episode_count: 12, air_date: "2024-01-10" },
+            ],
+            external_ids: { imdb_id: "tt20020001" },
+          });
+        }
+        if (request.url.includes("/tv/200300")) {
+          return jsonResponse(request.url, {
+            id: 200300,
+            name: "推理综艺",
+            original_name: "推理综艺",
+            first_air_date: "2023-03-01",
+            seasons: [
+              { season_number: 1, episode_count: 12, air_date: "2023-03-01" },
+              { season_number: 2, episode_count: 12, air_date: "2024-03-01" },
+            ],
+            external_ids: { imdb_id: "tt20030001" },
+          });
+        }
+        if (request.url.includes("/tv/95480")) {
+          // Jujutsu Kaisen split-season catalog representation: S1 has 47 episodes
+          return jsonResponse(request.url, {
+            id: 95480,
+            name: "咒术回战",
+            original_name: "呪術廻戦",
+            first_air_date: "2020-10-03",
+            seasons: [{ season_number: 1, episode_count: 47, air_date: "2020-10-03" }],
+            external_ids: { imdb_id: "tt95480001" },
+          });
+        }
+      }
+
+      if (request.kind === "platform" && request.namespace === "bilibili") {
+        if (request.url.includes("season_id=45600")) {
+          // S2 collection (2023, 23 eps)
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 45600,
+              title: "咒术回战 第二季",
+              jp_title: "呪術廻戦",
+              type: 1,
+              publish: { pub_time: "2023-07-06 23:00:00" },
+              episodes: makeBilibiliEpisodes(23, true),
+            },
+          });
+        }
+        if (request.url.includes("season_id=45574")) {
+          // Split S1 part 2 (2020, 23 eps: eps 25..47)
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 45574,
+              title: "咒术回战 Part 2",
+              jp_title: "呪術廻戦",
+              type: 1,
+              publish: { pub_time: "2020-10-03 01:25:00" },
+              episodes: makeBilibiliEpisodes(23, true),
+            },
+          });
+        }
+        if (request.url.includes("season_id=34432")) {
+          // Dubbed variant collection for S1 (2020, 24 eps)
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 34432,
+              title: "咒术回战（中配）",
+              jp_title: "呪術廻戦",
+              type: 1,
+              publish: { pub_time: "2020-10-03 01:25:00" },
+              episodes: makeBilibiliEpisodes(24, false),
+            },
+          });
+        }
+        if (request.url.includes("season_id=80100")) {
+          // Ongoing season currently at 10 aired episodes
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 80100,
+              title: "连载新番",
+              jp_title: "連載アニメ",
+              type: 1,
+              publish: { pub_time: "2026-04-01 20:00:00" },
+              episodes: makeBilibiliEpisodes(10, true),
+            },
+          });
+        }
+        if (request.url.includes("season_id=80101")) {
+          // Exceeds TMDB S1 episodeCount (26 > 24)
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 80101,
+              title: "连载新番",
+              jp_title: "連載アニメ",
+              type: 1,
+              publish: { pub_time: "2026-04-01 20:00:00" },
+              episodes: makeBilibiliEpisodes(26, false),
+            },
+          });
+        }
+        if (request.url.includes("season_id=80200")) {
+          // Merged 2-season collection (year matches earliest season S1 = 2022, 24 eps)
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 80200,
+              title: "双季合集剧",
+              type: 5,
+              publish: { pub_time: "2022-01-10 20:00:00" },
+              episodes: makeBilibiliEpisodes(24, true),
+            },
+          });
+        }
+        if (request.url.includes("season_id=80201")) {
+          // Wrong year (2024 instead of earliest season S1 = 2022)
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 80201,
+              title: "双季合集剧",
+              type: 5,
+              publish: { pub_time: "2024-01-10 20:00:00" },
+              episodes: makeBilibiliEpisodes(24, false),
+            },
+          });
+        }
+        if (request.url.includes("season_id=80202")) {
+          // Same valid metadata as 80200, used to test wrong 2nd-segment targetEpisodeStart
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 80202,
+              title: "双季合集剧",
+              type: 5,
+              publish: { pub_time: "2022-01-10 20:00:00" },
+              episodes: makeBilibiliEpisodes(24, false),
+            },
+          });
+        }
+        if (request.url.includes("season_id=28281")) {
+          // Movie (type: 2 -> movie)
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 28281,
+              title: "搏击俱乐部",
+              alias: "Fight Club",
+              type: 2,
+              publish: { pub_time: "1999-10-15 00:00:00" },
+              episodes: makeBilibiliEpisodes(1, true),
+            },
+          });
+        }
+        if (request.url.includes("season_id=80300")) {
+          // Non-linear variety show: 30 feature eps vs TMDB 12 eps, year 2023 matches S1
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 80300,
+              title: "推理综艺",
+              type: 7,
+              publish: { pub_time: "2023-03-01 12:00:00" },
+              episodes: makeBilibiliEpisodes(30, true),
+            },
+          });
+        }
+        if (request.url.includes("season_id=80301")) {
+          // Non-linear variety show with S2 year (2024)
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 80301,
+              title: "推理综艺",
+              type: 7,
+              publish: { pub_time: "2024-03-01 12:00:00" },
+              episodes: makeBilibiliEpisodes(30, false),
+            },
+          });
+        }
+      }
+
+      return baseStub(request);
+    };
+  }
+
+  async function drainEvidenceJobs(
+    worker: ReturnType<typeof createBackgroundWorker>,
+    emitted: JobQueueMessage[],
+    now: Date,
+  ) {
+    await worker.scheduled(createScheduledController(now));
+    const messages = emitted.splice(0, emitted.length);
+    if (messages.length > 0) {
+      await worker.queue(createQueueBatch(messages, now).batch);
+    }
+    return messages.length;
+  }
+
+  test("routes wrong season, wrong targetEpisodeStart, and wrong episode count to needs_review", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-24T01:00:00.000Z");
+    const outbound = createFakeOutboundClient({ fetchExternal: createStep2Stub() });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupVerifiedUserAndKeys(app, outbound, "step2-reject@example.com");
+
+    const submitCr = async (body: Record<string, unknown>) => {
+      const res = await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+          body: JSON.stringify(body),
+        }),
+      );
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { changeRequest: { id: string } }).changeRequest.id;
+    };
+
+    // 1. Wrong season: S2 collection (2023, 23 eps) submitted as S1
+    const wrongSeasonId = await submitCr({
+      targetExternalKey: "tmdb:tv:95479",
+      namespace: "bilibili",
+      nativeId: "ss45600",
+      variantDescription: "原声",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 23, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+    });
+
+    // 2. Wrong targetEpisodeStart: S1 1..24 with targetEpisodeStart=2
+    const wrongOffsetId = await submitCr({
+      targetExternalKey: "tmdb:tv:95479",
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 2, baseline: "tmdb" },
+      ],
+    });
+
+    // 3. Wrong episode count: S1 1..12 on 24-ep collection
+    const wrongCountId = await submitCr({
+      targetExternalKey: "tmdb:tv:95479",
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(3);
+
+    const inspectCr = async (id: string) => {
+      const res = await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      );
+      expect(res.status).toBe(200);
+      return (await res.json()) as {
+        changeRequest: {
+          status: string;
+          conflictReason: string | null;
+          evidence: { gate?: { step1?: { decision: string }; step2?: { decision: string } } };
+        };
+      };
+    };
+
+    const wrongSeason = await inspectCr(wrongSeasonId);
+    expect(wrongSeason.changeRequest.status).toBe("needs_review");
+    expect(wrongSeason.changeRequest.conflictReason).toBe("segment_year_mismatch");
+    expect(wrongSeason.changeRequest.evidence.gate?.step1?.decision).toBe("pass");
+    expect(wrongSeason.changeRequest.evidence.gate?.step2?.decision).toBe("needs_review");
+
+    const wrongOffset = await inspectCr(wrongOffsetId);
+    expect(wrongOffset.changeRequest.status).toBe("needs_review");
+    expect(wrongOffset.changeRequest.conflictReason).toBe("target_episode_start_mismatch");
+
+    const wrongCount = await inspectCr(wrongCountId);
+    expect(wrongCount.changeRequest.status).toBe("needs_review");
+    expect(wrongCount.changeRequest.conflictReason).toBe("segment_episode_count_mismatch");
+
+    // None of the rejected submissions appear in the default read API
+    const mediaRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+        headers: { "x-api-key": user.readKey },
+      }),
+    );
+    expect(mediaRes.status).toBe(404);
+  });
+
+  test("auto-approves open-ended ongoing seasons (episodeEnd: null) and routes over-limit counts to needs_review", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-24T02:00:00.000Z");
+    const outbound = createFakeOutboundClient({ fetchExternal: createStep2Stub() });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupVerifiedUserAndKeys(app, outbound, "step2-ongoing@example.com");
+
+    // 10 aired episodes <= 24 season episodes with episodeEnd: null -> auto-approve
+    const okRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:200100",
+          namespace: "bilibili",
+          nativeId: "ss80100",
+          variantDescription: "原声",
+          segments: [
+            {
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: null,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+            },
+          ],
+        }),
+      }),
+    );
+    expect(okRes.status).toBe(201);
+    const okCr = (await okRes.json()) as { changeRequest: { id: string } };
+
+    // 26 episodes > 24 season episodes -> needs_review
+    const overRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:200100",
+          namespace: "bilibili",
+          nativeId: "ss80101",
+          variantDescription: "备用",
+          segments: [
+            {
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: null,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+            },
+          ],
+        }),
+      }),
+    );
+    expect(overRes.status).toBe(201);
+    const overCr = (await overRes.json()) as { changeRequest: { id: string } };
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(2);
+
+    const okState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${okCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string } };
+    expect(okState.changeRequest.status).toBe("approved");
+
+    const overState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${overCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string } };
+    expect(overState.changeRequest.status).toBe("needs_review");
+
+    const mediaBody = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:200100`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(
+      resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 1, episode: 10 }),
+    ).toMatchObject({ kind: "mapped", nativeId: "ss80100", targetEpisode: 10 });
+  });
+
+  test("auto-approves split-season collections (47 eps -> ss34430 1..24 + ss45574 25..47) and resolves S1 E30 to ss45574 E6", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-24T03:00:00.000Z");
+    const outbound = createFakeOutboundClient({ fetchExternal: createStep2Stub() });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupVerifiedUserAndKeys(app, outbound, "step2-split@example.com");
+
+    const part1Res = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95480",
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          variantDescription: "原声",
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(part1Res.status).toBe(201);
+    const part1Cr = (await part1Res.json()) as { changeRequest: { id: string } };
+
+    const part2Res = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95480",
+          namespace: "bilibili",
+          nativeId: "ss45574",
+          variantDescription: "原声",
+          segments: [
+            {
+              season: 1,
+              episodeStart: 25,
+              episodeEnd: 47,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+            },
+          ],
+        }),
+      }),
+    );
+    expect(part2Res.status).toBe(201);
+    const part2Cr = (await part2Res.json()) as { changeRequest: { id: string } };
+
+    // Wrong targetEpisodeStart (25 instead of 1) on part 2 -> needs_review
+    const badOffsetRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95480",
+          namespace: "bilibili",
+          nativeId: "ss45574",
+          variantDescription: "错偏移变体",
+          segments: [
+            {
+              season: 1,
+              episodeStart: 25,
+              episodeEnd: 47,
+              targetEpisodeStart: 25,
+              baseline: "tmdb",
+            },
+          ],
+        }),
+      }),
+    );
+    expect(badOffsetRes.status).toBe(201);
+    const badOffsetCr = (await badOffsetRes.json()) as { changeRequest: { id: string } };
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(3);
+
+    const checkStatus = async (id: string) =>
+      (await (
+        await app.fetch(
+          new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
+            headers: { "x-api-key": user.readKey },
+          }),
+        )
+      ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+
+    expect((await checkStatus(part1Cr.changeRequest.id)).changeRequest.status).toBe("approved");
+    expect((await checkStatus(part2Cr.changeRequest.id)).changeRequest.status).toBe("approved");
+
+    const badOffset = await checkStatus(badOffsetCr.changeRequest.id);
+    expect(badOffset.changeRequest.status).toBe("needs_review");
+    expect(badOffset.changeRequest.conflictReason).toBe("target_episode_start_mismatch");
+
+    const mediaBody = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95480`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaBody.document.associations).toHaveLength(2);
+    expect(
+      resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 1, episode: 5 }),
+    ).toMatchObject({ kind: "mapped", nativeId: "ss34430", targetEpisode: 5 });
+    expect(
+      resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 1, episode: 30 }),
+    ).toMatchObject({ kind: "mapped", nativeId: "ss45574", targetEpisode: 6 });
+  });
+
+  test("verifies multi-season merged collections by summed episode count and earliest season premiere year", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-24T04:00:00.000Z");
+    const outbound = createFakeOutboundClient({ fetchExternal: createStep2Stub() });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupVerifiedUserAndKeys(app, outbound, "step2-merged@example.com");
+
+    const submitCr = async (body: Record<string, unknown>) => {
+      const res = await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+          body: JSON.stringify(body),
+        }),
+      );
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { changeRequest: { id: string } }).changeRequest.id;
+    };
+
+    // Valid merged 2-season collection (year 2022 = S1 premiere year, 12 + 12 = 24 eps)
+    const validId = await submitCr({
+      targetExternalKey: "tmdb:tv:200200",
+      namespace: "bilibili",
+      nativeId: "ss80200",
+      variantDescription: "原声",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+        { season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13, baseline: "tmdb" },
+      ],
+    });
+
+    // Wrong year (2024 instead of S1's 2022) -> needs_review
+    const badYearId = await submitCr({
+      targetExternalKey: "tmdb:tv:200200",
+      namespace: "bilibili",
+      nativeId: "ss80201",
+      variantDescription: "错年份变体",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+        { season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13, baseline: "tmdb" },
+      ],
+    });
+
+    // Wrong 2nd segment targetEpisodeStart (14 instead of 13) -> needs_review
+    const badSecondOffsetId = await submitCr({
+      targetExternalKey: "tmdb:tv:200200",
+      namespace: "bilibili",
+      nativeId: "ss80202",
+      variantDescription: "错偏移变体",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+        { season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 14, baseline: "tmdb" },
+      ],
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(3);
+
+    const readCr = async (id: string) =>
+      (await (
+        await app.fetch(
+          new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
+            headers: { "x-api-key": user.readKey },
+          }),
+        )
+      ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+
+    expect((await readCr(validId)).changeRequest.status).toBe("approved");
+    expect((await readCr(badYearId)).changeRequest).toMatchObject({
+      status: "needs_review",
+      conflictReason: "segment_year_mismatch",
+    });
+    expect((await readCr(badSecondOffsetId)).changeRequest).toMatchObject({
+      status: "needs_review",
+      conflictReason: "target_episode_start_mismatch",
+    });
+
+    const mediaBody = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:200200`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(
+      resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 2, episode: 3 }),
+    ).toMatchObject({ kind: "mapped", nativeId: "ss80200", targetEpisode: 15 });
+  });
+
+  test("skips Step 2 for movie change requests and auto-approves", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-24T05:00:00.000Z");
+    const outbound = createFakeOutboundClient({ fetchExternal: createStep2Stub() });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupVerifiedUserAndKeys(app, outbound, "step2-movie@example.com");
+
+    const submitRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:movie:550",
+          namespace: "bilibili",
+          nativeId: "ss28281",
+          variantDescription: "原声",
+          segments: [],
+        }),
+      }),
+    );
+    expect(submitRes.status).toBe(201);
+    const { changeRequest } = (await submitRes.json()) as { changeRequest: { id: string } };
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
+
+    const crBody = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as {
+      changeRequest: {
+        status: string;
+        evidence: { gate?: { step2?: { decision: string; skipped?: boolean } } };
+      };
+    };
+    expect(crBody.changeRequest.status).toBe("approved");
+    expect(crBody.changeRequest.evidence.gate?.step2).toMatchObject({
+      decision: "pass",
+      skipped: true,
+    });
+
+    const mediaBody = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:550`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaBody.document.media.type).toBe("movie");
+    expect(mediaBody.document.associations).toHaveLength(1);
+    expect(mediaBody.document.associations[0]?.nativeId).toBe("ss28281");
+  });
+
+  test("checks only season premiere year for nonLinear segments (skips episode count mismatch)", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-24T06:00:00.000Z");
+    const outbound = createFakeOutboundClient({ fetchExternal: createStep2Stub() });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupVerifiedUserAndKeys(app, outbound, "step2-nonlinear@example.com");
+
+    // 30 feature eps vs TMDB 12 eps, matching S1 year 2023 + nonLinear: true -> auto-approves!
+    const okRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:200300",
+          namespace: "bilibili",
+          nativeId: "ss80300",
+          variantDescription: "原声",
+          segments: [
+            {
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: null,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+              nonLinear: true,
+            },
+          ],
+        }),
+      }),
+    );
+    expect(okRes.status).toBe(201);
+    const okCr = (await okRes.json()) as { changeRequest: { id: string } };
+
+    // Wrong year (2024 collection submitted for S1 2023) with nonLinear: true -> needs_review!
+    const badYearRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:200300",
+          namespace: "bilibili",
+          nativeId: "ss80301",
+          variantDescription: "错年份变体",
+          segments: [
+            {
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: null,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+              nonLinear: true,
+            },
+          ],
+        }),
+      }),
+    );
+    expect(badYearRes.status).toBe(201);
+    const badYearCr = (await badYearRes.json()) as { changeRequest: { id: string } };
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(2);
+
+    const okState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${okCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string } };
+    expect(okState.changeRequest.status).toBe("approved");
+
+    const badYearState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${badYearCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+    expect(badYearState.changeRequest.status).toBe("needs_review");
+    expect(badYearState.changeRequest.conflictReason).toBe("segment_year_mismatch");
+
+    const mediaBody = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:200300`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(
+      resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 1, episode: 4 }),
+    ).toMatchObject({ kind: "collection_only", reason: "non_linear", nativeId: "ss80300" });
+  });
+
+  test("routes non-original setDefaultVariant=true to needs_review while promoting neutral first variant and allowing non-default dub", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-24T07:00:00.000Z");
+    const outbound = createFakeOutboundClient({ fetchExternal: createStep2Stub() });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupVerifiedUserAndKeys(app, outbound, "step2-variant@example.com");
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    // 1. Brand-new non-original variant ("中配") explicitly marked setDefaultVariant: true -> needs_review
+    const dubDefaultRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34432",
+          variantDescription: "中配",
+          setDefaultVariant: true,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(dubDefaultRes.status).toBe(201);
+    const dubDefaultCr = (await dubDefaultRes.json()) as { changeRequest: { id: string } };
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
+    const dubDefaultState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${dubDefaultCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+    expect(dubDefaultState.changeRequest).toMatchObject({
+      status: "needs_review",
+      conflictReason: "non_original_default_variant",
+    });
+
+    // 2. Neutral first variant ("标准版") auto-approves and becomes default
+    const neutralRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          variantDescription: "标准版",
+          setDefaultVariant: false,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(neutralRes.status).toBe(201);
+    const neutralCr = (await neutralRes.json()) as { changeRequest: { id: string } };
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
+    const neutralState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${neutralCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string } };
+    expect(neutralState.changeRequest.status).toBe("approved");
+
+    // 3. Adding "中配" with setDefaultVariant: false auto-approves as non-default
+    const dubNonDefaultRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34432",
+          variantDescription: "中配",
+          setDefaultVariant: false,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(dubNonDefaultRes.status).toBe(201);
+    const dubNonDefaultCr = (await dubNonDefaultRes.json()) as { changeRequest: { id: string } };
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
+    const dubNonDefaultState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${dubNonDefaultCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string } };
+    expect(dubNonDefaultState.changeRequest.status).toBe("approved");
+
+    const mediaAfterDub = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    const neutralVariant = mediaAfterDub.document.variants.find((v) => v.label === "标准版");
+    const dubVariant = mediaAfterDub.document.variants.find((v) => v.label === "中配");
+    expect(neutralVariant?.isDefault).toBe(true);
+    expect(dubVariant?.isDefault).toBe(false);
+
+    // 4. Attempting to override the existing default by referencing dub variantId with setDefaultVariant: true -> needs_review
+    const overrideRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
+        body: JSON.stringify({
+          targetExternalKey: "tmdb:tv:95479",
+          namespace: "bilibili",
+          nativeId: "ss34432",
+          variantId: dubVariant!.id,
+          setDefaultVariant: true,
+          segments: [
+            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          ],
+        }),
+      }),
+    );
+    expect(overrideRes.status).toBe(201);
+    const overrideCr = (await overrideRes.json()) as { changeRequest: { id: string } };
+
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
+    const overrideState = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/change-requests/${overrideCr.changeRequest.id}`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+    expect(overrideState.changeRequest).toMatchObject({
+      status: "needs_review",
+      conflictReason: "non_original_default_variant",
+    });
+
+    // Default variant remains unchanged ("标准版")
+    const mediaFinal = (await (
+      await app.fetch(
+        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
+          headers: { "x-api-key": user.readKey },
+        }),
+      )
+    ).json()) as { document: MediaDocument };
+    expect(mediaFinal.document.variants.find((v) => v.label === "标准版")?.isDefault).toBe(true);
+    expect(mediaFinal.document.variants.find((v) => v.label === "中配")?.isDefault).toBe(false);
+  });
+});

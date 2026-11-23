@@ -288,13 +288,26 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
       };
     }
 
-    // 3. Evaluate deterministic Evidence Gate (Step 1 + optional Step 2 hook)
+    // 3. Resolve variant description fallback when referenced only by variantId
+    let resolvedVariantDescription = changeRequest.variantDescription;
+    if (resolvedVariantDescription === null && changeRequest.variantId !== null) {
+      const variantRow = await ctx.db
+        .selectFrom("variants")
+        .select("description")
+        .where("id", "=", changeRequest.variantId)
+        .executeTakeFirst();
+      if (variantRow) {
+        resolvedVariantDescription = variantRow.description;
+      }
+    }
+
+    // 4. Evaluate deterministic Evidence Gate (Step 1 + Step 2)
     const gate = evaluateEvidenceGate({
       catalog: catalogEvidence,
       collection: collectionResult.info,
       segments: changeRequest.segments,
       setDefaultVariant: changeRequest.setDefaultVariant,
-      variantDescription: changeRequest.variantDescription,
+      variantDescription: resolvedVariantDescription,
       evaluateStep2: options.evaluateStep2,
     });
 
