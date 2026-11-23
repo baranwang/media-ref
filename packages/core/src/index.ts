@@ -8,6 +8,8 @@ export {
   isTier2Adapter,
   isTier3Adapter,
   parseBilibiliInput,
+  parseTencentInput,
+  tencentAdapter,
   type AdapterRegistry,
   type AdapterSearchCandidate,
   type AdapterSearchQuery,
@@ -25,6 +27,23 @@ export {
   type Tier2Adapter,
   type Tier3Adapter,
 } from "./adapters/index.ts";
+export {
+  computeDemandTargetsForBatchRead,
+  computeDemandTargetsForRead,
+  DEFAULT_DEMAND_NAMESPACE_GROUP,
+  listDemands,
+  mergeExternalKeyDemandsIntoMedia,
+  recordDemandForRead,
+  recordDemandsForBatchRead,
+  type DemandRecord,
+  type DemandStatus,
+  type DemandTarget,
+  type ListDemandsFilters,
+  type MergeExternalKeyDemandsInput,
+  type MergeExternalKeyDemandsResult,
+  type RecordDemandForReadInput,
+  type RecordDemandsForBatchReadInput,
+} from "./demands.ts";
 export {
   evaluateEvidenceGate,
   evaluateEvidenceGateStep1,
