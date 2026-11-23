@@ -4,6 +4,30 @@ import { createDb } from "@media-ref/db";
 import { createApiApp } from "./app.ts";
 import { DEFAULT_EMAIL_FROM } from "./auth.ts";
 
+export {
+  API_KEY_START_LENGTH,
+  buildApiKeyPermissions,
+  DEFAULT_API_KEY_CONFIG_ID,
+  DEFAULT_API_KEY_PREFIX,
+  extractApiKeyFromHeaders,
+  hashApiKey,
+  MAX_API_KEY_EXPIRES_IN_SECONDS,
+  MAX_API_KEY_NAME_LENGTH,
+  parseApiKeyPermissions,
+  registerApiKeyRoutes,
+  requireApiKey,
+  verifyApiKey,
+  type ApiKeyAction,
+  type ApiKeyPermissions,
+  type ApiKeyScope,
+  type ApiKeySummary,
+  type CreatedApiKeyResponse,
+  type RequireApiKeyOptions,
+  type VerifiedApiKey,
+  type VerifyApiKeyFailureCode,
+  type VerifyApiKeyInput,
+  type VerifyApiKeyResult,
+} from "./api-keys.ts";
 export { createApiApp, type ApiConfig, type ApiDeps } from "./app.ts";
 export {
   AUTH_BASE_PATH,
