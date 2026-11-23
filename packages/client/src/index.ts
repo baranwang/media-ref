@@ -64,3 +64,29 @@ export type {
   VariantAssociationSegments,
   VariantAssociationSegmentsInput,
 } from "./validation.ts";
+export {
+  DEFAULT_BASE_URL,
+  MAX_BATCH_MEDIA_KEYS,
+  MediaRefApiError,
+  createMediaRefClient,
+} from "./http.ts";
+export type {
+  BatchMediaItemErrorCode,
+  BatchMediaItemResult,
+  BatchMediaResponse,
+  FetchLike,
+  GetMediaBatchOptions,
+  GetMediaOptions,
+  GetMediaResponse,
+  LeadRecord,
+  MediaLookupKey,
+  MediaQueryItem,
+  MediaRefApiErrorOptions,
+  MediaRefClient,
+  MediaRefClientOptions,
+  NotFoundResolutionResult,
+  ReportLeadInput,
+  ReportLeadOptions,
+  ReportLeadResponse,
+  ResolveFromKeyResult,
+} from "./http.ts";
