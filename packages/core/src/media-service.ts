@@ -34,18 +34,19 @@ import {
   InvalidNativeIdError,
   type AdapterRegistry,
 } from "./adapters/index.ts";
+import {
+  buildCatalogTargetSnapshotFromTmdb,
+  parseCatalogTargetKey,
+  resolveCatalogTargetSnapshot,
+  selectBaseline,
+  type CatalogGatewayConfig,
+  type CatalogTargetSnapshot,
+} from "./catalog-gateway.ts";
 import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
 import { enqueueJob } from "./jobs.ts";
 import type { OutboundClient } from "./outbound.ts";
 import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
-import {
-  TmdbGatewayError,
-  createTmdbGateway,
-  parseTmdbNativeId,
-  type TmdbGateway,
-  type TmdbGatewayConfig,
-  type TmdbMediaFetchResult,
-} from "./tmdb.ts";
+import { type TmdbGateway, type TmdbGatewayConfig, type TmdbMediaFetchResult } from "./tmdb.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EXTERNAL_ID_NAMESPACE_SET: ReadonlySet<string> = new Set(EXTERNAL_ID_NAMESPACES);
@@ -74,6 +75,7 @@ export type MediaServiceErrorCode =
   | "VARIANT_NOT_ALLOWED"
   | "INVALID_VARIANT"
   | "INVALID_SEGMENTS"
+  | "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE"
   | "SEGMENT_OVERLAP"
   | "INVALID_TASK_ID"
   | "MEDIA_NOT_FOUND"
@@ -83,7 +85,9 @@ export type MediaServiceErrorCode =
   | "CHANGE_REQUEST_NOT_FOUND"
   | "INVALID_CHANGE_REQUEST_STATE"
   | "TMDB_MEDIA_NOT_FOUND"
-  | "TMDB_UPSTREAM_ERROR";
+  | "TMDB_UPSTREAM_ERROR"
+  | "CATALOG_MEDIA_NOT_FOUND"
+  | "CATALOG_UPSTREAM_ERROR";
 
 export class MediaServiceError extends Error {
   readonly code: MediaServiceErrorCode;
@@ -174,7 +178,9 @@ export interface ApproveChangeRequestInput {
   reason?: string | null;
   evidence?: JsonObject | null;
   conflictReason?: string | null;
+  prefetchedCatalog?: CatalogTargetSnapshot | null;
   prefetchedTmdb?: TmdbMediaFetchResult | null;
+  catalogConfig?: CatalogGatewayConfig;
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   allowedStatuses?: readonly ChangeRequestStatus[];
@@ -187,6 +193,7 @@ export interface ApproveChangeRequestInTransactionInput {
   reason?: string | null;
   evidence?: JsonObject | null;
   conflictReason?: string | null;
+  prefetchedCatalog?: CatalogTargetSnapshot | null;
   prefetchedTmdb?: TmdbMediaFetchResult | null;
   allowedStatuses?: readonly ChangeRequestStatus[];
   replacesAssociationId?: string | null;
@@ -576,6 +583,9 @@ function classifyValidationErrorStatus(
   errors: SegmentValidationError[],
   conflictStatus: number,
 ): { code: MediaServiceErrorCode; status: number } {
+  if (errors.some((err) => err.code === "BASELINE_REQUIRED_FOR_SEGMENTS")) {
+    return { code: "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE", status: 400 };
+  }
   const isConflict = errors.some(
     (err) =>
       err.code === "OVERLAPPING_VARIANT_SEGMENTS" ||
@@ -665,22 +675,22 @@ export async function createChangeRequest(
     throw new MediaServiceError("MEDIA_NOT_FOUND", 404, `Media not found for ID ${target.mediaId}`);
   }
 
-  if (!resolved) {
-    if (
-      target.kind !== "external_key" ||
-      target.namespace !== "tmdb" ||
-      !parseTmdbNativeId(target.nativeId)
-    ) {
-      throw new MediaServiceError(
-        "INVALID_TARGET_KEY",
-        400,
-        "Uncreated media submissions must target a valid TMDB external key (tmdb:movie:<id> or tmdb:tv:<id>)",
-      );
-    }
+  const catalogTarget =
+    !resolved && target.kind === "external_key" ? parseCatalogTargetKey(target.canonicalKey) : null;
+
+  if (!resolved && !catalogTarget) {
+    throw new MediaServiceError(
+      "INVALID_TARGET_KEY",
+      400,
+      "Uncreated media submissions must target a valid catalog external key (tmdb, tvdb, imdb, bangumi, douban, or trakt)",
+    );
   }
 
   const existingMedia = resolved?.media ?? null;
-  const effectiveBaseline: BaselineSource | null = existingMedia ? existingMedia.baseline : "tmdb";
+  const canonicalTargetKey = catalogTarget ? catalogTarget.canonicalKey : target.canonicalKey;
+  const effectiveBaseline: BaselineSource | null = existingMedia
+    ? existingMedia.baseline
+    : selectBaseline([catalogTarget!.namespace]);
 
   // Optional explicit replacement target validation
   let replacesAssociation: {
@@ -825,6 +835,14 @@ export async function createChangeRequest(
   const rawSegments = input.segments ?? [];
   if (!Array.isArray(rawSegments)) {
     throw new MediaServiceError("INVALID_SEGMENTS", 400, "segments must be an array");
+  }
+
+  if (effectiveBaseline === null && rawSegments.length > 0) {
+    throw new MediaServiceError(
+      "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE",
+      400,
+      "Media without a baseline cannot have segmented associations; submit whole-media (segments: []) instead",
+    );
   }
 
   const preparedInputs: SegmentInput[] = [];
@@ -1032,7 +1050,7 @@ export async function createChangeRequest(
         submitter_type: input.submitterType ?? "human",
         task_id: input.taskId ?? null,
         media_id: existingMedia?.id ?? null,
-        target_external_key: target.canonicalKey,
+        target_external_key: canonicalTargetKey,
         namespace,
         raw_native_id: rawNativeId,
         native_id: nativeId,
@@ -1172,8 +1190,10 @@ export async function approveChangeRequest(
     );
   }
 
-  let prefetchedTmdb: TmdbMediaFetchResult | null = input.prefetchedTmdb ?? null;
-  let needsMediaCreation = preRead.media_id === null && prefetchedTmdb === null;
+  let prefetchedCatalog: CatalogTargetSnapshot | null =
+    input.prefetchedCatalog ??
+    (input.prefetchedTmdb ? buildCatalogTargetSnapshotFromTmdb(input.prefetchedTmdb) : null);
+  let needsMediaCreation = preRead.media_id === null && prefetchedCatalog === null;
   if (needsMediaCreation) {
     const existingBeforeTx = await resolveExistingMediaByTarget(dbWrite, preTarget);
     if (existingBeforeTx) {
@@ -1182,46 +1202,45 @@ export async function approveChangeRequest(
   }
 
   if (needsMediaCreation) {
-    if (preTarget.kind !== "external_key" || preTarget.namespace !== "tmdb") {
+    const catalogTarget =
+      preTarget.kind === "external_key" ? parseCatalogTargetKey(preTarget.canonicalKey) : null;
+    if (!catalogTarget) {
       throw new MediaServiceError(
         "INVALID_TARGET_KEY",
         400,
-        "Cannot create media without a TMDB external key",
-      );
-    }
-    const tmdbParsed = parseTmdbNativeId(preTarget.nativeId);
-    if (!tmdbParsed) {
-      throw new MediaServiceError(
-        "INVALID_TARGET_KEY",
-        400,
-        `Invalid TMDB native ID: ${preTarget.nativeId}`,
+        "Cannot create media without a valid catalog external key",
       );
     }
 
-    const gateway = input.tmdbGateway ?? createTmdbGateway(outbound, input.tmdbConfig);
-    try {
-      prefetchedTmdb = await gateway.fetchMediaSnapshotAndExternalIds(
-        tmdbParsed.type,
-        tmdbParsed.id,
-      );
-    } catch (error) {
-      if (error instanceof TmdbGatewayError) {
-        throw new MediaServiceError("TMDB_UPSTREAM_ERROR", error.status, error.message);
-      }
-      throw new MediaServiceError(
-        "TMDB_UPSTREAM_ERROR",
-        502,
-        error instanceof Error ? error.message : "Failed to fetch TMDB media metadata",
-      );
-    }
+    const resolvedCatalog = await resolveCatalogTargetSnapshot(
+      catalogTarget.canonicalKey,
+      outbound,
+      {
+        ...input.catalogConfig,
+        tmdb: input.catalogConfig?.tmdb ?? input.tmdbConfig,
+        tmdbGateway: input.catalogConfig?.tmdbGateway ?? input.tmdbGateway,
+      },
+    );
 
-    if (!prefetchedTmdb) {
+    if (resolvedCatalog.status === "invalid_key") {
+      throw new MediaServiceError("INVALID_TARGET_KEY", 400, resolvedCatalog.reason);
+    }
+    if (resolvedCatalog.status === "not_found") {
       throw new MediaServiceError(
-        "TMDB_MEDIA_NOT_FOUND",
+        catalogTarget.namespace === "tmdb" ? "TMDB_MEDIA_NOT_FOUND" : "CATALOG_MEDIA_NOT_FOUND",
         404,
-        `TMDB media not found for ${preTarget.canonicalKey}`,
+        resolvedCatalog.reason ?? `Catalog media not found for ${catalogTarget.canonicalKey}`,
       );
     }
+    if (resolvedCatalog.status === "transient_error") {
+      throw new MediaServiceError(
+        catalogTarget.namespace === "tmdb" ? "TMDB_UPSTREAM_ERROR" : "CATALOG_UPSTREAM_ERROR",
+        502,
+        resolvedCatalog.reason,
+      );
+    }
+
+    prefetchedCatalog = resolvedCatalog.target;
   }
 
   return dbWrite.transaction().execute((trx) =>
@@ -1231,7 +1250,7 @@ export async function approveChangeRequest(
       reason,
       evidence: input.evidence,
       conflictReason: input.conflictReason,
-      prefetchedTmdb,
+      prefetchedCatalog,
       allowedStatuses,
       now: input.now,
     }),
@@ -1248,7 +1267,9 @@ export async function approveChangeRequestInTransaction(
 
   const allowedStatuses = input.allowedStatuses ?? ["needs_review"];
   const reason = input.reason?.trim() || null;
-  const prefetchedTmdb = input.prefetchedTmdb ?? null;
+  const prefetchedCatalog: CatalogTargetSnapshot | null =
+    input.prefetchedCatalog ??
+    (input.prefetchedTmdb ? buildCatalogTargetSnapshotFromTmdb(input.prefetchedTmdb) : null);
 
   // 0. Lock the change request row FOR UPDATE to prevent double-approval
   const cr = await trx
@@ -1290,7 +1311,7 @@ export async function approveChangeRequestInTransaction(
     if (existingInTx) {
       media = existingInTx.media;
     } else {
-      if (!prefetchedTmdb) {
+      if (!prefetchedCatalog) {
         throw new MediaServiceError(
           "MEDIA_NOT_FOUND",
           404,
@@ -1301,12 +1322,12 @@ export async function approveChangeRequestInTransaction(
       const createdMedia = await trx
         .insertInto("media")
         .values({
-          type: prefetchedTmdb.type,
-          baseline: "tmdb",
-          title: prefetchedTmdb.snapshot.title,
-          original_title: prefetchedTmdb.snapshot.originalTitle,
-          year: prefetchedTmdb.snapshot.year,
-          seasons: JSON.stringify(prefetchedTmdb.snapshot.seasons),
+          type: prefetchedCatalog.type,
+          baseline: prefetchedCatalog.baseline,
+          title: prefetchedCatalog.snapshot.title,
+          original_title: prefetchedCatalog.snapshot.originalTitle,
+          year: prefetchedCatalog.snapshot.year,
+          seasons: JSON.stringify(prefetchedCatalog.snapshot.seasons),
         })
         .returning([
           "id",
@@ -1320,57 +1341,134 @@ export async function approveChangeRequestInTransaction(
         ])
         .executeTakeFirstOrThrow();
 
-      // Sync TMDB + IMDb + TVDB + Trakt external IDs
-      await trx
-        .insertInto("external_ids")
-        .values({
-          media_id: createdMedia.id,
-          namespace: "tmdb",
-          native_id: prefetchedTmdb.externalIds.tmdb,
-          source: "sync",
-        })
-        .execute();
+      // Sync external IDs (TMDB, IMDb, TVDB, Trakt) discovered from target catalog
+      const primaryExternalNamespace: ExternalIdNamespace | null = isExternalIdNamespace(
+        prefetchedCatalog.sourceNamespace,
+      )
+        ? prefetchedCatalog.sourceNamespace
+        : null;
 
-      const secondaryExternalIds: Array<{ namespace: ExternalIdNamespace; nativeId: string }> = [];
-      if (prefetchedTmdb.externalIds.imdb) {
-        secondaryExternalIds.push({
-          namespace: "imdb",
-          nativeId: prefetchedTmdb.externalIds.imdb,
-        });
-      }
-      if (prefetchedTmdb.externalIds.tvdb) {
-        secondaryExternalIds.push({
-          namespace: "tvdb",
-          nativeId: prefetchedTmdb.externalIds.tvdb,
-        });
-      }
-      if (prefetchedTmdb.externalIds.trakt) {
-        secondaryExternalIds.push({
-          namespace: "trakt",
-          nativeId: prefetchedTmdb.externalIds.trakt,
-        });
-      }
-
-      for (const ext of secondaryExternalIds) {
+      if (primaryExternalNamespace && prefetchedCatalog.externalIds[primaryExternalNamespace]) {
         await trx
           .insertInto("external_ids")
           .values({
             media_id: createdMedia.id,
-            namespace: ext.namespace,
-            native_id: ext.nativeId,
+            namespace: primaryExternalNamespace,
+            native_id: prefetchedCatalog.externalIds[primaryExternalNamespace]!,
+            source: "sync",
+          })
+          .execute();
+      }
+
+      for (const extNs of EXTERNAL_ID_NAMESPACES) {
+        if (extNs === primaryExternalNamespace) {
+          continue;
+        }
+        const extNativeId = prefetchedCatalog.externalIds[extNs];
+        if (!extNativeId) {
+          continue;
+        }
+        await trx
+          .insertInto("external_ids")
+          .values({
+            media_id: createdMedia.id,
+            namespace: extNs,
+            native_id: extNativeId,
             source: "sync",
           })
           .onConflict((oc) => oc.doNothing())
           .execute();
       }
 
+      // When created from a Douban or Bangumi catalog entry, establish the initial confirmed
+      // catalog association immediately so GET /v1/media/douban:<id> or bangumi:<id> finds it.
+      const initAssoc = prefetchedCatalog.initialAssociation;
+      if (
+        initAssoc &&
+        (cr.namespace !== initAssoc.namespace || cr.native_id !== initAssoc.nativeId)
+      ) {
+        const createdInitAssoc = await trx
+          .insertInto("associations")
+          .values({
+            media_id: createdMedia.id,
+            namespace: initAssoc.namespace,
+            native_id: initAssoc.nativeId,
+            variant_id: null,
+            status: "confirmed",
+            needs_review: false,
+            locked: false,
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+
+        const initSegments: NormalizedSegment[] = [];
+        if (createdMedia.type === "tv" && createdMedia.baseline !== null) {
+          const season1 = prefetchedCatalog.snapshot.seasons.find((s) => s.season === 1);
+          initSegments.push({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: season1 && season1.episodeCount > 0 ? season1.episodeCount : null,
+            targetEpisodeStart: 1,
+            baseline: createdMedia.baseline,
+            nonLinear: false,
+            needsReview: false,
+          });
+          await trx
+            .insertInto("segments")
+            .values(
+              initSegments.map((seg) => ({
+                association_id: createdInitAssoc.id,
+                season: seg.season,
+                episode_start: seg.episodeStart,
+                episode_end: seg.episodeEnd,
+                target_episode_start: seg.targetEpisodeStart,
+                baseline: seg.baseline,
+                non_linear: seg.nonLinear,
+                needs_review: seg.needsReview,
+              })),
+            )
+            .execute();
+        }
+
+        const initRev = await trx
+          .insertInto("association_revisions")
+          .values({
+            association_id: createdInitAssoc.id,
+            revision_number: 1,
+            change_request_id: null,
+            variant_id: null,
+            status: "confirmed",
+            segments: JSON.stringify(initSegments),
+            actor_user_id: null,
+            reason: "initial_catalog_target",
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+
+        await trx
+          .updateTable("associations")
+          .set({ current_revision_id: initRev.id })
+          .where("id", "=", createdInitAssoc.id)
+          .execute();
+      }
+
+      const demandExternalKeys = new Set<string>([prefetchedCatalog.canonicalKey]);
+      for (const extNs of EXTERNAL_ID_NAMESPACES) {
+        const extNativeId = prefetchedCatalog.externalIds[extNs];
+        if (extNativeId) {
+          demandExternalKeys.add(formatExternalKey({ namespace: extNs, nativeId: extNativeId }));
+        }
+      }
+      if (initAssoc) {
+        demandExternalKeys.add(
+          formatExternalKey({ namespace: initAssoc.namespace, nativeId: initAssoc.nativeId }),
+        );
+      }
+
       await mergeExternalKeyDemandsIntoMedia(trx, {
         mediaId: createdMedia.id,
-        externalKeys: [
-          formatExternalKey({ namespace: "tmdb", nativeId: prefetchedTmdb.externalIds.tmdb }),
-          ...secondaryExternalIds.map((ext) => formatExternalKey(ext)),
-        ],
-        seasons: prefetchedTmdb.snapshot.seasons,
+        externalKeys: [...demandExternalKeys],
+        seasons: prefetchedCatalog.snapshot.seasons,
         mediaType: createdMedia.type,
         now: input.now,
       });
@@ -1505,6 +1603,14 @@ export async function approveChangeRequestInTransaction(
     input.replacesAssociationId !== undefined
       ? input.replacesAssociationId
       : extractReplacesAssociationId(cr.evidence);
+
+  if (media.baseline === null && normalizedSegments.length > 0) {
+    throw new MediaServiceError(
+      "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE",
+      400,
+      "Media without a baseline cannot have segmented associations",
+    );
+  }
 
   const existingAssociation = await trx
     .selectFrom("associations")

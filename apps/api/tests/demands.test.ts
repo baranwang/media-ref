@@ -1,4 +1,5 @@
 import {
+  createAdapterRegistry,
   createFakeOutboundClient,
   listDemands,
   type EmailMessage,
@@ -190,6 +191,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
       dbRead: readOnlyDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       onBackgroundTask: (task) => {
         bgTasks.push(task);
       },
@@ -348,6 +350,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
       dbRead: readOnlyDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       onBackgroundTask: (task) => {
         bgTasks.push(task);
       },
@@ -611,6 +614,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
       dbRead: readOnlyDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       onBackgroundTask: (task) => {
         bgTasks.push(task);
       },
@@ -1015,6 +1019,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
       dbRead: readOnlyDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       onBackgroundTask: (task) => {
         bgTasks.push(task);
       },

@@ -1,12 +1,16 @@
 import type { Namespace } from "@media-ref/client";
+import { bangumiAdapter } from "./bangumi.ts";
 import { bilibiliAdapter } from "./bilibili.ts";
+import { doubanAdapter } from "./douban.ts";
 import { iqiyiAdapter } from "./iqiyi.ts";
 import { mgtvAdapter } from "./mgtv.ts";
 import { tencentAdapter } from "./tencent.ts";
 import type { AdapterRegistry, AdapterTier, MediaAdapter } from "./types.ts";
 import { youkuAdapter } from "./youku.ts";
 
+export { bangumiAdapter, parseBangumiInput } from "./bangumi.ts";
 export { bilibiliAdapter, parseBilibiliInput } from "./bilibili.ts";
+export { doubanAdapter, parseDoubanInput } from "./douban.ts";
 export { iqiyiAdapter, parseIqiyiInput } from "./iqiyi.ts";
 export { mgtvAdapter, parseMgtvInput } from "./mgtv.ts";
 export { parseTencentInput, tencentAdapter } from "./tencent.ts";
@@ -64,5 +68,7 @@ export function createDefaultAdapterRegistry(): AdapterRegistry {
     iqiyiAdapter,
     youkuAdapter,
     mgtvAdapter,
+    doubanAdapter,
+    bangumiAdapter,
   ]);
 }
