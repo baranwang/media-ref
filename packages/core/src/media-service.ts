@@ -30,6 +30,7 @@ import type {
 import { sql, type Selectable, type Transaction } from "kysely";
 import type { Database } from "@media-ref/db";
 import type { OutboundClient } from "./outbound.ts";
+import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
 import {
   TmdbGatewayError,
   createTmdbGateway,
@@ -130,6 +131,8 @@ export interface CreateChangeRequestInput {
   setDefaultVariant?: boolean;
   segments?: readonly SegmentInput[];
   initialStatus?: "needs_review" | "pending_evidence";
+  submissionQuota?: SubmissionQuotaConfig;
+  now?: Date;
 }
 
 export interface ListChangeRequestsOptions {
@@ -804,26 +807,35 @@ export async function createChangeRequest(
     }
   }
 
-  const inserted = await dbWrite
-    .insertInto("change_requests")
-    .values({
-      status: input.initialStatus ?? "needs_review",
-      submitter_user_id: input.submitterUserId,
-      submitter_key_id: input.submitterKeyId ?? null,
-      submitter_type: input.submitterType ?? "human",
-      task_id: input.taskId ?? null,
-      media_id: existingMedia?.id ?? null,
-      target_external_key: target.canonicalKey,
-      namespace,
-      raw_native_id: rawNativeId,
-      native_id: nativeId,
-      variant_id: resolvedVariantId,
-      variant_description: variantDescription,
-      set_default_variant: setDefaultVariant,
-      segments: JSON.stringify(normalizedSegments),
-    })
-    .returningAll()
-    .executeTakeFirstOrThrow();
+  const inserted = await dbWrite.transaction().execute(async (trx) => {
+    const quota = await enforceSubmissionQuotaInTx(trx, {
+      submitterUserId: input.submitterUserId,
+      config: input.submissionQuota,
+      now: input.now,
+    });
+
+    return trx
+      .insertInto("change_requests")
+      .values({
+        status: input.initialStatus ?? "needs_review",
+        submitter_user_id: input.submitterUserId,
+        submitter_key_id: input.submitterKeyId ?? null,
+        submitter_type: input.submitterType ?? "human",
+        task_id: input.taskId ?? null,
+        media_id: existingMedia?.id ?? null,
+        target_external_key: target.canonicalKey,
+        namespace,
+        raw_native_id: rawNativeId,
+        native_id: nativeId,
+        variant_id: resolvedVariantId,
+        variant_description: variantDescription,
+        set_default_variant: setDefaultVariant,
+        segments: JSON.stringify(normalizedSegments),
+        ...(input.now ? { created_at: quota.referenceNow, updated_at: quota.referenceNow } : {}),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+  });
 
   return toChangeRequestRecord(inserted);
 }

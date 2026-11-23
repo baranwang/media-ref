@@ -58,6 +58,21 @@ export {
   type RejectChangeRequestInput,
 } from "./media-service.ts";
 export {
+  DEFAULT_REPUTATION_TIERS,
+  DEFAULT_ROLE_HOURLY_LIMITS,
+  DEFAULT_SUBMISSION_WINDOW_SECONDS,
+  DEFAULT_SUBMIT_BASE_HOURLY_LIMIT,
+  enforceSubmissionQuotaInTx,
+  resolveEffectiveReputationTiers,
+  resolveHourlySubmissionLimit,
+  SubmissionQuotaExceededError,
+  type EnforceSubmissionQuotaInput,
+  type ReputationTier,
+  type SubmissionQuotaConfig,
+  type SubmissionQuotaExceededParams,
+  type SubmissionQuotaSnapshot,
+} from "./quota.ts";
+export {
   BatchMediaQueryError,
   MAX_BATCH_MEDIA_KEYS,
   queryMediaBatch,
