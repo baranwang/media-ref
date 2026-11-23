@@ -1,8 +1,12 @@
 import type { Namespace } from "@media-ref/client";
+import { bangumiAdapter } from "./bangumi.ts";
 import { bilibiliAdapter } from "./bilibili.ts";
+import { doubanAdapter } from "./douban.ts";
 import type { AdapterRegistry, AdapterTier, MediaAdapter } from "./types.ts";
 
+export { bangumiAdapter, parseBangumiInput } from "./bangumi.ts";
 export { bilibiliAdapter, parseBilibiliInput } from "./bilibili.ts";
+export { doubanAdapter, parseDoubanInput } from "./douban.ts";
 export {
   AdapterTransientError,
   createTier1Adapter,
@@ -50,5 +54,5 @@ export function createAdapterRegistry(adapters: readonly MediaAdapter[] = []): A
 }
 
 export function createDefaultAdapterRegistry(): AdapterRegistry {
-  return createAdapterRegistry([bilibiliAdapter]);
+  return createAdapterRegistry([bilibiliAdapter, doubanAdapter, bangumiAdapter]);
 }

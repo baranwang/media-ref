@@ -1,13 +1,17 @@
 export {
   AdapterTransientError,
+  bangumiAdapter,
   bilibiliAdapter,
   createAdapterRegistry,
   createDefaultAdapterRegistry,
   createTier1Adapter,
+  doubanAdapter,
   InvalidNativeIdError,
   isTier2Adapter,
   isTier3Adapter,
+  parseBangumiInput,
   parseBilibiliInput,
+  parseDoubanInput,
   type AdapterRegistry,
   type AdapterSearchCandidate,
   type AdapterSearchQuery,
@@ -25,6 +29,20 @@ export {
   type Tier2Adapter,
   type Tier3Adapter,
 } from "./adapters/index.ts";
+export {
+  buildCatalogTargetSnapshotFromTmdb,
+  CATALOG_EVIDENCE_PRIORITY,
+  DEFAULT_IMDB_API_BASE_URL,
+  DEFAULT_TVDB_API_BASE_URL,
+  parseCatalogTargetKey,
+  resolveCatalogTargetSnapshot,
+  selectBaseline,
+  type CatalogGatewayConfig,
+  type CatalogTargetInitialAssociation,
+  type CatalogTargetSnapshot,
+  type ParsedCatalogTargetKey,
+  type ResolveCatalogTargetResult,
+} from "./catalog-gateway.ts";
 export {
   evaluateEvidenceGate,
   evaluateEvidenceGateStep1,

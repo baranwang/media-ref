@@ -1,11 +1,18 @@
-import type { Namespace } from "@media-ref/client";
-import type { Database, JsonObject } from "@media-ref/db";
+import { formatExternalKey, type CatalogNamespace } from "@media-ref/client";
+import type { Database, Db, JsonObject } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import {
   createDefaultAdapterRegistry,
   isTier2Adapter,
   type AdapterRegistry,
 } from "./adapters/index.ts";
+import {
+  CATALOG_EVIDENCE_PRIORITY,
+  parseCatalogTargetKey,
+  resolveCatalogTargetSnapshot,
+  type CatalogGatewayConfig,
+  type CatalogTargetSnapshot,
+} from "./catalog-gateway.ts";
 import {
   evaluateEvidenceGate,
   type CatalogEvidence,
@@ -20,16 +27,11 @@ import {
   MediaServiceError,
   TIER1_MANUAL_REVIEW_REASON,
 } from "./media-service.ts";
-import {
-  createTmdbGateway,
-  parseTmdbNativeId,
-  type TmdbGateway,
-  type TmdbGatewayConfig,
-  type TmdbMediaFetchResult,
-} from "./tmdb.ts";
+import type { TmdbGateway, TmdbGatewayConfig } from "./tmdb.ts";
 
 export interface EvidenceCheckJobOptions {
   adapterRegistry?: AdapterRegistry;
+  catalogConfig?: CatalogGatewayConfig;
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   evaluateStep2?: EvidenceGateStep2Evaluator;
@@ -61,37 +63,55 @@ async function markChangeRequestNeedsReviewInTx(
     .execute();
 }
 
-function buildTmdbCatalogEvidence(result: TmdbMediaFetchResult): CatalogEvidence {
-  const externalIds: Partial<Record<Namespace, string>> = {
-    tmdb: result.externalIds.tmdb,
-  };
-  if (result.externalIds.imdb) {
-    externalIds.imdb = result.externalIds.imdb;
-  }
-  if (result.externalIds.tvdb) {
-    externalIds.tvdb = result.externalIds.tvdb;
-  }
-  if (result.externalIds.trakt) {
-    externalIds.trakt = result.externalIds.trakt;
+async function resolveAuthoritativeCatalogKey(
+  db: Db,
+  mediaId: string | null,
+  targetExternalKey: string,
+): Promise<string | null> {
+  if (mediaId) {
+    const [extRows, catalogAssocRows] = await Promise.all([
+      db
+        .selectFrom("external_ids")
+        .select(["namespace", "native_id"])
+        .where("media_id", "=", mediaId)
+        .execute(),
+      db
+        .selectFrom("associations")
+        .select(["namespace", "native_id"])
+        .where("media_id", "=", mediaId)
+        .where("namespace", "in", ["bangumi", "douban"])
+        .where("status", "=", "confirmed")
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .execute(),
+    ]);
+
+    const keyByNamespace = new Map<CatalogNamespace, string>();
+    for (const row of extRows) {
+      if (!keyByNamespace.has(row.namespace)) {
+        keyByNamespace.set(
+          row.namespace,
+          formatExternalKey({ namespace: row.namespace, nativeId: row.native_id }),
+        );
+      }
+    }
+    for (const row of catalogAssocRows) {
+      const ns = row.namespace as CatalogNamespace;
+      if (!keyByNamespace.has(ns)) {
+        keyByNamespace.set(ns, formatExternalKey({ namespace: ns, nativeId: row.native_id }));
+      }
+    }
+
+    for (const preferredNamespace of CATALOG_EVIDENCE_PRIORITY) {
+      const candidate = keyByNamespace.get(preferredNamespace);
+      if (candidate) {
+        return candidate;
+      }
+    }
   }
 
-  return {
-    namespace: "tmdb",
-    canonicalId: result.externalIds.tmdb,
-    mediaType: result.type,
-    title: result.snapshot.title,
-    originalTitle: result.snapshot.originalTitle,
-    year: result.snapshot.year,
-    seasons: result.snapshot.seasons,
-    externalIds,
-  };
-}
-
-function extractTmdbTarget(targetExternalKey: string): { type: "movie" | "tv"; id: string } | null {
-  if (!targetExternalKey.startsWith("tmdb:")) {
-    return null;
-  }
-  return parseTmdbNativeId(targetExternalKey.slice("tmdb:".length));
+  const parsedTarget = parseCatalogTargetKey(targetExternalKey);
+  return parsedTarget ? parsedTarget.canonicalKey : null;
 }
 
 export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions = {}): JobHandler {
@@ -156,64 +176,17 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
       };
     }
 
-    // 1. Fetch fresh catalog evidence (TMDB) outside DB transaction locks
-    let tmdbTarget = extractTmdbTarget(changeRequest.targetExternalKey);
-    if (!tmdbTarget && changeRequest.mediaId) {
-      const tmdbRow = await ctx.db
-        .selectFrom("external_ids")
-        .select("native_id")
-        .where("media_id", "=", changeRequest.mediaId)
-        .where("namespace", "=", "tmdb")
-        .executeTakeFirst();
-      if (tmdbRow) {
-        tmdbTarget = parseTmdbNativeId(tmdbRow.native_id);
-      }
-    }
+    // 1. Fetch fresh catalog evidence (TMDB, TVDB, IMDb, Bangumi, Douban, or Trakt) outside DB transaction locks
+    const catalogKey = await resolveAuthoritativeCatalogKey(
+      ctx.db,
+      changeRequest.mediaId,
+      changeRequest.targetExternalKey,
+    );
 
     let catalogEvidence: CatalogEvidence | null = null;
-    let prefetchedTmdb: TmdbMediaFetchResult | null = null;
+    let prefetchedCatalog: CatalogTargetSnapshot | null = null;
 
-    if (tmdbTarget) {
-      const gateway = options.tmdbGateway ?? createTmdbGateway(ctx.outbound, options.tmdbConfig);
-      let fetched: TmdbMediaFetchResult | null;
-      try {
-        fetched = await gateway.fetchMediaSnapshotAndExternalIds(tmdbTarget.type, tmdbTarget.id);
-      } catch (error) {
-        return {
-          status: "retry",
-          errorMessage:
-            error instanceof Error ? error.message : "Failed to fetch TMDB catalog evidence",
-        };
-      }
-
-      if (!fetched) {
-        const evidence: JsonObject = {
-          checkedAt,
-          catalogStatus: "not_found",
-          targetExternalKey: changeRequest.targetExternalKey,
-        };
-        return {
-          status: "completed",
-          result: {
-            changeRequestId: changeRequest.id,
-            decision: "needs_review",
-            conflictReason: "catalog_not_found",
-          },
-          async onCommit(trx) {
-            await markChangeRequestNeedsReviewInTx(trx, {
-              changeRequestId: changeRequest.id,
-              evidence,
-              conflictReason: "catalog_not_found",
-              decisionReason: `Catalog media not found for ${changeRequest.targetExternalKey}`,
-              now: ctx.now,
-            });
-          },
-        };
-      }
-
-      prefetchedTmdb = fetched;
-      catalogEvidence = buildTmdbCatalogEvidence(fetched);
-    } else {
+    if (!catalogKey) {
       const evidence: JsonObject = {
         checkedAt,
         catalogStatus: "unsupported_catalog",
@@ -237,6 +210,53 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         },
       };
     }
+
+    const catalogResult = await resolveCatalogTargetSnapshot(catalogKey, ctx.outbound, {
+      ...options.catalogConfig,
+      tmdb: options.catalogConfig?.tmdb ?? options.tmdbConfig,
+      tmdbGateway: options.catalogConfig?.tmdbGateway ?? options.tmdbGateway,
+    });
+
+    if (catalogResult.status === "transient_error") {
+      return {
+        status: "retry",
+        ...(catalogResult.retryAfterMs !== undefined
+          ? { delayMs: catalogResult.retryAfterMs }
+          : {}),
+        errorMessage: catalogResult.reason,
+      };
+    }
+
+    if (catalogResult.status === "not_found" || catalogResult.status === "invalid_key") {
+      const evidence: JsonObject = {
+        checkedAt,
+        catalogStatus: catalogResult.status,
+        targetExternalKey: changeRequest.targetExternalKey,
+        catalogKey,
+      };
+      return {
+        status: "completed",
+        result: {
+          changeRequestId: changeRequest.id,
+          decision: "needs_review",
+          conflictReason: "catalog_not_found",
+        },
+        async onCommit(trx) {
+          await markChangeRequestNeedsReviewInTx(trx, {
+            changeRequestId: changeRequest.id,
+            evidence,
+            conflictReason: "catalog_not_found",
+            decisionReason:
+              catalogResult.reason ??
+              `Catalog media not found for ${changeRequest.targetExternalKey}`,
+            now: ctx.now,
+          });
+        },
+      };
+    }
+
+    prefetchedCatalog = catalogResult.target;
+    catalogEvidence = catalogResult.target.evidence;
 
     // 2. Fetch fresh platform/collection evidence via Tier 2+ adapter outside DB locks
     const collectionResult = await adapter.fetchCollection(changeRequest.nativeId, ctx.outbound);
@@ -347,7 +367,7 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
               reason: "evidence_gate_passed",
               evidence: evidenceRecord,
               conflictReason: null,
-              prefetchedTmdb,
+              prefetchedCatalog,
               allowedStatuses: ["pending_evidence"],
               now: ctx.now,
             });
@@ -364,7 +384,8 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
               error instanceof MediaServiceError &&
               (error.code === "SEGMENT_OVERLAP" ||
                 error.code === "INVALID_VARIANT" ||
-                error.code === "INVALID_SEGMENTS")
+                error.code === "INVALID_SEGMENTS" ||
+                error.code === "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE")
             ) {
               await markChangeRequestNeedsReviewInTx(trx, {
                 changeRequestId: changeRequest.id,
