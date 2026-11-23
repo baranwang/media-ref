@@ -7,6 +7,7 @@ import * as m0005MediaDomain from "./0005_media_domain.ts";
 import * as m0006Leads from "./0006_leads.ts";
 import * as m0007PlatformStatus from "./0007_platform_status.ts";
 import * as m0008ReputationRateLimits from "./0008_reputation_rate_limits.ts";
+import * as m0009SyncState from "./0009_sync_state.ts";
 
 export const migrations: Record<string, Migration> = {
   "0001_initial": m0001Initial,
@@ -17,6 +18,7 @@ export const migrations: Record<string, Migration> = {
   "0006_leads": m0006Leads,
   "0007_platform_status": m0007PlatformStatus,
   "0008_reputation_rate_limits": m0008ReputationRateLimits,
+  "0009_sync_state": m0009SyncState,
 };
 
 export const staticMigrationProvider: MigrationProvider = {

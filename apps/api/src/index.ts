@@ -33,6 +33,7 @@ export {
 } from "./api-keys.ts";
 export { createApiApp, type ApiConfig, type ApiDeps } from "./app.ts";
 export { registerChangeRequestRoutes } from "./change-requests.ts";
+export { registerMediaAdminRoutes } from "./media-admin.ts";
 export {
   registerMediaRoutes,
   type BatchMediaReadResponse,

@@ -29,22 +29,45 @@ export interface TmdbMediaFetchResult {
   externalIds: TmdbExternalIdsSync;
 }
 
+export interface TmdbFetchMediaOptions {
+  throwOnNotFound?: boolean;
+}
+
+export interface TmdbChangesOptions {
+  startDate: string;
+  endDate: string;
+  page?: number;
+}
+
+export interface TmdbChangesResult {
+  mediaType: MediaType;
+  startDate: string;
+  endDate: string;
+  changedIds: string[];
+  totalPages: number;
+  totalResults: number;
+  pagesFetched: number;
+}
+
 export interface TmdbGateway {
   fetchMediaSnapshotAndExternalIds(
     tmdbType: MediaType,
     tmdbId: string,
+    options?: TmdbFetchMediaOptions,
   ): Promise<TmdbMediaFetchResult | null>;
+  fetchChanges(mediaType: MediaType, options: TmdbChangesOptions): Promise<TmdbChangesResult>;
 }
 
+export type TmdbGatewayErrorCode =
+  | "TMDB_NOT_FOUND"
+  | "TMDB_UPSTREAM_ERROR"
+  | "TMDB_INVALID_RESPONSE";
+
 export class TmdbGatewayError extends Error {
-  readonly code: "TMDB_UPSTREAM_ERROR" | "TMDB_INVALID_RESPONSE";
+  readonly code: TmdbGatewayErrorCode;
   readonly status: number;
 
-  constructor(
-    code: "TMDB_UPSTREAM_ERROR" | "TMDB_INVALID_RESPONSE",
-    message: string,
-    status = 502,
-  ) {
+  constructor(code: TmdbGatewayErrorCode, message: string, status = 502) {
     super(message);
     this.name = "TmdbGatewayError";
     this.code = code;
@@ -247,54 +270,82 @@ export function createTmdbGateway(
     return url.toString();
   }
 
+  async function fetchTmdbJson(
+    url: string,
+    label: string,
+  ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; notFound: true }> {
+    let response;
+    try {
+      response = await outbound.fetchExternal({
+        kind: "catalog",
+        namespace: "tmdb",
+        url,
+        method: "GET",
+        headers: buildTmdbHeaders(),
+        timeoutMs: config.timeoutMs,
+      });
+    } catch (error) {
+      throw new TmdbGatewayError(
+        "TMDB_UPSTREAM_ERROR",
+        `TMDB request failed for ${label}: ${error instanceof Error ? error.message : String(error)}`,
+        502,
+      );
+    }
+
+    if (response.status === 404) {
+      return { ok: false, notFound: true };
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new TmdbGatewayError(
+        "TMDB_UPSTREAM_ERROR",
+        `TMDB returned HTTP ${response.status} for ${label}`,
+        502,
+      );
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(response.body);
+    } catch {
+      throw new TmdbGatewayError(
+        "TMDB_INVALID_RESPONSE",
+        `TMDB returned invalid JSON for ${label}`,
+        502,
+      );
+    }
+
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new TmdbGatewayError(
+        "TMDB_INVALID_RESPONSE",
+        `TMDB returned unexpected payload for ${label}`,
+        502,
+      );
+    }
+
+    return { ok: true, data: payload as Record<string, unknown> };
+  }
+
   return {
-    async fetchMediaSnapshotAndExternalIds(tmdbType, tmdbId) {
+    async fetchMediaSnapshotAndExternalIds(tmdbType, tmdbId, options) {
       const detailsUrl = buildTmdbUrl(`/${tmdbType}/${encodeURIComponent(tmdbId)}`, {
         append_to_response: "external_ids",
         language,
       });
 
-      const response = await outbound.fetchExternal({
-        kind: "catalog",
-        namespace: "tmdb",
-        url: detailsUrl,
-        method: "GET",
-        headers: buildTmdbHeaders(),
-        timeoutMs: config.timeoutMs,
-      });
-
-      if (response.status === 404) {
+      const fetched = await fetchTmdbJson(detailsUrl, `${tmdbType}:${tmdbId}`);
+      if (!fetched.ok) {
+        if (options?.throwOnNotFound) {
+          throw new TmdbGatewayError(
+            "TMDB_NOT_FOUND",
+            `TMDB media not found for ${tmdbType}:${tmdbId}`,
+            404,
+          );
+        }
         return null;
       }
 
-      if (response.status < 200 || response.status >= 300) {
-        throw new TmdbGatewayError(
-          "TMDB_UPSTREAM_ERROR",
-          `TMDB returned HTTP ${response.status} for ${tmdbType}:${tmdbId}`,
-          502,
-        );
-      }
-
-      let payload: unknown;
-      try {
-        payload = JSON.parse(response.body);
-      } catch {
-        throw new TmdbGatewayError(
-          "TMDB_INVALID_RESPONSE",
-          `TMDB returned invalid JSON for ${tmdbType}:${tmdbId}`,
-          502,
-        );
-      }
-
-      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-        throw new TmdbGatewayError(
-          "TMDB_INVALID_RESPONSE",
-          `TMDB returned unexpected payload for ${tmdbType}:${tmdbId}`,
-          502,
-        );
-      }
-
-      const data = payload as Record<string, unknown>;
+      const data = fetched.data;
       const title =
         tmdbType === "movie"
           ? (nonEmptyString(data.title) ?? nonEmptyString(data.original_title))
@@ -361,6 +412,100 @@ export function createTmdbGateway(
           tvdb: extracted.tvdb,
           trakt,
         },
+      };
+    },
+
+    async fetchChanges(mediaType, options) {
+      const startPage = options.page ?? 1;
+      if (!Number.isInteger(startPage) || startPage < 1) {
+        throw new TmdbGatewayError(
+          "TMDB_INVALID_RESPONSE",
+          `Invalid TMDB changes page: ${String(options.page)}`,
+          400,
+        );
+      }
+
+      const seenIds = new Set<string>();
+      let currentPage = startPage;
+      let totalPages = startPage;
+      let totalResults = 0;
+      let pagesFetched = 0;
+      const maxPages = 1000;
+
+      while (currentPage <= totalPages && pagesFetched < maxPages) {
+        const changesUrl = buildTmdbUrl(`/${mediaType}/changes`, {
+          start_date: options.startDate,
+          end_date: options.endDate,
+          page: String(currentPage),
+        });
+
+        const fetched = await fetchTmdbJson(
+          changesUrl,
+          `${mediaType}/changes (${options.startDate}..${options.endDate} page ${currentPage})`,
+        );
+
+        if (!fetched.ok) {
+          throw new TmdbGatewayError(
+            "TMDB_NOT_FOUND",
+            `TMDB changes endpoint returned 404 for ${mediaType} (${options.startDate}..${options.endDate})`,
+            404,
+          );
+        }
+
+        const data = fetched.data;
+        if (!Array.isArray(data.results)) {
+          throw new TmdbGatewayError(
+            "TMDB_INVALID_RESPONSE",
+            `TMDB changes response missing results array for ${mediaType}`,
+            502,
+          );
+        }
+
+        for (const item of data.results) {
+          if (!item || typeof item !== "object") {
+            continue;
+          }
+          const parsedId = parsePositiveIdString((item as Record<string, unknown>).id);
+          if (parsedId) {
+            seenIds.add(parsedId);
+          }
+        }
+
+        const rawTotalPages = data.total_pages;
+        if (
+          typeof rawTotalPages === "number" &&
+          Number.isInteger(rawTotalPages) &&
+          rawTotalPages >= 0
+        ) {
+          totalPages = rawTotalPages;
+        } else if (pagesFetched === 0) {
+          totalPages = currentPage;
+        }
+
+        const rawTotalResults = data.total_results;
+        if (
+          typeof rawTotalResults === "number" &&
+          Number.isInteger(rawTotalResults) &&
+          rawTotalResults >= 0
+        ) {
+          totalResults = rawTotalResults;
+        }
+
+        pagesFetched += 1;
+        if (currentPage >= totalPages) {
+          break;
+        }
+        currentPage += 1;
+      }
+
+      return {
+        mediaType,
+        startDate: options.startDate,
+        endDate: options.endDate,
+        changedIds: Array.from(seenIds),
+        totalPages,
+        totalResults,
+        pagesFetched,
       };
     },
   };
