@@ -8,18 +8,24 @@ import {
   completeJobWithFencing,
   createDefaultJobHandlers,
   createEvidenceCheckJobHandler,
+  createExplorationJobHandler,
   createInvalidationRecheckJobHandler,
   createTmdbSyncJobHandler,
   enqueueTmdbDailySyncIfDue,
   EVIDENCE_CHECK_JOB_TYPE,
+  EXPLORATION_JOB_TYPE,
   failJobWithFencing,
   getJobById,
   INVALIDATION_RECHECK_JOB_TYPE,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
+  scheduleExplorationJobs,
   TMDB_SYNC_JOB_TYPE,
   type AdapterRegistry,
   type EvidenceGateStep2Evaluator,
+  type ExplorationExecutor,
+  type ExplorationSchedulerConfig,
+  type ExternalKeyCatalogVerifier,
   type JobHandlerRegistry,
   type JobQueueMessage,
   type JobQueueSender,
@@ -41,6 +47,8 @@ export interface BackgroundWorkerConfig {
   jobTypes?: readonly string[];
   tmdb?: TmdbGatewayConfig;
   enableDailyTmdbSync?: boolean;
+  exploration?: Partial<ExplorationSchedulerConfig>;
+  enableExplorationScheduling?: boolean;
 }
 
 export interface BackgroundWorkerDeps {
@@ -50,6 +58,8 @@ export interface BackgroundWorkerDeps {
   adapterRegistry?: AdapterRegistry;
   tmdbGateway?: TmdbGateway;
   evaluateStep2?: EvidenceGateStep2Evaluator;
+  explorationExecutor?: ExplorationExecutor;
+  explorationCatalogVerifier?: ExternalKeyCatalogVerifier;
   handlers?: JobHandlerRegistry;
   config?: BackgroundWorkerConfig;
   now?: () => Date;
@@ -139,6 +149,14 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
     }),
+    [EXPLORATION_JOB_TYPE]: createExplorationJobHandler({
+      adapterRegistry: deps.adapterRegistry,
+      tmdbConfig: deps.config?.tmdb,
+      tmdbGateway: deps.tmdbGateway,
+      config: deps.config?.exploration,
+      executor: deps.explorationExecutor,
+      catalogVerifier: deps.explorationCatalogVerifier,
+    }),
     ...deps.handlers,
   };
 
@@ -151,6 +169,18 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
       if (shouldCheckTmdbSync) {
         await enqueueTmdbDailySyncIfDue(deps.db, { now });
+      }
+
+      const shouldScheduleExploration =
+        deps.config?.enableExplorationScheduling !== false &&
+        (!deps.config?.jobTypes || deps.config.jobTypes.includes(EXPLORATION_JOB_TYPE));
+
+      if (shouldScheduleExploration) {
+        await scheduleExplorationJobs(deps.db, {
+          now,
+          config: deps.config?.exploration,
+          adapterRegistry: deps.adapterRegistry,
+        });
       }
 
       const claimedJobs = await claimDueJobs(deps.db, {

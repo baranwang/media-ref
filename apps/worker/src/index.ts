@@ -8,8 +8,13 @@ import type {
 } from "@cloudflare/workers-types";
 import {
   createLiveOutboundClient,
-  type JobQueueMessage,
+  DEFAULT_EXPLORATION_BATCH_SIZE,
+  DEFAULT_EXPLORATION_DAILY_BUDGET,
+  DEFAULT_EXPLORATION_LEASE_DURATION_MS,
+  DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
+  parseExplorationBackoffSeconds,
   parseOutboundProxyConfig,
+  type JobQueueMessage,
 } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import {
@@ -38,6 +43,10 @@ export interface BackgroundWorkerEnv {
   OUTBOUND_PROXY_CONFIG?: string;
   JOB_BATCH_SIZE?: string;
   JOB_LEASE_DURATION_MS?: string;
+  EXPLORATION_DAILY_BUDGET?: string;
+  EXPLORATION_BATCH_SIZE?: string;
+  EXPLORATION_LEASE_DURATION_MS?: string;
+  EXPLORATION_BACKOFF_SECONDS?: string;
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
   TMDB_API_BASE_URL?: string;
@@ -53,10 +62,33 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerConfig {
+function parseNonNegativeInt(raw: string | undefined, fallback: number): number {
+  if (!raw || raw.trim() === "") {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerConfig {
   return {
     batchSize: parsePositiveInt(env.JOB_BATCH_SIZE, DEFAULT_JOB_BATCH_SIZE),
     leaseDurationMs: parsePositiveInt(env.JOB_LEASE_DURATION_MS, DEFAULT_LEASE_DURATION_MS),
+    exploration: {
+      dailyBudget: parseNonNegativeInt(
+        env.EXPLORATION_DAILY_BUDGET,
+        DEFAULT_EXPLORATION_DAILY_BUDGET,
+      ),
+      batchSize: parsePositiveInt(env.EXPLORATION_BATCH_SIZE, DEFAULT_EXPLORATION_BATCH_SIZE),
+      leaseDurationMs: parsePositiveInt(
+        env.EXPLORATION_LEASE_DURATION_MS,
+        DEFAULT_EXPLORATION_LEASE_DURATION_MS,
+      ),
+      notFoundBackoffSeconds: parseExplorationBackoffSeconds(
+        env.EXPLORATION_BACKOFF_SECONDS,
+        DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
+      ),
+    },
     tmdb: {
       accessToken: env.TMDB_ACCESS_TOKEN,
       apiKey: env.TMDB_API_KEY,

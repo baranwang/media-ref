@@ -77,6 +77,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0012_exploration_budget",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -862,6 +867,104 @@ describe("packages/db migrations", () => {
       .executeTakeFirstOrThrow();
 
     expect(userReport.id).toBeTruthy();
+
+    // Exploration daily budget & TMDB daily export IDs from 0012_exploration_budget
+    const insertedBudget = await testDb.writeDb
+      .insertInto("exploration_daily_budget")
+      .values({
+        budget_date: "2026-11-23",
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedBudget).toMatchObject({
+      budget_date: "2026-11-23",
+      consumed: 0,
+    });
+    expect(insertedBudget.updated_at).toBeInstanceOf(Date);
+
+    // Rejects malformed budget_date and negative consumed count
+    await expect(
+      testDb.writeDb
+        .insertInto("exploration_daily_budget")
+        .values({
+          budget_date: "2026/11/23",
+          consumed: 0,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("exploration_daily_budget")
+        .values({
+          budget_date: "2026-11-24",
+          consumed: -1,
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    const insertedExportId = await testDb.writeDb
+      .insertInto("tmdb_daily_export_ids")
+      .values({
+        media_type: "tv",
+        tmdb_id: "95479",
+        exported_date: "2026-11-23",
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    expect(insertedExportId).toEqual({
+      media_type: "tv",
+      tmdb_id: "95479",
+      exported_date: "2026-11-23",
+    });
+
+    // Duplicate (media_type, tmdb_id) primary key fails
+    await expect(
+      testDb.writeDb
+        .insertInto("tmdb_daily_export_ids")
+        .values({
+          media_type: "tv",
+          tmdb_id: "95479",
+          exported_date: "2026-11-24",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // Rejects invalid media_type, empty tmdb_id, and malformed exported_date
+    await expect(
+      testDb.writeDb
+        .insertInto("tmdb_daily_export_ids")
+        .values({
+          media_type: "anime" as any,
+          tmdb_id: "95479",
+          exported_date: "2026-11-23",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("tmdb_daily_export_ids")
+        .values({
+          media_type: "movie",
+          tmdb_id: "   ",
+          exported_date: "2026-11-23",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    await expect(
+      testDb.writeDb
+        .insertInto("tmdb_daily_export_ids")
+        .values({
+          media_type: "movie",
+          tmdb_id: "550",
+          exported_date: "11-23-2026",
+        })
+        .execute(),
+    ).rejects.toThrow();
 
     const rerunResults = await runMigrations(testDb.writeDb);
     expect(rerunResults).toEqual([]);
