@@ -116,6 +116,8 @@ export type AssociationNamespaceRow = PlatformNamespaceRow | "douban" | "bangumi
 export type AssociationStatusRow = "confirmed" | "seed_unconfirmed" | "delisted";
 export type ChangeRequestStatusRow = "pending_evidence" | "approved" | "needs_review" | "rejected";
 export type SubmitterTypeRow = "human" | "agent";
+export type DemandNamespaceGroupRow = "platform" | "catalog";
+export type DemandStatusRow = "open" | "leased" | "fulfilled" | "not_found" | "invalid_key";
 
 export interface SeasonSnapshotRow {
   season: number;
@@ -276,6 +278,24 @@ export interface PlatformChecksTable {
   updated_at: Generated<Date>;
 }
 
+export interface DemandsTable {
+  id: Generated<string>;
+  media_id: string | null;
+  external_key: string | null;
+  season: number | null;
+  namespace_group: DemandNamespaceGroupRow;
+  demand_count: Generated<number>;
+  status: Generated<DemandStatusRow>;
+  not_found_count: Generated<number>;
+  next_eligible_at: Generated<Date>;
+  last_explored_at: Date | null;
+  lease_generation: Generated<number>;
+  lease_expires_at: Date | null;
+  last_demanded_at: Generated<Date>;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
 export interface Database {
   schema_meta: SchemaMetaTable;
   user: UserTable;
@@ -293,4 +313,5 @@ export interface Database {
   change_requests: ChangeRequestsTable;
   leads: LeadsTable;
   platform_checks: PlatformChecksTable;
+  demands: DemandsTable;
 }

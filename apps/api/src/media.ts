@@ -1,15 +1,23 @@
-import type { MediaDocument } from "@media-ref/client";
+import type { MediaDocument, NamespaceGroup } from "@media-ref/client";
 import {
   BatchMediaQueryError,
+  computeDemandTargetsForBatchRead,
+  computeDemandTargetsForRead,
+  DEFAULT_DEMAND_NAMESPACE_GROUP,
   MAX_BATCH_MEDIA_KEYS,
   queryMediaBatch,
   queryMediaByKey,
+  recordDemandForRead,
+  recordDemandsForBatchRead,
   type BatchMediaQueryResult,
   type MediaQueryItem,
 } from "@media-ref/core";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { requireApiKey } from "./api-keys.ts";
 import type { ApiEnv } from "./auth.ts";
+
+const MAX_SEASON_NUMBER = 2_147_483_647;
+const NON_NEGATIVE_INTEGER_PATTERN = /^\d+$/;
 
 export interface MediaReadResponse {
   key: string;
@@ -38,8 +46,62 @@ function parseBooleanQueryParam(
   return { ok: false };
 }
 
+function parseSeasonQueryParam(
+  raw: string | undefined,
+): { ok: true; value: number | undefined } | { ok: false } {
+  if (raw === undefined || raw === "") {
+    return { ok: true, value: undefined };
+  }
+  const trimmed = raw.trim();
+  if (!NON_NEGATIVE_INTEGER_PATTERN.test(trimmed)) {
+    return { ok: false };
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > MAX_SEASON_NUMBER) {
+    return { ok: false };
+  }
+  return { ok: true, value: parsed };
+}
+
+function parseNamespaceGroupQueryParam(
+  raw: string | undefined,
+): { ok: true; value: NamespaceGroup } | { ok: false } {
+  if (raw === undefined || raw === "") {
+    return { ok: true, value: DEFAULT_DEMAND_NAMESPACE_GROUP };
+  }
+  const normalized = raw.trim();
+  if (normalized === "platform" || normalized === "catalog") {
+    return { ok: true, value: normalized };
+  }
+  return { ok: false };
+}
+
+function scheduleBackgroundTask(c: Context<ApiEnv>, work: () => Promise<unknown>): void {
+  const onError = c.get("onBackgroundTaskError");
+  const promise = Promise.resolve()
+    .then(work)
+    .catch((error: unknown) => {
+      onError?.(error);
+    });
+
+  const onBackgroundTask = c.get("onBackgroundTask");
+  onBackgroundTask?.(promise);
+
+  try {
+    c.executionCtx.waitUntil(promise);
+  } catch {
+    // No ExecutionContext attached (e.g. direct app.fetch calls in tests).
+  }
+}
+
 type ParseBatchRequestResult =
-  | { ok: true; keys: string[]; includeUnconfirmed: boolean }
+  | {
+      ok: true;
+      keys: string[];
+      includeUnconfirmed: boolean;
+      season: number | undefined;
+      namespaceGroup: NamespaceGroup;
+    }
   | { ok: false; code: string; message: string };
 
 function parseBatchMediaRequest(body: unknown): ParseBatchRequestResult {
@@ -80,10 +142,41 @@ function parseBatchMediaRequest(body: unknown): ParseBatchRequestResult {
     includeUnconfirmed = record.includeUnconfirmed;
   }
 
+  let season: number | undefined;
+  if (record.season !== undefined && record.season !== null) {
+    if (
+      typeof record.season !== "number" ||
+      !Number.isInteger(record.season) ||
+      record.season < 0 ||
+      record.season > MAX_SEASON_NUMBER
+    ) {
+      return {
+        ok: false,
+        code: "INVALID_REQUEST",
+        message: "season must be a non-negative integer",
+      };
+    }
+    season = record.season;
+  }
+
+  let namespaceGroup: NamespaceGroup = DEFAULT_DEMAND_NAMESPACE_GROUP;
+  if (record.namespaceGroup !== undefined && record.namespaceGroup !== null) {
+    if (record.namespaceGroup !== "platform" && record.namespaceGroup !== "catalog") {
+      return {
+        ok: false,
+        code: "INVALID_REQUEST",
+        message: "namespaceGroup must be either 'platform' or 'catalog'",
+      };
+    }
+    namespaceGroup = record.namespaceGroup;
+  }
+
   return {
     ok: true,
     keys: record.keys as string[],
     includeUnconfirmed,
+    season,
+    namespaceGroup,
   };
 }
 
@@ -107,6 +200,22 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
         includeUnconfirmed: parsed.includeUnconfirmed,
       });
 
+      const batchDemandInput = {
+        results,
+        season: parsed.season,
+        namespaceGroup: parsed.namespaceGroup,
+      };
+      if (computeDemandTargetsForBatchRead(batchDemandInput).length > 0) {
+        const dbWrite = c.get("dbWrite");
+        const now = c.get("now")();
+        scheduleBackgroundTask(c, () =>
+          recordDemandsForBatchRead(dbWrite, {
+            ...batchDemandInput,
+            now,
+          }),
+        );
+      }
+
       const response: BatchMediaReadResponse = { results };
       return c.json(response, 200);
     } catch (error) {
@@ -129,6 +238,28 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
       );
     }
 
+    const seasonParsed = parseSeasonQueryParam(c.req.query("season"));
+    if (!seasonParsed.ok) {
+      return c.json(
+        {
+          error: "INVALID_QUERY",
+          message: "season must be a non-negative integer",
+        },
+        400,
+      );
+    }
+
+    const namespaceGroupParsed = parseNamespaceGroupQueryParam(c.req.query("namespaceGroup"));
+    if (!namespaceGroupParsed.ok) {
+      return c.json(
+        {
+          error: "INVALID_QUERY",
+          message: "namespaceGroup must be either 'platform' or 'catalog'",
+        },
+        400,
+      );
+    }
+
     const rawKey = c.req.param("key").trim();
     const result = await queryMediaByKey(c.get("dbRead"), rawKey, {
       includeUnconfirmed: includeUnconfirmedParsed.value,
@@ -136,6 +267,23 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
 
     if (result.kind === "invalid_key") {
       return c.json({ error: "INVALID_KEY", message: result.message }, 400);
+    }
+
+    const demandInput = {
+      rawKey,
+      queryResult: result,
+      season: seasonParsed.value,
+      namespaceGroup: namespaceGroupParsed.value,
+    };
+    if (computeDemandTargetsForRead(demandInput).length > 0) {
+      const dbWrite = c.get("dbWrite");
+      const now = c.get("now")();
+      scheduleBackgroundTask(c, () =>
+        recordDemandForRead(dbWrite, {
+          ...demandInput,
+          now,
+        }),
+      );
     }
 
     if (result.kind === "not_found") {

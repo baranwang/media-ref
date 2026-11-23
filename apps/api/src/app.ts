@@ -33,6 +33,8 @@ export interface ApiDeps {
   dbWrite: Db;
   outbound: OutboundClient;
   tmdbGateway?: TmdbGateway;
+  onBackgroundTask?: (promise: Promise<unknown>) => void;
+  onBackgroundTaskError?: (error: unknown) => void;
   config: ApiConfig;
 }
 
@@ -79,6 +81,8 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     c.set("tmdbConfig", deps.config.tmdb);
     c.set("tmdbGateway", deps.tmdbGateway);
     c.set("now", now);
+    c.set("onBackgroundTask", deps.onBackgroundTask);
+    c.set("onBackgroundTaskError", deps.onBackgroundTaskError);
     c.set("session", null);
     c.set("apiKey", null);
     if (c.req.path !== "/health" && c.req.path !== "/health/outbound") {

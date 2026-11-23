@@ -117,6 +117,7 @@ const worker = {
   async fetch(request: Request, env: ApiWorkerEnv, ctx: ExecutionContext): Promise<Response> {
     const dbRead = createDb(env.HYPERDRIVE_READ.connectionString, { max: 5 });
     const dbWrite = createDb(env.HYPERDRIVE_WRITE.connectionString, { max: 5 });
+    const backgroundTasks: Promise<unknown>[] = [];
 
     const app = createApiApp({
       dbRead,
@@ -126,6 +127,12 @@ const worker = {
         emailBinding: env.EMAIL,
         defaultEmailFrom: env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM,
       }),
+      onBackgroundTask: (promise) => {
+        backgroundTasks.push(promise);
+      },
+      onBackgroundTaskError: (error) => {
+        console.error("API background task failed:", error);
+      },
       config: {
         enableHealthOutboundProbe: env.ENABLE_HEALTH_OUTBOUND_PROBE === "true",
         baseUrl: env.API_BASE_URL,
@@ -145,9 +152,13 @@ const worker = {
     });
 
     try {
-      return await app.fetch(request);
+      return await app.fetch(request, env, ctx);
     } finally {
-      ctx.waitUntil(Promise.allSettled([dbRead.destroy(), dbWrite.destroy()]));
+      ctx.waitUntil(
+        Promise.allSettled(backgroundTasks).finally(() =>
+          Promise.allSettled([dbRead.destroy(), dbWrite.destroy()]),
+        ),
+      );
     }
   },
 };

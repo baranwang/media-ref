@@ -1,4 +1,21 @@
 export {
+  computeDemandTargetsForBatchRead,
+  computeDemandTargetsForRead,
+  DEFAULT_DEMAND_NAMESPACE_GROUP,
+  listDemands,
+  mergeExternalKeyDemandsIntoMedia,
+  recordDemandForRead,
+  recordDemandsForBatchRead,
+  type DemandRecord,
+  type DemandStatus,
+  type DemandTarget,
+  type ListDemandsFilters,
+  type MergeExternalKeyDemandsInput,
+  type MergeExternalKeyDemandsResult,
+  type RecordDemandForReadInput,
+  type RecordDemandsForBatchReadInput,
+} from "./demands.ts";
+export {
   claimDueJobs,
   completeJobWithFencing,
   createDefaultJobHandlers,

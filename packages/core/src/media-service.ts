@@ -29,6 +29,7 @@ import type {
 } from "@media-ref/db";
 import { sql, type Selectable, type Transaction } from "kysely";
 import type { Database } from "@media-ref/db";
+import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
 import type { OutboundClient } from "./outbound.ts";
 import {
   TmdbGatewayError,
@@ -1082,6 +1083,16 @@ export async function approveChangeRequest(
             .onConflict((oc) => oc.doNothing())
             .execute();
         }
+
+        await mergeExternalKeyDemandsIntoMedia(trx, {
+          mediaId: createdMedia.id,
+          externalKeys: [
+            formatExternalKey({ namespace: "tmdb", nativeId: prefetchedTmdb.externalIds.tmdb }),
+            ...secondaryExternalIds.map((ext) => formatExternalKey(ext)),
+          ],
+          seasons: prefetchedTmdb.snapshot.seasons,
+          mediaType: createdMedia.type,
+        });
 
         media = createdMedia;
       }
