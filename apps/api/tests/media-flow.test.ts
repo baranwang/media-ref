@@ -1,5 +1,6 @@
 import { resolveEpisode, type MediaDocument } from "@media-ref/client";
 import {
+  createAdapterRegistry,
   createFakeOutboundClient,
   type EmailMessage,
   type ExternalHttpRequest,
@@ -239,6 +240,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -535,6 +537,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -758,6 +761,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -898,6 +902,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -1153,6 +1158,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         dbRead: readOnlyDb,
         dbWrite: testDb.writeDb,
         outbound,
+        adapterRegistry: createAdapterRegistry(),
         config: {
           baseUrl: TEST_BASE_URL,
           authSecret: TEST_AUTH_SECRET,

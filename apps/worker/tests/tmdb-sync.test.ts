@@ -2,6 +2,7 @@ import type { Message, MessageBatch, ScheduledController } from "@cloudflare/wor
 import { createApiApp } from "@media-ref/api";
 import { resolveEpisode, type MediaDocument } from "@media-ref/client";
 import {
+  createAdapterRegistry,
   createFakeOutboundClient,
   type EmailMessage,
   type ExternalHttpRequest,
@@ -285,6 +286,7 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -452,6 +454,7 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -624,6 +627,7 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -792,6 +796,7 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -960,6 +965,7 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -1171,6 +1177,7 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -1309,6 +1316,7 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,

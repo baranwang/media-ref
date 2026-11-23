@@ -1,5 +1,6 @@
 import type { ExecutionContext, Hyperdrive } from "@cloudflare/workers-types";
 import {
+  createAdapterRegistry,
   createFakeOutboundClient,
   type EmailMessage,
   type ExternalHttpRequest,
@@ -189,6 +190,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       readKeyLimiter: createInMemoryRateLimiter({
         limit: 3,
         periodSeconds: 60,
@@ -284,6 +286,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       readKeyLimiter: createInMemoryRateLimiter({ limit: 10, periodSeconds: 60 }),
       readIpLimiter: createInMemoryRateLimiter({ limit: 3, periodSeconds: 60 }),
       config: {
@@ -373,6 +376,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -799,6 +803,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,

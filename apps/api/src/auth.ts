@@ -1,5 +1,6 @@
 import { apiKey } from "@better-auth/api-key";
 import type {
+  AdapterRegistry,
   OutboundClient,
   SubmissionQuotaConfig,
   TmdbGateway,
@@ -216,6 +217,7 @@ export interface ApiEnv {
     dbRead: Db;
     dbWrite: Db;
     outbound: OutboundClient;
+    adapterRegistry: AdapterRegistry;
     tmdbConfig: TmdbGatewayConfig | undefined;
     tmdbGateway: TmdbGateway | undefined;
     now: () => Date;

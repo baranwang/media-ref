@@ -7,13 +7,17 @@ import {
   claimDueJobs,
   completeJobWithFencing,
   createDefaultJobHandlers,
+  createEvidenceCheckJobHandler,
   createTmdbSyncJobHandler,
   enqueueTmdbDailySyncIfDue,
+  EVIDENCE_CHECK_JOB_TYPE,
   failJobWithFencing,
   getJobById,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
   TMDB_SYNC_JOB_TYPE,
+  type AdapterRegistry,
+  type EvidenceGateStep2Evaluator,
   type JobHandlerRegistry,
   type JobQueueMessage,
   type JobQueueSender,
@@ -41,8 +45,10 @@ export interface BackgroundWorkerDeps {
   db: Db;
   outbound: OutboundClient;
   queue: JobQueueSender;
-  handlers?: JobHandlerRegistry;
+  adapterRegistry?: AdapterRegistry;
   tmdbGateway?: TmdbGateway;
+  evaluateStep2?: EvidenceGateStep2Evaluator;
+  handlers?: JobHandlerRegistry;
   config?: BackgroundWorkerConfig;
   now?: () => Date;
 }
@@ -118,6 +124,12 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
   const defaultRetryDelayMs = deps.config?.defaultRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const handlers: JobHandlerRegistry = {
     ...createDefaultJobHandlers(),
+    [EVIDENCE_CHECK_JOB_TYPE]: createEvidenceCheckJobHandler({
+      adapterRegistry: deps.adapterRegistry,
+      tmdbConfig: deps.config?.tmdb,
+      tmdbGateway: deps.tmdbGateway,
+      evaluateStep2: deps.evaluateStep2,
+    }),
     [TMDB_SYNC_JOB_TYPE]: createTmdbSyncJobHandler({
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,

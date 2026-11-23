@@ -1,6 +1,7 @@
 import type { ExecutionContext, Hyperdrive, RateLimit } from "@cloudflare/workers-types";
 import type { MediaDocument } from "@media-ref/client";
 import {
+  createAdapterRegistry,
   createFakeOutboundClient,
   type EmailMessage,
   type ExternalHttpRequest,
@@ -173,6 +174,7 @@ async function seedConfirmedMediaFixture(testDb: TestDbHandle) {
     dbRead: testDb.readDb,
     dbWrite: testDb.writeDb,
     outbound,
+    adapterRegistry: createAdapterRegistry(),
     config: {
       baseUrl: TEST_BASE_URL,
       authSecret: TEST_AUTH_SECRET,
