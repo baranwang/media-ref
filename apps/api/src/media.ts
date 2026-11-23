@@ -2,9 +2,12 @@ import { readMediaDocument } from "@media-ref/core";
 import type { Hono } from "hono";
 import { requireApiKey } from "./api-keys.ts";
 import type { ApiEnv } from "./auth.ts";
+import { requireReadRateLimit } from "./rate-limit.ts";
 
 export function registerMediaRoutes(app: Hono<ApiEnv>): void {
-  app.get("/v1/media/:key", requireApiKey({ db: "read", permission: "read" }), async (c) => {
+  app.use("/v1/media/*", requireApiKey({ db: "read", permission: "read" }), requireReadRateLimit);
+
+  app.get("/v1/media/:key", async (c) => {
     const rawKey = c.req.param("key").trim();
     const result = await readMediaDocument(c.get("dbRead"), rawKey);
 
