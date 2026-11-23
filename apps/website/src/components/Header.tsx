@@ -1,79 +1,114 @@
-import { Link } from "@tanstack/react-router";
-import ParaglideLocaleSwitcher from "./LocaleSwitcher.tsx";
+import { useState } from "react";
+import { Link, useNavigate, useRouter } from "@tanstack/react-router";
+import { signOut, type CurrentUser } from "#/lib/api";
+import { isReviewer } from "#/lib/auth";
 import ThemeToggle from "./ThemeToggle";
 
-export default function Header() {
+interface HeaderProps {
+  user: CurrentUser | null;
+}
+
+export default function Header({ user }: HeaderProps) {
+  const router = useRouter();
+  const navigate = useNavigate();
+  const [signingOut, setSigningOut] = useState(false);
+
+  async function handleSignOut() {
+    setSigningOut(true);
+    try {
+      await signOut();
+    } catch {
+      // Even if the session was already cleared server-side, continue to /login.
+    } finally {
+      await router.invalidate();
+      await navigate({ to: "/login", search: {}, replace: true });
+      setSigningOut(false);
+    }
+  }
+
   return (
     <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--header-bg)] px-4 backdrop-blur-lg">
-      <nav className="page-wrap flex flex-wrap items-center gap-x-3 gap-y-2 py-3 sm:py-4">
-        <h2 className="m-0 flex-shrink-0 text-base font-semibold tracking-tight">
+      <nav className="page-wrap flex flex-wrap items-center gap-x-4 gap-y-2 py-3 sm:py-3.5">
+        <div className="shrink-0">
           <Link
-            to="/"
-            className="inline-flex items-center gap-2 rounded-full border border-[var(--chip-line)] bg-[var(--chip-bg)] px-3 py-1.5 text-sm text-[var(--sea-ink)] no-underline shadow-[0_8px_24px_rgba(30,90,72,0.08)] sm:px-4 sm:py-2"
+            to={user ? "/" : "/login"}
+            className="inline-flex items-center gap-2 rounded-full border border-[var(--chip-line)] bg-[var(--chip-bg)] px-3.5 py-1.5 text-sm font-bold tracking-tight text-[var(--sea-ink)] no-underline shadow-[0_6px_18px_rgba(30,90,72,0.07)]"
           >
-            <span className="h-2 w-2 rounded-full bg-[linear-gradient(90deg,#56c6be,#7ed3bf)]" />
-            TanStack Start
+            <span className="h-2 w-2 rounded-full bg-[linear-gradient(120deg,var(--lagoon),var(--palm))]" />
+            <span>media-ref</span>
           </Link>
-        </h2>
-
-        <div className="order-3 flex w-full flex-wrap items-center gap-x-4 gap-y-1 pb-1 text-sm font-semibold sm:order-none sm:w-auto sm:flex-nowrap sm:pb-0">
-          <Link to="/" className="nav-link" activeProps={{ className: "nav-link is-active" }}>
-            Home
-          </Link>
-          <Link to="/about" className="nav-link" activeProps={{ className: "nav-link is-active" }}>
-            About
-          </Link>
-          <a
-            href="https://tanstack.com/start/latest/docs/framework/react/overview"
-            className="nav-link"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Docs
-          </a>
-          <details className="relative w-full sm:w-auto">
-            <summary className="nav-link cursor-pointer list-none">Demos</summary>
-            <div className="mt-2 min-w-56 rounded-xl border border-[var(--line)] bg-[var(--header-bg)] p-2 shadow-lg sm:absolute sm:right-0">
-              <a
-                href="/demo/i18n"
-                className="block rounded-lg px-3 py-2 text-sm text-[var(--sea-ink-soft)] no-underline transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)]"
-              >
-                I18n example
-              </a>
-            </div>
-          </details>
         </div>
 
-        <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
-          <a
-            href="https://x.com/tan_stack"
-            target="_blank"
-            rel="noreferrer"
-            className="hidden rounded-xl p-2 text-[var(--sea-ink-soft)] transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)] sm:block"
-          >
-            <span className="sr-only">Follow TanStack on X</span>
-            <svg viewBox="0 0 16 16" aria-hidden="true" width="24" height="24">
-              <path
-                fill="currentColor"
-                d="M12.6 1h2.2L10 6.48 15.64 15h-4.41L7.78 9.82 3.23 15H1l5.14-5.84L.72 1h4.52l3.12 4.73L12.6 1zm-.77 12.67h1.22L4.57 2.26H3.26l8.57 11.41z"
-              />
-            </svg>
-          </a>
-          <a
-            href="https://github.com/TanStack"
-            target="_blank"
-            rel="noreferrer"
-            className="hidden rounded-xl p-2 text-[var(--sea-ink-soft)] transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)] sm:block"
-          >
-            <span className="sr-only">Go to TanStack GitHub</span>
-            <svg viewBox="0 0 16 16" aria-hidden="true" width="24" height="24">
-              <path
-                fill="currentColor"
-                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"
-              />
-            </svg>
-          </a>
-          <ParaglideLocaleSwitcher />
+        <div className="order-3 flex w-full flex-wrap items-center gap-x-5 gap-y-1 pb-1 text-sm font-semibold sm:order-none sm:w-auto sm:flex-nowrap sm:pb-0">
+          {user ? (
+            <>
+              <Link
+                to="/"
+                className="nav-link"
+                activeOptions={{ exact: true }}
+                activeProps={{ className: "nav-link is-active" }}
+              >
+                工作台
+              </Link>
+              <Link
+                to="/keys"
+                className="nav-link"
+                activeProps={{ className: "nav-link is-active" }}
+              >
+                接口密钥
+              </Link>
+            </>
+          ) : (
+            <>
+              <Link
+                to="/login"
+                className="nav-link"
+                activeProps={{ className: "nav-link is-active" }}
+              >
+                登录
+              </Link>
+              <Link
+                to="/register"
+                className="nav-link"
+                activeProps={{ className: "nav-link is-active" }}
+              >
+                注册
+              </Link>
+            </>
+          )}
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          {user ? (
+            <>
+              <div className="hidden items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--chip-bg)] px-3 py-1 text-xs sm:inline-flex">
+                <span
+                  className={
+                    user.emailVerified
+                      ? "h-2 w-2 rounded-full bg-emerald-500"
+                      : "h-2 w-2 rounded-full bg-amber-500"
+                  }
+                  title={user.emailVerified ? "邮箱已验证" : "邮箱未验证"}
+                />
+                <span className="max-w-[11rem] truncate font-semibold text-[var(--sea-ink)]">
+                  {user.name || user.email}
+                </span>
+                {isReviewer(user) ? (
+                  <span className="rounded-full bg-[var(--ok-bg)] px-2 py-0.5 text-[11px] font-bold text-[var(--ok-ink)]">
+                    审核员
+                  </span>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={handleSignOut}
+                disabled={signingOut}
+                className="cursor-pointer rounded-full border border-[var(--line)] bg-[var(--chip-bg)] px-3 py-1.5 text-xs font-semibold text-[var(--sea-ink-soft)] transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {signingOut ? "退出中..." : "退出登录"}
+              </button>
+            </>
+          ) : null}
 
           <ThemeToggle />
         </div>

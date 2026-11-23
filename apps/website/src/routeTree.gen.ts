@@ -10,53 +10,63 @@
 
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
-import { Route as AboutRouteImport } from "./routes/about";
-import { Route as DemoI18nRouteImport } from "./routes/demo.i18n";
+import { Route as KeysRouteImport } from "./routes/keys";
+import { Route as LoginRouteImport } from "./routes/login";
+import { Route as RegisterRouteImport } from "./routes/register";
 
 const IndexRoute = IndexRouteImport.update({
   id: "/",
   path: "/",
   getParentRoute: () => rootRouteImport,
 } as any);
-const AboutRoute = AboutRouteImport.update({
-  id: "/about",
-  path: "/about",
+const KeysRoute = KeysRouteImport.update({
+  id: "/keys",
+  path: "/keys",
   getParentRoute: () => rootRouteImport,
 } as any);
-const DemoI18nRoute = DemoI18nRouteImport.update({
-  id: "/demo/i18n",
-  path: "/demo/i18n",
+const LoginRoute = LoginRouteImport.update({
+  id: "/login",
+  path: "/login",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const RegisterRoute = RegisterRouteImport.update({
+  id: "/register",
+  path: "/register",
   getParentRoute: () => rootRouteImport,
 } as any);
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
-  "/about": typeof AboutRoute;
-  "/demo/i18n": typeof DemoI18nRoute;
+  "/keys": typeof KeysRoute;
+  "/login": typeof LoginRoute;
+  "/register": typeof RegisterRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
-  "/about": typeof AboutRoute;
-  "/demo/i18n": typeof DemoI18nRoute;
+  "/keys": typeof KeysRoute;
+  "/login": typeof LoginRoute;
+  "/register": typeof RegisterRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
-  "/about": typeof AboutRoute;
-  "/demo/i18n": typeof DemoI18nRoute;
+  "/keys": typeof KeysRoute;
+  "/login": typeof LoginRoute;
+  "/register": typeof RegisterRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/about" | "/demo/i18n";
+  fullPaths: "/" | "/keys" | "/login" | "/register";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/about" | "/demo/i18n";
-  id: "__root__" | "/" | "/about" | "/demo/i18n";
+  to: "/" | "/keys" | "/login" | "/register";
+  id: "__root__" | "/" | "/keys" | "/login" | "/register";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
-  AboutRoute: typeof AboutRoute;
-  DemoI18nRoute: typeof DemoI18nRoute;
+  KeysRoute: typeof KeysRoute;
+  LoginRoute: typeof LoginRoute;
+  RegisterRoute: typeof RegisterRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -68,18 +78,25 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof IndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
-    "/about": {
-      id: "/about";
-      path: "/about";
-      fullPath: "/about";
-      preLoaderRoute: typeof AboutRouteImport;
+    "/keys": {
+      id: "/keys";
+      path: "/keys";
+      fullPath: "/keys";
+      preLoaderRoute: typeof KeysRouteImport;
       parentRoute: typeof rootRouteImport;
     };
-    "/demo/i18n": {
-      id: "/demo/i18n";
-      path: "/demo/i18n";
-      fullPath: "/demo/i18n";
-      preLoaderRoute: typeof DemoI18nRouteImport;
+    "/login": {
+      id: "/login";
+      path: "/login";
+      fullPath: "/login";
+      preLoaderRoute: typeof LoginRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/register": {
+      id: "/register";
+      path: "/register";
+      fullPath: "/register";
+      preLoaderRoute: typeof RegisterRouteImport;
       parentRoute: typeof rootRouteImport;
     };
   }
@@ -87,8 +104,9 @@ declare module "@tanstack/react-router" {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AboutRoute: AboutRoute,
-  DemoI18nRoute: DemoI18nRoute,
+  KeysRoute: KeysRoute,
+  LoginRoute: LoginRoute,
+  RegisterRoute: RegisterRoute,
 };
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
