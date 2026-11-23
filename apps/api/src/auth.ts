@@ -2,6 +2,7 @@ import type { OutboundClient } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { betterAuth } from "better-auth";
 import type { MiddlewareHandler } from "hono";
+import { buildOAuthAuthOptions, type OAuthConfig } from "./oauth.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
 export const DEFAULT_API_BASE_URL = "https://api.mediaref.org";
@@ -13,6 +14,7 @@ export interface AuthConfig {
   cookieDomain?: string;
   emailFrom?: string;
   trustedOrigins?: string[];
+  oauth?: OAuthConfig;
 }
 
 export interface AuthDeps {
@@ -114,6 +116,7 @@ export function createAuth(deps: AuthDeps) {
   const cookieDomain = normalizeCookieDomain(deps.config.cookieDomain);
   const emailFrom = deps.config.emailFrom ?? DEFAULT_EMAIL_FROM;
   const trustedOrigins = resolveTrustedOrigins(deps.config);
+  const oauthOptions = buildOAuthAuthOptions(deps.config.oauth, deps.outbound);
 
   return betterAuth({
     baseURL,
@@ -124,6 +127,11 @@ export function createAuth(deps: AuthDeps) {
       type: "postgres",
     },
     trustedOrigins,
+    socialProviders: oauthOptions.socialProviders,
+    plugins: [...oauthOptions.plugins],
+    account: {
+      accountLinking: oauthOptions.accountLinking,
+    },
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,

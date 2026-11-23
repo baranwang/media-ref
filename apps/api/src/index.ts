@@ -3,8 +3,17 @@ import { createLiveOutboundClient, parseOutboundProxyConfig } from "@media-ref/c
 import { createDb } from "@media-ref/db";
 import { createApiApp } from "./app.ts";
 import { DEFAULT_EMAIL_FROM } from "./auth.ts";
+import { parseOAuthConfigFromEnv } from "./oauth.ts";
 
 export { createApiApp, type ApiConfig, type ApiDeps } from "./app.ts";
+export {
+  buildOAuthAuthOptions,
+  parseOAuthConfigFromEnv,
+  type OAuthAuthOptions,
+  type OAuthConfig,
+  type OAuthEnvVars,
+  type OAuthProviderCredentials,
+} from "./oauth.ts";
 export {
   AUTH_BASE_PATH,
   createAuth,
@@ -32,6 +41,10 @@ export interface ApiWorkerEnv {
   API_BASE_URL?: string;
   COOKIE_DOMAIN?: string;
   TRUSTED_ORIGINS?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  TRAKT_CLIENT_ID?: string;
+  TRAKT_CLIENT_SECRET?: string;
   OUTBOUND_PROXY_CONFIG?: string;
   ENABLE_HEALTH_OUTBOUND_PROBE?: string;
 }
@@ -67,6 +80,7 @@ const worker = {
         cookieDomain: env.COOKIE_DOMAIN,
         emailFrom: env.EMAIL_FROM,
         trustedOrigins: parseTrustedOrigins(env.TRUSTED_ORIGINS),
+        oauth: parseOAuthConfigFromEnv(env),
       },
     });
 

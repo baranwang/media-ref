@@ -1,4 +1,4 @@
-export type ExternalTargetKind = "platform" | "catalog";
+export type ExternalTargetKind = "platform" | "catalog" | "oauth";
 
 export type ExternalHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
 
@@ -10,6 +10,7 @@ export interface ExternalHttpRequest {
   headers?: Record<string, string>;
   body?: string;
   timeoutMs?: number;
+  redirect?: "follow" | "error" | "manual";
 }
 
 export interface ExternalHttpResponse {
@@ -148,6 +149,7 @@ export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}
         method: request.method ?? "GET",
         headers: resolved.headers,
         body: request.body,
+        ...(request.redirect !== undefined ? { redirect: request.redirect } : {}),
         signal:
           request.timeoutMs !== undefined ? AbortSignal.timeout(request.timeoutMs) : undefined,
       });
