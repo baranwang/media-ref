@@ -10,6 +10,8 @@
   "scripts": {
     "ready": "vp check && vp run -r test && vp run -r build",
     "dev": "vp run @media-ref/website#dev",
+    "db:up": "vp run @media-ref/db#up",
+    "db:down": "vp run @media-ref/db#down",
     "db:migrate": "vp run @media-ref/db#migrate",
     "prepare": "vp config"
   },

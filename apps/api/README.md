@@ -29,7 +29,7 @@ Tests run at the HTTP entrypoint seam (`app.fetch` and the exported Worker `fetc
 ## Commands
 
 ```bash
-# Run API Worker HTTP entrypoint tests (requires local PostgreSQL 19 via docker compose up -d)
+# Run API Worker HTTP entrypoint tests (requires local PostgreSQL 19 via `vp run db:up`)
 vp run @media-ref/api#test
 
 # Verify Cloudflare Worker bundle with Wrangler (dry run)

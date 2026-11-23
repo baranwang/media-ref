@@ -8,6 +8,8 @@
     "./testing": "./src/testing.ts"
   },
   "scripts": {
+    "up": "docker compose up -d",
+    "down": "docker compose down",
     "migrate": "vpx ./src/migrate.ts",
     "test": "vp test --run",
     "check": "vp check"

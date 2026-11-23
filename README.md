@@ -25,16 +25,18 @@ bun install
 
 ## Local PostgreSQL 19
 
-Start the local PostgreSQL 19 container (bound to `127.0.0.1:54329`, database `media_ref_dev`, user/password `postgres`/`postgres`):
+Start the local PostgreSQL 19 container (defined in [`packages/db/compose.yaml`](./packages/db/compose.yaml), bound to `127.0.0.1:54329`, database `media_ref_dev`, user/password `postgres`/`postgres`):
 
 ```bash
-docker compose up -d
+vp run db:up
+# or: docker compose -f packages/db/compose.yaml up -d
 ```
 
 Stop the container:
 
 ```bash
-docker compose down
+vp run db:down
+# or: docker compose -f packages/db/compose.yaml down
 ```
 
 ## Database Migrations
@@ -53,7 +55,7 @@ DATABASE_URL=postgres://postgres:postgres@127.0.0.1:54329/media_ref_dev vp run d
 
 ## Running Tests
 
-Make sure local PostgreSQL 19 is running (`docker compose up -d`). Database and API Worker tests automatically create and migrate an isolated ephemeral database (`media_ref_test_<hex>`) on `TEST_DATABASE_URL` (defaulting to `postgres://postgres:postgres@127.0.0.1:54329/postgres`) and drop it during cleanup.
+Make sure local PostgreSQL 19 is running (`vp run db:up`). Database, core, API Worker, and background Worker tests automatically create and migrate an isolated ephemeral database (`media_ref_test_<hex>`) on `TEST_DATABASE_URL` (defaulting to `postgres://postgres:postgres@127.0.0.1:54329/postgres`) and drop it during cleanup.
 
 ```bash
 # Run tests across all workspace packages
