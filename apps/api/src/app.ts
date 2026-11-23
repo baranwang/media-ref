@@ -11,6 +11,7 @@ import type { Db } from "@media-ref/db";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { registerApiKeyRoutes } from "./api-keys.ts";
+import { registerAssociationRoutes } from "./associations.ts";
 import {
   AUTH_BASE_PATH,
   createAuth,
@@ -204,6 +205,7 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
   registerChangeRequestRoutes(app);
   registerLeadRoutes(app);
   registerReviewerRoutes(app);
+  registerAssociationRoutes(app);
   registerMediaAdminRoutes(app);
   registerMediaRoutes(app);
 

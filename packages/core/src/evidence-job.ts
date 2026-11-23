@@ -7,6 +7,12 @@ import {
   type AdapterRegistry,
 } from "./adapters/index.ts";
 import {
+  CONFLICT_REASONS,
+  evaluateEvidenceCheckConflict,
+  findConflictingAssociations,
+  recordLockedAssociationAlertInTx,
+} from "./conflict-resolution.ts";
+import {
   evaluateEvidenceGate,
   type CatalogEvidence,
   type EvidenceGateStep2Evaluator,
@@ -251,6 +257,170 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
       };
     }
 
+    // 2b. Check whether this submission contradicts an existing confirmed or locked association
+    const replacesAssociationId =
+      changeRequest.replacesAssociationId ??
+      (typeof ctx.job.payload.replacesAssociationId === "string" &&
+      isUuid(ctx.job.payload.replacesAssociationId)
+        ? ctx.job.payload.replacesAssociationId
+        : null);
+
+    const conflictingAssociations = await findConflictingAssociations(ctx.db, {
+      mediaId: changeRequest.mediaId,
+      targetExternalKey: changeRequest.targetExternalKey,
+      namespace: changeRequest.namespace,
+      nativeId: changeRequest.nativeId,
+      replacesAssociationId,
+    });
+
+    if (conflictingAssociations.length > 0) {
+      const conflictResolution = await evaluateEvidenceCheckConflict({
+        changeRequest,
+        replacesAssociationId,
+        conflictingAssociations,
+        catalogEvidence,
+        newCollectionResult: collectionResult,
+        adapterRegistry,
+        outbound: ctx.outbound,
+        evaluateStep2: options.evaluateStep2,
+        checkedAt,
+      });
+
+      if (conflictResolution.kind === "retry") {
+        return {
+          status: "retry",
+          ...(conflictResolution.delayMs !== undefined
+            ? { delayMs: conflictResolution.delayMs }
+            : {}),
+          errorMessage: conflictResolution.errorMessage,
+        };
+      }
+
+      if (conflictResolution.kind === "locked") {
+        return {
+          status: "completed",
+          result: {
+            changeRequestId: changeRequest.id,
+            decision: "needs_review",
+            conflictReason: conflictResolution.conflictReason,
+          },
+          async onCommit(trx) {
+            await markChangeRequestNeedsReviewInTx(trx, {
+              changeRequestId: changeRequest.id,
+              evidence: conflictResolution.evidenceRecord,
+              conflictReason: conflictResolution.conflictReason,
+              decisionReason: conflictResolution.decisionReason,
+              now: ctx.now,
+            });
+            for (const locked of conflictResolution.lockedAssociations) {
+              await recordLockedAssociationAlertInTx(trx, {
+                mediaId: locked.mediaId,
+                associationId: locked.id,
+                changeRequestId: changeRequest.id,
+                namespace: changeRequest.namespace,
+                nativeId: changeRequest.nativeId,
+                existingNativeId: locked.nativeId,
+                detectedAt: checkedAt,
+              });
+            }
+          },
+        };
+      }
+
+      if (conflictResolution.kind === "needs_review") {
+        return {
+          status: "completed",
+          result: {
+            changeRequestId: changeRequest.id,
+            decision: "needs_review",
+            conflictReason: conflictResolution.conflictReason,
+          },
+          async onCommit(trx) {
+            await markChangeRequestNeedsReviewInTx(trx, {
+              changeRequestId: changeRequest.id,
+              evidence: conflictResolution.evidenceRecord,
+              conflictReason: conflictResolution.conflictReason,
+              decisionReason: conflictResolution.decisionReason,
+              now: ctx.now,
+            });
+          },
+        };
+      }
+
+      // conflictResolution.kind === "auto_replace" (newPassed=true, oldPassed=false)
+      return {
+        status: "completed",
+        result: {
+          changeRequestId: changeRequest.id,
+          decision: "approved",
+          conflictReplaced: true,
+        },
+        async onCommit(trx) {
+          await sql`savepoint sp_evidence_conflict_replace`.execute(trx);
+          try {
+            await approveChangeRequestInTransaction(trx, {
+              changeRequestId: changeRequest.id,
+              reviewerUserId: null,
+              reason: conflictResolution.decisionReason,
+              evidence: conflictResolution.evidenceRecord,
+              conflictReason: null,
+              prefetchedTmdb,
+              allowedStatuses: ["pending_evidence"],
+              replacesAssociationId,
+              enforceUnlockedCheck: true,
+              now: ctx.now,
+            });
+            await sql`release savepoint sp_evidence_conflict_replace`.execute(trx);
+          } catch (error) {
+            await sql`rollback to savepoint sp_evidence_conflict_replace`.execute(trx);
+            if (
+              error instanceof MediaServiceError &&
+              error.code === "INVALID_CHANGE_REQUEST_STATE"
+            ) {
+              return;
+            }
+            if (error instanceof MediaServiceError && error.code === "ASSOCIATION_LOCKED") {
+              await markChangeRequestNeedsReviewInTx(trx, {
+                changeRequestId: changeRequest.id,
+                evidence: conflictResolution.evidenceRecord,
+                conflictReason: CONFLICT_REASONS.LOCKED_ASSOCIATION_CHALLENGED,
+                decisionReason: error.message,
+                now: ctx.now,
+              });
+              for (const conflict of conflictResolution.conflictingAssociations) {
+                await recordLockedAssociationAlertInTx(trx, {
+                  mediaId: conflict.mediaId,
+                  associationId: conflict.id,
+                  changeRequestId: changeRequest.id,
+                  namespace: changeRequest.namespace,
+                  nativeId: changeRequest.nativeId,
+                  existingNativeId: conflict.nativeId,
+                  detectedAt: checkedAt,
+                });
+              }
+              return;
+            }
+            if (
+              error instanceof MediaServiceError &&
+              (error.code === "SEGMENT_OVERLAP" ||
+                error.code === "INVALID_VARIANT" ||
+                error.code === "INVALID_SEGMENTS")
+            ) {
+              await markChangeRequestNeedsReviewInTx(trx, {
+                changeRequestId: changeRequest.id,
+                evidence: conflictResolution.evidenceRecord,
+                conflictReason: error.code.toLowerCase(),
+                decisionReason: error.message,
+                now: ctx.now,
+              });
+              return;
+            }
+            throw error;
+          }
+        },
+      };
+    }
+
     if (collectionResult.status === "not_found") {
       const evidence: JsonObject = {
         checkedAt,
@@ -349,6 +519,8 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
               conflictReason: null,
               prefetchedTmdb,
               allowedStatuses: ["pending_evidence"],
+              replacesAssociationId,
+              enforceUnlockedCheck: true,
               now: ctx.now,
             });
             await sql`release savepoint sp_evidence_auto_approve`.execute(trx);
@@ -358,6 +530,34 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
               error instanceof MediaServiceError &&
               error.code === "INVALID_CHANGE_REQUEST_STATE"
             ) {
+              return;
+            }
+            if (error instanceof MediaServiceError && error.code === "ASSOCIATION_LOCKED") {
+              await markChangeRequestNeedsReviewInTx(trx, {
+                changeRequestId: changeRequest.id,
+                evidence: evidenceRecord,
+                conflictReason: CONFLICT_REASONS.LOCKED_ASSOCIATION_CHALLENGED,
+                decisionReason: error.message,
+                now: ctx.now,
+              });
+              const lateConflicts = await findConflictingAssociations(trx, {
+                mediaId: changeRequest.mediaId,
+                targetExternalKey: changeRequest.targetExternalKey,
+                namespace: changeRequest.namespace,
+                nativeId: changeRequest.nativeId,
+                replacesAssociationId,
+              });
+              for (const locked of lateConflicts.filter((entry) => entry.locked)) {
+                await recordLockedAssociationAlertInTx(trx, {
+                  mediaId: locked.mediaId,
+                  associationId: locked.id,
+                  changeRequestId: changeRequest.id,
+                  namespace: changeRequest.namespace,
+                  nativeId: changeRequest.nativeId,
+                  existingNativeId: locked.nativeId,
+                  detectedAt: checkedAt,
+                });
+              }
               return;
             }
             if (
