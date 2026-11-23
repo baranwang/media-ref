@@ -9,7 +9,8 @@
   "type": "module",
   "scripts": {
     "ready": "vp check && vp run -r test && vp run -r build",
-    "dev": "vp run website#dev",
+    "dev": "vp run @media-ref/website#dev",
+    "db:migrate": "vp run @media-ref/db#migrate",
     "prepare": "vp config"
   },
   "devDependencies": {
