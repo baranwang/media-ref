@@ -14,7 +14,7 @@ import {
   type NormalizedSegment,
   type SeasonSnapshot,
 } from "@media-ref/client";
-import type { Database, Db, SeasonSnapshotRow } from "@media-ref/db";
+import type { Database, Db, ExternalIdNamespaceRow, SeasonSnapshotRow } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import {
   createDefaultAdapterRegistry,
@@ -1159,17 +1159,21 @@ async function findExistingMediaIdByExternalKey(
 
   if (isExternalIdNamespace(parsed.namespace)) {
     const ext = await db
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select("media_id")
       .where("namespace", "=", parsed.namespace)
       .where("native_id", "=", parsed.nativeId)
       .executeTakeFirst();
-    return ext ? resolveCanonicalMediaId(db, ext.media_id) : null;
+    if (ext) {
+      return resolveCanonicalMediaId(db, ext.media_id);
+    }
   }
 
   if (isAssociationNamespace(parsed.namespace)) {
     const assoc = await db
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select("media_id")
       .where("namespace", "=", parsed.namespace)
       .where("native_id", "=", parsed.nativeId)
@@ -1199,11 +1203,13 @@ async function loadExplorationTargetMedia(
       .where("id", "=", canonicalId)
       .executeTakeFirst(),
     db
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select(["namespace", "native_id", "locked"])
       .where("media_id", "=", canonicalId)
       .orderBy("namespace", "asc")
       .orderBy("native_id", "asc")
+      .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
       .execute(),
   ]);
 
@@ -1543,8 +1549,10 @@ export function createExplorationJobHandler(
                 continue;
               }
               await trx
-                .insertInto("external_ids")
+                .insertInto("associations")
                 .values({
+                  status: "confirmed",
+                  is_external_id: true,
                   media_id: created.id,
                   namespace: ns,
                   native_id: nativeVal,

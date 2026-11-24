@@ -165,8 +165,10 @@ describe("API Worker demand recording on read misses (#27)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: media.id,
         namespace: "tmdb",
         native_id: "tv:95479",
@@ -342,8 +344,10 @@ describe("API Worker demand recording on read misses (#27)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: tvMedia.id,
         namespace: "tmdb",
         native_id: "tv:95479",
@@ -480,8 +484,10 @@ describe("API Worker demand recording on read misses (#27)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: movieMedia.id,
         namespace: "tmdb",
         native_id: "movie:55555",
@@ -976,8 +982,10 @@ describe("API Worker demand recording on read misses (#27)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: media.id,
         namespace: "tmdb",
         native_id: "tv:95479",

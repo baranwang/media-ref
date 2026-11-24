@@ -243,6 +243,7 @@ export {
   createChangeRequest,
   EVIDENCE_CHECK_JOB_TYPE,
   getChangeRequestById,
+  extractCollectionDisplay,
   isAssociationNamespace,
   isUuid,
   listChangeRequests,

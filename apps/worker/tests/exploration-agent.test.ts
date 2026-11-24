@@ -883,8 +883,10 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
         .executeTakeFirstOrThrow();
 
       await testDb.writeDb
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: media.id,
           namespace: "tmdb",
           native_id: `tv:${tmdbId}`,
@@ -1008,8 +1010,10 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: notFoundMedia.id,
         namespace: "tmdb",
         native_id: "movie:888881",
@@ -1031,8 +1035,10 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: transientMedia.id,
         namespace: "tmdb",
         native_id: "movie:888882",
@@ -1176,8 +1182,10 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: media.id,
         namespace: "tmdb",
         native_id: "movie:671",
@@ -1417,8 +1425,10 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
         .executeTakeFirstOrThrow();
 
       await testDb.writeDb
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: m.id,
           namespace: "tmdb",
           native_id: `movie:${900000 + i}`,
@@ -1557,8 +1567,10 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
         .executeTakeFirstOrThrow();
 
       await testDb.writeDb
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: media.id,
           namespace: "tmdb",
           native_id: `movie:${tmdbId}`,

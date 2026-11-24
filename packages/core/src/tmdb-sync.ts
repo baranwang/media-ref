@@ -16,6 +16,7 @@ import type {
   ReviewAlertStatusRow,
   ReviewAlertsTable,
   SeasonSnapshotRow,
+  ExternalIdNamespaceRow,
 } from "@media-ref/db";
 import { sql, type Selectable, type Transaction } from "kysely";
 import { enqueueJob, type BackgroundJob, type JobHandler } from "./jobs.ts";
@@ -420,7 +421,8 @@ async function syncSingleMediaType(
   const [trackedRows, existingCursor] = await Promise.all([
     db
       .selectFrom("media")
-      .innerJoin("external_ids", "external_ids.media_id", "media.id")
+      .innerJoin("associations as external_ids", "external_ids.media_id", "media.id")
+      .where("external_ids.is_external_id", "=", true)
       .select([
         "media.id as media_id",
         "media.type as type",
@@ -617,7 +619,8 @@ async function syncSingleMediaType(
 
         for (const ext of secondaryExternalIds) {
           const existingExt = await trx
-            .selectFrom("external_ids")
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
             .select(["id", "native_id", "locked"])
             .where("media_id", "=", currentMedia.id)
             .where("namespace", "=", ext.namespace)
@@ -628,14 +631,16 @@ async function syncSingleMediaType(
               continue;
             }
             const claimedByOther = await trx
-              .selectFrom("external_ids")
+              .selectFrom("associations")
+              .where("is_external_id", "=", true)
               .select("id")
               .where("namespace", "=", ext.namespace)
               .where("native_id", "=", ext.nativeId)
               .executeTakeFirst();
             if (!claimedByOther) {
               await trx
-                .updateTable("external_ids")
+                .updateTable("associations")
+                .where("is_external_id", "=", true)
                 .set({
                   native_id: ext.nativeId,
                   source: "sync",
@@ -646,8 +651,10 @@ async function syncSingleMediaType(
             }
           } else {
             await trx
-              .insertInto("external_ids")
+              .insertInto("associations")
               .values({
+                status: "confirmed",
+                is_external_id: true,
                 media_id: currentMedia.id,
                 namespace: ext.namespace,
                 native_id: ext.nativeId,
@@ -663,6 +670,7 @@ async function syncSingleMediaType(
         if (changedSeasons.length > 0) {
           const assocRows = await trx
             .selectFrom("associations")
+            .where("is_external_id", "=", false)
             .select("id")
             .where("media_id", "=", currentMedia.id)
             .where("status", "!=", "delisted")
@@ -811,7 +819,8 @@ export async function enqueueTmdbDailySyncIfDue(
 
   const activeTypes = await db
     .selectFrom("media")
-    .innerJoin("external_ids", "external_ids.media_id", "media.id")
+    .innerJoin("associations as external_ids", "external_ids.media_id", "media.id")
+    .where("external_ids.is_external_id", "=", true)
     .select("media.type")
     .distinct()
     .where("media.merged_into_media_id", "is", null)
@@ -1204,6 +1213,7 @@ async function flagBaselineMismatchedSegments(
 ): Promise<number> {
   const assocRows = await trx
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select("id")
     .where("media_id", "=", mediaId)
     .where("status", "!=", "delisted")
@@ -1334,14 +1344,18 @@ export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeM
     // 2. Migrate non-conflicting external_ids; conflicting ones remain on source as redirect keys
     const [sourceExternalIds, targetExternalIds] = await Promise.all([
       trx
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select(["id", "namespace", "native_id"])
         .where("media_id", "=", source.id)
+        .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
         .execute(),
       trx
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select(["id", "namespace", "native_id"])
         .where("media_id", "=", canonicalTarget.id)
+        .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
         .execute(),
     ]);
 
@@ -1351,7 +1365,8 @@ export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeM
     for (const ext of sourceExternalIds) {
       if (!targetExtNamespaces.has(ext.namespace)) {
         await trx
-          .updateTable("external_ids")
+          .updateTable("associations")
+          .where("is_external_id", "=", true)
           .set({ media_id: canonicalTarget.id, updated_at: now })
           .where("id", "=", ext.id)
           .execute();
@@ -1379,6 +1394,7 @@ export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeM
           .execute(),
         trx
           .selectFrom("associations")
+          .where("is_external_id", "=", false)
           .select(["id", "namespace", "native_id", "variant_id", "status"])
           .where("media_id", "=", source.id)
           .orderBy("created_at", "asc")
@@ -1386,6 +1402,7 @@ export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeM
           .execute(),
         trx
           .selectFrom("associations")
+          .where("is_external_id", "=", false)
           .select(["id", "namespace", "native_id", "variant_id", "status"])
           .where("media_id", "=", canonicalTarget.id)
           .orderBy("created_at", "asc")

@@ -757,6 +757,7 @@ export async function isMediaDemandCoveredInTx(
 
   const confirmedAssociations = await executor
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select("id")
     .where("media_id", "=", input.mediaId)
     .where("status", "=", "confirmed")

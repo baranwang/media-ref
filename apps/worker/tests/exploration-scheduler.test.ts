@@ -480,8 +480,10 @@ describe("Exploration scheduler (#28)", () => {
         .executeTakeFirstOrThrow();
 
       await testDb.writeDb
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: media.id,
           namespace: "tmdb",
           native_id: `tv:${opts.tmdbId}`,

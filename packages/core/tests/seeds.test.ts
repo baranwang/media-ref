@@ -92,7 +92,8 @@ describe("seed importers (#32)", () => {
       expect(mediaRows.every((m) => m.type === "movie" && m.baseline === "tmdb")).toBe(true);
 
       const extRows = await testDb.writeDb
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select(["media_id", "namespace", "native_id"])
         .execute();
       expect(extRows).toHaveLength(3); // tmdb:movie:278, imdb:tt0111161, tmdb:movie:2501
@@ -102,7 +103,11 @@ describe("seed importers (#32)", () => {
         true,
       );
 
-      const assocRows = await testDb.writeDb.selectFrom("associations").selectAll().execute();
+      const assocRows = await testDb.writeDb
+        .selectFrom("associations")
+        .where("is_external_id", "=", false)
+        .selectAll()
+        .execute();
       expect(assocRows).toHaveLength(2);
       for (const assoc of assocRows) {
         expect(assoc.namespace).toBe("douban");
@@ -157,6 +162,7 @@ describe("seed importers (#32)", () => {
       // Confirm statuses were NEVER downgraded
       const afterSecondAssoc = await testDb.writeDb
         .selectFrom("associations")
+        .where("is_external_id", "=", false)
         .selectAll()
         .execute();
       expect(afterSecondAssoc).toHaveLength(3);
@@ -301,7 +307,8 @@ describe("seed importers (#32)", () => {
       expect(mediaRows[0]?.title).toBe("肖申克的救赎");
 
       const extRows = await testDb.writeDb
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select(["namespace", "native_id"])
         .execute();
       expect(extRows).toEqual(
@@ -311,7 +318,11 @@ describe("seed importers (#32)", () => {
         ]),
       );
 
-      const assocRows = await testDb.writeDb.selectFrom("associations").selectAll().execute();
+      const assocRows = await testDb.writeDb
+        .selectFrom("associations")
+        .where("is_external_id", "=", false)
+        .selectAll()
+        .execute();
       expect(assocRows).toHaveLength(1);
       expect(assocRows[0]?.namespace).toBe("douban");
       expect(assocRows[0]?.native_id).toBe("1292052");
@@ -459,7 +470,8 @@ describe("seed importers (#32)", () => {
 
       // Verify seasonless tv/95479 was NOT imported into media or external_ids
       const tv95479Ext = await testDb.writeDb
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .selectAll()
         .where("namespace", "=", "tmdb")
         .where("native_id", "=", "tv:95479")
@@ -468,7 +480,8 @@ describe("seed importers (#32)", () => {
 
       // Verify TV season 3 associations & segments
       const tv62564Ext = await testDb.writeDb
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select("media_id")
         .where("namespace", "=", "tmdb")
         .where("native_id", "=", "tv:62564")
@@ -476,6 +489,7 @@ describe("seed importers (#32)", () => {
 
       const tvAssocs = await testDb.writeDb
         .selectFrom("associations")
+        .where("is_external_id", "=", false)
         .selectAll()
         .where("media_id", "=", tv62564Ext.media_id)
         .execute();
@@ -522,13 +536,15 @@ describe("seed importers (#32)", () => {
 
       // Check movie/129 has whole-movie segments: []
       const movie129Ext = await testDb.writeDb
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select("media_id")
         .where("namespace", "=", "tmdb")
         .where("native_id", "=", "movie:129")
         .executeTakeFirstOrThrow();
       const movieAssocs = await testDb.writeDb
         .selectFrom("associations")
+        .where("is_external_id", "=", false)
         .selectAll()
         .where("media_id", "=", movie129Ext.media_id)
         .execute();
@@ -753,7 +769,11 @@ describe("seed importers (#32)", () => {
       expect(mediaRows).toHaveLength(4);
       expect(mediaRows.every((m) => m.type === "movie" && m.baseline === "tmdb")).toBe(true);
 
-      const assocs = await testDb.writeDb.selectFrom("associations").selectAll().execute();
+      const assocs = await testDb.writeDb
+        .selectFrom("associations")
+        .where("is_external_id", "=", false)
+        .selectAll()
+        .execute();
       expect(assocs).toHaveLength(4);
       expect(assocs.every((a) => a.namespace === "douban" && a.status === "seed_unconfirmed")).toBe(
         true,
@@ -767,7 +787,8 @@ describe("seed importers (#32)", () => {
 
       // Verify trakt external ID was attached for movie:278
       const traktExt = await testDb.writeDb
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .selectAll()
         .where("namespace", "=", "trakt")
         .where("native_id", "=", "movie:2780")

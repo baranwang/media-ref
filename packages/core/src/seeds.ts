@@ -11,7 +11,13 @@ import {
   type NormalizedSegment,
   type PlatformNamespace,
 } from "@media-ref/client";
-import type { Database, Db, JsonObject, SeasonSnapshotRow } from "@media-ref/db";
+import type {
+  Database,
+  Db,
+  ExternalIdNamespaceRow,
+  JsonObject,
+  SeasonSnapshotRow,
+} from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import {
   AdapterTransientError,
@@ -32,7 +38,7 @@ import { evaluateEvidenceGate, type EvidenceGateStep2Evaluator } from "./evidenc
 import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
 import { recordLead } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
-import { isUuid, type AssociationNamespace } from "./media-service.ts";
+import { extractCollectionDisplay, isUuid, type AssociationNamespace } from "./media-service.ts";
 import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
 import {
   DEFAULT_TMDB_API_BASE_URL,
@@ -490,6 +496,7 @@ async function loadActiveAssociationsWithSegmentsInTx(
 ): Promise<Array<{ id: string; mediaId: string; segments: NormalizedSegment[] }>> {
   let query = trx
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select(["id", "media_id"])
     .where("status", "!=", "delisted");
 
@@ -573,7 +580,8 @@ async function upsertSeedAssociation(
     let mediaCreated = false;
 
     const existingTmdbExt = await trx
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select("media_id")
       .where("namespace", "=", "tmdb")
       .where("native_id", "=", tmdbNativeId)
@@ -585,7 +593,8 @@ async function upsertSeedAssociation(
 
     if (!media && normalizedImdbId) {
       const existingImdbExt = await trx
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select("media_id")
         .where("namespace", "=", "imdb")
         .where("native_id", "=", normalizedImdbId)
@@ -595,7 +604,8 @@ async function upsertSeedAssociation(
         const candidate = await resolveCanonicalMediaById(trx, existingImdbExt.media_id);
         if (candidate && candidate.type === input.tmdbType) {
           const candidateTmdb = await trx
-            .selectFrom("external_ids")
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
             .select("native_id")
             .where("media_id", "=", candidate.id)
             .where("namespace", "=", "tmdb")
@@ -604,8 +614,10 @@ async function upsertSeedAssociation(
           if (!candidateTmdb) {
             media = candidate;
             await trx
-              .insertInto("external_ids")
+              .insertInto("associations")
               .values({
+                status: "confirmed",
+                is_external_id: true,
                 media_id: candidate.id,
                 namespace: "tmdb",
                 native_id: tmdbNativeId,
@@ -644,8 +656,10 @@ async function upsertSeedAssociation(
         .executeTakeFirstOrThrow();
 
       await trx
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: created.id,
           namespace: "tmdb",
           native_id: tmdbNativeId,
@@ -662,8 +676,10 @@ async function upsertSeedAssociation(
 
     if (normalizedImdbId) {
       await trx
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: media.id,
           namespace: "imdb",
           native_id: normalizedImdbId,
@@ -677,8 +693,10 @@ async function upsertSeedAssociation(
 
     if (input.traktId) {
       await trx
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: media.id,
           namespace: "trakt",
           native_id: input.traktId,
@@ -698,6 +716,7 @@ async function upsertSeedAssociation(
 
     const existingAssociation = await trx
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["id", "status"])
       .where("media_id", "=", media.id)
       .where("namespace", "=", input.namespace)
@@ -2079,6 +2098,7 @@ export async function enqueueSeedEvidenceChecksForMedia(
   if (uniqueMediaIds.length > 0) {
     const rows = await dbWrite
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["id", "media_id"])
       .where("media_id", "in", uniqueMediaIds)
       .where("status", "=", "seed_unconfirmed")
@@ -2108,6 +2128,7 @@ export async function enqueueSeedEvidenceChecksForMedia(
     if (nsEntries.length > 0) {
       const rows = await dbWrite
         .selectFrom("associations")
+        .where("is_external_id", "=", false)
         .select(["id", "media_id"])
         .where("status", "=", "seed_unconfirmed")
         .where("needs_review", "=", false)
@@ -2187,12 +2208,15 @@ async function resolveAuthoritativeCatalogKeyForMedia(
 ): Promise<string | null> {
   const [extRows, catalogAssocRows] = await Promise.all([
     db
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select(["namespace", "native_id"])
       .where("media_id", "=", mediaId)
+      .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
       .execute(),
     db
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["namespace", "native_id"])
       .where("media_id", "=", mediaId)
       .where("namespace", "in", ["bangumi", "douban"])
@@ -2243,6 +2267,7 @@ async function markSeedEvidenceFailedInTx(
 ): Promise<void> {
   const current = await trx
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select(["id", "status"])
     .where("id", "=", input.associationId)
     .forUpdate()
@@ -2318,7 +2343,8 @@ async function refreshSeedMediaFromCatalogInTx(
     }
 
     const existingForMedia = await trx
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select(["id", "native_id", "locked"])
       .where("media_id", "=", media.id)
       .where("namespace", "=", extNs)
@@ -2326,8 +2352,10 @@ async function refreshSeedMediaFromCatalogInTx(
 
     if (!existingForMedia) {
       await trx
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: media.id,
           namespace: extNs,
           native_id: extNativeId,
@@ -2345,7 +2373,8 @@ async function refreshSeedMediaFromCatalogInTx(
     }
 
     const ownedElsewhere = await trx
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select("media_id")
       .where("namespace", "=", extNs)
       .where("native_id", "=", extNativeId)
@@ -2353,7 +2382,8 @@ async function refreshSeedMediaFromCatalogInTx(
 
     if (!ownedElsewhere) {
       await trx
-        .updateTable("external_ids")
+        .updateTable("associations")
+        .where("is_external_id", "=", true)
         .set({
           native_id: extNativeId,
           updated_at: now,
@@ -2380,6 +2410,7 @@ export function createSeedEvidenceCheckJobHandler(
 
     const assoc = await ctx.db
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["id", "media_id", "namespace", "native_id", "variant_id", "status", "locked"])
       .where("id", "=", rawAssociationId)
       .executeTakeFirst();
@@ -2680,6 +2711,7 @@ export function createSeedEvidenceCheckJobHandler(
         async onCommit(trx) {
           const current = await trx
             .selectFrom("associations")
+            .where("is_external_id", "=", false)
             .select(["id", "media_id", "namespace", "native_id", "variant_id", "status", "locked"])
             .where("id", "=", assoc.id)
             .forUpdate()
@@ -2817,6 +2849,7 @@ export function createSeedEvidenceCheckJobHandler(
               status: "confirmed",
               needs_review: false,
               current_revision_id: rev.id,
+              ...extractCollectionDisplay(evidenceRecord),
               updated_at: ctx.now,
             })
             .where("id", "=", current.id)

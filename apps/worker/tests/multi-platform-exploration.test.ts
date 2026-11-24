@@ -705,8 +705,10 @@ describe("Multi-platform Tier 3 exploration & Tier 2 exclusion (#30)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: media.id,
         namespace: "tmdb",
         native_id: "tv:777771",
