@@ -228,15 +228,6 @@ describe("ConnectRPC Protobuf end-to-end protocol compatibility", () => {
 
     await expect(binaryClient.getMedia("not-a-valid-key")).rejects.toThrow(RangeError);
 
-    const leadRes = await binaryClient.reportLead({
-      target: { tmdb: { type: "tv", id: 95479 } },
-      namespace: "youku",
-      nativeId: "yk_proto_e2e",
-      season: 1,
-    });
-    expect(leadRes.lead.nativeId).toBe("yk_proto_e2e");
-    expect(leadRes.lead.target).toEqual({ tmdb: { type: "tv", id: 95479 } });
-
     const batchRes = await binaryClient.getMediaBatch([
       { tmdb: { type: "tv", id: 95479 } },
       { tmdb: { type: "tv", id: 99999999 } },

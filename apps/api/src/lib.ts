@@ -41,7 +41,6 @@ export {
   parseAnonymousInvalidationThresholdFromEnv,
   type ReportInvalidationResponse,
 } from "./invalidation.ts";
-export { leadServiceImpl, type CreateLeadResponse, type LeadResponse } from "./leads.ts";
 export { mediaServiceImpl, type BatchMediaReadResponse, type MediaReadResponse } from "./media.ts";
 export {
   buildOAuthAuthOptions,

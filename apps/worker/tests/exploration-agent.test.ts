@@ -4,11 +4,13 @@ import { resolveEpisode } from "@media-ref/client";
 import {
   createFakeOutboundClient,
   deriveExplorationTaskId,
+  ensureSeedImporterUser,
   EVIDENCE_CHECK_JOB_TYPE,
   EXPLORATION_AGENT_USER_ID,
   EXPLORATION_JOB_TYPE,
   getJobById,
   listDemands,
+  recordLead,
   seedTmdbExportIds,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
@@ -1301,14 +1303,17 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
 
     const { readKey } = await setupApiKeys(apiApp, outbound, "e2e-config-switch@example.com");
 
-    // Report a client lead via LeadService.CreateLead (should appear as unverified hint in prompt)
-    const leadRes = await createRpcClients(apiApp, { apiKey: readKey }).lead.createLead({
-      target: mediaRef("tmdb:movie:671"),
+    // Record an internal exploration lead (e.g. from ambiguous seed data)
+    const seedImporterUserId = await ensureSeedImporterUser(testDb.writeDb);
+    const lead = await recordLead(testDb.writeDb, {
+      targetExternalKey: "tmdb:movie:671",
       namespace: "bilibili",
       nativeId: "ss28281",
       notes: "B站中配版",
+      reporterUserId: seedImporterUserId,
+      reporterKeyId: "system:seed-importer",
     });
-    expect(leadRes.lead?.id).toBeTruthy();
+    expect(lead.id).toBeTruthy();
 
     // Trigger read demand
     await getMediaDocumentRpc(apiApp, readKey, "tmdb:movie:671");

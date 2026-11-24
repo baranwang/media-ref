@@ -28,7 +28,7 @@ bun install
 
 ## Protobuf & ConnectRPC Codegen
 
-All business APIs are defined under [`proto/mediaref/v1/`](./proto/mediaref/v1/) (`MediaService`, `ChangeRequestService`, `LeadService`, `AssociationService`, `AccountService`, `ReviewerService`) and served over ConnectRPC (binary Protobuf by default, with Connect JSON and gRPC-Web interoperability). Better Auth (`/api/auth/*`) and health probes (`/health`) remain standard HTTP/JSON.
+All business APIs are defined under [`proto/mediaref/v1/`](./proto/mediaref/v1/) (`MediaService`, `ChangeRequestService`, `AssociationService`, `AccountService`, `ReviewerService`) and served over ConnectRPC (binary Protobuf by default, with Connect JSON and gRPC-Web interoperability). Better Auth (`/api/auth/*`) and health probes (`/health`) remain standard HTTP/JSON.
 
 ```bash
 # Lint .proto schemas with Buf

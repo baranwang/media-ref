@@ -272,17 +272,18 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
       expect(extractActions(bearerMe.permissions)).toEqual(["read", "report"]);
       expect(bearerMe.expiresAt).toBeUndefined();
 
-      // Read-only key also works with X-API-Key header on GetCurrentApiKey and report RPC (CreateLead).
+      // Read-only key also works with X-API-Key header on GetCurrentApiKey and report RPC (ReportInvalidation).
       const readKeyRpc = createRpcClients(app, { apiKey: readOnlyKey.key });
       const xApiKeyMe = await readKeyRpc.account.getCurrentApiKey({});
       expect(xApiKeyMe.keyId).toBe(readOnlyKey.id);
 
-      const reportRes = await readKeyRpc.lead.createLead({
-        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
-        namespace: "bilibili",
-        nativeId: "ss34430",
-      });
-      expect(reportRes.lead?.id).toBeTruthy();
+      const reportErr = await expectRpcError(
+        readKeyRpc.association.reportInvalidation({
+          associationId: "00000000-0000-4000-8000-000000000099",
+        }),
+      );
+      expect(reportErr.status).toBe(404);
+      expect(reportErr.code).toBe("ASSOCIATION_NOT_FOUND");
 
       // Read-only key is rejected with 403 INSUFFICIENT_PERMISSIONS on submit RPC (CreateChangeRequest).
       const submitPayload = {
@@ -314,15 +315,13 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
       const submitKeyApiRpc = createRpcClients(app, { apiKey: submitKey.key });
       const submitKeyBearerRpc = createRpcClients(app, { bearerToken: submitKey.key });
       expect((await submitKeyApiRpc.account.getCurrentApiKey({})).canSubmit).toBe(true);
-      expect(
-        (
-          await submitKeyBearerRpc.lead.createLead({
-            target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
-            namespace: "tencent",
-            nativeId: "mzc00200xyz",
-          })
-        ).lead?.id,
-      ).toBeTruthy();
+      const submitKeyReportErr = await expectRpcError(
+        submitKeyBearerRpc.association.reportInvalidation({
+          associationId: "00000000-0000-4000-8000-000000000099",
+        }),
+      );
+      expect(submitKeyReportErr.status).toBe(404);
+      expect(submitKeyReportErr.code).toBe("ASSOCIATION_NOT_FOUND");
 
       const submitRes = await submitKeyBearerRpc.changeRequest.createChangeRequest(submitPayload);
       expect(submitRes.changeRequest?.id).toBeTruthy();
@@ -409,10 +408,8 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
     expect(submitAfterRevoke.message).toBe("Invalid API key");
 
     const reportAfterRevoke = await expectRpcError(
-      createRpcClients(app, { apiKey: keyA.key }).lead.createLead({
-        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
-        namespace: "bilibili",
-        nativeId: "ss10002",
+      createRpcClients(app, { apiKey: keyA.key }).association.reportInvalidation({
+        associationId: "00000000-0000-4000-8000-000000000099",
       }),
     );
     expect(reportAfterRevoke.status).toBe(401);
@@ -555,15 +552,13 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
         })
       ).changeRequest?.id,
     ).toBeTruthy();
-    expect(
-      (
-        await keyRpc.lead.createLead({
-          target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
-          namespace: "bilibili",
-          nativeId: "ss10001",
-        })
-      ).lead?.id,
-    ).toBeTruthy();
+    const splitReportBeforeRevoke = await expectRpcError(
+      keyRpc.association.reportInvalidation({
+        associationId: "00000000-0000-4000-8000-000000000099",
+      }),
+    );
+    expect(splitReportBeforeRevoke.status).toBe(404);
+    expect(splitReportBeforeRevoke.code).toBe("ASSOCIATION_NOT_FOUND");
 
     // Read RPC hits dbRead (cachedReadDb), which does not have the row yet.
     expect((await expectRpcError(keyRpc.account.getCurrentApiKey({}))).status).toBe(401);
@@ -606,10 +601,8 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
     expect(
       (
         await expectRpcError(
-          keyRpc.lead.createLead({
-            target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
-            namespace: "bilibili",
-            nativeId: "ss10002",
+          keyRpc.association.reportInvalidation({
+            associationId: "00000000-0000-4000-8000-000000000099",
           }),
         )
       ).status,

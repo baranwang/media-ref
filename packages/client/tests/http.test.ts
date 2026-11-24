@@ -8,7 +8,6 @@ import {
   proto,
   resolveEpisode,
   toProtoBatchItemResult,
-  toProtoLead,
   toProtoMediaDocument,
   toProtoMediaQueryItem,
   toProtoMediaRef,
@@ -647,7 +646,7 @@ describe("createMediaRefClient — getMediaBatch", () => {
   });
 });
 
-describe("createMediaRefClient — resolveFromKey and reportLead", () => {
+describe("createMediaRefClient — resolveFromKey and option validation", () => {
   test("resolveFromKey combines getMedia + resolveEpisode with full typing and forwards params", async () => {
     const doc = createJujutsuKaisenDoc();
     const sentMessages: proto.GetMediaRequest[] = [];
@@ -760,74 +759,6 @@ describe("createMediaRefClient — resolveFromKey and reportLead", () => {
     }
   });
 
-  test("reportLead calls LeadService.CreateLead over binary Protobuf and returns typed LeadRecord", async () => {
-    const requests: Array<{
-      url: string;
-      method: string | undefined;
-      apiKey: string | null;
-      req: proto.CreateLeadRequest;
-    }> = [];
-
-    const fakeFetch: FetchLike = async (url, init) => {
-      const headers = new Headers(init?.headers);
-      const req = fromBinary(proto.CreateLeadRequestSchema, await readBodyBytes(init?.body));
-      requests.push({
-        url,
-        method: init?.method,
-        apiKey: headers.get("X-API-Key"),
-        req,
-      });
-
-      const protoRes = create(proto.CreateLeadResponseSchema, {
-        lead: toProtoLead({
-          id: "lead-1",
-          target: { tmdb: { type: "tv", id: 95479 } },
-          namespace: "bilibili",
-          nativeId: "ss45574",
-          season: 1,
-          variantDescription: "原声",
-          notes: "Season 1 part 2",
-          createdAt: "2026-11-23T12:00:00.000Z",
-        }),
-      });
-      return protoBinaryResponse(toBinary(proto.CreateLeadResponseSchema, protoRes));
-    };
-
-    const client = createMediaRefClient({ apiKey: "mref_report_key", fetch: fakeFetch });
-
-    const res = await client.reportLead({
-      target: { tmdb: { type: "tv", id: 95479 } },
-      namespace: "bilibili",
-      nativeId: "ss45574",
-      season: 1,
-      variantDescription: "原声",
-      notes: "Season 1 part 2",
-    });
-
-    expect(res.lead.id).toBe("lead-1");
-    expect(res.lead.target).toEqual({ tmdb: { type: "tv", id: 95479 } });
-    expect(res.lead.targetExternalKey).toBe("tmdb:tv:95479");
-    expect(res.lead.namespace).toBe("bilibili");
-    expect(res.lead.nativeId).toBe("ss45574");
-    expect(res.lead.season).toBe(1);
-    expect(res.lead.createdAt).toBe("2026-11-23T12:00:00.000Z");
-
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.url).toBe(`${DEFAULT_BASE_URL}/mediaref.v1.LeadService/CreateLead`);
-    expect(requests[0]?.method).toBe("POST");
-    expect(requests[0]?.apiKey).toBe("mref_report_key");
-    expect(requests[0]?.req.target?.id.case).toBe("tmdb");
-    if (requests[0]?.req.target?.id.case === "tmdb") {
-      expect(requests[0].req.target.id.value.type).toBe(proto.MediaType.TV);
-      expect(requests[0].req.target.id.value.id).toBe(95479);
-    }
-    expect(requests[0]?.req.namespace).toBe("bilibili");
-    expect(requests[0]?.req.nativeId).toBe("ss45574");
-    expect(requests[0]?.req.season).toBe(1);
-    expect(requests[0]?.req.variantDescription).toBe("原声");
-    expect(requests[0]?.req.notes).toBe("Season 1 part 2");
-  });
-
   test("validates client options and empty lookup keys", async () => {
     const fakeFetch: FetchLike = async () => protoBinaryResponse(new Uint8Array());
     expect(() => createMediaRefClient({ apiKey: "   ", fetch: fakeFetch })).toThrow(RangeError);
@@ -838,38 +769,7 @@ describe("createMediaRefClient — resolveFromKey and reportLead", () => {
     const client = createMediaRefClient({ apiKey: "mref_key", fetch: fakeFetch });
     await expect(client.getMedia("   ")).rejects.toThrow(RangeError);
     await expect(
-      client.reportLead({
-        target: { tmdb: { type: "tv", id: 95479 } },
-        namespace: "bilibili",
-        nativeId: "ss45574",
-        season: -1,
-      }),
+      client.getMedia({ tmdb: { type: "tv", id: 95479 } }, { season: -1 }),
     ).rejects.toThrow(RangeError);
-  });
-
-  test("reportLead throws MediaRefApiError on 401 responses", async () => {
-    const fakeFetch: FetchLike = async () =>
-      connectErrorResponse({
-        httpStatus: 401,
-        connectCode: "unauthenticated",
-        errorCode: "API_KEY_DISABLED",
-        message: "API key is disabled",
-      });
-
-    const client = createMediaRefClient({ apiKey: "mref_revoked", fetch: fakeFetch });
-
-    try {
-      await client.reportLead({
-        target: { tmdb: { type: "tv", id: 95479 } },
-        namespace: "bilibili",
-        nativeId: "ss45574",
-      });
-      expect.unreachable("expected 401 on reportLead");
-    } catch (error) {
-      expect(error).toBeInstanceOf(MediaRefApiError);
-      const apiErr = error as MediaRefApiError;
-      expect(apiErr.status).toBe(401);
-      expect(apiErr.code).toBe("API_KEY_DISABLED");
-    }
   });
 });

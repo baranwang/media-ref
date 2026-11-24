@@ -29,7 +29,6 @@ import {
 } from "./auth.ts";
 import { changeRequestServiceImpl } from "./change-requests.ts";
 import { kApiRequestRuntime, type ApiRequestRuntime } from "./context.ts";
-import { leadServiceImpl } from "./leads.ts";
 import { mediaServiceImpl } from "./media.ts";
 import {
   createReadRateLimitRuntime,
@@ -98,7 +97,6 @@ const connectRouter = createConnectRouter({
 
 connectRouter.service(proto.MediaService, mediaServiceImpl);
 connectRouter.service(proto.ChangeRequestService, changeRequestServiceImpl);
-connectRouter.service(proto.LeadService, leadServiceImpl);
 connectRouter.service(proto.AssociationService, associationServiceImpl);
 connectRouter.service(proto.AccountService, accountServiceImpl);
 connectRouter.service(proto.ReviewerService, reviewerServiceImpl);

@@ -46,7 +46,6 @@ import {
   type SegmentInput as ProtoSegmentInput,
   type Variant as ProtoVariant,
 } from "./gen/mediaref/v1/types_pb.ts";
-import { LeadSchema, type Lead as ProtoLead } from "./gen/mediaref/v1/lead_pb.ts";
 import {
   BatchMediaItemErrorSchema,
   BatchMediaItemResultSchema,
@@ -1283,53 +1282,6 @@ export function fromProtoBatchItemResult(entry: ProtoBatchMediaItemResult):
     ok: false,
     error: "NOT_FOUND",
     message: "Media not found",
-  };
-}
-
-export function toProtoLead(lead: {
-  id: string;
-  target: MediaRef | ProtoMediaRef | string;
-  namespace: Namespace;
-  nativeId: string;
-  season: number | null;
-  variantDescription: string | null;
-  notes: string | null;
-  createdAt: string;
-}): ProtoLead {
-  return create(LeadSchema, {
-    id: lead.id,
-    target: toProtoMediaRefFromInput(lead.target) ?? create(MediaRefSchema),
-    namespace: lead.namespace,
-    nativeId: lead.nativeId,
-    ...(lead.season !== null ? { season: lead.season } : {}),
-    ...(lead.variantDescription !== null ? { variantDescription: lead.variantDescription } : {}),
-    ...(lead.notes !== null ? { notes: lead.notes } : {}),
-    createdAt: lead.createdAt,
-  });
-}
-
-export function fromProtoLead(lead: ProtoLead): {
-  id: string;
-  target: MediaRef | null;
-  targetExternalKey: string;
-  namespace: Namespace;
-  nativeId: string;
-  season: number | null;
-  variantDescription: string | null;
-  notes: string | null;
-  createdAt: string;
-} {
-  const decoded = fromProtoMediaRef(lead.target, { mode: "target" });
-  return {
-    id: lead.id,
-    target: decoded.ok ? decoded.ref : null,
-    targetExternalKey: decoded.ok ? decoded.key : "",
-    namespace: lead.namespace as Namespace,
-    nativeId: lead.nativeId,
-    season: lead.season ?? null,
-    variantDescription: lead.variantDescription ?? null,
-    notes: lead.notes ?? null,
-    createdAt: lead.createdAt,
   };
 }
 

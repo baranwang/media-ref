@@ -103,7 +103,6 @@ export function createRpcClients(
     transport,
     media: createClient(proto.MediaService, transport),
     changeRequest: createClient(proto.ChangeRequestService, transport),
-    lead: createClient(proto.LeadService, transport),
     association: createClient(proto.AssociationService, transport),
     account: createClient(proto.AccountService, transport),
     reviewer: createClient(proto.ReviewerService, transport),

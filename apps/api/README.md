@@ -8,7 +8,6 @@ All business endpoints are defined in [`proto/mediaref/v1/`](../../proto/mediare
 
 - `mediaref.v1.MediaService`: `GetMedia` (`NO_SIDE_EFFECTS` / HTTP GET capable, structured `MediaRef` `oneof`: `media_id` / `tmdb` / `imdb` / `tvdb` / `trakt` / `douban` / `bangumi` / `platform`), `BatchGetMedia` (`repeated MediaRef refs`)
 - `mediaref.v1.ChangeRequestService`: `CreateChangeRequest` (`MediaRef target`), `GetChangeRequest`
-- `mediaref.v1.LeadService`: `CreateLead` (`MediaRef target`)
 - `mediaref.v1.AssociationService`: `ReportInvalidation`, `ListAssociationRevisions`
 - `mediaref.v1.AccountService`: `GetCurrentUser`, `GetCurrentApiKey`, `CreateApiKey`, `ListApiKeys`, `DeleteApiKey`
 - `mediaref.v1.ReviewerService`: `ListChangeRequests`, `ApproveChangeRequest`, `RejectChangeRequest`, `SetAssociationLock`, `OverrideMediaExternalId`, `SetMediaExternalIdLock`, `MergeMedia`, `SwitchMediaBaseline`, `ListReviewAlerts`, `ResolveReviewAlert`, `ListNeedsReviewSegments`, `SetUserRole`
