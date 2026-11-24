@@ -15,7 +15,7 @@ All business endpoints are defined in [`proto/mediaref/v1/`](../../proto/mediare
 
 Supported wire protocols on every RPC path (`/mediaref.v1.<Service>/<Method>`):
 
-- **Connect binary Protobuf** (`Content-Type: application/proto`, default in `@media-ref/client` and `apps/website`)
+- **Connect binary Protobuf** (`Content-Type: application/proto`, default in `@media-ref/client`)
 - **Connect JSON** (`Content-Type: application/json`, strict unknown-field validation)
 - **Connect HTTP GET** (for `NO_SIDE_EFFECTS` read RPCs)
 - **gRPC-Web** (`application/grpc-web+proto`)
@@ -27,8 +27,7 @@ Non-RPC HTTP/JSON routes:
 
 ## Entrypoints & Bindings
 
-- Default export & `InternalMediaEntrypoint` in [`src/index.ts`](./src/index.ts): clean Cloudflare Worker entrypoint exporting only `default` and `WorkerEntrypoint` subclasses (required by `workerd`), binding `HYPERDRIVE_READ` (cached Hyperdrive for reads) and `HYPERDRIVE_WRITE` (uncached Hyperdrive for mutations), cleaning up per-request `pg` pools after `ctx.waitUntil(...)` background demand/seed tasks settle.
-- `InternalMediaEntrypoint.getMedia(key, clientIp)` calls `executeInternalMediaQuery` directly in-process without a synthetic HTTP round-trip, and also handles `GET /internal/media/:key` via service binding `fetch`.
+- Default export in [`src/index.ts`](./src/index.ts): clean Cloudflare Worker entrypoint exporting only `default` (required by `workerd`), binding `HYPERDRIVE_READ` (cached Hyperdrive for reads) and `HYPERDRIVE_WRITE` (uncached Hyperdrive for mutations), cleaning up per-request `pg` pools after `ctx.waitUntil(...)` background demand/seed tasks settle.
 - `createApiApp(deps)` in [`src/app.ts`](./src/app.ts) (re-exported via [`src/lib.ts`](./src/lib.ts)): creates the Fetch-based ConnectRPC + Better Auth app with explicit `dbRead`, `dbWrite`, `outbound`, and `config` dependencies.
 - Wrangler config in [`wrangler.jsonc`](./wrangler.jsonc) enables `nodejs_compat` and declares `HYPERDRIVE_READ` and `HYPERDRIVE_WRITE`.
 

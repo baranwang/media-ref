@@ -41,25 +41,6 @@ export {
   parseAnonymousInvalidationThresholdFromEnv,
   type ReportInvalidationResponse,
 } from "./invalidation.ts";
-export {
-  CLIENT_IP_HEADER,
-  createCloudflareRateLimiterAdapter,
-  createInMemoryIpRateLimiter,
-  createInternalMediaApp,
-  DEFAULT_ANONYMOUS_IP_RATE_LIMIT,
-  DEFAULT_ANONYMOUS_IP_RATE_WINDOW_SECONDS,
-  executeInternalMediaQuery,
-  extractClientIp,
-  INTERNAL_MEDIA_PATH_PREFIX,
-  InternalMediaEntrypoint,
-  type AnonymousIpRateLimitDecision,
-  type AnonymousIpRateLimiter,
-  type InMemoryIpRateLimiterOptions,
-  type InternalMediaApp,
-  type InternalMediaDeps,
-  type InternalMediaRpcResult,
-  type InternalMediaWorkerEnv,
-} from "./internal.ts";
 export { leadServiceImpl, type CreateLeadResponse, type LeadResponse } from "./leads.ts";
 export { mediaServiceImpl, type BatchMediaReadResponse, type MediaReadResponse } from "./media.ts";
 export {

@@ -1,8 +1,8 @@
 import type { Hyperdrive, SendEmail } from "@cloudflare/workers-types";
-import type { InternalMediaWorkerEnv } from "./internal.ts";
 import type { RateLimitBinding } from "./rate-limit.ts";
 
-export interface ApiWorkerEnv extends InternalMediaWorkerEnv {
+export interface ApiWorkerEnv {
+  HYPERDRIVE_READ: Hyperdrive;
   HYPERDRIVE_WRITE: Hyperdrive;
   EMAIL?: SendEmail;
   EMAIL_FROM?: string;

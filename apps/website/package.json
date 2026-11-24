@@ -13,10 +13,7 @@
     "deploy": "bun run build && wrangler deploy"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "catalog:",
-    "@connectrpc/connect": "catalog:",
-    "@connectrpc/connect-web": "catalog:",
-    "@media-ref/client": "workspace:*",
+    "@media-ref/ui": "workspace:*",
     "@tailwindcss/vite": "catalog:",
     "@tanstack/react-devtools": "0.10.15",
     "@tanstack/react-router": "1.170.46",
@@ -29,7 +26,6 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.26.0",
     "@inlang/paraglide-js": "^2.13.1",
-    "@tailwindcss/typography": "^0.5.16",
     "@tanstack/devtools-vite": "0.8.7",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",

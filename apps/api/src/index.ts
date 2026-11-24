@@ -13,7 +13,6 @@ import type { ApiWorkerEnv } from "./worker-env.ts";
 
 // Cloudflare Workers `workerd` entry module must ONLY export `default` and
 // `WorkerEntrypoint` subclasses (never plain constants or helper objects).
-export { InternalMediaEntrypoint } from "./internal.ts";
 export type { ApiWorkerEnv } from "./worker-env.ts";
 
 function parseTrustedOrigins(raw: string | undefined): string[] | undefined {

@@ -9,7 +9,7 @@ Domain terminology is defined in [`GLOSSARY.md`](./GLOSSARY.md).
 - `proto/mediaref/v1/`: Canonical Protobuf v3 API schemas (single source of truth for all business RPCs, including the structured `MediaRef` `oneof`, generated into `packages/client/src/gen` via Buf).
 - `apps/api` (`@media-ref/api`): ConnectRPC Protobuf Cloudflare Worker (`api.mediaref.org`) built directly on Web Fetch API (`@connectrpc/connect` + Better Auth + Kysely).
 - `apps/worker` (`@media-ref/worker`): Background Cloudflare Worker (Queues & Cron) for evidence gate checks, exploration agent loops, and TMDB daily sync.
-- `apps/website` (`@media-ref/website`): TanStack Start SSR web app (`mediaref.org`). Media detail routes (`/media/<key>`) accept external keys and merged UUIDs and redirect (`302`) to the canonical `/media/<uuid>` route on unique match.
+- `apps/website` (`@media-ref/website`): TanStack Start SSR web app (`mediaref.org`, scaffold wired to `@media-ref/ui`).
 - `packages/client` (`@media-ref/client`): TypeScript SDK (`@connectrpc/connect-web` + `@bufbuild/protobuf`), generated Protobuf descriptors, and pure episode-resolution / segment-validation utilities.
 - `packages/db` (`@media-ref/db`): Kysely database types, PostgreSQL connection factory, TypeScript migrations, and ephemeral test DB helper.
 - `packages/core` (`@media-ref/core`): Shared core services and the outbound call layer (`OutboundClient`).
