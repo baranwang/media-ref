@@ -4,7 +4,6 @@ import {
   BatchMediaQueryError,
   ConflictResolutionError,
   InvalidationError,
-  LeadValidationError,
   MediaServiceError,
   MediaSyncError,
   SubmissionQuotaExceededError,
@@ -380,14 +379,6 @@ export function rethrowDomainError(error: unknown): never {
   if (error instanceof InvalidationError) {
     throw createDomainConnectError({
       status: error.status,
-      code: error.code,
-      message: error.message,
-    });
-  }
-
-  if (error instanceof LeadValidationError) {
-    throw createDomainConnectError({
-      status: 400,
       code: error.code,
       message: error.message,
     });

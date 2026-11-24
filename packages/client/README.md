@@ -122,21 +122,6 @@ for (const entry of batch.results) {
 
 Pass `{ autoChunk: false }` if you want arrays larger than 100 entries to throw a `RangeError` locally instead of issuing multiple RPC requests.
 
-### Reporting a Lead (`reportLead`)
-
-Clients that discover a potential platform or catalog match locally can report it as a non-binding lead for future exploration via `mediaref.v1.LeadService/CreateLead` (requires a standard read/report API key):
-
-```ts
-const { lead } = await client.reportLead({
-  target: { tmdb: { type: "tv", id: 95479 } },
-  namespace: "bilibili",
-  nativeId: "ss45574",
-  season: 1,
-  variantDescription: "原声",
-  notes: "Season 1 second cour",
-});
-```
-
 ### Direct ConnectRPC / Protobuf Usage
 
 For advanced callers (e.g. ChangeRequest, Association, Account, or Reviewer services), `@media-ref/client` exports both the transport helper and all generated Protobuf-ES v2 schemas under `@media-ref/client/proto` (and as `proto` on the root entrypoint):
@@ -225,8 +210,8 @@ const formatted = formatExternalKey({ namespace: "bilibili", nativeId: "ss45574"
 
 ## Exports
 
-- **ConnectRPC Client**: `createMediaRefClient`, `createMediaRefTransport`, `MediaRefApiError`, `DEFAULT_BASE_URL`, `MAX_BATCH_MEDIA_KEYS`, and request/response types (`MediaRefClient`, `MediaRefClientOptions`, `MediaRefTransportOptions`, `FetchLike`, `MediaLookupKey`, `GetMediaOptions`, `GetMediaResponse`, `MediaQueryItem`, `GetMediaBatchOptions`, `BatchMediaItemErrorCode`, `BatchMediaItemResult`, `BatchMediaResponse`, `ResolveFromKeyResult`, `NotFoundResolutionResult`, `ReportLeadInput`, `ReportLeadOptions`, `LeadRecord`, `ReportLeadResponse`, `MediaRefApiErrorOptions`).
-- **Generated Protobuf Schemas & Mappers**: `proto` namespace (and `@media-ref/client/proto` subpath), service descriptors (`MediaService`, `ChangeRequestService`, `LeadService`, `AssociationService`, `AccountService`, `ReviewerService`), `ErrorInfoDetailSchema`, structured `MediaRef` helpers (`toProtoMediaRef`, `toProtoMediaRefFromKey`, `toProtoMediaRefFromInput`, `fromProtoMediaRef`, `parseMediaRefFromKey`, `formatMediaRefKey`), and bidirectional mappers (`toProtoMediaDocument`, `fromProtoMediaDocument`, `toProtoSegmentInput`, `fromProtoSegmentInput`, `createDomainConnectError`, `extractConnectErrorInfo`, etc.).
+- **ConnectRPC Client**: `createMediaRefClient`, `createMediaRefTransport`, `MediaRefApiError`, `DEFAULT_BASE_URL`, `MAX_BATCH_MEDIA_KEYS`, and request/response types (`MediaRefClient`, `MediaRefClientOptions`, `MediaRefTransportOptions`, `FetchLike`, `MediaLookupKey`, `GetMediaOptions`, `GetMediaResponse`, `MediaQueryItem`, `GetMediaBatchOptions`, `BatchMediaItemErrorCode`, `BatchMediaItemResult`, `BatchMediaResponse`, `ResolveFromKeyResult`, `NotFoundResolutionResult`, `MediaRefApiErrorOptions`).
+- **Generated Protobuf Schemas & Mappers**: `proto` namespace (and `@media-ref/client/proto` subpath), service descriptors (`MediaService`, `ChangeRequestService`, `AssociationService`, `AccountService`, `ReviewerService`), `ErrorInfoDetailSchema`, structured `MediaRef` helpers (`toProtoMediaRef`, `toProtoMediaRefFromKey`, `toProtoMediaRefFromInput`, `fromProtoMediaRef`, `parseMediaRefFromKey`, `formatMediaRefKey`), and bidirectional mappers (`toProtoMediaDocument`, `fromProtoMediaDocument`, `toProtoSegmentInput`, `fromProtoSegmentInput`, `createDomainConnectError`, `extractConnectErrorInfo`, etc.).
 - **Episode Resolution**: `resolveEpisode` and result/query types (`ResolveEpisodeQuery`, `ResolveEpisodeResult`, `MappedEpisodeResult`, `CollectionOnlyResult`, `UnmappedEpisodeResult`).
 - **Segment Validation**: `normalizeSegment`, `normalizeSegments`, `validateSegment`, `validateVariantSegments`, `validateSharedCollectionSegments`.
 - **Domain Types & Helpers**: `MediaRef`, `TmdbRef`, `TvdbRef`, `TraktRef`, `PlatformRef`, `Media`, `MediaSnapshot`, `SeasonSnapshot`, `MediaDocument`, `Variant`, `Association`, `Segment`, `SegmentInput`, `ExternalId`, `ExternalKey`, `PLATFORM_NAMESPACES`, `CATALOG_NAMESPACES`, `BASELINE_PRIORITY`, `getNamespaceGroup`, `parseExternalKey`, `formatExternalKey`.

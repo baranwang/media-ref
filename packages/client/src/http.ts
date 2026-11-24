@@ -7,13 +7,11 @@ import {
   type Transport,
 } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
-import { LeadService } from "./gen/mediaref/v1/lead_pb.ts";
 import { MediaService } from "./gen/mediaref/v1/media_pb.ts";
 import { MediaRefSchema, type MediaRef as ProtoMediaRef } from "./gen/mediaref/v1/types_pb.ts";
 import {
   extractConnectErrorInfo,
   fromProtoBatchItemResult,
-  fromProtoLead,
   fromProtoMediaDocument,
   fromProtoMediaQueryItem,
   fromProtoMediaRef,
@@ -28,7 +26,7 @@ import type {
   UnmappedEpisodeResult,
 } from "./resolve.ts";
 import { getNamespaceGroup } from "./types.ts";
-import type { ExternalKey, MediaDocument, MediaRef, Namespace, NamespaceGroup } from "./types.ts";
+import type { ExternalKey, MediaDocument, MediaRef, NamespaceGroup } from "./types.ts";
 
 export const DEFAULT_BASE_URL = "https://api.mediaref.org";
 export const MAX_BATCH_MEDIA_KEYS = 100;
@@ -108,35 +106,6 @@ export type ResolveFromKeyResult =
   | (CollectionOnlyResult & { media: GetMediaResponse })
   | (UnmappedEpisodeResult & { media: GetMediaResponse });
 
-export interface ReportLeadInput {
-  target: MediaLookupKey;
-  namespace: Namespace;
-  nativeId: string;
-  season?: number | null;
-  variantDescription?: string | null;
-  notes?: string | null;
-}
-
-export interface ReportLeadOptions {
-  signal?: AbortSignal;
-}
-
-export interface LeadRecord {
-  id: string;
-  target: MediaRef | null;
-  targetExternalKey: string;
-  namespace: Namespace;
-  nativeId: string;
-  season: number | null;
-  variantDescription: string | null;
-  notes: string | null;
-  createdAt: string;
-}
-
-export interface ReportLeadResponse {
-  lead: LeadRecord;
-}
-
 export interface MediaRefApiErrorOptions {
   status: number;
   code: string;
@@ -171,7 +140,6 @@ export interface MediaRefClient {
     query: ResolveEpisodeQuery,
     options?: GetMediaOptions,
   ): Promise<ResolveFromKeyResult>;
-  reportLead(input: ReportLeadInput, options?: ReportLeadOptions): Promise<ReportLeadResponse>;
 }
 
 function normalizeBaseUrl(baseUrl: string | undefined): string {
@@ -268,7 +236,6 @@ export function createMediaRefClient(options: MediaRefClientOptions): MediaRefCl
 
   const transport = createMediaRefTransport(options);
   const mediaRpc = createClient(MediaService, transport);
-  const leadRpc = createClient(LeadService, transport);
 
   const getMedia = async (
     key: MediaLookupKey,
@@ -401,46 +368,6 @@ export function createMediaRefClient(options: MediaRefClientOptions): MediaRefCl
       });
 
       return { ...resolution, media };
-    },
-
-    async reportLead(
-      input: ReportLeadInput,
-      reportOptions?: ReportLeadOptions,
-    ): Promise<ReportLeadResponse> {
-      const protoTarget = toStrictProtoMediaRef(input.target);
-      validateSeasonOption(input.season);
-
-      try {
-        const res = await leadRpc.createLead(
-          {
-            target: protoTarget,
-            namespace: input.namespace,
-            nativeId: input.nativeId,
-            ...(input.season !== undefined && input.season !== null
-              ? { season: input.season }
-              : {}),
-            ...(input.variantDescription !== undefined && input.variantDescription !== null
-              ? { variantDescription: input.variantDescription }
-              : {}),
-            ...(input.notes !== undefined && input.notes !== null ? { notes: input.notes } : {}),
-          },
-          {
-            signal: reportOptions?.signal,
-          },
-        );
-
-        if (!res.lead) {
-          throw new MediaRefApiError({
-            status: 500,
-            code: "INVALID_RESPONSE",
-            message: "Server returned empty lead payload",
-          });
-        }
-
-        return { lead: fromProtoLead(res.lead) };
-      } catch (error) {
-        toMediaRefApiError(error);
-      }
     },
   };
 }
