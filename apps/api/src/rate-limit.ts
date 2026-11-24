@@ -1,6 +1,4 @@
 import type { ReputationTier, SubmissionQuotaConfig } from "@media-ref/core";
-import type { MiddlewareHandler } from "hono";
-import type { ApiEnv } from "./auth.ts";
 
 export const DEFAULT_READ_KEY_LIMIT = 120;
 export const DEFAULT_READ_IP_LIMIT = 300;
@@ -288,6 +286,55 @@ export function resolveSubmissionQuotaConfig(input: {
   };
 }
 
+const fallbackReadLimitersByConfig = new Map<string, ReadRateLimitRuntime>();
+
+export function resolveModuleScopedReadRateLimitRuntime(input: {
+  readKeyLimiter?: RateLimitBinding;
+  readIpLimiter?: RateLimitBinding;
+  config?: ReadRateLimitConfig;
+}): ReadRateLimitRuntime {
+  const readPeriodSeconds =
+    input.config?.readPeriodSeconds && input.config.readPeriodSeconds > 0
+      ? Math.floor(input.config.readPeriodSeconds)
+      : DEFAULT_READ_PERIOD_SECONDS;
+
+  const readRetryAfterSeconds =
+    input.config?.readRetryAfterSeconds && input.config.readRetryAfterSeconds > 0
+      ? Math.floor(input.config.readRetryAfterSeconds)
+      : DEFAULT_READ_RETRY_AFTER_SECONDS;
+
+  const readKeyLimit =
+    input.config?.readKeyLimit !== undefined
+      ? Math.max(0, Math.floor(input.config.readKeyLimit))
+      : DEFAULT_READ_KEY_LIMIT;
+
+  const readIpLimit =
+    input.config?.readIpLimit !== undefined
+      ? Math.max(0, Math.floor(input.config.readIpLimit))
+      : DEFAULT_READ_IP_LIMIT;
+
+  if (input.readKeyLimiter && input.readIpLimiter) {
+    return {
+      keyLimiter: input.readKeyLimiter,
+      ipLimiter: input.readIpLimiter,
+      retryAfterSeconds: readRetryAfterSeconds,
+    };
+  }
+
+  const cacheKey = `${readKeyLimit}:${readIpLimit}:${readPeriodSeconds}:${readRetryAfterSeconds}`;
+  let cached = fallbackReadLimitersByConfig.get(cacheKey);
+  if (!cached) {
+    cached = createReadRateLimitRuntime({ config: input.config });
+    fallbackReadLimitersByConfig.set(cacheKey, cached);
+  }
+
+  return {
+    keyLimiter: input.readKeyLimiter ?? cached.keyLimiter,
+    ipLimiter: input.readIpLimiter ?? cached.ipLimiter,
+    retryAfterSeconds: readRetryAfterSeconds,
+  };
+}
+
 export function createReadRateLimitRuntime(input: {
   readKeyLimiter?: RateLimitBinding;
   readIpLimiter?: RateLimitBinding;
@@ -333,40 +380,44 @@ export function createReadRateLimitRuntime(input: {
   };
 }
 
-export const requireReadRateLimit: MiddlewareHandler<ApiEnv> = async (c, next) => {
-  const runtime = c.get("readRateLimit");
-  const apiKey = c.get("apiKey");
+export type ReadRateLimitCheckResult =
+  | { allowed: true }
+  | {
+      allowed: false;
+      scope: ReadRateLimitScope;
+      retryAfterSeconds: number;
+      message: string;
+    };
 
-  if (apiKey) {
-    const keyOutcome = await runtime.keyLimiter.limit({ key: `read:key:${apiKey.keyId}` });
+export async function checkReadRateLimit(input: {
+  runtime: ReadRateLimitRuntime;
+  headers: Headers;
+  apiKeyId?: string;
+}): Promise<ReadRateLimitCheckResult> {
+  if (input.apiKeyId) {
+    const keyOutcome = await input.runtime.keyLimiter.limit({
+      key: `read:key:${input.apiKeyId}`,
+    });
     if (!keyOutcome.success) {
-      c.header("Retry-After", String(runtime.retryAfterSeconds));
-      return c.json(
-        {
-          error: "RATE_LIMITED",
-          scope: "api_key" as ReadRateLimitScope,
-          retryAfterSeconds: runtime.retryAfterSeconds,
-          message: `API key read rate limit exceeded; retry after ${runtime.retryAfterSeconds}s`,
-        },
-        429,
-      );
+      return {
+        allowed: false,
+        scope: "api_key",
+        retryAfterSeconds: input.runtime.retryAfterSeconds,
+        message: `API key read rate limit exceeded; retry after ${input.runtime.retryAfterSeconds}s`,
+      };
     }
   }
 
-  const clientIp = extractRequestClientIp(c.req.raw.headers);
-  const ipOutcome = await runtime.ipLimiter.limit({ key: `read:ip:${clientIp}` });
+  const clientIp = extractRequestClientIp(input.headers);
+  const ipOutcome = await input.runtime.ipLimiter.limit({ key: `read:ip:${clientIp}` });
   if (!ipOutcome.success) {
-    c.header("Retry-After", String(runtime.retryAfterSeconds));
-    return c.json(
-      {
-        error: "RATE_LIMITED",
-        scope: "ip" as ReadRateLimitScope,
-        retryAfterSeconds: runtime.retryAfterSeconds,
-        message: `IP read rate limit exceeded; retry after ${runtime.retryAfterSeconds}s`,
-      },
-      429,
-    );
+    return {
+      allowed: false,
+      scope: "ip",
+      retryAfterSeconds: input.runtime.retryAfterSeconds,
+      message: `IP read rate limit exceeded; retry after ${input.runtime.retryAfterSeconds}s`,
+    };
   }
 
-  await next();
-};
+  return { allowed: true };
+}

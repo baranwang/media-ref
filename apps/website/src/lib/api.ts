@@ -1,3 +1,7 @@
+import { ConnectError, createClient, type Interceptor, type Transport } from "@connectrpc/connect";
+import { createConnectTransport } from "@connectrpc/connect-web";
+import { extractConnectErrorInfo, fromProtoApiKeyAction, proto } from "@media-ref/client";
+
 export const DEFAULT_DEV_API_BASE_URL = "http://localhost:8787";
 export const DEFAULT_PROD_API_BASE_URL = "https://api.mediaref.org";
 export const MAX_API_KEY_NAME_LENGTH = 64;
@@ -101,6 +105,60 @@ export function getApiBaseUrl(): string {
   return import.meta.env.DEV ? DEFAULT_DEV_API_BASE_URL : DEFAULT_PROD_API_BASE_URL;
 }
 
+export function createWebsiteConnectTransport(cookieHeader?: string): Transport {
+  const interceptors: Interceptor[] = [];
+  if (cookieHeader && cookieHeader.trim().length > 0) {
+    const trimmedCookie = cookieHeader.trim();
+    interceptors.push((next) => (req) => {
+      req.header.set("cookie", trimmedCookie);
+      return next(req);
+    });
+  }
+
+  return createConnectTransport({
+    baseUrl: getApiBaseUrl(),
+    useBinaryFormat: true,
+    fetch: (input, init) =>
+      fetch(input, {
+        ...init,
+        credentials: "include",
+      }),
+    interceptors,
+  });
+}
+
+export function toWebsiteApiError(error: unknown): ApiError {
+  if (error instanceof ApiError) {
+    return error;
+  }
+  if (error instanceof ConnectError) {
+    const info = extractConnectErrorInfo(error);
+    return new ApiError(info.status, info.code, info.message);
+  }
+  return new ApiError(0, "NETWORK_ERROR", "无法连接到接口服务，请检查网络或稍后重试");
+}
+
+function fromProtoApiKeySummary(item: proto.ApiKeySummary): ApiKeySummary {
+  const actions: ApiKeyAction[] = [];
+  for (const action of item.permissions?.media ?? []) {
+    const mapped = fromProtoApiKeyAction(action);
+    if (mapped) {
+      actions.push(mapped);
+    }
+  }
+  return {
+    id: item.id,
+    name: item.name ?? null,
+    prefix: item.prefix ?? null,
+    start: item.start ?? null,
+    enabled: item.enabled,
+    permissions: { media: actions },
+    canSubmit: item.canSubmit,
+    createdAt: item.createdAt,
+    expiresAt: item.expiresAt ?? null,
+  };
+}
+
 interface RawErrorBody {
   error?: unknown;
   code?: unknown;
@@ -135,7 +193,7 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
-async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function authHttpRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers();
   headers.set("accept", "application/json");
 
@@ -205,6 +263,7 @@ export function formatApiError(error: unknown, fallback = "操作失败，请稍
       case "PROVIDER_NOT_FOUND":
         return "该第三方登录方式暂未在服务端启用";
       case "TOO_MANY_REQUESTS":
+      case "RATE_LIMITED":
         return "请求过于频繁，请稍后再试";
       default:
         if (error.status === 404 && error.message.toLowerCase().includes("provider")) {
@@ -226,21 +285,30 @@ export async function getCurrentUser(cookieHeader?: string): Promise<CurrentUser
     return null;
   }
 
+  const client = createClient(proto.AccountService, createWebsiteConnectTransport(cookieHeader));
   try {
-    return await apiRequest<CurrentUser>("/v1/me", {
-      method: "GET",
-      cookieHeader,
-    });
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 401) {
+    const res = await client.getCurrentUser({});
+    if (!res.user) {
       return null;
     }
-    throw error;
+    return {
+      id: res.user.id,
+      email: res.user.email,
+      name: res.user.name,
+      emailVerified: res.user.emailVerified,
+      role: res.user.role,
+    };
+  } catch (error) {
+    const apiErr = toWebsiteApiError(error);
+    if (apiErr.status === 401) {
+      return null;
+    }
+    throw apiErr;
   }
 }
 
 export async function signUpWithEmail(input: SignUpWithEmailInput): Promise<AuthSessionResponse> {
-  return apiRequest<AuthSessionResponse>("/api/auth/sign-up/email", {
+  return authHttpRequest<AuthSessionResponse>("/api/auth/sign-up/email", {
     method: "POST",
     body: {
       name: input.name.trim(),
@@ -252,7 +320,7 @@ export async function signUpWithEmail(input: SignUpWithEmailInput): Promise<Auth
 }
 
 export async function signInWithEmail(input: SignInWithEmailInput): Promise<AuthSessionResponse> {
-  return apiRequest<AuthSessionResponse>("/api/auth/sign-in/email", {
+  return authHttpRequest<AuthSessionResponse>("/api/auth/sign-in/email", {
     method: "POST",
     body: {
       email: input.email.trim(),
@@ -263,7 +331,7 @@ export async function signInWithEmail(input: SignInWithEmailInput): Promise<Auth
 }
 
 export async function signOut(): Promise<{ success: boolean }> {
-  const result = await apiRequest<{ success?: boolean } | undefined>("/api/auth/sign-out", {
+  const result = await authHttpRequest<{ success?: boolean } | undefined>("/api/auth/sign-out", {
     method: "POST",
     body: {},
   });
@@ -274,7 +342,7 @@ export async function resendVerificationEmail(
   email: string,
   callbackURL?: string,
 ): Promise<{ status: boolean }> {
-  const result = await apiRequest<{ status?: boolean } | undefined>(
+  const result = await authHttpRequest<{ status?: boolean } | undefined>(
     "/api/auth/send-verification-email",
     {
       method: "POST",
@@ -304,7 +372,7 @@ export async function startOAuthSignIn(
   };
 
   try {
-    const result = await apiRequest<OAuthSignInResponse>("/api/auth/sign-in/social", {
+    const result = await authHttpRequest<OAuthSignInResponse>("/api/auth/sign-in/social", {
       method: "POST",
       body: payload,
     });
@@ -315,7 +383,7 @@ export async function startOAuthSignIn(
   } catch (error) {
     if (provider === "trakt" && error instanceof ApiError && error.status === 404) {
       try {
-        const fallback = await apiRequest<OAuthSignInResponse>("/api/auth/sign-in/oauth2", {
+        const fallback = await authHttpRequest<OAuthSignInResponse>("/api/auth/sign-in/oauth2", {
           method: "POST",
           body: {
             providerId: provider,
@@ -342,29 +410,45 @@ export async function startOAuthSignIn(
 }
 
 export async function listApiKeys(cookieHeader?: string): Promise<ApiKeyListResponse> {
-  return apiRequest<ApiKeyListResponse>("/v1/api-keys", {
-    method: "GET",
-    cookieHeader,
-  });
+  const client = createClient(proto.AccountService, createWebsiteConnectTransport(cookieHeader));
+  try {
+    const res = await client.listApiKeys({});
+    return {
+      apiKeys: res.apiKeys.map(fromProtoApiKeySummary),
+      total: res.total,
+    };
+  } catch (error) {
+    throw toWebsiteApiError(error);
+  }
 }
 
 export async function createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey> {
   const trimmedName = input.name?.trim();
-  return apiRequest<CreatedApiKey>("/v1/api-keys", {
-    method: "POST",
-    body: {
+  const client = createClient(proto.AccountService, createWebsiteConnectTransport());
+  try {
+    const res = await client.createApiKey({
       ...(trimmedName ? { name: trimmedName } : {}),
       canSubmit: input.canSubmit,
       ...(input.expiresIn !== undefined ? { expiresIn: input.expiresIn } : {}),
-    },
-  });
+    });
+    if (!res.apiKey) {
+      throw new ApiError(500, "INVALID_RESPONSE", "服务端未返回密钥信息");
+    }
+    return {
+      ...fromProtoApiKeySummary(res.apiKey),
+      key: res.key,
+    };
+  } catch (error) {
+    throw toWebsiteApiError(error);
+  }
 }
 
 export async function revokeApiKey(id: string): Promise<{ success: boolean; id: string }> {
-  return apiRequest<{ success: boolean; id: string }>(
-    `/v1/api-keys/${encodeURIComponent(id.trim())}`,
-    {
-      method: "DELETE",
-    },
-  );
+  const client = createClient(proto.AccountService, createWebsiteConnectTransport());
+  try {
+    const res = await client.deleteApiKey({ id: id.trim() });
+    return { success: res.success, id: res.id };
+  } catch (error) {
+    throw toWebsiteApiError(error);
+  }
 }

@@ -1,9 +1,8 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { resolveEpisode, type BaselineSource } from "@media-ref/client";
 import {
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -11,8 +10,19 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoChangeRequestStatus,
+  getChangeRequestStateRpc,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-catalog-and-non-tmdb-integration-tests-0123456789";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -36,79 +46,20 @@ function makeBilibiliEpisodes(count: number) {
   }));
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupVerifiedUserAndKeys(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ) {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Catalog Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const submitKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Submit Key", canSubmit: true }),
-    }),
-  );
-  expect(submitKeyRes.status).toBe(201);
-  const submitKey = (await submitKeyRes.json()) as { id: string; key: string };
-
-  const readKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read Key", canSubmit: false }),
-    }),
-  );
-  expect(readKeyRes.status).toBe(201);
-  const readKey = (await readKeyRes.json()) as { id: string; key: string };
+  const { userId, cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Catalog Tester",
+  });
+  const submitKey = await issueApiKeyRpc(app, cookie, { name: "Submit Key", canSubmit: true });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Read Key", canSubmit: false });
 
   return {
-    userId: signUpBody.user.id,
+    userId,
     cookie,
     submitKey: submitKey.key,
     readKey: readKey.key,
@@ -477,104 +428,94 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "catalog-assoc@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // Reject invalid Douban URL and variant on catalog association
-    const badUrlRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "douban",
-          nativeId: "https://book.douban.com/subject/1001/",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
-        }),
+    const badUrlErr = await expectRpcError(
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:tv:95479"),
+        namespace: "douban",
+        nativeId: "https://book.douban.com/subject/1001/",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 24,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+          }),
+        ],
       }),
     );
-    expect(badUrlRes.status).toBe(400);
-    expect(await badUrlRes.json()).toMatchObject({ error: "INVALID_NATIVE_ID" });
+    expect(badUrlErr.status).toBe(400);
+    expect(badUrlErr.code).toBe("INVALID_NATIVE_ID");
 
-    const variantCatalogRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "douban",
-          nativeId: "1001",
-          variantDescription: "原声",
-          segments: [],
-        }),
+    const variantCatalogErr = await expectRpcError(
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:tv:95479"),
+        namespace: "douban",
+        nativeId: "1001",
+        variantDescription: "原声",
+        segments: [],
       }),
     );
-    expect(variantCatalogRes.status).toBe(400);
-    expect(await variantCatalogRes.json()).toMatchObject({ error: "VARIANT_NOT_ALLOWED" });
+    expect(variantCatalogErr.status).toBe(400);
+    expect(variantCatalogErr.code).toBe("VARIANT_NOT_ALLOWED");
 
     // Submit Douban Season 1, Douban Season 2, and Bangumi Season 1 (via URLs -> canonicalized!)
-    const s1Submit = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "douban",
-          nativeId: "https://movie.douban.com/subject/1001/",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const s1Submit = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "douban",
+      nativeId: "https://movie.douban.com/subject/1001/",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(s1Submit.status).toBe(201);
-    const s1Cr = (await s1Submit.json()) as {
-      changeRequest: { id: string; status: string; nativeId: string };
-    };
-    expect(s1Cr.changeRequest.status).toBe("pending_evidence");
-    expect(s1Cr.changeRequest.nativeId).toBe("1001");
+      ],
+    });
+    const s1Cr = s1Submit.changeRequest!;
+    expect(fromProtoChangeRequestStatus(s1Cr.status)).toBe("pending_evidence");
+    expect(s1Cr.nativeId).toBe("1001");
 
-    const s2Submit = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "douban",
-          nativeId: "https://m.douban.com/movie/subject/1002/",
-          segments: [
-            { season: 2, episodeStart: 1, episodeEnd: 23, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const s2Submit = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "douban",
+      nativeId: "https://m.douban.com/movie/subject/1002/",
+      segments: [
+        toProtoSegmentInput({
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 23,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(s2Submit.status).toBe(201);
-    const s2Cr = (await s2Submit.json()) as {
-      changeRequest: { id: string; status: string; nativeId: string };
-    };
-    expect(s2Cr.changeRequest.status).toBe("pending_evidence");
-    expect(s2Cr.changeRequest.nativeId).toBe("1002");
+      ],
+    });
+    const s2Cr = s2Submit.changeRequest!;
+    expect(fromProtoChangeRequestStatus(s2Cr.status)).toBe("pending_evidence");
+    expect(s2Cr.nativeId).toBe("1002");
 
-    const bgmSubmit = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bangumi",
-          nativeId: "https://bgm.tv/subject/294993",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const bgmSubmit = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bangumi",
+      nativeId: "https://bgm.tv/subject/294993",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(bgmSubmit.status).toBe(201);
-    const bgmCr = (await bgmSubmit.json()) as {
-      changeRequest: { id: string; status: string; nativeId: string };
-    };
-    expect(bgmCr.changeRequest.status).toBe("pending_evidence");
-    expect(bgmCr.changeRequest.nativeId).toBe("294993");
+      ],
+    });
+    const bgmCr = bgmSubmit.changeRequest!;
+    expect(fromProtoChangeRequestStatus(bgmCr.status)).toBe("pending_evidence");
+    expect(bgmCr.nativeId).toBe("294993");
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -596,29 +537,16 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
     expect(processed).toBe(3);
 
     // All three catalog change requests auto-approved!
-    for (const id of [s1Cr.changeRequest.id, s2Cr.changeRequest.id, bgmCr.changeRequest.id]) {
-      const statusRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      );
-      expect(statusRes.status).toBe(200);
-      expect(await statusRes.json()).toMatchObject({
-        changeRequest: { status: "approved", decisionReason: "evidence_gate_passed" },
+    for (const id of [s1Cr.id, s2Cr.id, bgmCr.id]) {
+      const crState = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, id);
+      expect(crState).toMatchObject({
+        status: "approved",
+        decisionReason: "evidence_gate_passed",
       });
     }
 
     // Query by Douban S1, Douban S2, and Bangumi -> returns MediaDocument with matchedAssociationId set
-    const douban1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/douban:1001`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(douban1Res.status).toBe(200);
-    const douban1Body = (await douban1Res.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
+    const douban1Body = await getMediaDocumentRpc(app, user.readKey, "douban:1001");
     expect(douban1Body.matchedAssociationId).toBeTruthy();
     const douban1Assoc = douban1Body.document.associations.find(
       (a) => a.namespace === "douban" && a.nativeId === "1001",
@@ -629,41 +557,17 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
       status: "confirmed",
     });
 
-    const douban2Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/douban:1002`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(douban2Res.status).toBe(200);
-    const douban2Body = (await douban2Res.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
+    const douban2Body = await getMediaDocumentRpc(app, user.readKey, "douban:1002");
     expect(douban2Body.matchedAssociationId).toBeTruthy();
     expect(douban2Body.matchedAssociationId).not.toBe(douban1Body.matchedAssociationId);
 
-    const bgmRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/bangumi:294993`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(bgmRes.status).toBe(200);
-    const bgmBody = (await bgmRes.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
+    const bgmBody = await getMediaDocumentRpc(app, user.readKey, "bangumi:294993");
     expect(bgmBody.matchedAssociationId).toBeTruthy();
     expect(bgmBody.document.media.id).toBe(douban1Body.document.media.id);
 
     // Also query by IMDb, TVDB, and Trakt external keys
     for (const extKey of ["imdb:tt12343534", "tvdb:377543", "trakt:show:159384"]) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/${extKey}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      );
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as { document: MediaDocument };
+      const body = await getMediaDocumentRpc(app, user.readKey, extKey);
       expect(body.document.media.id).toBe(douban1Body.document.media.id);
     }
 
@@ -708,8 +612,22 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "non-tmdb@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submissions = [
+    const submissions: Array<{
+      targetExternalKey: string;
+      nativeId: string;
+      segments: Array<{
+        season: number;
+        episodeStart: number;
+        episodeEnd: number;
+        targetEpisodeStart: number;
+        baseline?: BaselineSource;
+      }>;
+      expectedBaseline: BaselineSource;
+      expectedLookupKeys: string[];
+      expectMatchedOnFirstKey: boolean;
+    }> = [
       {
         targetExternalKey: "douban:600002",
         nativeId: "ss600002",
@@ -757,20 +675,14 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
     ];
 
     for (const sub of submissions) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: sub.targetExternalKey,
-            namespace: "bilibili",
-            nativeId: sub.nativeId,
-            variantDescription: "原声",
-            segments: sub.segments,
-          }),
-        }),
-      );
-      expect(res.status).toBe(201);
+      const res = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef(sub.targetExternalKey),
+        namespace: "bilibili",
+        nativeId: sub.nativeId,
+        variantDescription: "原声",
+        segments: sub.segments.map((seg) => toProtoSegmentInput(seg)),
+      });
+      expect(res.changeRequest?.id).toBeTruthy();
     }
 
     const emitted: JobQueueMessage[] = [];
@@ -793,16 +705,7 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
       let mediaId: string | null = null;
       for (let i = 0; i < sub.expectedLookupKeys.length; i += 1) {
         const key = sub.expectedLookupKeys[i]!;
-        const readRes = await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/media/${key}`, {
-            headers: { "x-api-key": user.readKey },
-          }),
-        );
-        expect(readRes.status).toBe(200);
-        const body = (await readRes.json()) as {
-          document: MediaDocument;
-          matchedAssociationId: string | null;
-        };
+        const body = await getMediaDocumentRpc(app, user.readKey, key);
         expect(body.document.media.baseline).toBe(sub.expectedBaseline);
         if (mediaId === null) {
           mediaId = body.document.media.id;
@@ -816,31 +719,18 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
     }
 
     // Adding a subsequent catalog association (bangumi:600002) to the existing Douban-baseline media passes Evidence Gate
-    const addBgmRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "douban:600002",
-          namespace: "bangumi",
-          nativeId: "https://bgm.tv/subject/600002",
-          segments: [{ season: 1, episodeStart: 1, episodeEnd: 8, targetEpisodeStart: 1 }],
-        }),
-      }),
-    );
-    expect(addBgmRes.status).toBe(201);
+    const addBgmRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("douban:600002"),
+      namespace: "bangumi",
+      nativeId: "https://bgm.tv/subject/600002",
+      segments: [
+        toProtoSegmentInput({ season: 1, episodeStart: 1, episodeEnd: 8, targetEpisodeStart: 1 }),
+      ],
+    });
+    expect(addBgmRes.changeRequest?.id).toBeTruthy();
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
 
-    const byAddedBgmRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/bangumi:600002`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(byAddedBgmRes.status).toBe(200);
-    const byAddedBgm = (await byAddedBgmRes.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
+    const byAddedBgm = await getMediaDocumentRpc(app, user.readKey, "bangumi:600002");
     expect(byAddedBgm.document.media.baseline).toBe("douban");
     expect(byAddedBgm.matchedAssociationId).toBeTruthy();
     expect(byAddedBgm.document.associations.map((a) => `${a.namespace}:${a.nativeId}`)).toEqual(
@@ -870,62 +760,58 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "trakt-only@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // 1. Before media exists: submitting WITH segments targeting trakt:show:12345 is rejected (400)
-    const segmentedBeforeRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "trakt:show:12345",
-          namespace: "bilibili",
-          nativeId: "ss12345",
-          variantDescription: "原声",
-          segments: [{ season: 1, episodeStart: 1, episodeEnd: 10, targetEpisodeStart: 1 }],
-        }),
+    const segmentedBeforeErr = await expectRpcError(
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef("trakt:show:12345"),
+        namespace: "bilibili",
+        nativeId: "ss12345",
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 10,
+            targetEpisodeStart: 1,
+          }),
+        ],
       }),
     );
-    expect(segmentedBeforeRes.status).toBe(400);
-    expect(await segmentedBeforeRes.json()).toMatchObject({
-      error: "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE",
-    });
+    expect(segmentedBeforeErr.status).toBe(400);
+    expect(segmentedBeforeErr.code).toBe("SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE");
 
     // Also rejected when an explicit baseline is supplied on segments
-    const segmentedWithBaselineRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "trakt:show:12345",
-          namespace: "bilibili",
-          nativeId: "ss12345",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 10, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
-        }),
+    const segmentedWithBaselineErr = await expectRpcError(
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef("trakt:show:12345"),
+        namespace: "bilibili",
+        nativeId: "ss12345",
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 10,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+          }),
+        ],
       }),
     );
-    expect(segmentedWithBaselineRes.status).toBe(400);
-    expect(await segmentedWithBaselineRes.json()).toMatchObject({
-      error: "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE",
-    });
+    expect(segmentedWithBaselineErr.status).toBe(400);
+    expect(segmentedWithBaselineErr.code).toBe("SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE");
 
     // 2. Submitting whole-media (segments: []) succeeds and creates media with baseline: null
-    const wholeMediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "trakt:show:12345",
-          namespace: "bilibili",
-          nativeId: "ss12345",
-          variantDescription: "原声",
-          segments: [],
-        }),
-      }),
-    );
-    expect(wholeMediaRes.status).toBe(201);
+    const wholeMediaRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("trakt:show:12345"),
+      namespace: "bilibili",
+      nativeId: "ss12345",
+      variantDescription: "原声",
+      segments: [],
+    });
+    expect(wholeMediaRes.changeRequest?.id).toBeTruthy();
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -943,13 +829,7 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
     const processed = await drainEvidenceJobs(worker, emitted, t0);
     expect(processed).toBe(1);
 
-    const readTraktRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/trakt:show:12345`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(readTraktRes.status).toBe(200);
-    const traktDoc = (await readTraktRes.json()) as { document: MediaDocument };
+    const traktDoc = await getMediaDocumentRpc(app, user.readKey, "trakt:show:12345");
     expect(traktDoc.document.media.baseline).toBeNull();
     expect(traktDoc.document.externalIds).toEqual([{ namespace: "trakt", nativeId: "show:12345" }]);
     expect(traktDoc.document.associations).toHaveLength(1);
@@ -961,60 +841,39 @@ describe("Catalog associations (Douban/Bangumi) & non-TMDB media end-to-end (#17
 
     // 3. After media exists with baseline === null: adding segments via trakt key OR media UUID is STILL rejected (400)
     for (const targetKey of ["trakt:show:12345", traktDoc.document.media.id]) {
-      const segmentedAfterRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: targetKey,
-            namespace: "douban",
-            nativeId: "777001",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 10,
-                targetEpisodeStart: 1,
-                baseline: "douban",
-              },
-            ],
-          }),
+      const segmentedAfterErr = await expectRpcError(
+        submitRpc.changeRequest.createChangeRequest({
+          target: mediaRef(targetKey),
+          namespace: "douban",
+          nativeId: "777001",
+          segments: [
+            toProtoSegmentInput({
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: 10,
+              targetEpisodeStart: 1,
+              baseline: "douban",
+            }),
+          ],
         }),
       );
-      expect(segmentedAfterRes.status).toBe(400);
-      expect(await segmentedAfterRes.json()).toMatchObject({
-        error: "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE",
-      });
+      expect(segmentedAfterErr.status).toBe(400);
+      expect(segmentedAfterErr.code).toBe("SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE");
     }
 
     // 4. Adding another whole-media association (douban:777001, segments: []) while baseline === null succeeds!
-    const wholeDoubanRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: traktDoc.document.media.id,
-          namespace: "douban",
-          nativeId: "777001",
-          segments: [],
-        }),
-      }),
-    );
-    expect(wholeDoubanRes.status).toBe(201);
+    const wholeDoubanRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef(traktDoc.document.media.id),
+      namespace: "douban",
+      nativeId: "777001",
+      segments: [],
+    });
+    expect(wholeDoubanRes.changeRequest?.id).toBeTruthy();
 
     const processed2 = await drainEvidenceJobs(worker, emitted, t0);
     expect(processed2).toBe(1);
 
-    const readByDoubanRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/douban:777001`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(readByDoubanRes.status).toBe(200);
-    const byDouban = (await readByDoubanRes.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
+    const byDouban = await getMediaDocumentRpc(app, user.readKey, "douban:777001");
     expect(byDouban.document.media.id).toBe(traktDoc.document.media.id);
     expect(byDouban.document.media.baseline).toBeNull();
     expect(byDouban.matchedAssociationId).toBeTruthy();

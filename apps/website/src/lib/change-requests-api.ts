@@ -1,9 +1,19 @@
+import { ConnectError, createClient } from "@connectrpc/connect";
 import {
   BASELINE_PRIORITY,
   CATALOG_NAMESPACES,
   PLATFORM_NAMESPACES,
+  extractConnectErrorInfo,
+  fromProtoChangeRequestStatus,
+  fromProtoMediaRef,
+  fromProtoSegment,
+  fromProtoSubmitterType,
   isPlatformNamespace,
   parseExternalKey,
+  proto,
+  toProtoChangeRequestStatus,
+  toProtoMediaRefFromKey,
+  toProtoSegmentInput,
   type BaselineSource,
   type CatalogNamespace,
   type ChangeRequestStatus,
@@ -16,7 +26,7 @@ import {
 } from "@media-ref/client";
 import { createIsomorphicFn } from "@tanstack/react-start";
 import { getRequestHeader } from "@tanstack/react-start/server";
-import { ApiError, formatApiError, getApiBaseUrl } from "./api";
+import { ApiError, createWebsiteConnectTransport, formatApiError } from "./api";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -180,6 +190,48 @@ export class ChangeRequestApiError extends ApiError {
     this.name = "ChangeRequestApiError";
     this.details = details;
   }
+}
+
+function toChangeRequestApiError(error: unknown): ChangeRequestApiError {
+  if (error instanceof ChangeRequestApiError) {
+    return error;
+  }
+  if (error instanceof ConnectError) {
+    const info = extractConnectErrorInfo(error);
+    return new ChangeRequestApiError(info.status, info.code, info.message, info.validationErrors);
+  }
+  return new ChangeRequestApiError(0, "NETWORK_ERROR", "无法连接到接口服务，请检查网络或稍后重试");
+}
+
+function fromProtoChangeRequest(cr: proto.ChangeRequest): ChangeRequestRecord {
+  const decodedTarget = fromProtoMediaRef(cr.target, { mode: "target" });
+  return {
+    id: cr.id,
+    status: fromProtoChangeRequestStatus(cr.status) ?? "pending_evidence",
+    submitterUserId: cr.submitterUserId,
+    submitterKeyId: cr.submitterKeyId ?? null,
+    submitterType: fromProtoSubmitterType(cr.submitterType),
+    taskId: cr.taskId ?? null,
+    mediaId: cr.mediaId ?? null,
+    targetExternalKey: decodedTarget.ok ? decodedTarget.key : "",
+    namespace: cr.namespace as AssociationNamespace,
+    rawNativeId: cr.rawNativeId,
+    nativeId: cr.nativeId,
+    variantId: cr.variantId ?? null,
+    variantDescription: cr.variantDescription ?? null,
+    setDefaultVariant: cr.setDefaultVariant,
+    replacesAssociationId: cr.replacesAssociationId ?? null,
+    segments: cr.segments.map(fromProtoSegment),
+    evidence: cr.evidence ? (cr.evidence as Record<string, unknown>) : null,
+    conflictReason: cr.conflictReason ?? null,
+    decisionReason: cr.decisionReason ?? null,
+    reviewerUserId: cr.reviewerUserId ?? null,
+    reviewedAt: cr.reviewedAt ?? null,
+    appliedAssociationId: cr.appliedAssociationId ?? null,
+    appliedRevisionId: cr.appliedRevisionId ?? null,
+    createdAt: cr.createdAt,
+    updatedAt: cr.updatedAt,
+  };
 }
 
 export function isUuid(value: string): boolean {
@@ -447,138 +499,69 @@ export function formatChangeRequestApiError(
   return formatApiError(error, fallback);
 }
 
-interface RawErrorBody {
-  error?: unknown;
-  code?: unknown;
-  message?: unknown;
-  details?: unknown;
-}
-
-async function parseErrorResponse(response: Response): Promise<ChangeRequestApiError> {
-  let code = `HTTP_${response.status}`;
-  let message = response.statusText || "请求失败";
-  let details: SegmentValidationError[] | undefined;
-
-  try {
-    const raw = (await response.json()) as RawErrorBody;
-    if (typeof raw.error === "string" && raw.error.length > 0) {
-      code = raw.error;
-    } else if (typeof raw.code === "string" && raw.code.length > 0) {
-      code = raw.code;
-    }
-    if (typeof raw.message === "string" && raw.message.length > 0) {
-      message = raw.message;
-    }
-    if (Array.isArray(raw.details)) {
-      details = raw.details as SegmentValidationError[];
-    }
-  } catch {
-    // Non-JSON response; keep HTTP status fallback.
-  }
-
-  return new ChangeRequestApiError(response.status, code, message, details);
-}
-
-interface RequestOptions {
-  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-  body?: unknown;
-  cookieHeader?: string;
-  signal?: AbortSignal;
-}
-
-async function changeRequestFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers();
-  headers.set("accept", "application/json");
-
-  if (options.body !== undefined) {
-    headers.set("content-type", "application/json");
-  }
-  if (options.cookieHeader) {
-    headers.set("cookie", options.cookieHeader);
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(`${getApiBaseUrl()}${path}`, {
-      method: options.method ?? "GET",
-      headers,
-      credentials: "include",
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-      signal: options.signal,
-    });
-  } catch {
-    throw new ChangeRequestApiError(0, "NETWORK_ERROR", "无法连接到接口服务，请检查网络或稍后重试");
-  }
-
-  if (!response.ok) {
-    throw await parseErrorResponse(response);
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  const text = await response.text();
-  if (!text) {
-    return undefined as T;
-  }
-  return JSON.parse(text) as T;
-}
-
 export async function submitChangeRequest(
   payload: SubmitChangeRequestInput,
 ): Promise<ChangeRequestRecord> {
   const isPlatform = isPlatformNamespace(payload.namespace);
   const trimmedNativeId = payload.nativeId.trim();
   const trimmedRawNativeId = (payload.rawNativeId ?? payload.nativeId).trim();
+  const trimmedVariantId = isPlatform ? payload.variantId?.trim() || undefined : undefined;
+  const trimmedVariantDescription = isPlatform
+    ? payload.variantDescription?.trim() || undefined
+    : undefined;
+  const trimmedReplacesAssociationId = payload.replacesAssociationId?.trim() || undefined;
 
-  const body: Record<string, unknown> = {
-    targetExternalKey: payload.targetExternalKey.trim(),
-    namespace: payload.namespace,
-    nativeId: trimmedNativeId,
-    rawNativeId: trimmedRawNativeId || trimmedNativeId,
-    segments: payload.segments ?? [],
-  };
-
-  if (isPlatform) {
-    const trimmedVariantId = payload.variantId?.trim() || null;
-    const trimmedVariantDescription = payload.variantDescription?.trim() || null;
-    if (trimmedVariantId) {
-      body.variantId = trimmedVariantId;
-    }
-    if (trimmedVariantDescription) {
-      body.variantDescription = trimmedVariantDescription;
-    }
-    body.setDefaultVariant = Boolean(payload.setDefaultVariant);
+  const protoTarget = toProtoMediaRefFromKey(payload.targetExternalKey.trim());
+  if (!protoTarget) {
+    throw new ChangeRequestApiError(
+      400,
+      "INVALID_TARGET_KEY",
+      "目标媒体格式无效，请输入合法的媒体 UUID 或外部标识",
+    );
   }
 
-  const trimmedReplacesAssociationId = payload.replacesAssociationId?.trim() || null;
-  if (trimmedReplacesAssociationId) {
-    body.replacesAssociationId = trimmedReplacesAssociationId;
-  }
+  const client = createClient(proto.ChangeRequestService, createWebsiteConnectTransport());
+  try {
+    const res = await client.createChangeRequest({
+      target: protoTarget,
+      namespace: payload.namespace,
+      nativeId: trimmedNativeId,
+      rawNativeId: trimmedRawNativeId || trimmedNativeId,
+      ...(trimmedVariantId ? { variantId: trimmedVariantId } : {}),
+      ...(trimmedVariantDescription ? { variantDescription: trimmedVariantDescription } : {}),
+      setDefaultVariant: isPlatform ? Boolean(payload.setDefaultVariant) : false,
+      ...(trimmedReplacesAssociationId
+        ? { replacesAssociationId: trimmedReplacesAssociationId }
+        : {}),
+      segments: (payload.segments ?? []).map(toProtoSegmentInput),
+    });
 
-  const result = await changeRequestFetch<{ changeRequest: ChangeRequestRecord }>(
-    "/v1/change-requests",
-    {
-      method: "POST",
-      body,
-    },
-  );
-  return result.changeRequest;
+    if (!res.changeRequest) {
+      throw new ChangeRequestApiError(500, "INVALID_RESPONSE", "服务端未返回变更单详情");
+    }
+    return fromProtoChangeRequest(res.changeRequest);
+  } catch (error) {
+    throw toChangeRequestApiError(error);
+  }
 }
 
 export async function getChangeRequest(
   id: string,
   cookieHeader?: string,
 ): Promise<ChangeRequestRecord> {
-  const result = await changeRequestFetch<{ changeRequest: ChangeRequestRecord }>(
-    `/v1/change-requests/${encodeURIComponent(id.trim())}`,
-    {
-      method: "GET",
-      cookieHeader,
-    },
+  const client = createClient(
+    proto.ChangeRequestService,
+    createWebsiteConnectTransport(cookieHeader),
   );
-  return result.changeRequest;
+  try {
+    const res = await client.getChangeRequest({ id: id.trim() });
+    if (!res.changeRequest) {
+      throw new ChangeRequestApiError(404, "CHANGE_REQUEST_NOT_FOUND", "未找到该变更单");
+    }
+    return fromProtoChangeRequest(res.changeRequest);
+  } catch (error) {
+    throw toChangeRequestApiError(error);
+  }
 }
 
 export async function listReviewerChangeRequests(
@@ -586,23 +569,20 @@ export async function listReviewerChangeRequests(
   cookieHeader?: string,
   pagination?: { limit?: number; offset?: number },
 ): Promise<ChangeRequestListResponse> {
-  const params = new URLSearchParams();
-  if (status) {
-    params.set("status", status);
+  const client = createClient(proto.ReviewerService, createWebsiteConnectTransport(cookieHeader));
+  try {
+    const res = await client.listChangeRequests({
+      status: toProtoChangeRequestStatus(status),
+      ...(pagination?.limit !== undefined ? { limit: pagination.limit } : {}),
+      ...(pagination?.offset !== undefined ? { offset: pagination.offset } : {}),
+    });
+    return {
+      changeRequests: res.changeRequests.map(fromProtoChangeRequest),
+      total: res.total,
+    };
+  } catch (error) {
+    throw toChangeRequestApiError(error);
   }
-  if (pagination?.limit !== undefined) {
-    params.set("limit", String(pagination.limit));
-  }
-  if (pagination?.offset !== undefined) {
-    params.set("offset", String(pagination.offset));
-  }
-  const query = params.toString();
-  const path = query ? `/v1/reviewer/change-requests?${query}` : "/v1/reviewer/change-requests";
-
-  return changeRequestFetch<ChangeRequestListResponse>(path, {
-    method: "GET",
-    cookieHeader,
-  });
 }
 
 export async function approveChangeRequest(
@@ -610,13 +590,24 @@ export async function approveChangeRequest(
   reason?: string,
 ): Promise<ApproveChangeRequestResponse> {
   const trimmedReason = reason?.trim();
-  return changeRequestFetch<ApproveChangeRequestResponse>(
-    `/v1/reviewer/change-requests/${encodeURIComponent(id.trim())}/approve`,
-    {
-      method: "POST",
-      body: trimmedReason ? { reason: trimmedReason } : {},
-    },
-  );
+  const client = createClient(proto.ReviewerService, createWebsiteConnectTransport());
+  try {
+    const res = await client.approveChangeRequest({
+      id: id.trim(),
+      ...(trimmedReason ? { reason: trimmedReason } : {}),
+    });
+    if (!res.changeRequest) {
+      throw new ChangeRequestApiError(500, "INVALID_RESPONSE", "服务端未返回审批后的变更单");
+    }
+    return {
+      changeRequest: fromProtoChangeRequest(res.changeRequest),
+      mediaId: res.mediaId,
+      associationId: res.associationId,
+      revisionId: res.revisionId,
+    };
+  } catch (error) {
+    throw toChangeRequestApiError(error);
+  }
 }
 
 export async function rejectChangeRequest(
@@ -624,19 +615,23 @@ export async function rejectChangeRequest(
   reason: string,
 ): Promise<ChangeRequestRecord> {
   const trimmedReason = reason.trim();
-  const result = await changeRequestFetch<{ changeRequest: ChangeRequestRecord }>(
-    `/v1/reviewer/change-requests/${encodeURIComponent(id.trim())}/reject`,
-    {
-      method: "POST",
-      body: trimmedReason ? { reason: trimmedReason } : {},
-    },
-  );
-  return result.changeRequest;
+  const client = createClient(proto.ReviewerService, createWebsiteConnectTransport());
+  try {
+    const res = await client.rejectChangeRequest({
+      id: id.trim(),
+      ...(trimmedReason ? { reason: trimmedReason } : {}),
+    });
+    if (!res.changeRequest) {
+      throw new ChangeRequestApiError(500, "INVALID_RESPONSE", "服务端未返回驳回后的变更单");
+    }
+    return fromProtoChangeRequest(res.changeRequest);
+  } catch (error) {
+    throw toChangeRequestApiError(error);
+  }
 }
 
 /**
- * Locks or unlocks an association via the reviewer lock endpoint (Ticket #12).
- * Gracefully translates HTTP 404 route-not-ready responses when #12 is not yet deployed.
+ * Locks or unlocks an association via the ReviewerService ConnectRPC endpoint.
  */
 export async function lockAssociation(
   associationId: string,
@@ -644,38 +639,27 @@ export async function lockAssociation(
 ): Promise<LockAssociationResponse> {
   const trimmedId = associationId.trim();
   const locked = options.locked ?? true;
-  const trimmedReason = options.reason?.trim();
 
+  const client = createClient(proto.ReviewerService, createWebsiteConnectTransport());
   try {
-    const raw = await changeRequestFetch<
-      | {
-          association?: { id?: string; locked?: boolean };
-          associationId?: string;
-          locked?: boolean;
-        }
-      | undefined
-    >(`/v1/reviewer/associations/${encodeURIComponent(trimmedId)}/lock`, {
-      method: "POST",
-      body: {
-        locked,
-        ...(trimmedReason ? { reason: trimmedReason } : {}),
-      },
+    const res = await client.setAssociationLock({
+      associationId: trimmedId,
+      locked,
     });
     return {
-      associationId: raw?.association?.id ?? raw?.associationId ?? trimmedId,
-      locked: raw?.association?.locked ?? raw?.locked ?? locked,
+      associationId: res.association?.id ?? res.associationId ?? trimmedId,
+      locked: res.association?.locked ?? res.locked,
     };
   } catch (error) {
-    if (error instanceof ChangeRequestApiError && error.status === 404) {
-      if (error.code === "HTTP_404") {
-        throw new ChangeRequestApiError(
-          404,
-          "LOCK_ENDPOINT_NOT_AVAILABLE",
-          "服务端尚未启用关联锁定接口（待锁定功能上线后即可使用）",
-        );
-      }
+    const crErr = toChangeRequestApiError(error);
+    if (crErr.status === 404 && (crErr.code === "NOT_FOUND" || crErr.code === "UNIMPLEMENTED")) {
+      throw new ChangeRequestApiError(
+        404,
+        "LOCK_ENDPOINT_NOT_AVAILABLE",
+        "服务端尚未启用关联锁定接口（待锁定功能上线后即可使用）",
+      );
     }
-    throw error;
+    throw crErr;
   }
 }
 

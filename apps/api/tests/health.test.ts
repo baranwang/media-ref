@@ -2,7 +2,8 @@ import type { ExecutionContext, Hyperdrive } from "@cloudflare/workers-types";
 import { createFakeOutboundClient } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import worker, { createApiApp } from "../src/index.ts";
+import worker from "../src/index.ts";
+import { createApiApp } from "../src/lib.ts";
 
 describe("API Worker HTTP entrypoint", () => {
   const handles: TestDbHandle[] = [];

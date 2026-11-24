@@ -1,9 +1,8 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { resolveEpisode } from "@media-ref/client";
 import {
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -11,8 +10,19 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoChangeRequestStatus,
+  getChangeRequestStateRpc,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-tencent-adapter-evidence-tests-0123456789abcdef";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -86,79 +96,20 @@ function makeTencentEpisodesRange(cid: string, seriesTitle: string, start: numbe
   return items;
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupVerifiedUserAndKeys(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ) {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Tencent Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const submitKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Submit Key", canSubmit: true }),
-    }),
-  );
-  expect(submitKeyRes.status).toBe(201);
-  const submitKey = (await submitKeyRes.json()) as { id: string; key: string };
-
-  const readKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read Key", canSubmit: false }),
-    }),
-  );
-  expect(readKeyRes.status).toBe(201);
-  const readKey = (await readKeyRes.json()) as { id: string; key: string };
+  const { userId, cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Tencent Tester",
+  });
+  const submitKey = await issueApiKeyRpc(app, cookie, { name: "Submit Key", canSubmit: true });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Read Key", canSubmit: false });
 
   return {
-    userId: signUpBody.user.id,
+    userId,
     cookie,
     submitKey: submitKey.key,
     readKey: readKey.key,
@@ -415,7 +366,7 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     }
   });
 
-  test("rejects invalid Tencent URLs (400), canonicalizes valid URLs to cid, auto-approves via scheduled + queue, and serves via GET /v1/media", async () => {
+  test("rejects invalid Tencent URLs (400), canonicalizes valid URLs to cid, auto-approves via scheduled + queue, and serves via MediaService.GetMedia", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -437,6 +388,8 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "tencent-submitter@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
+    const readRpc = createRpcClients(app, { apiKey: user.readKey });
 
     // 1. Invalid URLs / video-only x/page links are rejected immediately with HTTP 400
     for (const badInput of [
@@ -445,29 +398,25 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
       "https://evil.example.com/x/cover/mzc002007knmh3g.html",
       "mzc00200",
     ]) {
-      const badRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:108545",
-            namespace: "tencent",
-            nativeId: badInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 30,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
-          }),
+      const badErr = await expectRpcError(
+        submitRpc.changeRequest.createChangeRequest({
+          target: mediaRef({ tmdb: { type: "tv", id: 108545 } }),
+          namespace: "tencent",
+          nativeId: badInput,
+          variantDescription: "原声",
+          segments: [
+            toProtoSegmentInput({
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: 30,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+            }),
+          ],
         }),
       );
-      expect(badRes.status).toBe(400);
-      expect(await badRes.json()).toMatchObject({ error: "INVALID_NATIVE_ID" });
+      expect(badErr.status).toBe(400);
+      expect(badErr.code).toBe("INVALID_NATIVE_ID");
     }
 
     // 2. All valid Tencent URL/ID forms canonicalize to mzc002007knmh3g and enter pending_evidence
@@ -481,49 +430,35 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     const submittedIds: string[] = [];
 
     for (const rawInput of urlVariants) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:108545",
-            namespace: "tencent",
-            nativeId: rawInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 30,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+      const body = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 108545 } }),
+        namespace: "tencent",
+        nativeId: rawInput,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 30,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      );
-      expect(res.status).toBe(201);
-      const body = (await res.json()) as {
-        changeRequest: {
-          id: string;
-          status: string;
-          rawNativeId: string;
-          nativeId: string;
-        };
-      };
-      expect(body.changeRequest.status).toBe("pending_evidence");
-      expect(body.changeRequest.rawNativeId).toBe(rawInput);
-      expect(body.changeRequest.nativeId).toBe("mzc002007knmh3g");
-      submittedIds.push(body.changeRequest.id);
+        ],
+      });
+      expect(fromProtoChangeRequestStatus(body.changeRequest!.status)).toBe("pending_evidence");
+      expect(body.changeRequest!.rawNativeId).toBe(rawInput);
+      expect(body.changeRequest!.nativeId).toBe("mzc002007knmh3g");
+      submittedIds.push(body.changeRequest!.id);
     }
 
     // Before background worker runs, media is NOT readable yet
-    const preRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:108545`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(preRead.status).toBe(404);
+    expect(
+      (
+        await expectRpcError(
+          readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 108545 } }) }),
+        )
+      ).status,
+    ).toBe(404);
 
     // 3. Run Background Worker scheduled -> queue on the first URL submission
     const emitted: JobQueueMessage[] = [];
@@ -551,28 +486,17 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     expect(tracked[0]?.acked).toBe(true);
 
     // 4. Change request is auto-approved
-    const crStatusRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests/${submittedIds[0]}`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(crStatusRes.status).toBe(200);
-    expect(await crStatusRes.json()).toMatchObject({
-      changeRequest: {
-        status: "approved",
-        reviewerUserId: null,
-        decisionReason: "evidence_gate_passed",
-      },
+    const crState = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, submittedIds[0]!);
+    expect(crState).toMatchObject({
+      status: "approved",
+      reviewerUserId: null,
+      decisionReason: "evidence_gate_passed",
     });
 
-    // 5. Media is readable via TMDB key AND via Tencent reverse lookup, and resolves episodes
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:108545`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(mediaRes.status).toBe(200);
-    const mediaBody = (await mediaRes.json()) as { document: MediaDocument };
+    // 5. Media is readable via TMDB ref AND via Tencent reverse lookup, and resolves episodes
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, {
+      tmdb: { type: "tv", id: 108545 },
+    });
     expect(mediaBody.document.associations).toHaveLength(1);
     expect(mediaBody.document.associations[0]).toMatchObject({
       namespace: "tencent",
@@ -587,16 +511,10 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
       targetEpisode: 15,
     });
 
-    const reverseRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tencent:mzc002007knmh3g`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(reverseRes.status).toBe(200);
-    const reverseBody = (await reverseRes.json()) as {
-      items: Array<{ document: MediaDocument }>;
-    };
-    expect(reverseBody.items[0]?.document.media.id).toBe(mediaBody.document.media.id);
+    const reverseBody = await getMediaDocumentRpc(app, user.readKey, {
+      platform: { platform: "tencent", nativeId: "mzc002007knmh3g" },
+    });
+    expect(reverseBody.document.media.id).toBe(mediaBody.document.media.id);
   });
 
   test("auto-approves multi-page paginated Tencent series after aggregating all tabs", async () => {
@@ -621,24 +539,23 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "tencent-multipage@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:78879",
-          namespace: "tencent",
-          nativeId: "https://v.qq.com/x/cover/m441e3rjq9kwpsc.html",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 65, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const { changeRequest } = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 78879 } }),
+      namespace: "tencent",
+      nativeId: "https://v.qq.com/x/cover/m441e3rjq9kwpsc.html",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 65,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(submitRes.status).toBe(201);
-    const { changeRequest } = (await submitRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -658,26 +575,16 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     const summary = await worker.queue(createQueueBatch(emitted, t0).batch);
     expect(summary.completed).toBe(1);
 
-    const inspectRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(inspectRes.status).toBe(200);
-    expect(await inspectRes.json()).toMatchObject({
-      changeRequest: {
-        status: "approved",
-        nativeId: "m441e3rjq9kwpsc",
-      },
+    expect(
+      await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest!.id),
+    ).toMatchObject({
+      status: "approved",
+      nativeId: "m441e3rjq9kwpsc",
     });
 
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:78879`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(mediaRes.status).toBe(200);
-    const mediaBody = (await mediaRes.json()) as { document: MediaDocument };
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, {
+      tmdb: { type: "tv", id: 78879 },
+    });
     expect(
       resolveEpisode(mediaBody.document, { namespace: "tencent", season: 1, episode: 65 }),
     ).toMatchObject({
@@ -709,31 +616,26 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "tencent-review@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
+    const readRpc = createRpcClients(app, { apiKey: user.readKey });
 
     const submitCid = async (cid: string) => {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:108545",
-            namespace: "tencent",
-            nativeId: cid,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 30,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+      const res = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 108545 } }),
+        namespace: "tencent",
+        nativeId: cid,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 30,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      );
-      expect(res.status).toBe(201);
-      return ((await res.json()) as { changeRequest: { id: string } }).changeRequest.id;
+        ],
+      });
+      return res.changeRequest!.id;
     };
 
     const noYearId = await submitCid("mzc00200noyear1");
@@ -758,37 +660,29 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     const summary = await worker.queue(createQueueBatch(emitted, t0).batch);
     expect(summary.completed).toBe(3);
 
-    const readCr = async (id: string) =>
-      (await (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
-            headers: { "x-api-key": user.readKey },
-          }),
-        )
-      ).json()) as {
-        changeRequest: { status: string; conflictReason: string | null };
-      };
-
-    expect((await readCr(noYearId)).changeRequest).toMatchObject({
+    expect(await getChangeRequestStateRpc(app, { apiKey: user.readKey }, noYearId)).toMatchObject({
       status: "needs_review",
       conflictReason: "year_missing",
     });
-    expect((await readCr(noEpsId)).changeRequest).toMatchObject({
+    expect(await getChangeRequestStateRpc(app, { apiKey: user.readKey }, noEpsId)).toMatchObject({
       status: "needs_review",
       conflictReason: "episode_count_missing",
     });
-    expect((await readCr(notFoundId)).changeRequest).toMatchObject({
-      status: "needs_review",
-      conflictReason: "collection_not_found",
-    });
+    expect(await getChangeRequestStateRpc(app, { apiKey: user.readKey }, notFoundId)).toMatchObject(
+      {
+        status: "needs_review",
+        conflictReason: "collection_not_found",
+      },
+    );
 
     // None of them may appear in default read API
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:108545`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(mediaRes.status).toBe(404);
+    expect(
+      (
+        await expectRpcError(
+          readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 108545 } }) }),
+        )
+      ).status,
+    ).toBe(404);
   });
 
   test("retries transient Tencent RPC errors while keeping change request in pending_evidence until recovery", async () => {
@@ -830,24 +724,23 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "tencent-retry@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:108545",
-          namespace: "tencent",
-          nativeId: "https://v.qq.com/x/cover/mzc002007knmh3g.html",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 30, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const { changeRequest } = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 108545 } }),
+      namespace: "tencent",
+      nativeId: "https://v.qq.com/x/cover/mzc002007knmh3g.html",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 30,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(submitRes.status).toBe(201);
-    const { changeRequest } = (await submitRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -871,14 +764,9 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     const attempt1 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt1.rescheduled).toBe(1);
 
-    const afterAttempt1 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(afterAttempt1.changeRequest.status).toBe("pending_evidence");
+    expect(
+      (await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest!.id)).status,
+    ).toBe("pending_evidence");
 
     // Attempt 2 after retry backoff: Tencent recovers -> auto-approved!
     now = new Date(now.getTime() + 30_000);
@@ -887,13 +775,8 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     const attempt2 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt2.completed).toBe(1);
 
-    const afterAttempt2 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(afterAttempt2.changeRequest.status).toBe("approved");
+    expect(
+      (await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest!.id)).status,
+    ).toBe("approved");
   });
 });

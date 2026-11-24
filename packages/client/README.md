@@ -1,6 +1,8 @@
 # `@media-ref/client`
 
-Zero-dependency TypeScript client for [media-ref](https://mediaref.org) — an open database mapping movies and TV media to video platform collections and catalog entries down to season/episode segments.
+TypeScript client and Protobuf/ConnectRPC contract package for [media-ref](https://mediaref.org) — an open database mapping movies and TV media to video platform collections and catalog entries down to season/episode segments.
+
+Built on `@bufbuild/protobuf` + `@connectrpc/connect` + `@connectrpc/connect-web` with default **binary Protobuf** (`application/proto`) framing and full Connect JSON / Connect HTTP GET interoperability. Pure domain helpers (`resolveEpisode`, segment validators, external-key parsers) remain side-effect-free and tree-shakeable.
 
 Works in Node.js 22+, Bun, Deno, Cloudflare Workers, and browsers using standard Web `fetch`.
 
@@ -23,6 +25,8 @@ const client = createMediaRefClient({
   apiKey: process.env.MEDIA_REF_API_KEY!,
   // Optional overrides:
   // baseUrl: "https://api.mediaref.org",
+  // useBinaryFormat: true, // default: binary Protobuf (application/proto); set false for Connect JSON
+  // useHttpGet: false,     // set true to use Connect HTTP GET for side-effect-free GetMedia calls
   // fetch: customFetch,
 });
 ```
@@ -30,10 +34,13 @@ const client = createMediaRefClient({
 ### Query a Single Media and Resolve an Episode
 
 ```ts
-const res = await client.getMedia("tmdb:tv:95479", {
-  season: 1,
-  namespaceGroup: "platform",
-});
+const res = await client.getMedia(
+  { tmdb: { type: "tv", id: 95479 } },
+  {
+    season: 1,
+    namespaceGroup: "platform",
+  },
+);
 
 if (res) {
   const episode = resolveEpisode(res.document, {
@@ -49,18 +56,22 @@ if (res) {
 }
 ```
 
-- `getMedia` accepts a media UUID, an external key string (`"tmdb:tv:95479"`, `"douban:1292052"`, `"bilibili:ss45574"`), or a structured `ExternalKey` (`{ namespace: "tmdb", nativeId: "tv:95479" }`).
-- Returns `null` when the API responds with `404`.
+- `getMedia` calls `mediaref.v1.MediaService/GetMedia` using a structured `mediaref.v1.MediaRef` `oneof` on the wire.
+- Accepts a structured `MediaRef` (`{ mediaId: "<uuid>" }`, `{ tmdb: { type: "tv", id: 95479 } }`, `{ trakt: { id: "159384", type: "tv" } }`, `{ imdb: "tt12343534" }`, `{ tvdb: { id: 377543, type: "tv" } }`, `{ douban: "1292052" }`, `{ bangumi: "294993" }`, `{ platform: { platform: "bilibili", nativeId: "ss45574" } }`), a raw `proto.MediaRef`, a media UUID, or a legacy external-key string / `ExternalKey` (automatically parsed into `MediaRef`).
+- Returns `null` when the server responds with `Code.NotFound`.
 - Supports `includeUnconfirmed`, `season`, `namespaceGroup`, and `signal` (`AbortSignal`).
 
 ### One-Step Lookup + Episode Resolution (`resolveFromKey`)
 
 ```ts
-const resolved = await client.resolveFromKey("tmdb:tv:95479", {
-  namespace: "bilibili",
-  season: 1,
-  episode: 30,
-});
+const resolved = await client.resolveFromKey(
+  { tmdb: { type: "tv", id: 95479 } },
+  {
+    namespace: "bilibili",
+    season: 1,
+    episode: 30,
+  },
+);
 
 switch (resolved.kind) {
   case "mapped":
@@ -84,11 +95,16 @@ switch (resolved.kind) {
 
 ### Batch Queries (`getMediaBatch`)
 
-The Read API supports up to 100 keys per `POST /v1/media/batch` request. By default (`autoChunk: true`), `getMediaBatch` splits larger lists into sequential `<= 100`-key requests while preserving exact input order and per-key `ok: false` results:
+`mediaref.v1.MediaService/BatchGetMedia` supports up to 100 `MediaRef` entries per RPC request. By default (`autoChunk: true`), `getMediaBatch` splits larger lists into sequential `<= 100`-entry requests while preserving exact input order and per-entry `ok: false` results:
 
 ```ts
 const batch = await client.getMediaBatch(
-  ["tmdb:tv:95479", { namespace: "douban", nativeId: "1292052" }, "bilibili:ss45574"],
+  [
+    { tmdb: { type: "tv", id: 95479 } },
+    { trakt: { id: "159384", type: "tv" } },
+    { douban: "1292052" },
+    { platform: { platform: "bilibili", nativeId: "ss45574" } },
+  ],
   {
     includeUnconfirmed: false,
     namespaceGroup: "platform",
@@ -97,22 +113,22 @@ const batch = await client.getMediaBatch(
 
 for (const entry of batch.results) {
   if (entry.ok) {
-    console.log(entry.key, entry.items[0]?.document.media.snapshot.title);
+    console.log(entry.ref, entry.items[0]?.document.media.snapshot.title);
   } else {
-    console.warn(entry.key, entry.error, entry.message);
+    console.warn(entry.ref, entry.error, entry.message);
   }
 }
 ```
 
-Pass `{ autoChunk: false }` if you want arrays larger than 100 keys to throw a `RangeError` locally instead of issuing multiple HTTP requests.
+Pass `{ autoChunk: false }` if you want arrays larger than 100 entries to throw a `RangeError` locally instead of issuing multiple RPC requests.
 
 ### Reporting a Lead (`reportLead`)
 
-Clients that discover a potential platform or catalog match locally can report it as a non-binding lead for future exploration (requires a standard read/report API key):
+Clients that discover a potential platform or catalog match locally can report it as a non-binding lead for future exploration via `mediaref.v1.LeadService/CreateLead` (requires a standard read/report API key):
 
 ```ts
 const { lead } = await client.reportLead({
-  targetExternalKey: { namespace: "tmdb", nativeId: "tv:95479" },
+  target: { tmdb: { type: "tv", id: 95479 } },
   namespace: "bilibili",
   nativeId: "ss45574",
   season: 1,
@@ -121,9 +137,32 @@ const { lead } = await client.reportLead({
 });
 ```
 
+### Direct ConnectRPC / Protobuf Usage
+
+For advanced callers (e.g. ChangeRequest, Association, Account, or Reviewer services), `@media-ref/client` exports both the transport helper and all generated Protobuf-ES v2 schemas under `@media-ref/client/proto` (and as `proto` on the root entrypoint):
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { createMediaRefTransport, proto } from "@media-ref/client";
+
+const transport = createMediaRefTransport({
+  baseUrl: "https://api.mediaref.org",
+  apiKey: process.env.MEDIA_REF_API_KEY!,
+});
+const media = createClient(proto.MediaService, transport);
+const res = await media.getMedia({
+  ref: {
+    id: {
+      case: "tmdb",
+      value: { type: proto.MediaType.TV, id: 95479 },
+    },
+  },
+});
+```
+
 ### Error Handling (`MediaRefApiError`)
 
-Non-2xx responses (other than `404` on `getMedia`) throw `MediaRefApiError` with typed `status`, `code`, `message`, and `retryAfterSeconds` (parsed from `Retry-After` or JSON body on `429`):
+Non-OK ConnectRPC responses (other than `NotFound` on `getMedia`) throw `MediaRefApiError` with typed `status`, `code` (from structured `mediaref.v1.ErrorInfoDetail`), `message`, and `retryAfterSeconds` (from `Retry-After` response header or `ErrorInfoDetail` on `429`):
 
 ```ts
 import { MediaRefApiError } from "@media-ref/client";
@@ -143,7 +182,7 @@ try {
 
 ## Pure Utilities
 
-All pure domain functions can be used offline without creating an HTTP client:
+All pure domain functions can be used offline without creating a ConnectRPC client:
 
 ### Segment Validation (`validateVariantSegments`)
 
@@ -186,7 +225,8 @@ const formatted = formatExternalKey({ namespace: "bilibili", nativeId: "ss45574"
 
 ## Exports
 
-- **HTTP Client**: `createMediaRefClient`, `MediaRefApiError`, `DEFAULT_BASE_URL`, `MAX_BATCH_MEDIA_KEYS`, and request/response types (`MediaRefClient`, `MediaRefClientOptions`, `FetchLike`, `MediaLookupKey`, `GetMediaOptions`, `GetMediaResponse`, `MediaQueryItem`, `GetMediaBatchOptions`, `BatchMediaItemErrorCode`, `BatchMediaItemResult`, `BatchMediaResponse`, `ResolveFromKeyResult`, `NotFoundResolutionResult`, `ReportLeadInput`, `ReportLeadOptions`, `LeadRecord`, `ReportLeadResponse`, `MediaRefApiErrorOptions`).
+- **ConnectRPC Client**: `createMediaRefClient`, `createMediaRefTransport`, `MediaRefApiError`, `DEFAULT_BASE_URL`, `MAX_BATCH_MEDIA_KEYS`, and request/response types (`MediaRefClient`, `MediaRefClientOptions`, `MediaRefTransportOptions`, `FetchLike`, `MediaLookupKey`, `GetMediaOptions`, `GetMediaResponse`, `MediaQueryItem`, `GetMediaBatchOptions`, `BatchMediaItemErrorCode`, `BatchMediaItemResult`, `BatchMediaResponse`, `ResolveFromKeyResult`, `NotFoundResolutionResult`, `ReportLeadInput`, `ReportLeadOptions`, `LeadRecord`, `ReportLeadResponse`, `MediaRefApiErrorOptions`).
+- **Generated Protobuf Schemas & Mappers**: `proto` namespace (and `@media-ref/client/proto` subpath), service descriptors (`MediaService`, `ChangeRequestService`, `LeadService`, `AssociationService`, `AccountService`, `ReviewerService`), `ErrorInfoDetailSchema`, structured `MediaRef` helpers (`toProtoMediaRef`, `toProtoMediaRefFromKey`, `toProtoMediaRefFromInput`, `fromProtoMediaRef`, `parseMediaRefFromKey`, `formatMediaRefKey`), and bidirectional mappers (`toProtoMediaDocument`, `fromProtoMediaDocument`, `toProtoSegmentInput`, `fromProtoSegmentInput`, `createDomainConnectError`, `extractConnectErrorInfo`, etc.).
 - **Episode Resolution**: `resolveEpisode` and result/query types (`ResolveEpisodeQuery`, `ResolveEpisodeResult`, `MappedEpisodeResult`, `CollectionOnlyResult`, `UnmappedEpisodeResult`).
 - **Segment Validation**: `normalizeSegment`, `normalizeSegments`, `validateSegment`, `validateVariantSegments`, `validateSharedCollectionSegments`.
-- **Domain Types & Helpers**: `Media`, `MediaSnapshot`, `SeasonSnapshot`, `MediaDocument`, `Variant`, `Association`, `Segment`, `SegmentInput`, `ExternalId`, `ExternalKey`, `PLATFORM_NAMESPACES`, `CATALOG_NAMESPACES`, `BASELINE_PRIORITY`, `getNamespaceGroup`, `parseExternalKey`, `formatExternalKey`.
+- **Domain Types & Helpers**: `MediaRef`, `TmdbRef`, `TvdbRef`, `TraktRef`, `PlatformRef`, `Media`, `MediaSnapshot`, `SeasonSnapshot`, `MediaDocument`, `Variant`, `Association`, `Segment`, `SegmentInput`, `ExternalId`, `ExternalKey`, `PLATFORM_NAMESPACES`, `CATALOG_NAMESPACES`, `BASELINE_PRIORITY`, `getNamespaceGroup`, `parseExternalKey`, `formatExternalKey`.

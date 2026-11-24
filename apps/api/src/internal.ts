@@ -3,7 +3,6 @@ import type { MediaDocument } from "@media-ref/client";
 import { queryMediaByKey, type MediaQueryItem } from "@media-ref/core";
 import { createDb, type Db } from "@media-ref/db";
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { Hono } from "hono";
 
 export const INTERNAL_MEDIA_PATH_PREFIX = "/internal/media";
 export const CLIENT_IP_HEADER = "x-forwarded-client-ip";
@@ -40,6 +39,10 @@ export interface InternalMediaDeps {
     windowSeconds?: number;
   };
   now?: () => Date;
+}
+
+export interface InternalMediaApp {
+  fetch(request: Request): Promise<Response>;
 }
 
 export type InternalMediaRpcResult =
@@ -201,8 +204,96 @@ function resolveInternalRateLimiter(env: InternalMediaWorkerEnv): AnonymousIpRat
   return limiter;
 }
 
-export function createInternalMediaApp(deps: InternalMediaDeps): Hono {
-  const app = new Hono();
+export async function executeInternalMediaQuery(
+  input: {
+    dbRead: Db;
+    rateLimiter: AnonymousIpRateLimiter;
+    now?: Date;
+  },
+  rawKey: string,
+  clientIp: string,
+): Promise<InternalMediaRpcResult> {
+  const decision = await input.rateLimiter.check(clientIp, input.now);
+  if (!decision.allowed) {
+    const retryAfterSeconds = Math.max(
+      1,
+      decision.retryAfterSeconds ?? DEFAULT_ANONYMOUS_IP_RATE_WINDOW_SECONDS,
+    );
+    return {
+      status: 429,
+      error: "RATE_LIMITED",
+      message: "Too many requests from this IP. Please retry later.",
+      retryAfterSeconds,
+    };
+  }
+
+  const trimmedKey = rawKey.trim();
+  const result = await queryMediaByKey(input.dbRead, trimmedKey, { includeUnconfirmed: false });
+
+  if (result.kind === "invalid_key") {
+    return {
+      status: 400,
+      error: "INVALID_KEY",
+      message: result.message,
+    };
+  }
+
+  if (result.kind === "not_found") {
+    return {
+      status: 404,
+      error: "MEDIA_NOT_FOUND",
+      message: "Media not found",
+    };
+  }
+
+  const primary = result.items[0]!;
+  return {
+    status: 200,
+    document: primary.document,
+    matchedAssociationId: primary.matchedAssociationId,
+    items: result.items,
+  };
+}
+
+function internalResultToResponse(result: InternalMediaRpcResult): Response {
+  if (result.status === 200) {
+    return Response.json(
+      {
+        document: result.document,
+        matchedAssociationId: result.matchedAssociationId,
+        items: result.items,
+      },
+      { status: 200 },
+    );
+  }
+
+  if (result.status === 429) {
+    return Response.json(
+      {
+        error: result.error,
+        message: result.message,
+        retryAfter: result.retryAfterSeconds,
+      },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(result.retryAfterSeconds),
+          "Cache-Control": "no-store",
+        },
+      },
+    );
+  }
+
+  return Response.json(
+    {
+      error: result.error,
+      message: result.message,
+    },
+    { status: result.status },
+  );
+}
+
+export function createInternalMediaApp(deps: InternalMediaDeps): InternalMediaApp {
   const getNow = deps.now ?? (() => new Date());
   const rateLimiter =
     deps.rateLimiter ??
@@ -212,49 +303,47 @@ export function createInternalMediaApp(deps: InternalMediaDeps): Hono {
       now: getNow,
     });
 
-  app.get(`${INTERNAL_MEDIA_PATH_PREFIX}/:key`, async (c) => {
-    const clientIp = extractClientIp(c.req.raw.headers);
-    const decision = await rateLimiter.check(clientIp, getNow());
-    if (!decision.allowed) {
-      const retryAfterSeconds = Math.max(
-        1,
-        decision.retryAfterSeconds ?? DEFAULT_ANONYMOUS_IP_RATE_WINDOW_SECONDS,
-      );
-      c.header("Retry-After", String(retryAfterSeconds));
-      c.header("Cache-Control", "no-store");
-      return c.json(
+  return {
+    async fetch(request: Request): Promise<Response> {
+      const url = new URL(request.url);
+      if (request.method !== "GET") {
+        return Response.json({ error: "NOT_FOUND", message: "Not found" }, { status: 404 });
+      }
+
+      const prefixWithSlash = `${INTERNAL_MEDIA_PATH_PREFIX}/`;
+      if (!url.pathname.startsWith(prefixWithSlash)) {
+        return Response.json({ error: "NOT_FOUND", message: "Not found" }, { status: 404 });
+      }
+
+      const encodedKey = url.pathname.slice(prefixWithSlash.length);
+      if (encodedKey.length === 0 || encodedKey.includes("/")) {
+        return Response.json({ error: "NOT_FOUND", message: "Not found" }, { status: 404 });
+      }
+
+      let decodedKey: string;
+      try {
+        decodedKey = decodeURIComponent(encodedKey);
+      } catch {
+        return Response.json(
+          { error: "INVALID_KEY", message: "Invalid percent-encoding in key" },
+          { status: 400 },
+        );
+      }
+
+      const clientIp = extractClientIp(request.headers);
+      const result = await executeInternalMediaQuery(
         {
-          error: "RATE_LIMITED",
-          message: "Too many requests from this IP. Please retry later.",
-          retryAfter: retryAfterSeconds,
+          dbRead: deps.dbRead,
+          rateLimiter,
+          now: getNow(),
         },
-        429,
+        decodedKey,
+        clientIp,
       );
-    }
 
-    const rawKey = c.req.param("key").trim();
-    const result = await queryMediaByKey(deps.dbRead, rawKey, { includeUnconfirmed: false });
-
-    if (result.kind === "invalid_key") {
-      return c.json({ error: "INVALID_KEY", message: result.message }, 400);
-    }
-
-    if (result.kind === "not_found") {
-      return c.json({ error: "MEDIA_NOT_FOUND", message: "Media not found" }, 404);
-    }
-
-    const primary = result.items[0]!;
-    return c.json(
-      {
-        document: primary.document,
-        matchedAssociationId: primary.matchedAssociationId,
-        items: result.items,
-      },
-      200,
-    );
-  });
-
-  return app;
+      return internalResultToResponse(result);
+    },
+  };
 }
 
 export class InternalMediaEntrypoint extends WorkerEntrypoint<InternalMediaWorkerEnv> {
@@ -273,69 +362,14 @@ export class InternalMediaEntrypoint extends WorkerEntrypoint<InternalMediaWorke
   }
 
   async getMedia(key: string, clientIp?: string): Promise<InternalMediaRpcResult> {
-    const headers = new Headers({ accept: "application/json" });
-    if (clientIp && clientIp.trim().length > 0) {
-      headers.set(CLIENT_IP_HEADER, clientIp.trim());
+    const dbRead = createDb(this.env.HYPERDRIVE_READ.connectionString, { max: 5 });
+    const rateLimiter = resolveInternalRateLimiter(this.env);
+    const normalizedIp = normalizeClientIp(clientIp) ?? "unknown";
+
+    try {
+      return await executeInternalMediaQuery({ dbRead, rateLimiter }, key, normalizedIp);
+    } finally {
+      this.ctx.waitUntil(dbRead.destroy());
     }
-
-    const response = await this.fetch(
-      new Request(
-        `https://internal.mediaref.org${INTERNAL_MEDIA_PATH_PREFIX}/${encodeURIComponent(key)}`,
-        {
-          method: "GET",
-          headers,
-        },
-      ),
-    );
-
-    if (response.status === 200) {
-      const body = (await response.json()) as {
-        document: MediaDocument;
-        matchedAssociationId: string | null;
-        items?: MediaQueryItem[];
-      };
-      return {
-        status: 200,
-        document: body.document,
-        matchedAssociationId: body.matchedAssociationId,
-        items: body.items ?? [
-          {
-            document: body.document,
-            matchedAssociationId: body.matchedAssociationId,
-          },
-        ],
-      };
-    }
-
-    if (response.status === 400) {
-      const body = (await response.json()) as { message?: string };
-      return {
-        status: 400,
-        error: "INVALID_KEY",
-        message: body.message ?? "Invalid media key",
-      };
-    }
-
-    if (response.status === 429) {
-      const body = (await response.json()) as { message?: string; retryAfter?: number };
-      const retryHeader = Number.parseInt(response.headers.get("retry-after") ?? "", 10);
-      const retryAfterSeconds =
-        Number.isFinite(retryHeader) && retryHeader > 0
-          ? retryHeader
-          : (body.retryAfter ?? DEFAULT_ANONYMOUS_IP_RATE_WINDOW_SECONDS);
-      return {
-        status: 429,
-        error: "RATE_LIMITED",
-        message: body.message ?? "Too many requests from this IP. Please retry later.",
-        retryAfterSeconds,
-      };
-    }
-
-    const body = (await response.json().catch(() => ({}))) as { message?: string };
-    return {
-      status: 404,
-      error: "MEDIA_NOT_FOUND",
-      message: body.message ?? "Media not found",
-    };
   }
 }

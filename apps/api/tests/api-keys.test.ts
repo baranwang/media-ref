@@ -1,70 +1,28 @@
 import type { ExecutionContext, Hyperdrive } from "@cloudflare/workers-types";
-import { createFakeOutboundClient, type EmailMessage } from "@media-ref/core";
+import { fromProtoApiKeyAction, proto, toProtoSegmentInput } from "@media-ref/client";
+import { createAdapterRegistry, createFakeOutboundClient } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import worker, { createApiApp, requireApiKey } from "../src/index.ts";
+import worker from "../src/index.ts";
+import { createApiApp } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  mediaRef,
+  signUpUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-api-key-integration-tests-0123456789";
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
+function extractActions(perms?: proto.ApiKeyPermissions): string[] {
+  return (perms?.media ?? [])
+    .map(fromProtoApiKeyAction)
+    .filter((a): a is "read" | "report" | "submit" => a !== undefined);
 }
 
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-async function signUpUser(
-  app: ReturnType<typeof createApiApp>,
-  outbound: ReturnType<typeof createFakeOutboundClient>,
-  input: { email: string; password: string; name: string; verify?: boolean },
-): Promise<{ userId: string; cookie: string }> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: input.email,
-        password: input.password,
-        name: input.name,
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  if (input.verify) {
-    const email = outbound.sentEmails[emailsBefore];
-    expect(email).toBeDefined();
-    const verifyRes = await app.fetch(
-      new Request(extractVerificationUrl(email!), {
-        method: "GET",
-        headers: { cookie },
-      }),
-    );
-    expect([200, 302]).toContain(verifyRes.status);
-    const refreshed = extractCookieHeader(verifyRes);
-    if (refreshed) {
-      cookie = refreshed;
-    }
-  }
-
-  return { userId: signUpBody.user.id, cookie };
-}
-
-describe("API Worker API key management & verification", () => {
+describe("API Worker API key management & verification (ConnectRPC)", () => {
   const handles: TestDbHandle[] = [];
 
   afterEach(async () => {
@@ -104,147 +62,92 @@ describe("API Worker API key management & verification", () => {
       verify: true,
     });
 
-    const readKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: alice.cookie,
-        },
-        body: JSON.stringify({ name: "Player App" }),
-      }),
-    );
-    expect(readKeyRes.status).toBe(201);
-    const readKey = (await readKeyRes.json()) as {
-      id: string;
-      name: string | null;
-      prefix: string | null;
-      start: string | null;
-      key: string;
-      enabled: boolean;
-      permissions: { media: string[] };
-      canSubmit: boolean;
-      createdAt: string;
-      expiresAt: string | null;
-    };
+    const aliceRpc = createRpcClients(app, { cookie: alice.cookie });
+    const bobRpc = createRpcClients(app, { cookie: bob.cookie });
 
-    expect(readKey.name).toBe("Player App");
-    expect(readKey.prefix).toBe("mref_");
-    expect(readKey.key.startsWith("mref_")).toBe(true);
-    expect(readKey.start).toBe(readKey.key.slice(0, 11));
-    expect(readKey.enabled).toBe(true);
-    expect(readKey.permissions).toEqual({ media: ["read", "report"] });
-    expect(readKey.canSubmit).toBe(false);
-    expect(readKey.expiresAt).toBeNull();
-    expect(Number.isNaN(Date.parse(readKey.createdAt))).toBe(false);
+    const readKeyRes = await aliceRpc.account.createApiKey({ name: "Player App" });
+    const readKeySummary = readKeyRes.apiKey!;
 
-    const submitKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: alice.cookie,
-        },
-        body: JSON.stringify({
-          name: "Batch Submitter",
-          canSubmit: true,
-          expiresIn: 86_400,
-        }),
-      }),
-    );
-    expect(submitKeyRes.status).toBe(201);
-    const submitKey = (await submitKeyRes.json()) as typeof readKey;
+    expect(readKeySummary.name).toBe("Player App");
+    expect(readKeySummary.prefix).toBe("mref_");
+    expect(readKeyRes.key.startsWith("mref_")).toBe(true);
+    expect(readKeySummary.start).toBe(readKeyRes.key.slice(0, 11));
+    expect(readKeySummary.enabled).toBe(true);
+    expect(extractActions(readKeySummary.permissions)).toEqual(["read", "report"]);
+    expect(readKeySummary.canSubmit).toBe(false);
+    expect(readKeySummary.expiresAt).toBeUndefined();
+    expect(Number.isNaN(Date.parse(readKeySummary.createdAt))).toBe(false);
 
-    expect(submitKey.id).not.toBe(readKey.id);
-    expect(submitKey.key).not.toBe(readKey.key);
-    expect(submitKey.permissions).toEqual({ media: ["read", "report", "submit"] });
-    expect(submitKey.canSubmit).toBe(true);
-    expect(submitKey.expiresAt).not.toBeNull();
+    const submitKeyRes = await aliceRpc.account.createApiKey({
+      name: "Batch Submitter",
+      canSubmit: true,
+      expiresIn: 86_400,
+    });
+    const submitKeySummary = submitKeyRes.apiKey!;
 
-    const listRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        headers: { cookie: alice.cookie },
-      }),
-    );
-    expect(listRes.status).toBe(200);
-    const listBody = (await listRes.json()) as {
-      apiKeys: Array<Record<string, unknown>>;
-      total: number;
-    };
+    expect(submitKeySummary.id).not.toBe(readKeySummary.id);
+    expect(submitKeyRes.key).not.toBe(readKeyRes.key);
+    expect(extractActions(submitKeySummary.permissions)).toEqual(["read", "report", "submit"]);
+    expect(submitKeySummary.canSubmit).toBe(true);
+    expect(submitKeySummary.expiresAt).toBeDefined();
 
+    const listBody = await aliceRpc.account.listApiKeys({});
     expect(listBody.total).toBe(2);
     expect(listBody.apiKeys).toHaveLength(2);
     for (const item of listBody.apiKeys) {
       expect(item).not.toHaveProperty("key");
     }
     const serializedList = JSON.stringify(listBody);
-    expect(serializedList).not.toContain(readKey.key);
-    expect(serializedList).not.toContain(submitKey.key);
+    expect(serializedList).not.toContain(readKeyRes.key);
+    expect(serializedList).not.toContain(submitKeyRes.key);
 
     const byId = new Map(listBody.apiKeys.map((item) => [item.id, item]));
-    expect(byId.get(readKey.id)).toMatchObject({
-      id: readKey.id,
+    expect(byId.get(readKeySummary.id)).toMatchObject({
+      id: readKeySummary.id,
       name: "Player App",
       prefix: "mref_",
-      start: readKey.start,
+      start: readKeySummary.start,
       enabled: true,
-      permissions: { media: ["read", "report"] },
       canSubmit: false,
-      expiresAt: null,
     });
-    expect(byId.get(submitKey.id)).toMatchObject({
-      id: submitKey.id,
+    expect(extractActions(byId.get(readKeySummary.id)?.permissions)).toEqual(["read", "report"]);
+    expect(byId.get(readKeySummary.id)?.expiresAt).toBeUndefined();
+
+    expect(byId.get(submitKeySummary.id)).toMatchObject({
+      id: submitKeySummary.id,
       name: "Batch Submitter",
       prefix: "mref_",
-      start: submitKey.start,
+      start: submitKeySummary.start,
       enabled: true,
-      permissions: { media: ["read", "report", "submit"] },
       canSubmit: true,
     });
+    expect(extractActions(byId.get(submitKeySummary.id)?.permissions)).toEqual([
+      "read",
+      "report",
+      "submit",
+    ]);
 
     // Bob cannot see or revoke Alice's keys.
-    const bobListRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        headers: { cookie: bob.cookie },
-      }),
-    );
-    expect(bobListRes.status).toBe(200);
-    expect(await bobListRes.json()).toEqual({ apiKeys: [], total: 0 });
+    const bobList = await bobRpc.account.listApiKeys({});
+    expect(bobList.total).toBe(0);
+    expect(bobList.apiKeys).toEqual([]);
 
-    const bobDeleteRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/${readKey.id}`, {
-        method: "DELETE",
-        headers: { cookie: bob.cookie },
-      }),
+    const bobDeleteErr = await expectRpcError(
+      bobRpc.account.deleteApiKey({ id: readKeySummary.id }),
     );
-    expect(bobDeleteRes.status).toBe(404);
-    expect(await bobDeleteRes.json()).toMatchObject({ error: "API_KEY_NOT_FOUND" });
+    expect(bobDeleteErr.status).toBe(404);
+    expect(bobDeleteErr.code).toBe("API_KEY_NOT_FOUND");
 
     // Alice revokes one key; the other remains.
-    const deleteRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/${readKey.id}`, {
-        method: "DELETE",
-        headers: { cookie: alice.cookie },
-      }),
-    );
-    expect(deleteRes.status).toBe(200);
-    expect(await deleteRes.json()).toEqual({ success: true, id: readKey.id });
+    const deleteRes = await aliceRpc.account.deleteApiKey({ id: readKeySummary.id });
+    expect(deleteRes).toMatchObject({ success: true, id: readKeySummary.id });
 
-    const listAfterDelete = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        headers: { cookie: alice.cookie },
-      }),
-    );
-    expect(listAfterDelete.status).toBe(200);
-    const afterBody = (await listAfterDelete.json()) as {
-      apiKeys: Array<{ id: string }>;
-      total: number;
-    };
+    const afterBody = await aliceRpc.account.listApiKeys({});
     expect(afterBody.total).toBe(1);
-    expect(afterBody.apiKeys.map((k) => k.id)).toEqual([submitKey.id]);
+    expect(afterBody.apiKeys.map((k) => k.id)).toEqual([submitKeySummary.id]);
   });
 
-  test("rejects unverified users creating keys on POST /v1/api-keys and blocks direct /api/auth/api-key/create bypass", async () => {
+  test("rejects unverified users creating keys and blocks direct /api/auth/api-key/create bypass", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -259,23 +162,14 @@ describe("API Worker API key management & verification", () => {
       },
     });
 
-    // Unauthenticated callers are rejected with 401.
-    const unauthCreate = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "No Auth" }),
-      }),
+    const unauthRpc = createRpcClients(app);
+    expect((await expectRpcError(unauthRpc.account.createApiKey({ name: "No Auth" }))).status).toBe(
+      401,
     );
-    expect(unauthCreate.status).toBe(401);
-
-    const unauthList = await app.fetch(new Request(`${TEST_BASE_URL}/v1/api-keys`));
-    expect(unauthList.status).toBe(401);
-
-    const unauthDelete = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/some-id`, { method: "DELETE" }),
+    expect((await expectRpcError(unauthRpc.account.listApiKeys({}))).status).toBe(401);
+    expect((await expectRpcError(unauthRpc.account.deleteApiKey({ id: "some-id" }))).status).toBe(
+      401,
     );
-    expect(unauthDelete.status).toBe(401);
 
     const unverified = await signUpUser(app, outbound, {
       email: "unverified@example.com",
@@ -284,21 +178,14 @@ describe("API Worker API key management & verification", () => {
       verify: false,
     });
 
-    const createRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: unverified.cookie,
-        },
-        body: JSON.stringify({ name: "Blocked Key" }),
+    const createErr = await expectRpcError(
+      createRpcClients(app, { cookie: unverified.cookie }).account.createApiKey({
+        name: "Blocked Key",
       }),
     );
-    expect(createRes.status).toBe(403);
-    expect(await createRes.json()).toEqual({
-      error: "EMAIL_NOT_VERIFIED",
-      message: "Email verification is required",
-    });
+    expect(createErr.status).toBe(403);
+    expect(createErr.code).toBe("EMAIL_NOT_VERIFIED");
+    expect(createErr.message).toBe("Email verification is required");
 
     // Direct Better Auth /api/auth/api-key/create must be disabled so unverified users cannot bypass.
     const directBypass = await app.fetch(
@@ -330,28 +217,11 @@ describe("API Worker API key management & verification", () => {
         dbRead: readOnlyDb,
         dbWrite: testDb.writeDb,
         outbound,
+        adapterRegistry: createAdapterRegistry(),
         config: {
           baseUrl: TEST_BASE_URL,
           authSecret: TEST_AUTH_SECRET,
         },
-      });
-
-      app.post("/v1/test-report", requireApiKey({ db: "write", permission: "report" }), (c) => {
-        const verified = c.get("apiKey")!;
-        return c.json({ ok: true, keyId: verified.keyId, userId: verified.userId }, 200);
-      });
-
-      app.post("/v1/test-submit", requireApiKey({ db: "write", permission: "submit" }), (c) => {
-        const verified = c.get("apiKey")!;
-        return c.json(
-          {
-            ok: true,
-            keyId: verified.keyId,
-            userId: verified.userId,
-            canSubmit: verified.canSubmit,
-          },
-          200,
-        );
       });
 
       const dev = await signUpUser(app, outbound, {
@@ -361,39 +231,22 @@ describe("API Worker API key management & verification", () => {
         verify: true,
       });
 
-      // Create genuine keys through Better Auth's apiKey plugin via POST /v1/api-keys.
-      const readOnlyKeyRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            cookie: dev.cookie,
-          },
-          body: JSON.stringify({ name: "Read & Report Key" }),
-        }),
-      );
-      expect(readOnlyKeyRes.status).toBe(201);
-      const readOnlyKey = (await readOnlyKeyRes.json()) as {
-        id: string;
-        key: string;
-        start: string;
+      const devRpc = createRpcClients(app, { cookie: dev.cookie });
+      const readOnlyKeyRes = await devRpc.account.createApiKey({ name: "Read & Report Key" });
+      const readOnlyKey = {
+        id: readOnlyKeyRes.apiKey!.id,
+        key: readOnlyKeyRes.key,
+        start: readOnlyKeyRes.apiKey!.start!,
       };
 
-      const submitKeyRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            cookie: dev.cookie,
-          },
-          body: JSON.stringify({
-            name: "Submit Key",
-            scopes: ["read_report", "submit"],
-          }),
-        }),
-      );
-      expect(submitKeyRes.status).toBe(201);
-      const submitKey = (await submitKeyRes.json()) as { id: string; key: string };
+      const submitKeyRes = await devRpc.account.createApiKey({
+        name: "Submit Key",
+        scopes: [proto.ApiKeyScope.READ_REPORT, proto.ApiKeyScope.SUBMIT],
+      });
+      const submitKey = {
+        id: submitKeyRes.apiKey!.id,
+        key: submitKeyRes.key,
+      };
 
       const beforeRows = await testDb.readDb
         .selectFrom("apikey")
@@ -402,89 +255,77 @@ describe("API Worker API key management & verification", () => {
         .execute();
       const beforeById = new Map(beforeRows.map((row) => [row.id, row]));
 
-      // Read-only key works with Authorization: Bearer on GET /v1/api-keys/me (uses readOnlyDb).
-      const bearerMeRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-          headers: { authorization: `Bearer ${readOnlyKey.key}` },
-        }),
-      );
-      expect(bearerMeRes.status).toBe(200);
-      expect(await bearerMeRes.json()).toEqual({
+      // Read-only key works with Authorization: Bearer on GetCurrentApiKey (uses readOnlyDb).
+      const bearerMe = await createRpcClients(app, {
+        bearerToken: readOnlyKey.key,
+      }).account.getCurrentApiKey({});
+      expect(bearerMe).toMatchObject({
         keyId: readOnlyKey.id,
         userId: dev.userId,
         name: "Read & Report Key",
         prefix: "mref_",
         start: readOnlyKey.start,
-        permissions: { media: ["read", "report"] },
         canSubmit: false,
         emailVerified: true,
         role: "user",
-        expiresAt: null,
       });
+      expect(extractActions(bearerMe.permissions)).toEqual(["read", "report"]);
+      expect(bearerMe.expiresAt).toBeUndefined();
 
-      // Read-only key also works with X-API-Key header on GET /v1/api-keys/me and report endpoint.
-      const xApiKeyMeRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-          headers: { "x-api-key": readOnlyKey.key },
-        }),
-      );
-      expect(xApiKeyMeRes.status).toBe(200);
+      // Read-only key also works with X-API-Key header on GetCurrentApiKey and report RPC (CreateLead).
+      const readKeyRpc = createRpcClients(app, { apiKey: readOnlyKey.key });
+      const xApiKeyMe = await readKeyRpc.account.getCurrentApiKey({});
+      expect(xApiKeyMe.keyId).toBe(readOnlyKey.id);
 
-      const readKeyReportRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/test-report`, {
-          method: "POST",
-          headers: { "x-api-key": readOnlyKey.key },
-        }),
-      );
-      expect(readKeyReportRes.status).toBe(200);
-      expect(await readKeyReportRes.json()).toEqual({
-        ok: true,
-        keyId: readOnlyKey.id,
-        userId: dev.userId,
+      const reportRes = await readKeyRpc.lead.createLead({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss34430",
       });
+      expect(reportRes.lead?.id).toBeTruthy();
 
-      // Read-only key is rejected with 403 INSUFFICIENT_PERMISSIONS on submit endpoint.
-      const readKeySubmitRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${readOnlyKey.key}` },
-        }),
-      );
-      expect(readKeySubmitRes.status).toBe(403);
-      expect(await readKeySubmitRes.json()).toEqual({
-        error: "INSUFFICIENT_PERMISSIONS",
-        message: "API key does not have required permission",
-      });
+      // Read-only key is rejected with 403 INSUFFICIENT_PERMISSIONS on submit RPC (CreateChangeRequest).
+      const submitPayload = {
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 12,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+          }),
+        ],
+      };
 
-      // Submit key succeeds on read, report, and submit endpoints.
-      const submitKeyReadRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-          headers: { "x-api-key": submitKey.key },
-        }),
+      const readKeySubmitErr = await expectRpcError(
+        createRpcClients(app, { bearerToken: readOnlyKey.key }).changeRequest.createChangeRequest(
+          submitPayload,
+        ),
       );
-      expect(submitKeyReadRes.status).toBe(200);
+      expect(readKeySubmitErr.status).toBe(403);
+      expect(readKeySubmitErr.code).toBe("INSUFFICIENT_PERMISSIONS");
+      expect(readKeySubmitErr.message).toBe("API key does not have required permission");
 
-      const submitKeyReportRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/test-report`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${submitKey.key}` },
-        }),
-      );
-      expect(submitKeyReportRes.status).toBe(200);
+      // Submit key succeeds on read, report, and submit RPCs.
+      const submitKeyApiRpc = createRpcClients(app, { apiKey: submitKey.key });
+      const submitKeyBearerRpc = createRpcClients(app, { bearerToken: submitKey.key });
+      expect((await submitKeyApiRpc.account.getCurrentApiKey({})).canSubmit).toBe(true);
+      expect(
+        (
+          await submitKeyBearerRpc.lead.createLead({
+            target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+            namespace: "tencent",
+            nativeId: "mzc00200xyz",
+          })
+        ).lead?.id,
+      ).toBeTruthy();
 
-      const submitKeySubmitRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${submitKey.key}` },
-        }),
-      );
-      expect(submitKeySubmitRes.status).toBe(200);
-      expect(await submitKeySubmitRes.json()).toEqual({
-        ok: true,
-        keyId: submitKey.id,
-        userId: dev.userId,
-        canSubmit: true,
-      });
+      const submitRes = await submitKeyBearerRpc.changeRequest.createChangeRequest(submitPayload);
+      expect(submitRes.changeRequest?.id).toBeTruthy();
 
       // Verify zero DB writes happened on apikey rows (requestCount, lastRequest, updatedAt untouched).
       const afterRows = await testDb.readDb
@@ -513,18 +354,12 @@ describe("API Worker API key management & verification", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
       },
     });
-
-    app.post("/v1/test-report", requireApiKey({ db: "write", permission: "report" }), (c) =>
-      c.json({ ok: true, keyId: c.get("apiKey")!.keyId }, 200),
-    );
-    app.post("/v1/test-submit", requireApiKey({ db: "write", permission: "submit" }), (c) =>
-      c.json({ ok: true, keyId: c.get("apiKey")!.keyId }, 200),
-    );
 
     const user = await signUpUser(app, outbound, {
       email: "revoke@example.com",
@@ -533,78 +368,62 @@ describe("API Worker API key management & verification", () => {
       verify: true,
     });
 
-    const keyARes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({ name: "Key A", canSubmit: true }),
-      }),
-    );
-    expect(keyARes.status).toBe(201);
-    const keyA = (await keyARes.json()) as { id: string; key: string };
+    const userRpc = createRpcClients(app, { cookie: user.cookie });
+    const keyA = await userRpc.account.createApiKey({ name: "Key A", canSubmit: true });
+    const keyB = await userRpc.account.createApiKey({ name: "Key B", canSubmit: true });
 
-    const keyBRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({ name: "Key B", canSubmit: true }),
-      }),
-    );
-    expect(keyBRes.status).toBe(201);
-    const keyB = (await keyBRes.json()) as { id: string; key: string };
+    const submitPayload = (nativeId: string) => ({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId,
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    });
 
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-            method: "POST",
-            headers: { "x-api-key": keyA.key },
-          }),
+        await createRpcClients(app, { apiKey: keyA.key }).changeRequest.createChangeRequest(
+          submitPayload("ss10001"),
         )
-      ).status,
-    ).toBe(200);
+      ).changeRequest?.id,
+    ).toBeTruthy();
 
-    const revokeRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/${keyA.id}`, {
-        method: "DELETE",
-        headers: { cookie: user.cookie },
-      }),
-    );
-    expect(revokeRes.status).toBe(200);
+    await userRpc.account.deleteApiKey({ id: keyA.apiKey!.id });
 
-    // Immediately rejected on both submit and report dbWrite endpoints.
-    const submitAfterRevoke = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${keyA.key}` },
-      }),
+    // Immediately rejected on both submit and report dbWrite RPCs.
+    const submitAfterRevoke = await expectRpcError(
+      createRpcClients(app, { bearerToken: keyA.key }).changeRequest.createChangeRequest(
+        submitPayload("ss10002"),
+      ),
     );
     expect(submitAfterRevoke.status).toBe(401);
-    expect(await submitAfterRevoke.json()).toEqual({
-      error: "INVALID_API_KEY",
-      message: "Invalid API key",
-    });
+    expect(submitAfterRevoke.code).toBe("INVALID_API_KEY");
+    expect(submitAfterRevoke.message).toBe("Invalid API key");
 
-    const reportAfterRevoke = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/test-report`, {
-        method: "POST",
-        headers: { "x-api-key": keyA.key },
+    const reportAfterRevoke = await expectRpcError(
+      createRpcClients(app, { apiKey: keyA.key }).lead.createLead({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss10002",
       }),
     );
     expect(reportAfterRevoke.status).toBe(401);
-    expect(await reportAfterRevoke.json()).toEqual({
-      error: "INVALID_API_KEY",
-      message: "Invalid API key",
-    });
+    expect(reportAfterRevoke.code).toBe("INVALID_API_KEY");
+    expect(reportAfterRevoke.message).toBe("Invalid API key");
 
     // Key B owned by the same user continues working unaffected.
-    const keyBSubmit = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-        method: "POST",
-        headers: { "x-api-key": keyB.key },
-      }),
-    );
-    expect(keyBSubmit.status).toBe(200);
+    const keyBSubmit = await createRpcClients(app, {
+      apiKey: keyB.key,
+    }).changeRequest.createChangeRequest(submitPayload("ss10003"));
+    expect(keyBSubmit.changeRequest?.id).toBeTruthy();
   });
 
   test("rejects expired keys and disabled keys with 401", async () => {
@@ -617,16 +436,13 @@ describe("API Worker API key management & verification", () => {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
         now: () => currentTime,
       },
     });
-
-    app.post("/v1/test-submit", requireApiKey({ db: "write", permission: "submit" }), (c) =>
-      c.json({ ok: true }, 200),
-    );
 
     const user = await signUpUser(app, outbound, {
       email: "expiry@example.com",
@@ -635,84 +451,67 @@ describe("API Worker API key management & verification", () => {
       verify: true,
     });
 
-    const expiringRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({ name: "Short Lived", canSubmit: true, expiresIn: 60 }),
-      }),
-    );
-    expect(expiringRes.status).toBe(201);
-    const expiringKey = (await expiringRes.json()) as { id: string; key: string };
-
-    const disableTargetRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({ name: "Disable Me", canSubmit: true }),
-      }),
-    );
-    expect(disableTargetRes.status).toBe(201);
-    const disableTarget = (await disableTargetRes.json()) as { id: string; key: string };
+    const userRpc = createRpcClients(app, { cookie: user.cookie });
+    const expiringKey = await userRpc.account.createApiKey({
+      name: "Short Lived",
+      canSubmit: true,
+      expiresIn: 60,
+    });
+    const disableTarget = await userRpc.account.createApiKey({
+      name: "Disable Me",
+      canSubmit: true,
+    });
 
     // Valid before expiration.
     expect(
-      (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-            headers: { "x-api-key": expiringKey.key },
-          }),
-        )
-      ).status,
-    ).toBe(200);
+      (await createRpcClients(app, { apiKey: expiringKey.key }).account.getCurrentApiKey({})).keyId,
+    ).toBe(expiringKey.apiKey!.id);
 
     // Advance clock past expiresAt.
     currentTime = new Date(Date.now() + 65_000);
 
-    const expiredRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-        headers: { "x-api-key": expiringKey.key },
-      }),
+    const expiredRead = await expectRpcError(
+      createRpcClients(app, { apiKey: expiringKey.key }).account.getCurrentApiKey({}),
     );
     expect(expiredRead.status).toBe(401);
-    expect(await expiredRead.json()).toEqual({
-      error: "API_KEY_EXPIRED",
-      message: "API key has expired",
-    });
+    expect(expiredRead.code).toBe("API_KEY_EXPIRED");
+    expect(expiredRead.message).toBe("API key has expired");
 
-    const expiredWrite = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${expiringKey.key}` },
+    const expiredWrite = await expectRpcError(
+      createRpcClients(app, { bearerToken: expiringKey.key }).changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
       }),
     );
     expect(expiredWrite.status).toBe(401);
-    expect(await expiredWrite.json()).toEqual({
-      error: "API_KEY_EXPIRED",
-      message: "API key has expired",
-    });
+    expect(expiredWrite.code).toBe("API_KEY_EXPIRED");
+    expect(expiredWrite.message).toBe("API key has expired");
 
     // Disable key via Better Auth update endpoint and confirm custom verifier rejects it.
     const disableRes = await app.fetch(
       new Request(`${TEST_BASE_URL}/api/auth/api-key/update`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({ keyId: disableTarget.id, enabled: false }),
+        body: JSON.stringify({ keyId: disableTarget.apiKey!.id, enabled: false }),
       }),
     );
     expect(disableRes.status).toBe(200);
 
-    const disabledCheck = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-        method: "POST",
-        headers: { "x-api-key": disableTarget.key },
+    const disabledCheck = await expectRpcError(
+      createRpcClients(app, { apiKey: disableTarget.key }).changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
       }),
     );
     expect(disabledCheck.status).toBe(401);
-    expect(await disabledCheck.json()).toEqual({
-      error: "API_KEY_DISABLED",
-      message: "API key is disabled",
-    });
+    expect(disabledCheck.code).toBe("API_KEY_DISABLED");
+    expect(disabledCheck.message).toBe("API key is disabled");
   });
 
   test("routes read verification through dbRead and write/report verification through dbWrite independently", async () => {
@@ -725,18 +524,12 @@ describe("API Worker API key management & verification", () => {
       dbRead: cachedReadDb.readDb,
       dbWrite: primaryWriteDb.writeDb,
       outbound,
+      adapterRegistry: createAdapterRegistry(),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
       },
     });
-
-    app.post("/v1/test-report", requireApiKey({ db: "write", permission: "report" }), (c) =>
-      c.json({ ok: true }, 200),
-    );
-    app.post("/v1/test-submit", requireApiKey({ db: "write", permission: "submit" }), (c) =>
-      c.json({ ok: true }, 200),
-    );
 
     const user = await signUpUser(app, outbound, {
       email: "splitdb@example.com",
@@ -745,48 +538,35 @@ describe("API Worker API key management & verification", () => {
       verify: true,
     });
 
-    const createRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({ name: "Split Key", canSubmit: true }),
-      }),
-    );
-    expect(createRes.status).toBe(201);
-    const created = (await createRes.json()) as { id: string; key: string };
+    const userRpc = createRpcClients(app, { cookie: user.cookie });
+    const created = await userRpc.account.createApiKey({ name: "Split Key", canSubmit: true });
 
-    // Write/report routes hit dbWrite (primaryWriteDb) and succeed immediately.
-    expect(
-      (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-            method: "POST",
-            headers: { "x-api-key": created.key },
-          }),
-        )
-      ).status,
-    ).toBe(200);
-    expect(
-      (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/test-report`, {
-            method: "POST",
-            headers: { "x-api-key": created.key },
-          }),
-        )
-      ).status,
-    ).toBe(200);
+    const keyRpc = createRpcClients(app, { apiKey: created.key });
 
-    // Read route hits dbRead (cachedReadDb), which does not have the row yet.
+    // Write/report RPCs hit dbWrite (primaryWriteDb) and succeed immediately.
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-            headers: { "x-api-key": created.key },
-          }),
-        )
-      ).status,
-    ).toBe(401);
+        await keyRpc.changeRequest.createChangeRequest({
+          target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+          namespace: "bilibili",
+          nativeId: "ss10001",
+          variantDescription: "原声",
+          segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
+        })
+      ).changeRequest?.id,
+    ).toBeTruthy();
+    expect(
+      (
+        await keyRpc.lead.createLead({
+          target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+          namespace: "bilibili",
+          nativeId: "ss10001",
+        })
+      ).lead?.id,
+    ).toBeTruthy();
+
+    // Read RPC hits dbRead (cachedReadDb), which does not have the row yet.
+    expect((await expectRpcError(keyRpc.account.getCurrentApiKey({}))).status).toBe(401);
 
     // Copy the user and apikey rows into cachedReadDb to simulate cached read visibility.
     const userRow = await primaryWriteDb.readDb
@@ -797,67 +577,49 @@ describe("API Worker API key management & verification", () => {
     const keyRow = await primaryWriteDb.readDb
       .selectFrom("apikey")
       .selectAll()
-      .where("id", "=", created.id)
+      .where("id", "=", created.apiKey!.id)
       .executeTakeFirstOrThrow();
 
     await cachedReadDb.writeDb.insertInto("user").values(userRow).execute();
     await cachedReadDb.writeDb.insertInto("apikey").values(keyRow).execute();
 
-    // Now read route succeeds via dbRead.
-    expect(
-      (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-            headers: { "x-api-key": created.key },
-          }),
-        )
-      ).status,
-    ).toBe(200);
+    // Now read RPC succeeds via dbRead.
+    expect((await keyRpc.account.getCurrentApiKey({})).keyId).toBe(created.apiKey!.id);
 
     // Revoke key (deletes on primaryWriteDb while cachedReadDb still holds stale cache entry).
-    const revokeRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/${created.id}`, {
-        method: "DELETE",
-        headers: { cookie: user.cookie },
-      }),
-    );
-    expect(revokeRes.status).toBe(200);
+    await userRpc.account.deleteApiKey({ id: created.apiKey!.id });
 
-    // Write & report endpoints reject IMMEDIATELY because they query uncached dbWrite.
+    // Write & report RPCs reject IMMEDIATELY because they query uncached dbWrite.
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/test-submit`, {
-            method: "POST",
-            headers: { "x-api-key": created.key },
+        await expectRpcError(
+          keyRpc.changeRequest.createChangeRequest({
+            target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+            namespace: "bilibili",
+            nativeId: "ss10002",
+            variantDescription: "原声",
+            segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
           }),
         )
       ).status,
     ).toBe(401);
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/test-report`, {
-            method: "POST",
-            headers: { "x-api-key": created.key },
+        await expectRpcError(
+          keyRpc.lead.createLead({
+            target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+            namespace: "bilibili",
+            nativeId: "ss10002",
           }),
         )
       ).status,
     ).toBe(401);
 
-    // Read endpoint still sees the stale cached row on dbRead, confirming distinct connection routing.
-    expect(
-      (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-            headers: { "x-api-key": created.key },
-          }),
-        )
-      ).status,
-    ).toBe(200);
+    // Read RPC still sees the stale cached row on dbRead, confirming distinct connection routing.
+    expect((await keyRpc.account.getCurrentApiKey({})).keyId).toBe(created.apiKey!.id);
   });
 
-  test("validates POST /v1/api-keys input and rejects missing or malformed API key headers", async () => {
+  test("validates CreateApiKey input and rejects missing or malformed API key headers", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -880,65 +642,68 @@ describe("API Worker API key management & verification", () => {
     });
 
     // Missing or non-Bearer auth headers return 401 API_KEY_REQUIRED.
-    const missingKey = await app.fetch(new Request(`${TEST_BASE_URL}/v1/api-keys/me`));
-    expect(missingKey.status).toBe(401);
-    expect(await missingKey.json()).toEqual({
-      error: "API_KEY_REQUIRED",
-      message: "API key is required",
-    });
+    const missingErr = await expectRpcError(createRpcClients(app).account.getCurrentApiKey({}));
+    expect(missingErr.status).toBe(401);
+    expect(missingErr.code).toBe("API_KEY_REQUIRED");
+    expect(missingErr.message).toBe("API key is required");
 
-    const basicAuth = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
+    const basicAuthErr = await expectRpcError(
+      createRpcClients(app, {
         headers: { authorization: "Basic dXNlcjpwYXNz" },
-      }),
+      }).account.getCurrentApiKey({}),
     );
-    expect(basicAuth.status).toBe(401);
-    expect(await basicAuth.json()).toEqual({
-      error: "API_KEY_REQUIRED",
-      message: "API key is required",
-    });
+    expect(basicAuthErr.status).toBe(401);
+    expect(basicAuthErr.code).toBe("API_KEY_REQUIRED");
+    expect(basicAuthErr.message).toBe("API key is required");
 
-    const wrongKey = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-        headers: { "x-api-key": "mref_nonexistent_key_value" },
-      }),
+    const wrongKeyErr = await expectRpcError(
+      createRpcClients(app, { apiKey: "mref_nonexistent_key_value" }).account.getCurrentApiKey({}),
     );
-    expect(wrongKey.status).toBe(401);
-    expect(await wrongKey.json()).toEqual({
-      error: "INVALID_API_KEY",
-      message: "Invalid API key",
-    });
+    expect(wrongKeyErr.status).toBe(401);
+    expect(wrongKeyErr.code).toBe("INVALID_API_KEY");
+    expect(wrongKeyErr.message).toBe("Invalid API key");
 
-    // Malformed JSON and invalid creation payloads return 400.
-    const invalidCases: Array<{ body: string; expectedError: string }> = [
-      { body: "{not-json", expectedError: "INVALID_JSON" },
-      { body: JSON.stringify({ name: "   " }), expectedError: "INVALID_NAME" },
-      { body: JSON.stringify({ name: "a".repeat(65) }), expectedError: "INVALID_NAME" },
-      { body: JSON.stringify({ scopes: [] }), expectedError: "INVALID_PERMISSIONS" },
-      { body: JSON.stringify({ scopes: ["admin"] }), expectedError: "INVALID_PERMISSIONS" },
-      {
-        body: JSON.stringify({ canSubmit: false, scopes: ["read_report", "submit"] }),
-        expectedError: "INVALID_PERMISSIONS",
-      },
-      {
-        body: JSON.stringify({ name: "Raw Perms", permissions: { media: ["submit"] } }),
-        expectedError: "INVALID_PERMISSIONS",
-      },
-      { body: JSON.stringify({ expiresIn: 0 }), expectedError: "INVALID_EXPIRES_IN" },
-      { body: JSON.stringify({ expiresIn: 12.5 }), expectedError: "INVALID_EXPIRES_IN" },
-      { body: JSON.stringify({ expiresIn: 400 * 86_400 }), expectedError: "INVALID_EXPIRES_IN" },
-    ];
-
-    for (const testCase of invalidCases) {
+    // Malformed Connect JSON / unknown fields / invalid wire types return 400 at Protobuf decode.
+    for (const badBody of [
+      "{not-json",
+      JSON.stringify({ name: "Raw Perms", permissions: { media: ["submit"] } }),
+      JSON.stringify({ scopes: ["admin"] }),
+      JSON.stringify({ expiresIn: 12.5 }),
+    ]) {
       const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/api-keys`, {
+        new Request(`${TEST_BASE_URL}/mediaref.v1.AccountService/CreateApiKey`, {
           method: "POST",
           headers: { "content-type": "application/json", cookie: user.cookie },
-          body: testCase.body,
+          body: badBody,
         }),
       );
       expect(res.status).toBe(400);
-      expect(await res.json()).toMatchObject({ error: testCase.expectedError });
+    }
+
+    // Domain-level validation errors return structured ConnectError codes.
+    const userRpc = createRpcClients(app, { cookie: user.cookie });
+    const invalidRpcCases: Array<{
+      input: Parameters<typeof userRpc.account.createApiKey>[0];
+      expectedCode: string;
+    }> = [
+      { input: { name: "   " }, expectedCode: "INVALID_NAME" },
+      { input: { name: "a".repeat(65) }, expectedCode: "INVALID_NAME" },
+      { input: { scopes: [proto.ApiKeyScope.UNSPECIFIED] }, expectedCode: "INVALID_PERMISSIONS" },
+      {
+        input: {
+          canSubmit: false,
+          scopes: [proto.ApiKeyScope.READ_REPORT, proto.ApiKeyScope.SUBMIT],
+        },
+        expectedCode: "INVALID_PERMISSIONS",
+      },
+      { input: { expiresIn: 0 }, expectedCode: "INVALID_EXPIRES_IN" },
+      { input: { expiresIn: 400 * 86_400 }, expectedCode: "INVALID_EXPIRES_IN" },
+    ];
+
+    for (const testCase of invalidRpcCases) {
+      const err = await expectRpcError(userRpc.account.createApiKey(testCase.input));
+      expect(err.status).toBe(400);
+      expect(err.code).toBe(testCase.expectedCode);
     }
   });
 
@@ -964,15 +729,9 @@ describe("API Worker API key management & verification", () => {
       verify: true,
     });
 
-    const createdRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({ name: "Worker Key" }),
-      }),
-    );
-    expect(createdRes.status).toBe(201);
-    const created = (await createdRes.json()) as { id: string; key: string };
+    const created = await createRpcClients(app, { cookie: user.cookie }).account.createApiKey({
+      name: "Worker Key",
+    });
 
     const pending: Promise<unknown>[] = [];
     const ctx = {
@@ -987,29 +746,33 @@ describe("API Worker API key management & verification", () => {
       connectionString: testDb.connectionString,
     } as Hyperdrive;
 
-    const response = await worker.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-        headers: {
-          "x-api-key": created.key,
-          origin: "https://mediaref.org",
-        },
-      }),
-      {
-        HYPERDRIVE_READ: hyperdrive,
-        HYPERDRIVE_WRITE: hyperdrive,
-        AUTH_SECRET: TEST_AUTH_SECRET,
-        API_BASE_URL: TEST_BASE_URL,
-        COOKIE_DOMAIN: "mediaref.org",
+    let observedCorsOrigin: string | null = null;
+    const workerEnv = {
+      HYPERDRIVE_READ: hyperdrive,
+      HYPERDRIVE_WRITE: hyperdrive,
+      AUTH_SECRET: TEST_AUTH_SECRET,
+      API_BASE_URL: TEST_BASE_URL,
+      COOKIE_DOMAIN: "mediaref.org",
+    };
+
+    const workerRpc = createRpcClients(
+      async (req) => {
+        const res = await worker.fetch(req, workerEnv, ctx);
+        observedCorsOrigin = res.headers.get("access-control-allow-origin");
+        return res;
       },
-      ctx,
+      {
+        apiKey: created.key,
+        headers: { origin: "https://mediaref.org" },
+      },
     );
 
+    const me = await workerRpc.account.getCurrentApiKey({});
     await Promise.all(pending);
 
-    expect(response.status).toBe(200);
-    expect(response.headers.get("access-control-allow-origin")).toBe("https://mediaref.org");
-    expect(await response.json()).toMatchObject({
-      keyId: created.id,
+    expect(observedCorsOrigin).toBe("https://mediaref.org");
+    expect(me).toMatchObject({
+      keyId: created.apiKey!.id,
       userId: user.userId,
       canSubmit: false,
     });

@@ -1,4 +1,25 @@
-import { formatExternalKey } from "./external-key.ts";
+import { create } from "@bufbuild/protobuf";
+import {
+  Code,
+  ConnectError,
+  createClient,
+  type Interceptor,
+  type Transport,
+} from "@connectrpc/connect";
+import { createConnectTransport } from "@connectrpc/connect-web";
+import { LeadService } from "./gen/mediaref/v1/lead_pb.ts";
+import { MediaService } from "./gen/mediaref/v1/media_pb.ts";
+import { MediaRefSchema, type MediaRef as ProtoMediaRef } from "./gen/mediaref/v1/types_pb.ts";
+import {
+  extractConnectErrorInfo,
+  fromProtoBatchItemResult,
+  fromProtoLead,
+  fromProtoMediaDocument,
+  fromProtoMediaQueryItem,
+  fromProtoMediaRef,
+  toProtoMediaRefFromInput,
+  toProtoNamespaceGroup,
+} from "./proto-mappers.ts";
 import { resolveEpisode } from "./resolve.ts";
 import type {
   CollectionOnlyResult,
@@ -7,19 +28,28 @@ import type {
   UnmappedEpisodeResult,
 } from "./resolve.ts";
 import { getNamespaceGroup } from "./types.ts";
-import type { ExternalKey, MediaDocument, Namespace, NamespaceGroup } from "./types.ts";
+import type { ExternalKey, MediaDocument, MediaRef, Namespace, NamespaceGroup } from "./types.ts";
 
 export const DEFAULT_BASE_URL = "https://api.mediaref.org";
 export const MAX_BATCH_MEDIA_KEYS = 100;
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
-export type MediaLookupKey = string | ExternalKey;
+export type MediaLookupKey = MediaRef | ProtoMediaRef | ExternalKey | string;
 
-export interface MediaRefClientOptions {
-  apiKey: string;
+export interface MediaRefTransportOptions {
+  apiKey?: string;
   baseUrl?: string;
   fetch?: FetchLike;
+  /** Defaults to `true` (binary Protobuf wire format). Set `false` for Connect JSON. */
+  useBinaryFormat?: boolean;
+  /** Enables Connect HTTP GET for side-effect-free read RPCs. Defaults to `false`. */
+  useHttpGet?: boolean;
+  interceptors?: Interceptor[];
+}
+
+export interface MediaRefClientOptions extends MediaRefTransportOptions {
+  apiKey: string;
 }
 
 export interface GetMediaOptions {
@@ -35,6 +65,7 @@ export interface MediaQueryItem {
 }
 
 export interface GetMediaResponse {
+  ref: MediaRef | null;
   key: string;
   document: MediaDocument;
   matchedAssociationId: string | null;
@@ -52,8 +83,14 @@ export interface GetMediaBatchOptions {
 export type BatchMediaItemErrorCode = "INVALID_KEY" | "NOT_FOUND";
 
 export type BatchMediaItemResult =
-  | { key: string; ok: true; items: MediaQueryItem[] }
-  | { key: string; ok: false; error: BatchMediaItemErrorCode; message: string };
+  | { ref: MediaRef | null; key: string; ok: true; items: MediaQueryItem[] }
+  | {
+      ref: MediaRef | null;
+      key: string;
+      ok: false;
+      error: BatchMediaItemErrorCode;
+      message: string;
+    };
 
 export interface BatchMediaResponse {
   results: BatchMediaItemResult[];
@@ -61,6 +98,7 @@ export interface BatchMediaResponse {
 
 export interface NotFoundResolutionResult {
   kind: "not_found";
+  ref: MediaRef | null;
   key: string;
 }
 
@@ -71,7 +109,7 @@ export type ResolveFromKeyResult =
   | (UnmappedEpisodeResult & { media: GetMediaResponse });
 
 export interface ReportLeadInput {
-  targetExternalKey: MediaLookupKey;
+  target: MediaLookupKey;
   namespace: Namespace;
   nativeId: string;
   season?: number | null;
@@ -85,6 +123,7 @@ export interface ReportLeadOptions {
 
 export interface LeadRecord {
   id: string;
+  target: MediaRef | null;
   targetExternalKey: string;
   namespace: Namespace;
   nativeId: string;
@@ -121,6 +160,7 @@ export class MediaRefApiError extends Error {
 }
 
 export interface MediaRefClient {
+  readonly transport: Transport;
   getMedia(key: MediaLookupKey, options?: GetMediaOptions): Promise<GetMediaResponse | null>;
   getMediaBatch(
     keys: ReadonlyArray<MediaLookupKey>,
@@ -142,8 +182,20 @@ function normalizeBaseUrl(baseUrl: string | undefined): string {
   return raw.replace(/\/+$/, "");
 }
 
-function serializeLookupKey(key: MediaLookupKey): string {
-  return typeof key === "string" ? key : formatExternalKey(key);
+function toStrictProtoMediaRef(input: MediaLookupKey): ProtoMediaRef {
+  const protoRef = toProtoMediaRefFromInput(input);
+  if (!protoRef) {
+    throw new RangeError("Invalid media reference");
+  }
+  const validated = fromProtoMediaRef(protoRef);
+  if (!validated.ok) {
+    throw new RangeError(validated.message);
+  }
+  return protoRef;
+}
+
+function toBatchProtoMediaRef(input: MediaLookupKey): ProtoMediaRef {
+  return toProtoMediaRefFromInput(input) ?? create(MediaRefSchema);
 }
 
 function validateSeasonOption(season: number | null | undefined): void {
@@ -152,80 +204,31 @@ function validateSeasonOption(season: number | null | undefined): void {
   }
 }
 
-function parseRetryAfterHeader(raw: string | null): number | undefined {
-  if (raw === null) {
-    return undefined;
-  }
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) {
-    return undefined;
-  }
-  if (/^\d+$/.test(trimmed)) {
-    const parsed = Number.parseInt(trimmed, 10);
-    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
-  }
-  const timestamp = Date.parse(trimmed);
-  if (!Number.isNaN(timestamp)) {
-    return Math.max(0, Math.ceil((timestamp - Date.now()) / 1000));
-  }
-  return undefined;
+function toGlobalFetch(fetchFn: FetchLike): typeof globalThis.fetch {
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    return fetchFn(url, init);
+  }) as typeof globalThis.fetch;
 }
 
-async function createApiErrorFromResponse(response: Response): Promise<MediaRefApiError> {
-  let code = "HTTP_ERROR";
-  let message = response.statusText
-    ? `HTTP ${response.status}: ${response.statusText}`
-    : `HTTP ${response.status}`;
-  let retryAfterSeconds = parseRetryAfterHeader(response.headers.get("retry-after"));
-
-  let rawText = "";
-  try {
-    rawText = await response.text();
-  } catch {
-    rawText = "";
+function toMediaRefApiError(error: unknown): never {
+  if (error instanceof MediaRefApiError) {
+    throw error;
   }
-
-  if (rawText.trim().length > 0) {
-    try {
-      const parsed: unknown = JSON.parse(rawText);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const record = parsed as Record<string, unknown>;
-        if (typeof record.error === "string" && record.error.trim().length > 0) {
-          code = record.error;
-        } else if (typeof record.code === "string" && record.code.trim().length > 0) {
-          code = record.code;
-        }
-        if (typeof record.message === "string" && record.message.trim().length > 0) {
-          message = record.message;
-        }
-        if (
-          retryAfterSeconds === undefined &&
-          typeof record.retryAfterSeconds === "number" &&
-          Number.isFinite(record.retryAfterSeconds) &&
-          record.retryAfterSeconds >= 0
-        ) {
-          retryAfterSeconds = record.retryAfterSeconds;
-        }
-      }
-    } catch {
-      // Non-JSON response body (e.g. proxy/CDN error page); keep fallback code/message.
-    }
+  if (error instanceof ConnectError) {
+    const info = extractConnectErrorInfo(error);
+    throw new MediaRefApiError({
+      status: info.status,
+      code: info.code,
+      message: info.message,
+      retryAfterSeconds: info.retryAfterSeconds,
+    });
   }
-
-  return new MediaRefApiError({
-    status: response.status,
-    code,
-    message,
-    retryAfterSeconds,
-  });
+  throw error;
 }
 
-export function createMediaRefClient(options: MediaRefClientOptions): MediaRefClient {
-  if (typeof options.apiKey !== "string" || options.apiKey.trim().length === 0) {
-    throw new RangeError("apiKey must be a non-empty string");
-  }
-
-  const apiKey = options.apiKey.trim();
+export function createMediaRefTransport(options: MediaRefTransportOptions = {}): Transport {
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const fetchFn: FetchLike | undefined =
     options.fetch ??
@@ -235,50 +238,82 @@ export function createMediaRefClient(options: MediaRefClientOptions): MediaRefCl
     throw new Error("No fetch implementation available; provide options.fetch");
   }
 
+  const interceptors: Interceptor[] = [];
+  const trimmedKey = options.apiKey?.trim();
+  if (trimmedKey && trimmedKey.length > 0) {
+    interceptors.push((next) => (req) => {
+      if (!req.header.has("X-API-Key")) {
+        req.header.set("X-API-Key", trimmedKey);
+      }
+      return next(req);
+    });
+  }
+  if (options.interceptors && options.interceptors.length > 0) {
+    interceptors.push(...options.interceptors);
+  }
+
+  return createConnectTransport({
+    baseUrl,
+    useBinaryFormat: options.useBinaryFormat ?? true,
+    useHttpGet: options.useHttpGet ?? false,
+    fetch: toGlobalFetch(fetchFn),
+    interceptors,
+  });
+}
+
+export function createMediaRefClient(options: MediaRefClientOptions): MediaRefClient {
+  if (typeof options.apiKey !== "string" || options.apiKey.trim().length === 0) {
+    throw new RangeError("apiKey must be a non-empty string");
+  }
+
+  const transport = createMediaRefTransport(options);
+  const mediaRpc = createClient(MediaService, transport);
+  const leadRpc = createClient(LeadService, transport);
+
   const getMedia = async (
     key: MediaLookupKey,
     getOptions?: GetMediaOptions,
   ): Promise<GetMediaResponse | null> => {
-    const keyStr = serializeLookupKey(key);
-    if (keyStr.trim().length === 0) {
-      throw new RangeError("Media lookup key must be a non-empty string");
-    }
+    const protoRef = toStrictProtoMediaRef(key);
     validateSeasonOption(getOptions?.season);
 
-    const params = new URLSearchParams();
-    if (getOptions?.includeUnconfirmed !== undefined) {
-      params.set("includeUnconfirmed", String(getOptions.includeUnconfirmed));
-    }
-    if (getOptions?.season !== undefined) {
-      params.set("season", String(getOptions.season));
-    }
-    if (getOptions?.namespaceGroup !== undefined) {
-      params.set("namespaceGroup", getOptions.namespaceGroup);
-    }
+    try {
+      const res = await mediaRpc.getMedia(
+        {
+          ref: protoRef,
+          includeUnconfirmed: getOptions?.includeUnconfirmed ?? false,
+          ...(getOptions?.season !== undefined ? { season: getOptions.season } : {}),
+          namespaceGroup: toProtoNamespaceGroup(getOptions?.namespaceGroup),
+        },
+        {
+          signal: getOptions?.signal,
+        },
+      );
 
-    const queryString = params.toString();
-    const url = `${baseUrl}/v1/media/${encodeURIComponent(keyStr)}${queryString.length > 0 ? `?${queryString}` : ""}`;
-    const response = await fetchFn(url, {
-      method: "GET",
-      headers: {
-        "X-API-Key": apiKey,
-        Accept: "application/json",
-      },
-      signal: getOptions?.signal,
-    });
+      if (!res.document) {
+        return null;
+      }
 
-    if (response.status === 404) {
-      return null;
+      const decodedRef = fromProtoMediaRef(res.ref ?? protoRef);
+      const document = fromProtoMediaDocument(res.document);
+      const items = res.items.map(fromProtoMediaQueryItem);
+      return {
+        ref: decodedRef.ok ? decodedRef.ref : null,
+        key: decodedRef.ok ? decodedRef.key : "",
+        document,
+        matchedAssociationId: res.matchedAssociationId ?? null,
+        items,
+      };
+    } catch (error) {
+      if (error instanceof ConnectError && error.code === Code.NotFound) {
+        return null;
+      }
+      toMediaRefApiError(error);
     }
-
-    if (!response.ok) {
-      throw await createApiErrorFromResponse(response);
-    }
-
-    return (await response.json()) as GetMediaResponse;
   };
 
   return {
+    transport,
     getMedia,
 
     async getMediaBatch(
@@ -291,45 +326,35 @@ export function createMediaRefClient(options: MediaRefClientOptions): MediaRefCl
         return { results: [] };
       }
 
-      const serializedKeys = keys.map(serializeLookupKey);
+      const protoRefs = keys.map(toBatchProtoMediaRef);
       const autoChunk = batchOptions?.autoChunk ?? true;
-      if (!autoChunk && serializedKeys.length > MAX_BATCH_MEDIA_KEYS) {
+      if (!autoChunk && protoRefs.length > MAX_BATCH_MEDIA_KEYS) {
         throw new RangeError(
-          `Batch size ${serializedKeys.length} exceeds maximum of ${MAX_BATCH_MEDIA_KEYS} keys when autoChunk is disabled`,
+          `Batch size ${protoRefs.length} exceeds maximum of ${MAX_BATCH_MEDIA_KEYS} refs when autoChunk is disabled`,
         );
       }
 
       const allResults: BatchMediaItemResult[] = [];
-      for (let offset = 0; offset < serializedKeys.length; offset += MAX_BATCH_MEDIA_KEYS) {
-        const chunkKeys = serializedKeys.slice(offset, offset + MAX_BATCH_MEDIA_KEYS);
-        const body: Record<string, unknown> = { keys: chunkKeys };
-        if (batchOptions?.includeUnconfirmed !== undefined) {
-          body.includeUnconfirmed = batchOptions.includeUnconfirmed;
+      for (let offset = 0; offset < protoRefs.length; offset += MAX_BATCH_MEDIA_KEYS) {
+        const chunkRefs = protoRefs.slice(offset, offset + MAX_BATCH_MEDIA_KEYS);
+        try {
+          const res = await mediaRpc.batchGetMedia(
+            {
+              refs: chunkRefs,
+              includeUnconfirmed: batchOptions?.includeUnconfirmed ?? false,
+              ...(batchOptions?.season !== undefined ? { season: batchOptions.season } : {}),
+              namespaceGroup: toProtoNamespaceGroup(batchOptions?.namespaceGroup),
+            },
+            {
+              signal: batchOptions?.signal,
+            },
+          );
+          for (const entry of res.results) {
+            allResults.push(fromProtoBatchItemResult(entry));
+          }
+        } catch (error) {
+          toMediaRefApiError(error);
         }
-        if (batchOptions?.season !== undefined) {
-          body.season = batchOptions.season;
-        }
-        if (batchOptions?.namespaceGroup !== undefined) {
-          body.namespaceGroup = batchOptions.namespaceGroup;
-        }
-
-        const response = await fetchFn(`${baseUrl}/v1/media/batch`, {
-          method: "POST",
-          headers: {
-            "X-API-Key": apiKey,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify(body),
-          signal: batchOptions?.signal,
-        });
-
-        if (!response.ok) {
-          throw await createApiErrorFromResponse(response);
-        }
-
-        const chunkData = (await response.json()) as BatchMediaResponse;
-        allResults.push(...chunkData.results);
       }
 
       return { results: allResults };
@@ -340,7 +365,8 @@ export function createMediaRefClient(options: MediaRefClientOptions): MediaRefCl
       query: ResolveEpisodeQuery,
       getOptions?: GetMediaOptions,
     ): Promise<ResolveFromKeyResult> {
-      const keyStr = serializeLookupKey(key);
+      const protoRef = toStrictProtoMediaRef(key);
+      const decoded = fromProtoMediaRef(protoRef);
       const effectiveIncludeUnconfirmed =
         getOptions?.includeUnconfirmed ?? query.includeUnconfirmed;
       const effectiveSeason =
@@ -352,7 +378,7 @@ export function createMediaRefClient(options: MediaRefClientOptions): MediaRefCl
       const effectiveNamespaceGroup =
         getOptions?.namespaceGroup ?? getNamespaceGroup(query.namespace);
 
-      const media = await getMedia(keyStr, {
+      const media = await getMedia(protoRef, {
         includeUnconfirmed: effectiveIncludeUnconfirmed,
         season: effectiveSeason,
         namespaceGroup: effectiveNamespaceGroup,
@@ -360,7 +386,11 @@ export function createMediaRefClient(options: MediaRefClientOptions): MediaRefCl
       });
 
       if (media === null) {
-        return { kind: "not_found", key: keyStr };
+        return {
+          kind: "not_found",
+          ref: decoded.ok ? decoded.ref : null,
+          key: decoded.ok ? decoded.key : "",
+        };
       }
 
       const resolution = resolveEpisode(media.document, {
@@ -377,39 +407,40 @@ export function createMediaRefClient(options: MediaRefClientOptions): MediaRefCl
       input: ReportLeadInput,
       reportOptions?: ReportLeadOptions,
     ): Promise<ReportLeadResponse> {
+      const protoTarget = toStrictProtoMediaRef(input.target);
       validateSeasonOption(input.season);
 
-      const body: Record<string, unknown> = {
-        targetExternalKey: serializeLookupKey(input.targetExternalKey),
-        namespace: input.namespace,
-        nativeId: input.nativeId,
-      };
-      if (input.season !== undefined) {
-        body.season = input.season;
-      }
-      if (input.variantDescription !== undefined) {
-        body.variantDescription = input.variantDescription;
-      }
-      if (input.notes !== undefined) {
-        body.notes = input.notes;
-      }
+      try {
+        const res = await leadRpc.createLead(
+          {
+            target: protoTarget,
+            namespace: input.namespace,
+            nativeId: input.nativeId,
+            ...(input.season !== undefined && input.season !== null
+              ? { season: input.season }
+              : {}),
+            ...(input.variantDescription !== undefined && input.variantDescription !== null
+              ? { variantDescription: input.variantDescription }
+              : {}),
+            ...(input.notes !== undefined && input.notes !== null ? { notes: input.notes } : {}),
+          },
+          {
+            signal: reportOptions?.signal,
+          },
+        );
 
-      const response = await fetchFn(`${baseUrl}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "X-API-Key": apiKey,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: reportOptions?.signal,
-      });
+        if (!res.lead) {
+          throw new MediaRefApiError({
+            status: 500,
+            code: "INVALID_RESPONSE",
+            message: "Server returned empty lead payload",
+          });
+        }
 
-      if (!response.ok) {
-        throw await createApiErrorFromResponse(response);
+        return { lead: fromProtoLead(res.lead) };
+      } catch (error) {
+        toMediaRefApiError(error);
       }
-
-      return (await response.json()) as ReportLeadResponse;
     },
   };
 }

@@ -1,9 +1,8 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { resolveEpisode } from "@media-ref/client";
 import {
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -11,8 +10,19 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoChangeRequestStatus,
+  getChangeRequestStateRpc,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-youku-evidence-integration-tests-0123456789abcdef";
 
 const YOUKU_SHOW_COMPLETE_TV = "c8e2a1b4d5f60718293a";
@@ -84,75 +94,17 @@ function makeYoukuFeatureItems(count: number, includeNonFeature = true) {
   return items;
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupVerifiedUserAndKeys(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ) {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Youku Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const submitKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Submit Key", canSubmit: true }),
-    }),
-  );
-  expect(submitKeyRes.status).toBe(201);
-  const submitKey = (await submitKeyRes.json()) as { key: string };
-
-  const readKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read Key", canSubmit: false }),
-    }),
-  );
-  expect(readKeyRes.status).toBe(201);
-  const readKey = (await readKeyRes.json()) as { key: string };
+  const { cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Youku Tester",
+  });
+  const submitKey = await issueApiKeyRpc(app, cookie, { name: "Submit Key", canSubmit: true });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Read Key", canSubmit: false });
 
   return {
     cookie,
@@ -533,6 +485,7 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "youku-submitter@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // 1. Invalid Youku URLs/IDs are immediately rejected with 400 INVALID_NATIVE_ID
     for (const badInput of [
@@ -541,29 +494,25 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
       "id_zc8e2a1b4d5f60718293a",
       "short123",
     ]) {
-      const badRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:73618",
-            namespace: "youku",
-            nativeId: badInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 32,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
-          }),
+      const badErr = await expectRpcError(
+        submitRpc.changeRequest.createChangeRequest({
+          target: mediaRef("tmdb:tv:73618"),
+          namespace: "youku",
+          nativeId: badInput,
+          variantDescription: "原声",
+          segments: [
+            toProtoSegmentInput({
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: 32,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+            }),
+          ],
         }),
       );
-      expect(badRes.status).toBe(400);
-      expect(await badRes.json()).toMatchObject({ error: "INVALID_NATIVE_ID" });
+      expect(badErr.status).toBe(400);
+      expect(badErr.code).toBe("INVALID_NATIVE_ID");
     }
 
     // 2. All valid Youku URL/ID variants canonicalize to 20-char lowercase hex showId without leading z
@@ -577,62 +526,39 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
 
     const submittedTvIds: string[] = [];
     for (const rawInput of urlVariants) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:73618",
-            namespace: "youku",
-            nativeId: rawInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 32,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+      const res = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:tv:73618"),
+        namespace: "youku",
+        nativeId: rawInput,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 32,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      );
-      expect(res.status).toBe(201);
-      const body = (await res.json()) as {
-        changeRequest: {
-          id: string;
-          status: string;
-          rawNativeId: string;
-          nativeId: string;
-        };
-      };
-      expect(body.changeRequest.status).toBe("pending_evidence");
-      expect(body.changeRequest.rawNativeId).toBe(rawInput);
-      expect(body.changeRequest.nativeId).toBe(YOUKU_SHOW_COMPLETE_TV);
-      submittedTvIds.push(body.changeRequest.id);
+        ],
+      });
+      const cr = res.changeRequest!;
+      expect(fromProtoChangeRequestStatus(cr.status)).toBe("pending_evidence");
+      expect(cr.rawNativeId).toBe(rawInput);
+      expect(cr.nativeId).toBe(YOUKU_SHOW_COMPLETE_TV);
+      submittedTvIds.push(cr.id);
     }
 
     // Also submit a Youku movie URL
-    const movieSubmitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:535167",
-          namespace: "youku",
-          nativeId: `https://list.youku.com/show/id_z${YOUKU_SHOW_MOVIE}.html`,
-          variantDescription: "原声",
-          segments: [],
-        }),
-      }),
-    );
-    expect(movieSubmitRes.status).toBe(201);
-    const movieCr = (await movieSubmitRes.json()) as {
-      changeRequest: { id: string; nativeId: string; status: string };
-    };
-    expect(movieCr.changeRequest.nativeId).toBe(YOUKU_SHOW_MOVIE);
-    expect(movieCr.changeRequest.status).toBe("pending_evidence");
+    const movieSubmitRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:movie:535167"),
+      namespace: "youku",
+      nativeId: `https://list.youku.com/show/id_z${YOUKU_SHOW_MOVIE}.html`,
+      variantDescription: "原声",
+      segments: [],
+    });
+    const movieCr = movieSubmitRes.changeRequest!;
+    expect(movieCr.nativeId).toBe(YOUKU_SHOW_MOVIE);
+    expect(fromProtoChangeRequestStatus(movieCr.status)).toBe("pending_evidence");
 
     // 3. Run Background Worker scheduled -> queue for first TV CR and movie CR
     const emitted: JobQueueMessage[] = [];
@@ -654,9 +580,7 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
         msg.jobType === "evidence_check" && msg.payload.changeRequestId === submittedTvIds[0],
     );
     const movieMsg = emitted.find(
-      (msg) =>
-        msg.jobType === "evidence_check" &&
-        msg.payload.changeRequestId === movieCr.changeRequest.id,
+      (msg) => msg.jobType === "evidence_check" && msg.payload.changeRequestId === movieCr.id,
     );
     expect(tvMsg).toBeDefined();
     expect(movieMsg).toBeDefined();
@@ -666,31 +590,17 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     expect(summary.completed).toBe(2);
     expect(tracked.every((entry) => entry.acked)).toBe(true);
 
-    // 4. Verify TV change request auto-approved and readable via GET /v1/media + resolveEpisode
-    const tvCrStatus = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${submittedTvIds[0]}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as {
-      changeRequest: {
-        status: string;
-        reviewerUserId: string | null;
-        decisionReason: string | null;
-      };
-    };
-    expect(tvCrStatus.changeRequest.status).toBe("approved");
-    expect(tvCrStatus.changeRequest.reviewerUserId).toBeNull();
-    expect(tvCrStatus.changeRequest.decisionReason).toBe("evidence_gate_passed");
-
-    const tvMediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:73618`, {
-        headers: { "x-api-key": user.readKey },
-      }),
+    // 4. Verify TV change request auto-approved and readable via MediaService.GetMedia + resolveEpisode
+    const tvCrStatus = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      submittedTvIds[0]!,
     );
-    expect(tvMediaRes.status).toBe(200);
-    const tvMediaBody = (await tvMediaRes.json()) as { document: MediaDocument };
+    expect(tvCrStatus.status).toBe("approved");
+    expect(tvCrStatus.reviewerUserId).toBeNull();
+    expect(tvCrStatus.decisionReason).toBe("evidence_gate_passed");
+
+    const tvMediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:73618");
     expect(tvMediaBody.document.associations).toHaveLength(1);
     expect(tvMediaBody.document.associations[0]).toMatchObject({
       namespace: "youku",
@@ -706,13 +616,7 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     });
 
     // 5. Verify Movie change request auto-approved and readable
-    const movieMediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:535167`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(movieMediaRes.status).toBe(200);
-    const movieMediaBody = (await movieMediaRes.json()) as { document: MediaDocument };
+    const movieMediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:movie:535167");
     expect(movieMediaBody.document.associations[0]).toMatchObject({
       namespace: "youku",
       nativeId: YOUKU_SHOW_MOVIE,
@@ -743,36 +647,29 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "youku-caveats@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     const submitCr = async (payload: {
       targetExternalKey: string;
       nativeId: string;
       episodeEnd: number;
     }) => {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: payload.targetExternalKey,
-            namespace: "youku",
-            nativeId: payload.nativeId,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: payload.episodeEnd,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+      const res = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef(payload.targetExternalKey),
+        namespace: "youku",
+        nativeId: payload.nativeId,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: payload.episodeEnd,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      );
-      expect(res.status).toBe(201);
-      const body = (await res.json()) as { changeRequest: { id: string } };
-      return body.changeRequest.id;
+        ],
+      });
+      return res.changeRequest!.id;
     };
 
     const geoLockedCrId = await submitCr({
@@ -815,50 +712,37 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     expect(summary.completed).toBe(4);
 
     const inspectCr = async (id: string) => {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      );
-      expect(res.status).toBe(200);
-      return (await res.json()) as {
-        changeRequest: {
-          status: string;
-          conflictReason: string | null;
-          evidence: {
-            collection?: { featureEpisodeCount?: number | null; year?: number | null };
-          } | null;
-        };
+      const cr = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, id);
+      return cr as typeof cr & {
+        evidence: {
+          collection?: { featureEpisodeCount?: number | null; year?: number | null };
+        } | null;
       };
     };
 
     const geoInspect = await inspectCr(geoLockedCrId);
-    expect(geoInspect.changeRequest.status).toBe("needs_review");
-    expect(geoInspect.changeRequest.conflictReason).toBe("episode_count_missing");
-    expect(geoInspect.changeRequest.evidence?.collection?.featureEpisodeCount).toBeNull();
+    expect(geoInspect.status).toBe("needs_review");
+    expect(geoInspect.conflictReason).toBe("episode_count_missing");
+    expect(geoInspect.evidence?.collection?.featureEpisodeCount).toBeNull();
 
     const truncatedInspect = await inspectCr(truncatedCrId);
-    expect(truncatedInspect.changeRequest.status).toBe("needs_review");
-    expect(truncatedInspect.changeRequest.conflictReason).toBe("episode_count_missing");
-    expect(truncatedInspect.changeRequest.evidence?.collection?.featureEpisodeCount).toBeNull();
+    expect(truncatedInspect.status).toBe("needs_review");
+    expect(truncatedInspect.conflictReason).toBe("episode_count_missing");
+    expect(truncatedInspect.evidence?.collection?.featureEpisodeCount).toBeNull();
 
     const missingYearInspect = await inspectCr(missingYearCrId);
-    expect(missingYearInspect.changeRequest.status).toBe("needs_review");
-    expect(missingYearInspect.changeRequest.conflictReason).toBe("year_missing");
-    expect(missingYearInspect.changeRequest.evidence?.collection?.year).toBeNull();
+    expect(missingYearInspect.status).toBe("needs_review");
+    expect(missingYearInspect.conflictReason).toBe("year_missing");
+    expect(missingYearInspect.evidence?.collection?.year).toBeNull();
 
     const notFoundInspect = await inspectCr(notFoundCrId);
-    expect(notFoundInspect.changeRequest.status).toBe("needs_review");
-    expect(notFoundInspect.changeRequest.conflictReason).toBe("collection_not_found");
+    expect(notFoundInspect.status).toBe("needs_review");
+    expect(notFoundInspect.conflictReason).toBe("collection_not_found");
 
     // None of the needs_review submissions appear in default read API
     for (const key of ["tmdb:tv:31910", "tmdb:tv:73618"]) {
-      const readRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/${key}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      );
-      expect(readRes.status).toBe(404);
+      const readErr = await expectRpcError(getMediaDocumentRpc(app, user.readKey, key));
+      expect(readErr.status).toBe(404);
     }
   });
 
@@ -906,24 +790,24 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "youku-retry@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:219001",
-          namespace: "youku",
-          nativeId: `https://list.youku.com/show/id_z${YOUKU_SHOW_FLAKY_RETRY}.html`,
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 21, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const submitRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:219001"),
+      namespace: "youku",
+      nativeId: `https://list.youku.com/show/id_z${YOUKU_SHOW_FLAKY_RETRY}.html`,
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 21,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(submitRes.status).toBe(201);
-    const { changeRequest } = (await submitRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const changeRequest = submitRes.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -947,14 +831,8 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     const attempt1 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt1.rescheduled).toBe(1);
 
-    const status1 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(status1.changeRequest.status).toBe("pending_evidence");
+    const status1 = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest.id);
+    expect(status1.status).toBe("pending_evidence");
 
     // Attempt 2: HTTP 503 -> rescheduled, CR remains pending_evidence
     now = new Date(now.getTime() + 30_000);
@@ -963,14 +841,8 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     const attempt2 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt2.rescheduled).toBe(1);
 
-    const status2 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(status2.changeRequest.status).toBe("pending_evidence");
+    const status2 = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest.id);
+    expect(status2.status).toBe("pending_evidence");
 
     // Attempt 3: clean SSR response -> auto-approved!
     now = new Date(now.getTime() + 30_000);
@@ -979,22 +851,10 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     const attempt3 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt3.completed).toBe(1);
 
-    const status3 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(status3.changeRequest.status).toBe("approved");
+    const status3 = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest.id);
+    expect(status3.status).toBe("approved");
 
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:219001`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(mediaRes.status).toBe(200);
-    const mediaBody = (await mediaRes.json()) as { document: MediaDocument };
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:219001");
     expect(mediaBody.document.associations[0]?.nativeId).toBe(YOUKU_SHOW_FLAKY_RETRY);
   });
 });

@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package mediaref.v1;
+
+import "mediaref/v1/types.proto";
+
+message CreateChangeRequestRequest {
+  MediaRef target = 1;
+  string namespace = 2;
+  string native_id = 3;
+  optional string raw_native_id = 4;
+  optional string variant_id = 5;
+  optional string variant_description = 6;
+  bool set_default_variant = 7;
+  optional string task_id = 8;
+  optional string replaces_association_id = 9;
+  repeated SegmentInput segments = 10;
+}
+
+message CreateChangeRequestResponse {
+  ChangeRequest change_request = 1;
+}
+
+message GetChangeRequestRequest {
+  string id = 1;
+}
+
+message GetChangeRequestResponse {
+  ChangeRequest change_request = 1;
+}
+
+service ChangeRequestService {
+  rpc CreateChangeRequest(CreateChangeRequestRequest) returns (CreateChangeRequestResponse);
+  rpc GetChangeRequest(GetChangeRequestRequest) returns (GetChangeRequestResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}

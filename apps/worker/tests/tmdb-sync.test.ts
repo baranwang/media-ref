@@ -1,10 +1,9 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
-import { createApiApp } from "@media-ref/api";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { createApiApp } from "@media-ref/api/app";
+import { resolveEpisode, type MediaDocument, type SegmentInput } from "@media-ref/client";
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -12,83 +11,26 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoReviewAlertStatus,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-tmdb-sync-integration-tests-0123456789";
-
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-async function signUpUser(
-  app: ReturnType<typeof createApiApp>,
-  outbound: ReturnType<typeof createFakeOutboundClient>,
-  input: { email: string; password: string; name: string; verify?: boolean },
-): Promise<{ userId: string; cookie: string }> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: input.email,
-        password: input.password,
-        name: input.name,
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  if (input.verify) {
-    const email = outbound.sentEmails[emailsBefore];
-    expect(email).toBeDefined();
-    const verifyRes = await app.fetch(
-      new Request(extractVerificationUrl(email!), {
-        method: "GET",
-        headers: { cookie },
-      }),
-    );
-    expect([200, 302]).toContain(verifyRes.status);
-    const refreshed = extractCookieHeader(verifyRes);
-    if (refreshed) {
-      cookie = refreshed;
-    }
-  }
-
-  return { userId: signUpBody.user.id, cookie };
-}
 
 async function createApiKey(
   app: ReturnType<typeof createApiApp>,
   cookie: string,
   options: { name: string; canSubmit?: boolean },
 ): Promise<{ id: string; key: string }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        name: options.name,
-        canSubmit: options.canSubmit ?? false,
-      }),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; key: string };
+  return issueApiKeyRpc(app, cookie, options);
 }
 
 function createScheduledController(scheduledTime: Date): ScheduledController {
@@ -141,17 +83,15 @@ async function setupActors(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
 ) {
-  const submitter = await signUpUser(app, outbound, {
+  const submitter = await signUpAndVerifyUser(app, outbound, {
     email: "submitter@example.com",
     password: "StrongPassword123!",
     name: "Submitter",
-    verify: true,
   });
-  const reviewer = await signUpUser(app, outbound, {
+  const reviewer = await signUpAndVerifyUser(app, outbound, {
     email: "reviewer@example.com",
     password: "StrongPassword123!",
     name: "Reviewer",
-    verify: true,
   });
   await testDb.writeDb
     .updateTable("user")
@@ -175,36 +115,36 @@ async function submitAndApprove(
   app: ReturnType<typeof createApiApp>,
   submitKey: string,
   reviewerCookie: string,
-  body: Record<string, unknown>,
+  body: {
+    targetExternalKey: string;
+    namespace: string;
+    nativeId: string;
+    variantDescription?: string;
+    segments: SegmentInput[];
+  },
 ): Promise<{ mediaId: string; associationId: string; revisionId: string }> {
-  const crRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": submitKey,
-      },
-      body: JSON.stringify(body),
-    }),
-  );
-  expect(crRes.status).toBe(201);
-  const crJson = (await crRes.json()) as { changeRequest: { id: string } };
+  const crRes = await createRpcClients(app, {
+    apiKey: submitKey,
+  }).changeRequest.createChangeRequest({
+    target: mediaRef(body.targetExternalKey),
+    namespace: body.namespace,
+    nativeId: body.nativeId,
+    ...(body.variantDescription !== undefined
+      ? { variantDescription: body.variantDescription }
+      : {}),
+    segments: body.segments.map(toProtoSegmentInput),
+  });
 
-  const approveRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${crJson.changeRequest.id}/approve`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie: reviewerCookie,
-      },
-      body: JSON.stringify({ reason: "Approved in test" }),
-    }),
-  );
-  expect(approveRes.status).toBe(200);
-  return (await approveRes.json()) as {
-    mediaId: string;
-    associationId: string;
-    revisionId: string;
+  const approved = await createRpcClients(app, {
+    cookie: reviewerCookie,
+  }).reviewer.approveChangeRequest({
+    id: crRes.changeRequest!.id,
+    reason: "Approved in test",
+  });
+  return {
+    mediaId: approved.mediaId,
+    associationId: approved.associationId,
+    revisionId: approved.revisionId,
   };
 }
 
@@ -213,16 +153,13 @@ async function readMedia(
   readKey: string,
   key: string,
 ): Promise<{ status: number; document?: MediaDocument }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/media/${encodeURIComponent(key)}`, {
-      headers: { "x-api-key": readKey },
-    }),
-  );
-  if (res.status !== 200) {
-    return { status: res.status };
+  try {
+    const res = await getMediaDocumentRpc(app, readKey, key);
+    return { status: 200, document: res.document };
+  } catch (error) {
+    const err = await expectRpcError(Promise.reject(error));
+    return { status: err.status };
   }
-  const json = (await res.json()) as { document: MediaDocument };
-  return { status: res.status, document: json.document };
 }
 
 describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
@@ -712,28 +649,19 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     });
 
     // Reviewer endpoint requires reviewer role
-    const unauthRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/segments/needs-review`),
+    const unauthErr = await expectRpcError(
+      createRpcClients(app).reviewer.listNeedsReviewSegments({}),
     );
-    expect(unauthRes.status).toBe(401);
-    const nonReviewerRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/segments/needs-review`, {
-        headers: { cookie: submitter.cookie },
-      }),
+    expect(unauthErr.status).toBe(401);
+    const nonReviewerErr = await expectRpcError(
+      createRpcClients(app, { cookie: submitter.cookie }).reviewer.listNeedsReviewSegments({}),
     );
-    expect(nonReviewerRes.status).toBe(403);
+    expect(nonReviewerErr.status).toBe(403);
 
     // Reviewer sees exactly the 3 flagged segments (seasons 1, 2, 4)
-    const reviewerSegsRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/segments/needs-review`, {
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(reviewerSegsRes.status).toBe(200);
-    const reviewerSegsBody = (await reviewerSegsRes.json()) as {
-      segments: Array<{ mediaId: string; season: number; needsReview: boolean; nativeId: string }>;
-      total: number;
-    };
+    const reviewerSegsBody = await createRpcClients(app, {
+      cookie: reviewer.cookie,
+    }).reviewer.listNeedsReviewSegments({});
     expect(reviewerSegsBody.total).toBe(3);
     expect(reviewerSegsBody.segments.map((s) => s.season).sort((a, b) => a - b)).toEqual([1, 2, 4]);
     expect(reviewerSegsBody.segments.every((s) => s.mediaId === mediaId && s.needsReview)).toBe(
@@ -843,39 +771,25 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect(stillExists.document?.media.id).toBe(mediaId);
 
     // Alerts endpoint enforces reviewer authorization
-    const nonReviewerAlerts = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/alerts`, {
-        headers: { cookie: submitter.cookie },
-      }),
+    const nonReviewerAlertsErr = await expectRpcError(
+      createRpcClients(app, { cookie: submitter.cookie }).reviewer.listReviewAlerts({}),
     );
-    expect(nonReviewerAlerts.status).toBe(403);
+    expect(nonReviewerAlertsErr.status).toBe(403);
 
     // Reviewer sees the open tmdb_missing_or_merged alert
-    const alertsRes1 = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/alerts?alertType=tmdb_missing_or_merged`, {
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(alertsRes1.status).toBe(200);
-    const alertsBody1 = (await alertsRes1.json()) as {
-      alerts: Array<{
-        id: string;
-        alertType: string;
-        mediaId: string | null;
-        status: string;
-        details: Record<string, unknown>;
-      }>;
-      total: number;
-    };
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
+    const alertsBody1 = await reviewerRpc.reviewer.listReviewAlerts({
+      alertType: "tmdb_missing_or_merged",
+    });
     expect(alertsBody1.total).toBe(1);
     expect(alertsBody1.alerts[0]).toMatchObject({
       alertType: "tmdb_missing_or_merged",
       mediaId,
-      status: "open",
       details: expect.objectContaining({
         tmdbExternalKey: "tmdb:tv:77777",
       }),
     });
+    expect(fromProtoReviewAlertStatus(alertsBody1.alerts[0]!.status)).toBe("open");
 
     // Running sync again on the next day when 77777 still returns 404 deduplicates the open alert
     now = new Date("2026-11-24T04:00:00.000Z");
@@ -883,13 +797,9 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect(emitted).toHaveLength(1);
     await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
 
-    const alertsRes2 = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/alerts?alertType=tmdb_missing_or_merged`, {
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(alertsRes2.status).toBe(200);
-    const alertsBody2 = (await alertsRes2.json()) as { alerts: unknown[]; total: number };
+    const alertsBody2 = await reviewerRpc.reviewer.listReviewAlerts({
+      alertType: "tmdb_missing_or_merged",
+    });
     expect(alertsBody2.total).toBe(1);
   });
 
@@ -1036,53 +946,37 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
 
     // Non-reviewer cannot merge
-    const forbiddenMerge = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/merge`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: submitter.cookie },
-        body: JSON.stringify({
-          sourceMediaId: createdA1.mediaId,
-          targetMediaId: createdB.mediaId,
-        }),
+    const submitterRpc = createRpcClients(app, { cookie: submitter.cookie });
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
+    const forbiddenMergeErr = await expectRpcError(
+      submitterRpc.reviewer.mergeMedia({
+        sourceMediaId: createdA1.mediaId,
+        targetMediaId: createdB.mediaId,
       }),
     );
-    expect(forbiddenMerge.status).toBe(403);
+    expect(forbiddenMergeErr.status).toBe(403);
 
     // Self-merge is rejected
-    const selfMerge = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/merge`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({
-          sourceMediaId: createdA1.mediaId,
-          targetMediaId: createdA1.mediaId,
-        }),
+    const selfMergeErr = await expectRpcError(
+      reviewerRpc.reviewer.mergeMedia({
+        sourceMediaId: createdA1.mediaId,
+        targetMediaId: createdA1.mediaId,
       }),
     );
-    expect(selfMerge.status).toBe(400);
+    expect(selfMergeErr.status).toBe(400);
 
     // Merge A -> B
-    const mergeAB = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/merge`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({
-          sourceMediaId: createdA1.mediaId,
-          targetMediaId: createdB.mediaId,
-          reason: "TMDB merged 77777 into 88888",
-        }),
-      }),
-    );
-    expect(mergeAB.status).toBe(200);
+    await reviewerRpc.reviewer.mergeMedia({
+      sourceMediaId: createdA1.mediaId,
+      targetMediaId: createdB.mediaId,
+      reason: "TMDB merged 77777 into 88888",
+    });
 
     // Media A's open tmdb_missing_or_merged alert is automatically resolved after merge
-    const remainingOpenAlerts = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/alerts?alertType=tmdb_missing_or_merged`, {
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(remainingOpenAlerts.status).toBe(200);
-    expect((await remainingOpenAlerts.json()) as { total: number }).toMatchObject({ total: 0 });
+    const remainingOpenAlerts = await reviewerRpc.reviewer.listReviewAlerts({
+      alertType: "tmdb_missing_or_merged",
+    });
+    expect(remainingOpenAlerts.total).toBe(0);
 
     // Querying old Media A UUID and old TMDB external key transparently resolves to Media B
     const viaOldUuid = await readMedia(app, readKey.key, createdA1.mediaId);
@@ -1111,31 +1005,20 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect(viaOldTmdb.document?.media.id).toBe(createdB.mediaId);
 
     // Chain merge B -> C: A's redirect flattens to C, and C keeps its single default bilibili variant ("中配")
-    const mergeBC = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/merge`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({
-          sourceMediaId: createdB.mediaId,
-          targetMediaId: createdC.mediaId,
-          reason: "Consolidated into canonical TMDB 95479",
-        }),
-      }),
-    );
-    expect(mergeBC.status).toBe(200);
+    await reviewerRpc.reviewer.mergeMedia({
+      sourceMediaId: createdB.mediaId,
+      targetMediaId: createdC.mediaId,
+      reason: "Consolidated into canonical TMDB 95479",
+    });
 
     // Cycle attempt C -> A must fail cleanly
-    const cycleRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/merge`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({
-          sourceMediaId: createdC.mediaId,
-          targetMediaId: createdA1.mediaId,
-        }),
+    const cycleErr = await expectRpcError(
+      reviewerRpc.reviewer.mergeMedia({
+        sourceMediaId: createdC.mediaId,
+        targetMediaId: createdA1.mediaId,
       }),
     );
-    expect(cycleRes.status).toBe(409);
+    expect(cycleErr.status).toBe(409);
 
     const viaOldAAfterChain = await readMedia(app, readKey.key, createdA1.mediaId);
     expect(viaOldAAfterChain.status).toBe(200);
@@ -1229,19 +1112,14 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     });
 
     // Merge douban-baseline media into TMDB-backed target
-    const mergeRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/merge`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({
-          sourceMediaId: doubanMedia.id,
-          targetMediaId: tmdbCreated.mediaId,
-          reason: "TMDB entry now available",
-        }),
-      }),
-    );
-    expect(mergeRes.status).toBe(200);
-    expect(await mergeRes.json()).toMatchObject({
+    const mergeRes = await createRpcClients(app, {
+      cookie: reviewer.cookie,
+    }).reviewer.mergeMedia({
+      sourceMediaId: doubanMedia.id,
+      targetMediaId: tmdbCreated.mediaId,
+      reason: "TMDB entry now available",
+    });
+    expect(mergeRes).toMatchObject({
       sourceMediaId: doubanMedia.id,
       targetMediaId: tmdbCreated.mediaId,
       flaggedSegmentCount: 1,
@@ -1348,34 +1226,32 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     });
 
     // Non-reviewer forbidden; invalid baseline rejected
-    const forbiddenSwitch = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/${media.id}/baseline`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: submitter.cookie },
-        body: JSON.stringify({ baseline: "tmdb" }),
-      }),
-    );
-    expect(forbiddenSwitch.status).toBe(403);
+    const submitterRpc = createRpcClients(app, { cookie: submitter.cookie });
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
 
-    const invalidBaseline = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/${media.id}/baseline`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({ baseline: "invalid_source" }),
+    const forbiddenSwitchErr = await expectRpcError(
+      submitterRpc.reviewer.switchMediaBaseline({
+        mediaId: media.id,
+        baseline: "tmdb",
       }),
     );
-    expect(invalidBaseline.status).toBe(400);
+    expect(forbiddenSwitchErr.status).toBe(403);
+
+    const invalidBaselineErr = await expectRpcError(
+      reviewerRpc.reviewer.switchMediaBaseline({
+        mediaId: media.id,
+        baseline: "invalid_source",
+      }),
+    );
+    expect(invalidBaselineErr.status).toBe(400);
 
     // Switch baseline from douban -> tmdb
-    const switchRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/${media.id}/baseline`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({ baseline: "tmdb", reason: "Adopted TMDB numbering" }),
-      }),
-    );
-    expect(switchRes.status).toBe(200);
-    expect(await switchRes.json()).toEqual({
+    const switchRes = await reviewerRpc.reviewer.switchMediaBaseline({
+      mediaId: media.id,
+      baseline: "tmdb",
+      reason: "Adopted TMDB numbering",
+    });
+    expect(switchRes).toMatchObject({
       mediaId: media.id,
       previousBaseline: "douban",
       baseline: "tmdb",
@@ -1410,13 +1286,10 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect("targetEpisode" in resolvedAfterSwitch).toBe(false);
 
     // Visible in reviewer needs-review queue
-    const needsReviewRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/segments/needs-review?mediaId=${media.id}`, {
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(needsReviewRes.status).toBe(200);
-    expect((await needsReviewRes.json()) as { total: number }).toMatchObject({ total: 1 });
+    const needsReviewRes = await reviewerRpc.reviewer.listNeedsReviewSegments({
+      mediaId: media.id,
+    });
+    expect(needsReviewRes.total).toBe(1);
 
     // Submit & approve replacement on "tmdb" baseline -> mapping resumes and needs-review queue clears!
     await submitAndApprove(app, submitKey.key, reviewer.cookie, {
@@ -1439,12 +1312,9 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       targetEpisode: 4,
     });
 
-    const needsReviewCleared = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/segments/needs-review?mediaId=${media.id}`, {
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(needsReviewCleared.status).toBe(200);
-    expect((await needsReviewCleared.json()) as { total: number }).toMatchObject({ total: 0 });
+    const needsReviewCleared = await reviewerRpc.reviewer.listNeedsReviewSegments({
+      mediaId: media.id,
+    });
+    expect(needsReviewCleared.total).toBe(0);
   });
 });

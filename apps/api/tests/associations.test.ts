@@ -1,86 +1,28 @@
-import type { MediaDocument } from "@media-ref/client";
+import {
+  fromProtoAssociationStatus,
+  fromProtoMediaDocument,
+  proto,
+  toProtoSegmentInput,
+} from "@media-ref/client";
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
   runTmdbDailySync,
-  type EmailMessage,
   type ExternalHttpRequest,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { createApiApp } from "../src/app.ts";
+import { createApiApp } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-associations-locks-history-0123456789";
-
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-async function signUpUser(
-  app: ReturnType<typeof createApiApp>,
-  outbound: ReturnType<typeof createFakeOutboundClient>,
-  input: { email: string; password: string; name: string },
-): Promise<{ userId: string; cookie: string }> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  return { userId: signUpBody.user.id, cookie };
-}
-
-async function createApiKey(
-  app: ReturnType<typeof createApiApp>,
-  cookie: string,
-  options: { name: string; canSubmit?: boolean },
-): Promise<{ id: string; key: string }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        name: options.name,
-        canSubmit: options.canSubmit ?? false,
-      }),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; key: string };
-}
 
 function createTmdbStub(overrides?: { imdbId95479?: string; tvdbId95479?: number }) {
   return (request: ExternalHttpRequest) => {
@@ -217,154 +159,122 @@ describe("Association revision history, locking, and reviewer external ID overri
       .where("id", "=", reviewer.userId)
       .execute();
 
-    const submitKey = await createApiKey(app, contributor.cookie, {
+    const submitKey = await issueApiKeyRpc(app, contributor.cookie, {
       name: "Submit",
       canSubmit: true,
     });
-    const readKey = await createApiKey(app, contributor.cookie, {
+    const readKey = await issueApiKeyRpc(app, contributor.cookie, {
       name: "Read",
       canSubmit: false,
     });
 
-    // Submit & approve revision 1
-    const cr1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
-        }),
-      }),
-    );
-    expect(cr1Res.status).toBe(201);
-    const cr1 = (await cr1Res.json()) as { changeRequest: { id: string } };
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
 
-    const approve1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${cr1.changeRequest.id}/approve`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({ reason: "Initial confirmation" }),
-      }),
-    );
-    expect(approve1Res.status).toBe(200);
-    const approve1 = (await approve1Res.json()) as {
-      mediaId: string;
-      associationId: string;
-      revisionId: string;
-    };
+    // Submit & approve revision 1
+    const cr1 = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    });
+
+    const approve1 = await reviewerRpc.reviewer.approveChangeRequest({
+      id: cr1.changeRequest!.id,
+      reason: "Initial confirmation",
+    });
 
     // Submit & approve revision 2 on the same association (extended to E1-24)
-    const cr2Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const cr2 = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(cr2Res.status).toBe(201);
-    const cr2 = (await cr2Res.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
-    const approve2Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${cr2.changeRequest.id}/approve`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({ reason: "Updated full season range" }),
-      }),
-    );
-    expect(approve2Res.status).toBe(200);
-    const approve2 = (await approve2Res.json()) as { associationId: string; revisionId: string };
+    const approve2 = await reviewerRpc.reviewer.approveChangeRequest({
+      id: cr2.changeRequest!.id,
+      reason: "Updated full season range",
+    });
     expect(approve2.associationId).toBe(approve1.associationId);
 
     // Unauthenticated request -> 401
-    const unauthRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/associations/${approve1.associationId}/revisions`),
-    );
-    expect(unauthRes.status).toBe(401);
+    expect(
+      (
+        await expectRpcError(
+          createRpcClients(app).association.listAssociationRevisions({
+            associationId: approve1.associationId,
+          }),
+        )
+      ).status,
+    ).toBe(401);
 
     // Invalid UUID -> 400
-    const badIdRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/associations/not-a-uuid/revisions`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(badIdRes.status).toBe(400);
+    expect(
+      (
+        await expectRpcError(
+          readRpc.association.listAssociationRevisions({ associationId: "not-a-uuid" }),
+        )
+      ).status,
+    ).toBe(400);
 
     // Non-existent UUID -> 404
-    const missingRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/00000000-0000-4000-8000-000000000999/revisions`,
-        {
-          headers: { "x-api-key": readKey.key },
-        },
-      ),
-    );
-    expect(missingRes.status).toBe(404);
+    expect(
+      (
+        await expectRpcError(
+          readRpc.association.listAssociationRevisions({
+            associationId: "00000000-0000-4000-8000-000000000999",
+          }),
+        )
+      ).status,
+    ).toBe(404);
 
     // Authenticated via read API key -> returns ordered revisions 1..2 with full snapshots
-    const revByKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/associations/${approve1.associationId}/revisions`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(revByKeyRes.status).toBe(200);
-    const revBody = (await revByKeyRes.json()) as {
-      association: {
-        id: string;
-        mediaId: string;
-        namespace: string;
-        nativeId: string;
-        status: string;
-        locked: boolean;
-        currentRevisionId: string;
-      };
-      revisions: Array<{
-        id: string;
-        revisionNumber: number;
-        changeRequestId: string | null;
-        status: string;
-        segments: Array<{ season: number; episodeStart: number; episodeEnd: number | null }>;
-        actorUserId: string | null;
-        submitterUserId: string | null;
-        reviewerUserId: string | null;
-        reason: string | null;
-      }>;
-      total: number;
-    };
+    const revBody = await readRpc.association.listAssociationRevisions({
+      associationId: approve1.associationId,
+    });
 
     expect(revBody.total).toBe(2);
-    expect(revBody.association.id).toBe(approve1.associationId);
-    expect(revBody.association.mediaId).toBe(approve1.mediaId);
-    expect(revBody.association.namespace).toBe("bilibili");
-    expect(revBody.association.nativeId).toBe("ss34430");
-    expect(revBody.association.status).toBe("confirmed");
-    expect(revBody.association.locked).toBe(false);
-    expect(revBody.association.currentRevisionId).toBe(approve2.revisionId);
+    expect(revBody.association).toMatchObject({
+      id: approve1.associationId,
+      mediaId: approve1.mediaId,
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      locked: false,
+      currentRevisionId: approve2.revisionId,
+    });
+    expect(fromProtoAssociationStatus(revBody.association!.status)).toBe("confirmed");
 
     expect(revBody.revisions.map((r) => r.revisionNumber)).toEqual([1, 2]);
     expect(revBody.revisions[0]).toMatchObject({
       id: approve1.revisionId,
       revisionNumber: 1,
-      changeRequestId: cr1.changeRequest.id,
-      status: "confirmed",
+      changeRequestId: cr1.changeRequest!.id,
       actorUserId: reviewer.userId,
       submitterUserId: contributor.userId,
       reviewerUserId: reviewer.userId,
       reason: "Initial confirmation",
     });
+    expect(fromProtoAssociationStatus(revBody.revisions[0]!.status)).toBe("confirmed");
     expect(revBody.revisions[0]?.segments).toEqual([
       expect.objectContaining({ season: 1, episodeStart: 1, episodeEnd: 12 }),
     ]);
@@ -372,30 +282,24 @@ describe("Association revision history, locking, and reviewer external ID overri
     expect(revBody.revisions[1]).toMatchObject({
       id: approve2.revisionId,
       revisionNumber: 2,
-      changeRequestId: cr2.changeRequest.id,
-      status: "confirmed",
+      changeRequestId: cr2.changeRequest!.id,
       actorUserId: reviewer.userId,
       submitterUserId: contributor.userId,
       reviewerUserId: reviewer.userId,
       reason: "Updated full season range",
     });
+    expect(fromProtoAssociationStatus(revBody.revisions[1]!.status)).toBe("confirmed");
     expect(revBody.revisions[1]?.segments).toEqual([
       expect.objectContaining({ season: 1, episodeStart: 1, episodeEnd: 24 }),
     ]);
 
     // Authenticated via session cookie (desc order) -> works as well
-    const revBySessionRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${approve1.associationId}/revisions?order=desc`,
-        {
-          headers: { cookie: contributor.cookie },
-        },
-      ),
-    );
-    expect(revBySessionRes.status).toBe(200);
-    const revDesc = (await revBySessionRes.json()) as {
-      revisions: Array<{ revisionNumber: number }>;
-    };
+    const revDesc = await createRpcClients(app, {
+      cookie: contributor.cookie,
+    }).association.listAssociationRevisions({
+      associationId: approve1.associationId,
+      order: proto.SortOrder.DESC,
+    });
     expect(revDesc.revisions.map((r) => r.revisionNumber)).toEqual([2, 1]);
   });
 
@@ -434,95 +338,71 @@ describe("Association revision history, locking, and reviewer external ID overri
       .where("id", "=", reviewer.userId)
       .execute();
 
-    const submitKey = await createApiKey(app, user.cookie, { name: "Submit", canSubmit: true });
-    const readKey = await createApiKey(app, user.cookie, { name: "Read", canSubmit: false });
+    const submitKey = await issueApiKeyRpc(app, user.cookie, { name: "Submit", canSubmit: true });
+    const readKey = await issueApiKeyRpc(app, user.cookie, { name: "Read", canSubmit: false });
 
-    const crRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
+    const userRpc = createRpcClients(app, { cookie: user.cookie });
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
+
+    const cr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    const cr = (await crRes.json()) as { changeRequest: { id: string } };
-    const approved = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${cr.changeRequest.id}/approve`, {
-          method: "POST",
-          headers: { cookie: reviewer.cookie },
-        }),
-      )
-    ).json()) as { associationId: string };
+      ],
+    });
+    const approved = await reviewerRpc.reviewer.approveChangeRequest({ id: cr.changeRequest!.id });
 
     // Non-reviewer gets 403
-    const forbiddenRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/associations/${approved.associationId}/lock`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({ locked: true }),
-      }),
-    );
-    expect(forbiddenRes.status).toBe(403);
+    expect(
+      (
+        await expectRpcError(
+          userRpc.reviewer.setAssociationLock({
+            associationId: approved.associationId,
+            locked: true,
+          }),
+        )
+      ).status,
+    ).toBe(403);
 
-    // Reviewer locks with default body (empty body defaults locked=true)
-    const lockRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/associations/${approved.associationId}/lock`, {
-        method: "POST",
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(lockRes.status).toBe(200);
-    const lockBody = (await lockRes.json()) as {
-      association: { id: string; locked: boolean };
-      associationId: string;
-      locked: boolean;
-    };
+    // Reviewer locks with omitted locked field (defaults to true)
+    const lockBody = await reviewerRpc.reviewer.setAssociationLock({
+      associationId: approved.associationId,
+    });
     expect(lockBody.locked).toBe(true);
     expect(lockBody.associationId).toBe(approved.associationId);
-    expect(lockBody.association.locked).toBe(true);
+    expect(lockBody.association?.locked).toBe(true);
 
     // Read API reflects locked=true
-    const docLocked = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": readKey.key },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
-    expect(docLocked.document.associations[0]?.locked).toBe(true);
+    const docLocked = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document!,
+    );
+    expect(docLocked.associations[0]?.locked).toBe(true);
 
     // Reviewer unlocks with { locked: false }
-    const unlockRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/associations/${approved.associationId}/lock`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({ locked: false }),
-      }),
-    );
-    expect(unlockRes.status).toBe(200);
-    const unlockBody = (await unlockRes.json()) as {
-      association: { id: string; locked: boolean };
-      locked: boolean;
-    };
+    const unlockBody = await reviewerRpc.reviewer.setAssociationLock({
+      associationId: approved.associationId,
+      locked: false,
+    });
     expect(unlockBody.locked).toBe(false);
-    expect(unlockBody.association.locked).toBe(false);
+    expect(unlockBody.association?.locked).toBe(false);
 
-    const docUnlocked = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": readKey.key },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
-    expect(docUnlocked.document.associations[0]?.locked).toBeUndefined();
+    const docUnlocked = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document!,
+    );
+    expect(docUnlocked.associations[0]?.locked).toBeUndefined();
   });
 
   test("allows reviewers to override and lock external IDs, rejects 403/409 conflicts, and preserves locked overrides across TMDB daily sync", async () => {
@@ -565,46 +445,37 @@ describe("Association revision history, locking, and reviewer external ID overri
       .where("id", "=", reviewer.userId)
       .execute();
 
-    const submitKey = await createApiKey(app, user.cookie, { name: "Submit", canSubmit: true });
-    const readKey = await createApiKey(app, user.cookie, { name: "Read", canSubmit: false });
+    const submitKey = await issueApiKeyRpc(app, user.cookie, { name: "Submit", canSubmit: true });
+    const readKey = await issueApiKeyRpc(app, user.cookie, { name: "Read", canSubmit: false });
+
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
+    const userRpc = createRpcClients(app, { cookie: user.cookie });
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
 
     // Create two media items (95479 and 108545) via submit + approve
     const createMedia = async (tmdbKey: string, nativeId: string) => {
-      const crRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-          body: JSON.stringify({
-            targetExternalKey: tmdbKey,
-            namespace: "bilibili",
-            nativeId,
-            variantDescription: "原声",
-            segments: [{ season: 1, baseline: "tmdb" }],
-          }),
-        }),
-      );
-      const cr = (await crRes.json()) as { changeRequest: { id: string } };
-      const approveRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${cr.changeRequest.id}/approve`, {
-          method: "POST",
-          headers: { cookie: reviewer.cookie },
-        }),
-      );
-      expect(approveRes.status).toBe(200);
-      return (await approveRes.json()) as { mediaId: string };
+      const cr = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef(tmdbKey),
+        namespace: "bilibili",
+        nativeId,
+        variantDescription: "原声",
+        segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
+      });
+      return reviewerRpc.reviewer.approveChangeRequest({ id: cr.changeRequest!.id });
     };
 
     const mediaA = await createMedia("tmdb:tv:95479", "ss34430");
     await createMedia("tmdb:tv:108545", "ss43123");
 
-    // Non-reviewer gets 403 on PUT override and POST lock
+    // Non-reviewer gets 403 on override and lock
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/reviewer/media/${mediaA.mediaId}/external-ids/imdb`, {
-            method: "PUT",
-            headers: { "content-type": "application/json", cookie: user.cookie },
-            body: JSON.stringify({ nativeId: "tt99999999" }),
+        await expectRpcError(
+          userRpc.reviewer.overrideMediaExternalId({
+            mediaId: mediaA.mediaId,
+            namespace: "imdb",
+            nativeId: "tt99999999",
           }),
         )
       ).status,
@@ -612,47 +483,35 @@ describe("Association revision history, locking, and reviewer external ID overri
 
     expect(
       (
-        await app.fetch(
-          new Request(
-            `${TEST_BASE_URL}/v1/reviewer/media/${mediaA.mediaId}/external-ids/imdb/lock`,
-            {
-              method: "POST",
-              headers: { "content-type": "application/json", cookie: user.cookie },
-              body: JSON.stringify({ locked: true }),
-            },
-          ),
+        await expectRpcError(
+          userRpc.reviewer.setMediaExternalIdLock({
+            mediaId: mediaA.mediaId,
+            namespace: "imdb",
+            locked: true,
+          }),
         )
       ).status,
     ).toBe(403);
 
     // Duplicate (namespace, native_id) already owned by another media -> 409
-    const duplicateRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/${mediaA.mediaId}/external-ids/imdb`, {
-        method: "PUT",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({ nativeId: "tt20242042" }),
-      }),
-    );
-    expect(duplicateRes.status).toBe(409);
+    expect(
+      (
+        await expectRpcError(
+          reviewerRpc.reviewer.overrideMediaExternalId({
+            mediaId: mediaA.mediaId,
+            namespace: "imdb",
+            nativeId: "tt20242042",
+          }),
+        )
+      ).status,
+    ).toBe(409);
 
     // Reviewer overrides IMDb on mediaA (locked defaults to true, source becomes 'reviewer')
-    const overrideRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/${mediaA.mediaId}/external-ids/imdb`, {
-        method: "PUT",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({ nativeId: "tt88887777" }),
-      }),
-    );
-    expect(overrideRes.status).toBe(200);
-    const overrideBody = (await overrideRes.json()) as {
-      externalId: {
-        mediaId: string;
-        namespace: string;
-        nativeId: string;
-        locked: boolean;
-        source: string;
-      };
-    };
+    const overrideBody = await reviewerRpc.reviewer.overrideMediaExternalId({
+      mediaId: mediaA.mediaId,
+      namespace: "imdb",
+      nativeId: "tt88887777",
+    });
     expect(overrideBody.externalId).toMatchObject({
       mediaId: mediaA.mediaId,
       namespace: "imdb",
@@ -662,15 +521,11 @@ describe("Association revision history, locking, and reviewer external ID overri
     });
 
     // Read API returns overridden & locked IMDb ID and lookup by new external key works
-    const readByNewImdb = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/imdb:tt88887777`, {
-        headers: { "x-api-key": readKey.key },
-      }),
+    const readDoc = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ imdb: "tt88887777" }) })).document!,
     );
-    expect(readByNewImdb.status).toBe(200);
-    const readDoc = (await readByNewImdb.json()) as { document: MediaDocument };
-    expect(readDoc.document.media.id).toBe(mediaA.mediaId);
-    expect(readDoc.document.externalIds).toContainEqual({
+    expect(readDoc.media.id).toBe(mediaA.mediaId);
+    expect(readDoc.externalIds).toContainEqual({
       namespace: "imdb",
       nativeId: "tt88887777",
       locked: true,
@@ -686,36 +541,27 @@ describe("Association revision history, locking, and reviewer external ID overri
     });
     expect(syncResult.tv.refreshedCount).toBe(1);
 
-    const afterSyncDoc = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": readKey.key },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
-    expect(afterSyncDoc.document.externalIds).toContainEqual({
+    const afterSyncDoc = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document!,
+    );
+    expect(afterSyncDoc.externalIds).toContainEqual({
       namespace: "imdb",
       nativeId: "tt88887777",
       locked: true,
     });
-    expect(afterSyncDoc.document.externalIds).toContainEqual({
+    expect(afterSyncDoc.externalIds).toContainEqual({
       namespace: "tvdb",
       nativeId: "999888",
     });
 
-    // Reviewer can toggle lock on existing external ID via POST .../lock
-    const toggleLockRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/media/${mediaA.mediaId}/external-ids/imdb/lock`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: reviewer.cookie },
-        body: JSON.stringify({ locked: false }),
-      }),
-    );
-    expect(toggleLockRes.status).toBe(200);
-    const toggleBody = (await toggleLockRes.json()) as {
-      externalId: { namespace: string; nativeId: string; locked: boolean };
-    };
-    expect(toggleBody.externalId.locked).toBe(false);
+    // Reviewer can toggle lock on existing external ID via SetMediaExternalIdLock
+    const toggleBody = await reviewerRpc.reviewer.setMediaExternalIdLock({
+      mediaId: mediaA.mediaId,
+      namespace: "imdb",
+      locked: false,
+    });
+    expect(toggleBody.externalId?.locked).toBe(false);
 
     // After unlocking, a subsequent TMDB sync CAN update IMDb
     const syncAfterUnlock = await runTmdbDailySync(testDb.writeDb, outbound, {
@@ -724,14 +570,11 @@ describe("Association revision history, locking, and reviewer external ID overri
     });
     expect(syncAfterUnlock.tv.refreshedCount).toBe(1);
 
-    const afterUnlockDoc = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": readKey.key },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
-    expect(afterUnlockDoc.document.externalIds).toContainEqual({
+    const afterUnlockDoc = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document!,
+    );
+    expect(afterUnlockDoc.externalIds).toContainEqual({
       namespace: "imdb",
       nativeId: "tt11110000",
     });

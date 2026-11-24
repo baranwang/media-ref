@@ -1,6 +1,6 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { resolveEpisode } from "@media-ref/client";
 import {
   createFakeOutboundClient,
   deriveExplorationTaskId,
@@ -10,7 +10,6 @@ import {
   getJobById,
   listDemands,
   seedTmdbExportIds,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -24,8 +23,18 @@ import {
   parseWorkerConfig,
   type BackgroundWorkerEnv,
 } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  proto,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-exploration-agent-e2e-tests-0123456789abcdef";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -62,75 +71,17 @@ function makeBilibiliEpisodes(count: number, idBase = 341200) {
   return episodes;
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupApiKeys(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ) {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Agent E2E Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const readKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read Key", canSubmit: false }),
-    }),
-  );
-  expect(readKeyRes.status).toBe(201);
-  const readKey = (await readKeyRes.json()) as { id: string; key: string };
-
-  const submitKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Submit Key", canSubmit: true }),
-    }),
-  );
-  expect(submitKeyRes.status).toBe(201);
-  const submitKey = (await submitKeyRes.json()) as { id: string; key: string };
+  const { cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Agent E2E Tester",
+  });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Read Key", canSubmit: false });
+  const submitKey = await issueApiKeyRpc(app, cookie, { name: "Submit Key", canSubmit: true });
 
   return {
     cookie,
@@ -422,12 +373,13 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     const { readKey } = await setupApiKeys(apiApp, outbound, "e2e-miss-to-hit@example.com");
 
     // 1. Read unseen external key -> 404 + records demand (NO media created yet!)
-    const missRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?season=1&namespaceGroup=platform`, {
-        headers: { "x-api-key": readKey },
+    const missErr = await expectRpcError(
+      getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479", {
+        season: 1,
+        namespaceGroup: proto.NamespaceGroup.PLATFORM,
       }),
     );
-    expect(missRes.status).toBe(404);
+    expect(missErr.status).toBe(404);
     await Promise.all(pendingBgTasks);
 
     const mediaBefore = await testDb.readDb.selectFrom("media").select("id").execute();
@@ -504,13 +456,7 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     expect(outbound.modelRequests).toHaveLength(modelCallsAfterExploration);
 
     // 7. Read again -> 200 with confirmed Bilibili ss34430 & resolvable via @media-ref/client
-    const hitRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(hitRes.status).toBe(200);
-    const hitBody = (await hitRes.json()) as { document: MediaDocument };
+    const hitBody = await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479");
     expect(hitBody.document.media.snapshot.title).toBe("咒术回战");
     expect(hitBody.document.variants).toHaveLength(1);
     expect(hitBody.document.variants[0]).toMatchObject({
@@ -585,24 +531,19 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     });
 
     // Seed existing media with Season 1 confirmed via the public submission & Evidence Gate flow
-    const submitS1Res = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": submitKey,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          setDefaultVariant: true,
-          segments: [{ season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1 }],
-        }),
-      }),
-    );
-    expect(submitS1Res.status).toBe(201);
+    const submitS1Res = await createRpcClients(apiApp, {
+      apiKey: submitKey,
+    }).changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      setDefaultVariant: true,
+      segments: [
+        toProtoSegmentInput({ season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1 }),
+      ],
+    });
+    expect(submitS1Res.changeRequest?.id).toBeTruthy();
 
     await worker.scheduled(createScheduledController(t0));
     expect(emitted).toHaveLength(1);
@@ -611,13 +552,10 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     emitted.length = 0;
 
     // 1. Read existing media requesting Season 2 -> 200 (S1 only), records demand for Season 2!
-    const readS2Miss = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?season=2&namespaceGroup=platform`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(readS2Miss.status).toBe(200);
-    const readS2MissBody = (await readS2Miss.json()) as { document: MediaDocument };
+    const readS2MissBody = await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479", {
+      season: 2,
+      namespaceGroup: proto.NamespaceGroup.PLATFORM,
+    });
     expect(
       resolveEpisode(readS2MissBody.document, { namespace: "bilibili", season: 2, episode: 5 }),
     ).toMatchObject({ kind: "unmapped" });
@@ -639,14 +577,8 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     const evSummary = await worker.queue(createQueueBatch(emitted, t0).batch);
     expect(evSummary.completed).toBe(1);
 
-    // 3. GET now resolves BOTH Season 1 and Season 2 under the same default "原声" variant!
-    const readBoth = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(readBoth.status).toBe(200);
-    const doc = ((await readBoth.json()) as { document: MediaDocument }).document;
+    // 3. GetMedia now resolves BOTH Season 1 and Season 2 under the same default "原声" variant!
+    const doc = (await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479")).document;
     expect(doc.variants).toHaveLength(1);
     expect(doc.associations.map((a) => a.nativeId).sort()).toEqual(["ss34430", "ss45574"]);
 
@@ -691,13 +623,9 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     const { readKey } = await setupApiKeys(apiApp, outbound, "e2e-seasonless@example.com");
     await seedTmdbExportIds(testDb.writeDb, [{ mediaType: "tv", tmdbId: "95479" }], "2026-11-24");
 
-    // Read WITHOUT ?season= -> 404, records seasonless external-key demand
-    const missRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(missRes.status).toBe(404);
+    // Read WITHOUT season -> 404, records seasonless external-key demand
+    const missErr = await expectRpcError(getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479"));
+    expect(missErr.status).toBe(404);
     await Promise.all(pendingBgTasks);
 
     const emitted: JobQueueMessage[] = [];
@@ -739,13 +667,7 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     await worker.queue(createQueueBatch(emitted, t0).batch);
 
     // Both Season 1 and Season 2 are now confirmed and resolvable!
-    const finalRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(finalRes.status).toBe(200);
-    const doc = ((await finalRes.json()) as { document: MediaDocument }).document;
+    const doc = (await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479")).document;
     expect(resolveEpisode(doc, { namespace: "bilibili", season: 1, episode: 1 })).toMatchObject({
       kind: "mapped",
       nativeId: "ss34430",
@@ -885,9 +807,10 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     const { readKey } = await setupApiKeys(apiApp, outbound, "e2e-mismatch@example.com");
     await seedTmdbExportIds(testDb.writeDb, [{ mediaType: "tv", tmdbId: "95479" }], "2026-11-24");
 
-    await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?season=1&namespaceGroup=platform`, {
-        headers: { "x-api-key": readKey },
+    await expectRpcError(
+      getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479", {
+        season: 1,
+        namespaceGroup: proto.NamespaceGroup.PLATFORM,
       }),
     );
     await Promise.all(pendingBgTasks);
@@ -924,23 +847,14 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     expect(crs[0]?.status).toBe("needs_review");
     expect(crs[0]?.conflict_reason).toBeTruthy();
 
-    // Default GET MUST NOT return the unconfirmed/mismatched candidate
-    const defaultRead = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(defaultRead.status).toBe(200);
-    const defaultDoc = ((await defaultRead.json()) as { document: MediaDocument }).document;
+    // Default GetMedia MUST NOT return the unconfirmed/mismatched candidate
+    const defaultDoc = (await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479")).document;
     expect(defaultDoc.associations).toHaveLength(0);
 
     // includeUnconfirmed=true exposes it explicitly tagged unconfirmed
-    const unconfirmedRead = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?includeUnconfirmed=true`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    const unconfirmedDoc = ((await unconfirmedRead.json()) as { document: MediaDocument }).document;
+    const unconfirmedDoc = (
+      await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:95479", { includeUnconfirmed: true })
+    ).document;
     expect(unconfirmedDoc.associations).toHaveLength(1);
     expect(unconfirmedDoc.associations[0]?.nativeId).toBe("ss99887");
     expect(unconfirmedDoc.associations[0]?.unconfirmed).toBe(true);
@@ -1190,17 +1104,9 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
 
     const { readKey } = await setupApiKeys(apiApp, outbound, "e2e-not-found@example.com");
 
-    // Trigger demands for both existing movies via GET API
-    await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:888881`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:888882`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
+    // Trigger demands for both existing movies via MediaService.GetMedia
+    await getMediaDocumentRpc(apiApp, readKey, "tmdb:movie:888881");
+    await getMediaDocumentRpc(apiApp, readKey, "tmdb:movie:888882");
     await Promise.all(pendingBgTasks);
 
     const emitted: JobQueueMessage[] = [];
@@ -1227,12 +1133,7 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     await worker.queue(createQueueBatch(emitted, t0).batch);
 
     // 1. Clean empty search -> platformStatuses.bilibili === "not_found" + demand backoff applied
-    const nfRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:888881`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    const nfDoc = ((await nfRes.json()) as { document: MediaDocument }).document;
+    const nfDoc = (await getMediaDocumentRpc(apiApp, readKey, "tmdb:movie:888881")).document;
     expect(nfDoc.platformStatuses?.bilibili).toEqual({
       status: "not_found",
       checkedAt: t0.toISOString(),
@@ -1244,12 +1145,7 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
     expect(nfDemands[0]?.nextEligibleAt).toBe(new Date(t0.getTime() + 3600 * 1000).toISOString());
 
     // 2. HTTP 412 transient error -> NEVER marked not_found, platformStatuses stays "unchecked", demand stays "open"
-    const trRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:888882`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    const trDoc = ((await trRes.json()) as { document: MediaDocument }).document;
+    const trDoc = (await getMediaDocumentRpc(apiApp, readKey, "tmdb:movie:888882")).document;
     expect(trDoc.platformStatuses?.bilibili).toEqual({ status: "unchecked" });
 
     const trDemands = await listDemands(testDb.readDb, { mediaId: transientMedia.id });
@@ -1405,30 +1301,17 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
 
     const { readKey } = await setupApiKeys(apiApp, outbound, "e2e-config-switch@example.com");
 
-    // Report a client lead via POST /v1/leads (should appear as unverified hint in prompt)
-    const leadRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readKey,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:671",
-          namespace: "bilibili",
-          nativeId: "ss28281",
-          notes: "B站中配版",
-        }),
-      }),
-    );
-    expect(leadRes.status).toBe(201);
+    // Report a client lead via LeadService.CreateLead (should appear as unverified hint in prompt)
+    const leadRes = await createRpcClients(apiApp, { apiKey: readKey }).lead.createLead({
+      target: mediaRef("tmdb:movie:671"),
+      namespace: "bilibili",
+      nativeId: "ss28281",
+      notes: "B站中配版",
+    });
+    expect(leadRes.lead?.id).toBeTruthy();
 
     // Trigger read demand
-    await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:671`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
+    await getMediaDocumentRpc(apiApp, readKey, "tmdb:movie:671");
     await Promise.all(pendingBgTasks);
 
     // Parse env config -> swaps provider, model, gatewayId, maxSteps with ZERO code changes!
@@ -1646,5 +1529,144 @@ describe("Exploration agent loop and Bilibili Tier 3 E2E (#29)", () => {
       .where("media_id", "=", failedMediaId)
       .execute();
     expect(failedChecks).toHaveLength(0);
+  });
+
+  test("aborts hanging invokeModel and fetchExternal calls at the maxDurationMs wall-clock deadline without marking not_found", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-24T09:30:00.000Z");
+
+    const seedMovie = async (tmdbId: string, title: string) => {
+      const media = await testDb.writeDb
+        .insertInto("media")
+        .values({
+          type: "movie",
+          baseline: "tmdb",
+          title,
+          original_title: title,
+          year: 2024,
+          seasons: JSON.stringify([]),
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+
+      await testDb.writeDb
+        .insertInto("external_ids")
+        .values({
+          media_id: media.id,
+          namespace: "tmdb",
+          native_id: `movie:${tmdbId}`,
+          source: "sync",
+        })
+        .execute();
+
+      await testDb.writeDb
+        .insertInto("demands")
+        .values({
+          media_id: media.id,
+          season: null,
+          namespace_group: "platform",
+          demand_count: 5,
+          status: "open",
+          next_eligible_at: t0,
+          last_demanded_at: t0,
+        })
+        .execute();
+
+      return media.id;
+    };
+
+    const hangModelMediaId = await seedMovie("999901", "模型挂起超时电影");
+    const hangFetchMediaId = await seedMovie("999902", "检索挂起超时电影");
+
+    let modelSignalAborted = false;
+    let fetchSignalAborted = false;
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        return new Promise((_resolve, reject) => {
+          const onAbort = () => {
+            fetchSignalAborted = true;
+            reject(request.signal?.reason ?? new Error("aborted"));
+          };
+          if (request.signal?.aborted) {
+            onAbort();
+            return;
+          }
+          request.signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      },
+      invokeModel(request) {
+        const userPrompt = request.messages.find((m) => m.role === "user")?.content ?? "";
+        if (userPrompt.includes("检索挂起超时电影")) {
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call_hang_fetch",
+                name: "search_platform",
+                arguments: { keyword: "超时测试" },
+              },
+            ],
+            model: request.model ?? "test-model",
+          };
+        }
+        return new Promise((_resolve, reject) => {
+          const onAbort = () => {
+            modelSignalAborted = true;
+            reject(request.signal?.reason ?? new Error("aborted"));
+          };
+          if (request.signal?.aborted) {
+            onAbort();
+            return;
+          }
+          request.signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      },
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: {
+        enableDailyTmdbSync: false,
+        exploration: { dailyBudget: 10, batchSize: 10 },
+        explorationAgent: { maxDurationMs: 60 },
+      },
+      now: () => t0,
+    });
+
+    await worker.scheduled(createScheduledController(t0));
+    expect(emitted).toHaveLength(2);
+
+    const startedAt = Date.now();
+    const summary = await worker.queue(createQueueBatch(emitted, t0).batch);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(summary.completed).toBe(2);
+    expect(elapsedMs).toBeLessThan(2000);
+    expect(modelSignalAborted).toBe(true);
+    expect(fetchSignalAborted).toBe(true);
+
+    // Neither media may be falsely marked not_found on a wall-clock timeout!
+    for (const mediaId of [hangModelMediaId, hangFetchMediaId]) {
+      const checks = await testDb.readDb
+        .selectFrom("platform_checks")
+        .selectAll()
+        .where("media_id", "=", mediaId)
+        .execute();
+      expect(checks).toHaveLength(0);
+
+      const demands = await listDemands(testDb.readDb, { mediaId });
+      expect(demands[0]?.status).toBe("open");
+      expect(demands[0]?.notFoundCount).toBe(0);
+    }
   });
 });

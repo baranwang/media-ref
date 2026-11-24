@@ -1,87 +1,23 @@
+import { create } from "@bufbuild/protobuf";
 import type { ExecutionContext, Hyperdrive } from "@cloudflare/workers-types";
-import { createFakeOutboundClient, listLeadsForTarget, type EmailMessage } from "@media-ref/core";
+import { fromProtoApiKeyAction, fromProtoMediaRef, proto } from "@media-ref/client";
+import { createFakeOutboundClient, listLeadsForTarget } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import worker, { createApiApp } from "../src/index.ts";
+import worker from "../src/index.ts";
+import { createApiApp } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-leads-integration-tests-0123456789";
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-async function signUpAndVerifyUser(
-  app: ReturnType<typeof createApiApp>,
-  outbound: ReturnType<typeof createFakeOutboundClient>,
-  input: { email: string; password: string; name: string },
-): Promise<{ userId: string; cookie: string }> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const email = outbound.sentEmails[emailsBefore];
-  expect(email).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(email!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  return { userId: signUpBody.user.id, cookie };
-}
-
-async function issueApiKey(
-  app: ReturnType<typeof createApiApp>,
-  cookie: string,
-  options: { name: string; canSubmit?: boolean; expiresIn?: number },
-): Promise<{ id: string; key: string; permissions: { media: string[] }; canSubmit: boolean }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie,
-      },
-      body: JSON.stringify(options),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as {
-    id: string;
-    key: string;
-    permissions: { media: string[] };
-    canSubmit: boolean;
-  };
-}
-
-describe("API Worker lead reporting (POST /v1/leads)", () => {
+describe("API Worker lead reporting (LeadService.CreateLead)", () => {
   const handles: TestDbHandle[] = [];
 
   afterEach(async () => {
@@ -108,108 +44,77 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
       },
     });
 
-    const user = await signUpAndVerifyUser(app, outbound, {
+    const user = await signUpUser(app, outbound, {
       email: "reporter@example.com",
       password: "StrongPassword123!",
       name: "Client Developer",
     });
 
-    const readOnlyKey = await issueApiKey(app, user.cookie, { name: "Player Client" });
-    expect(readOnlyKey.canSubmit).toBe(false);
-    expect(readOnlyKey.permissions).toEqual({ media: ["read", "report"] });
+    const createdKeyRes = await createRpcClients(app, { cookie: user.cookie }).account.createApiKey(
+      { name: "Player Client" },
+    );
+    expect(createdKeyRes.apiKey!.canSubmit).toBe(false);
+    expect(createdKeyRes.apiKey!.permissions?.media.map(fromProtoApiKeyAction)).toEqual([
+      "read",
+      "report",
+    ]);
+
+    const readOnlyKey = { id: createdKeyRes.apiKey!.id, key: createdKeyRes.key };
 
     // Report a full lead using X-API-Key header
-    const createRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readOnlyKey.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          season: 1,
-          variantDescription: "原声",
-          notes: "Matched by title and release year",
-        }),
-      }),
-    );
-
-    expect(createRes.status).toBe(201);
-    const createdBody = (await createRes.json()) as {
-      lead: {
-        id: string;
-        targetExternalKey: string;
-        namespace: string;
-        nativeId: string;
-        season: number | null;
-        variantDescription: string | null;
-        notes: string | null;
-        createdAt: string;
-      };
-    };
-
-    expect(createdBody.lead).toMatchObject({
-      targetExternalKey: "tmdb:tv:95479",
+    const createdBody = await createRpcClients(app, { apiKey: readOnlyKey.key }).lead.createLead({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
       namespace: "bilibili",
       nativeId: "ss34430",
       season: 1,
       variantDescription: "原声",
       notes: "Matched by title and release year",
     });
-    expect(createdBody.lead.id).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-    );
-    expect(Number.isNaN(Date.parse(createdBody.lead.createdAt))).toBe(false);
+
+    const lead = createdBody.lead!;
+    expect(fromProtoMediaRef(lead.target, { mode: "target" })).toMatchObject({
+      ok: true,
+      key: "tmdb:tv:95479",
+    });
+    expect(lead).toMatchObject({
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      season: 1,
+      variantDescription: "原声",
+      notes: "Matched by title and release year",
+    });
+    expect(lead.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    expect(Number.isNaN(Date.parse(lead.createdAt))).toBe(false);
 
     // Report a minimal lead (without optional fields) using Authorization: Bearer
-    const minimalRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${readOnlyKey.key}`,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "douban:1292052",
-          namespace: "tencent",
-          nativeId: "mzc00200xyz",
-        }),
-      }),
-    );
-
-    expect(minimalRes.status).toBe(201);
-    const minimalBody = (await minimalRes.json()) as typeof createdBody;
-    expect(minimalBody.lead).toMatchObject({
-      targetExternalKey: "douban:1292052",
+    const minimalBody = await createRpcClients(app, {
+      bearerToken: readOnlyKey.key,
+    }).lead.createLead({
+      target: mediaRef({ douban: "1292052" }),
       namespace: "tencent",
       nativeId: "mzc00200xyz",
-      season: null,
-      variantDescription: null,
-      notes: null,
     });
 
+    expect(fromProtoMediaRef(minimalBody.lead?.target, { mode: "target" })).toMatchObject({
+      ok: true,
+      key: "douban:1292052",
+    });
+    expect(minimalBody.lead).toMatchObject({
+      namespace: "tencent",
+      nativeId: "mzc00200xyz",
+    });
+    expect(minimalBody.lead?.season).toBeUndefined();
+    expect(minimalBody.lead?.variantDescription).toBeUndefined();
+    expect(minimalBody.lead?.notes).toBeUndefined();
+
     // Season 0 (specials) is accepted as a valid non-negative integer
-    const specialsRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readOnlyKey.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34431",
-          season: 0,
-        }),
-      }),
-    );
-    expect(specialsRes.status).toBe(201);
-    const specialsBody = (await specialsRes.json()) as typeof createdBody;
-    expect(specialsBody.lead.season).toBe(0);
+    const specialsBody = await createRpcClients(app, { apiKey: readOnlyKey.key }).lead.createLead({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss34431",
+      season: 0,
+    });
+    expect(specialsBody.lead?.season).toBe(0);
 
     // Exploration helper retrieves stored leads with reporter metadata
     const bilibiliSeason1 = await listLeadsForTarget(testDb.readDb, {
@@ -219,7 +124,7 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
     });
     expect(bilibiliSeason1).toHaveLength(1);
     expect(bilibiliSeason1[0]).toMatchObject({
-      id: createdBody.lead.id,
+      id: lead.id,
       targetExternalKey: "tmdb:tv:95479",
       namespace: "bilibili",
       nativeId: "ss34430",
@@ -248,14 +153,14 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
       },
     });
 
-    const user = await signUpAndVerifyUser(app, outbound, {
+    const user = await signUpUser(app, outbound, {
       email: "revoke-lead@example.com",
       password: "StrongPassword123!",
       name: "Revoke Tester",
     });
 
-    const keyA = await issueApiKey(app, user.cookie, { name: "Revocable Client Key" });
-    const submitKey = await issueApiKey(app, user.cookie, {
+    const keyA = await issueApiKeyRpc(app, user.cookie, { name: "Revocable Client Key" });
+    const submitKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Submit Capable Key",
       canSubmit: true,
     });
@@ -275,87 +180,51 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
     await staleReadDb.writeDb.insertInto("apikey").values(keyARow).execute();
 
     // Before revocation, keyA can report a lead.
-    const beforeRevokeRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": keyA.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "iqiyi",
-          nativeId: "a_19rrk12345",
-          season: 1,
-        }),
-      }),
-    );
-    expect(beforeRevokeRes.status).toBe(201);
-    const beforeLead = (await beforeRevokeRes.json()) as { lead: { id: string } };
+    const keyARpc = createRpcClients(app, { apiKey: keyA.key });
+    const beforeLead = await keyARpc.lead.createLead({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "iqiyi",
+      nativeId: "a_19rrk12345",
+      season: 1,
+    });
+    expect(beforeLead.lead?.id).toBeTruthy();
 
     // Revoke keyA on dbWrite (staleReadDb still has the old cached row).
-    const revokeRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/${keyA.id}`, {
-        method: "DELETE",
-        headers: { cookie: user.cookie },
-      }),
-    );
-    expect(revokeRes.status).toBe(200);
+    await createRpcClients(app, { cookie: user.cookie }).account.deleteApiKey({ id: keyA.id });
 
     // Proof that staleReadDb still considers keyA valid on a read endpoint:
-    const staleReadCheck = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-        headers: { "x-api-key": keyA.key },
-      }),
-    );
-    expect(staleReadCheck.status).toBe(200);
+    expect((await keyARpc.account.getCurrentApiKey({})).keyId).toBe(keyA.id);
 
-    // POST /v1/leads MUST verify against dbWrite and immediately reject the revoked key.
-    const afterRevokeRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": keyA.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "iqiyi",
-          nativeId: "a_19rrk99999",
-          season: 2,
-        }),
+    // LeadService.CreateLead MUST verify against dbWrite and immediately reject the revoked key.
+    const afterRevokeErr = await expectRpcError(
+      keyARpc.lead.createLead({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "iqiyi",
+        nativeId: "a_19rrk99999",
+        season: 2,
       }),
     );
-    expect(afterRevokeRes.status).toBe(401);
-    expect(await afterRevokeRes.json()).toEqual({
-      error: "INVALID_API_KEY",
-      message: "Invalid API key",
-    });
+    expect(afterRevokeErr.status).toBe(401);
+    expect(afterRevokeErr.code).toBe("INVALID_API_KEY");
+    expect(afterRevokeErr.message).toBe("Invalid API key");
 
     // Submit-capable key (which also has report permission) still works on dbWrite.
-    const submitKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${submitKey.key}`,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "youku",
-          nativeId: "yk_abc123",
-          season: 1,
-        }),
-      }),
-    );
-    expect(submitKeyRes.status).toBe(201);
+    const submitKeyRes = await createRpcClients(app, {
+      bearerToken: submitKey.key,
+    }).lead.createLead({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "youku",
+      nativeId: "yk_abc123",
+      season: 1,
+    });
+    expect(submitKeyRes.lead?.id).toBeTruthy();
 
     // Earlier lead reported before revocation remains intact; rejected lead was not stored.
     const iqiyiLeads = await listLeadsForTarget(primaryWriteDb.readDb, {
       targetExternalKey: "tmdb:tv:95479",
       namespace: "iqiyi",
     });
-    expect(iqiyiLeads.map((item) => item.id)).toEqual([beforeLead.lead.id]);
+    expect(iqiyiLeads.map((item) => item.id)).toEqual([beforeLead.lead!.id]);
   });
 
   test("rejects missing, invalid, disabled, expired, and permission-lacking API keys and invalid payloads", async () => {
@@ -375,56 +244,41 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
       },
     });
 
-    const validPayload = JSON.stringify({
-      targetExternalKey: "tmdb:movie:550",
+    const validPayload = {
+      target: mediaRef({ tmdb: { type: "movie", id: 550 } }),
       namespace: "bilibili",
       nativeId: "ss12345",
-    });
+    };
 
     // Missing API key -> 401
-    const missingKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: validPayload,
-      }),
-    );
-    expect(missingKeyRes.status).toBe(401);
-    expect(await missingKeyRes.json()).toEqual({
-      error: "API_KEY_REQUIRED",
-      message: "API key is required",
-    });
+    const missingKeyErr = await expectRpcError(createRpcClients(app).lead.createLead(validPayload));
+    expect(missingKeyErr.status).toBe(401);
+    expect(missingKeyErr.code).toBe("API_KEY_REQUIRED");
+    expect(missingKeyErr.message).toBe("API key is required");
 
     // Unknown API key -> 401
-    const unknownKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": "mref_nonexistent_key_value",
-        },
-        body: validPayload,
-      }),
+    const unknownKeyErr = await expectRpcError(
+      createRpcClients(app, { apiKey: "mref_nonexistent_key_value" }).lead.createLead(validPayload),
     );
-    expect(unknownKeyRes.status).toBe(401);
-    expect(await unknownKeyRes.json()).toEqual({
-      error: "INVALID_API_KEY",
-      message: "Invalid API key",
-    });
+    expect(unknownKeyErr.status).toBe(401);
+    expect(unknownKeyErr.code).toBe("INVALID_API_KEY");
+    expect(unknownKeyErr.message).toBe("Invalid API key");
 
-    const user = await signUpAndVerifyUser(app, outbound, {
+    const user = await signUpUser(app, outbound, {
       email: "validate-lead@example.com",
       password: "StrongPassword123!",
       name: "Validation Tester",
     });
 
-    const activeKey = await issueApiKey(app, user.cookie, { name: "Active Key" });
-    const expiringKey = await issueApiKey(app, user.cookie, {
+    const activeKey = await issueApiKeyRpc(app, user.cookie, { name: "Active Key" });
+    const expiringKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Expiring Key",
       expiresIn: 60,
     });
-    const disabledKey = await issueApiKey(app, user.cookie, { name: "Disabled Key" });
-    const readOnlyNoReportKey = await issueApiKey(app, user.cookie, { name: "No Report Perm Key" });
+    const disabledKey = await issueApiKeyRpc(app, user.cookie, { name: "Disabled Key" });
+    const readOnlyNoReportKey = await issueApiKeyRpc(app, user.cookie, {
+      name: "No Report Perm Key",
+    });
 
     // Disable key via Better Auth update endpoint
     const disableRes = await app.fetch(
@@ -436,18 +290,12 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
     );
     expect(disableRes.status).toBe(200);
 
-    const disabledLeadRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": disabledKey.key },
-        body: validPayload,
-      }),
+    const disabledErr = await expectRpcError(
+      createRpcClients(app, { apiKey: disabledKey.key }).lead.createLead(validPayload),
     );
-    expect(disabledLeadRes.status).toBe(401);
-    expect(await disabledLeadRes.json()).toEqual({
-      error: "API_KEY_DISABLED",
-      message: "API key is disabled",
-    });
+    expect(disabledErr.status).toBe(401);
+    expect(disabledErr.code).toBe("API_KEY_DISABLED");
+    expect(disabledErr.message).toBe("API key is disabled");
 
     // Restrict a key to ["read"] only in DB to verify report permission check
     await testDb.writeDb
@@ -456,147 +304,139 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
       .where("id", "=", readOnlyNoReportKey.id)
       .execute();
 
-    const insufficientPermRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": readOnlyNoReportKey.key },
-        body: validPayload,
-      }),
+    const insufficientErr = await expectRpcError(
+      createRpcClients(app, { apiKey: readOnlyNoReportKey.key }).lead.createLead(validPayload),
     );
-    expect(insufficientPermRes.status).toBe(403);
-    expect(await insufficientPermRes.json()).toEqual({
-      error: "INSUFFICIENT_PERMISSIONS",
-      message: "API key does not have required permission",
-    });
+    expect(insufficientErr.status).toBe(403);
+    expect(insufficientErr.code).toBe("INSUFFICIENT_PERMISSIONS");
+    expect(insufficientErr.message).toBe("API key does not have required permission");
 
     // Advance clock past expiringKey's expiration
     currentTime = new Date(Date.now() + 65_000);
-    const expiredLeadRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": expiringKey.key },
-        body: validPayload,
-      }),
+    const expiredErr = await expectRpcError(
+      createRpcClients(app, { apiKey: expiringKey.key }).lead.createLead(validPayload),
     );
-    expect(expiredLeadRes.status).toBe(401);
-    expect(await expiredLeadRes.json()).toEqual({
-      error: "API_KEY_EXPIRED",
-      message: "API key has expired",
-    });
+    expect(expiredErr.status).toBe(401);
+    expect(expiredErr.code).toBe("API_KEY_EXPIRED");
+    expect(expiredErr.message).toBe("API key has expired");
 
-    // Invalid JSON and invalid body fields -> 400
-    const invalidCases: Array<{ body: string; expectedError: string }> = [
-      { body: "{not-json", expectedError: "INVALID_JSON" },
-      { body: JSON.stringify(["not-an-object"]), expectedError: "INVALID_REQUEST" },
-      { body: JSON.stringify(null), expectedError: "INVALID_REQUEST" },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "unknown:123",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-        }),
-        expectedError: "INVALID_EXTERNAL_KEY",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-        }),
-        expectedError: "INVALID_EXTERNAL_KEY",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: " tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-        }),
-        expectedError: "INVALID_EXTERNAL_KEY",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "netflix",
-          nativeId: "80057281",
-        }),
-        expectedError: "INVALID_NAMESPACE",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "",
-        }),
-        expectedError: "INVALID_NATIVE_ID",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "   ",
-        }),
-        expectedError: "INVALID_NATIVE_ID",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          season: -1,
-        }),
-        expectedError: "INVALID_SEASON",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          season: 1.5,
-        }),
-        expectedError: "INVALID_SEASON",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          season: "1",
-        }),
-        expectedError: "INVALID_SEASON",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: 42,
-        }),
-        expectedError: "INVALID_VARIANT_DESCRIPTION",
-      },
-      {
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          notes: { hint: "bad" },
-        }),
-        expectedError: "INVALID_NOTES",
-      },
-    ];
-
-    for (const testCase of invalidCases) {
+    // Wire-level malformed Connect JSON / invalid field types -> 400
+    const jsonTmdbTarget = { tmdb: { type: "MEDIA_TYPE_TV", id: 95479 } };
+    for (const badBody of [
+      "{not-json",
+      JSON.stringify(["not-an-object"]),
+      JSON.stringify({
+        target: jsonTmdbTarget,
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        season: 1.5,
+      }),
+      JSON.stringify({
+        target: jsonTmdbTarget,
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        season: "not-a-number",
+      }),
+      JSON.stringify({
+        target: jsonTmdbTarget,
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: 42,
+      }),
+      JSON.stringify({
+        target: jsonTmdbTarget,
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        notes: { hint: "bad" },
+      }),
+    ]) {
       const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/leads`, {
+        new Request(`${TEST_BASE_URL}/mediaref.v1.LeadService/CreateLead`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             "x-api-key": activeKey.key,
           },
-          body: testCase.body,
+          body: badBody,
         }),
       );
       expect(res.status).toBe(400);
-      expect(await res.json()).toMatchObject({ error: testCase.expectedError });
+    }
+
+    // Domain validation errors via binary ConnectRPC -> 400 + structured error code
+    const activeRpc = createRpcClients(app, { apiKey: activeKey.key });
+    const invalidDomainCases: Array<{
+      input: Parameters<typeof activeRpc.lead.createLead>[0];
+      expectedCode: string;
+    }> = [
+      {
+        input: {
+          target: create(proto.MediaRefSchema),
+          namespace: "bilibili",
+          nativeId: "ss34430",
+        },
+        expectedCode: "INVALID_EXTERNAL_KEY",
+      },
+      {
+        input: {
+          target: create(proto.MediaRefSchema, {
+            id: {
+              case: "tmdb",
+              value: create(proto.TmdbRefSchema, { type: proto.MediaType.TV, id: 0 }),
+            },
+          }),
+          namespace: "bilibili",
+          nativeId: "ss34430",
+        },
+        expectedCode: "INVALID_EXTERNAL_KEY",
+      },
+      {
+        input: {
+          target: mediaRef({ mediaId: "00000000-0000-4000-8000-000000000001" }),
+          namespace: "bilibili",
+          nativeId: "ss34430",
+        },
+        expectedCode: "INVALID_EXTERNAL_KEY",
+      },
+      {
+        input: {
+          target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+          namespace: "netflix",
+          nativeId: "80057281",
+        },
+        expectedCode: "INVALID_NAMESPACE",
+      },
+      {
+        input: {
+          target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+          namespace: "bilibili",
+          nativeId: "",
+        },
+        expectedCode: "INVALID_NATIVE_ID",
+      },
+      {
+        input: {
+          target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+          namespace: "bilibili",
+          nativeId: "   ",
+        },
+        expectedCode: "INVALID_NATIVE_ID",
+      },
+      {
+        input: {
+          target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+          namespace: "bilibili",
+          nativeId: "ss34430",
+          season: -1,
+        },
+        expectedCode: "INVALID_SEASON",
+      },
+    ];
+
+    for (const testCase of invalidDomainCases) {
+      const err = await expectRpcError(activeRpc.lead.createLead(testCase.input));
+      expect(err.status).toBe(400);
+      expect(err.code).toBe(testCase.expectedCode);
     }
 
     const totalLeads = await testDb.readDb.selectFrom("leads").select("id").execute();
@@ -618,43 +458,43 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
       },
     });
 
-    const user = await signUpAndVerifyUser(app, outbound, {
+    const user = await signUpUser(app, outbound, {
       email: "isolation@example.com",
       password: "StrongPassword123!",
       name: "Isolation Tester",
     });
 
-    const key = await issueApiKey(app, user.cookie, { name: "Client App" });
+    const key = await issueApiKeyRpc(app, user.cookie, { name: "Client App" });
+    const keyRpc = createRpcClients(app, { apiKey: key.key });
 
     const payloads = [
       {
-        targetExternalKey: "tmdb:tv:95479",
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
         namespace: "bilibili",
         nativeId: "ss34430",
         season: 1,
         variantDescription: "原声",
       },
       {
-        targetExternalKey: "tmdb:tv:95479",
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
         namespace: "bilibili",
         nativeId: "ss45574",
         season: 2,
       },
       {
-        targetExternalKey: "tmdb:tv:95479",
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
         namespace: "bilibili",
         nativeId: "ss_series_hint",
-        season: null,
         notes: "   ",
       },
       {
-        targetExternalKey: "tmdb:tv:95479",
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
         namespace: "tencent",
         nativeId: "mzc00200test",
         season: 1,
       },
       {
-        targetExternalKey: "douban:1292052",
+        target: mediaRef({ douban: "1292052" }),
         namespace: "mgtv",
         nativeId: "mg_999",
       },
@@ -662,19 +502,8 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
 
     const createdIds: string[] = [];
     for (const payload of payloads) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/leads`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": key.key,
-          },
-          body: JSON.stringify(payload),
-        }),
-      );
-      expect(res.status).toBe(201);
-      const body = (await res.json()) as { lead: { id: string; notes: string | null } };
-      createdIds.push(body.lead.id);
+      const body = await keyRpc.lead.createLead(payload);
+      createdIds.push(body.lead!.id);
     }
 
     // Reporting leads MUST NOT enqueue any background_jobs (cannot trigger exploration)
@@ -687,8 +516,10 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
 
     // Leads are NOT exposed on public read endpoints
     const getLeadsRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        headers: { "x-api-key": key.key },
+      new Request(`${TEST_BASE_URL}/mediaref.v1.LeadService/ListLeads`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": key.key },
+        body: "{}",
       }),
     );
     expect(getLeadsRes.status).toBe(404);
@@ -697,13 +528,8 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
     expect(healthRes.status).toBe(200);
     expect(await healthRes.text()).not.toContain("ss34430");
 
-    const keyMeRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/me`, {
-        headers: { "x-api-key": key.key },
-      }),
-    );
-    expect(keyMeRes.status).toBe(200);
-    expect(await keyMeRes.text()).not.toContain("ss34430");
+    const keyMe = await keyRpc.account.getCurrentApiKey({});
+    expect(JSON.stringify(keyMe)).not.toContain("ss34430");
 
     // Exploration lookup helper filters cleanly by targetExternalKey, namespace, season, and limit
     const allForTmdb = await listLeadsForTarget(testDb.readDb, {
@@ -755,7 +581,7 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
     expect(unknownTarget).toEqual([]);
   });
 
-  test("default Cloudflare Worker fetch entrypoint handles POST /v1/leads over HYPERDRIVE_WRITE", async () => {
+  test("default Cloudflare Worker fetch entrypoint handles LeadService.CreateLead over HYPERDRIVE_WRITE", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -770,12 +596,12 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
       },
     });
 
-    const user = await signUpAndVerifyUser(app, outbound, {
+    const user = await signUpUser(app, outbound, {
       email: "worker-lead@example.com",
       password: "StrongPassword123!",
       name: "Worker Lead Dev",
     });
-    const key = await issueApiKey(app, user.cookie, { name: "Worker Lead Key" });
+    const key = await issueApiKeyRpc(app, user.cookie, { name: "Worker Lead Key" });
 
     const pending: Promise<unknown>[] = [];
     const ctx = {
@@ -790,38 +616,31 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
       connectionString: testDb.connectionString,
     } as Hyperdrive;
 
-    const response = await worker.fetch(
-      new Request(`${TEST_BASE_URL}/v1/leads`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": key.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          season: 1,
-        }),
-      }),
-      {
-        HYPERDRIVE_READ: hyperdrive,
-        HYPERDRIVE_WRITE: hyperdrive,
-        AUTH_SECRET: TEST_AUTH_SECRET,
-        API_BASE_URL: TEST_BASE_URL,
-        COOKIE_DOMAIN: "mediaref.org",
-      },
-      ctx,
-    );
+    const workerEnv = {
+      HYPERDRIVE_READ: hyperdrive,
+      HYPERDRIVE_WRITE: hyperdrive,
+      AUTH_SECRET: TEST_AUTH_SECRET,
+      API_BASE_URL: TEST_BASE_URL,
+      COOKIE_DOMAIN: "mediaref.org",
+    };
 
+    const workerRpc = createRpcClients((req) => worker.fetch(req, workerEnv, ctx), {
+      apiKey: key.key,
+    });
+
+    const body = await workerRpc.lead.createLead({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      season: 1,
+    });
     await Promise.all(pending);
 
-    expect(response.status).toBe(201);
-    const body = (await response.json()) as {
-      lead: { id: string; targetExternalKey: string; namespace: string; nativeId: string };
-    };
+    expect(fromProtoMediaRef(body.lead?.target, { mode: "target" })).toMatchObject({
+      ok: true,
+      key: "tmdb:tv:95479",
+    });
     expect(body.lead).toMatchObject({
-      targetExternalKey: "tmdb:tv:95479",
       namespace: "bilibili",
       nativeId: "ss34430",
     });
@@ -832,6 +651,6 @@ describe("API Worker lead reporting (POST /v1/leads)", () => {
       season: 1,
     });
     expect(stored).toHaveLength(1);
-    expect(stored[0]!.id).toBe(body.lead.id);
+    expect(stored[0]!.id).toBe(body.lead!.id);
   });
 });

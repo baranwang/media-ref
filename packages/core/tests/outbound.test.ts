@@ -508,4 +508,47 @@ describe("createFakeOutboundClient", () => {
       }),
     ).rejects.toThrow("Simulated upstream timeout");
   });
+
+  test("propagates AbortSignal and enforces hard timeoutMs on fetchExternal and invokeModel", async () => {
+    let observedFetchSignal: AbortSignal | undefined;
+    const hangingFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        observedFetchSignal = init?.signal ?? undefined;
+        init?.signal?.addEventListener("abort", () => {
+          reject(init.signal?.reason ?? new Error("aborted"));
+        });
+      });
+
+    const hangingAiBinding = {
+      run: () => new Promise<never>(() => {}),
+    };
+
+    const live = createLiveOutboundClient({
+      fetchImpl: hangingFetch,
+      aiBinding: hangingAiBinding,
+      aiProvider: "workers-ai",
+      aiModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    });
+
+    const httpController = new AbortController();
+    const httpPromise = live.fetchExternal({
+      kind: "platform",
+      namespace: "bilibili",
+      url: "https://api.bilibili.com/pgc/view/web/season?season_id=34430",
+      signal: httpController.signal,
+      timeoutMs: 5_000,
+    });
+    httpController.abort(new Error("caller_cancelled"));
+    await expect(httpPromise).rejects.toThrow("caller_cancelled");
+    expect(observedFetchSignal?.aborted).toBe(true);
+
+    const start = Date.now();
+    await expect(
+      live.invokeModel({
+        messages: [{ role: "user", content: "hang forever" }],
+        timeoutMs: 40,
+      }),
+    ).rejects.toThrow();
+    expect(Date.now() - start).toBeLessThan(500);
+  });
 });

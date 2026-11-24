@@ -1,3 +1,5 @@
+import type { ExecutionContext } from "@cloudflare/workers-types";
+import { proto } from "@media-ref/client";
 import {
   createDefaultAdapterRegistry,
   resolveAnonymousInvalidationThreshold,
@@ -10,31 +12,33 @@ import {
   type TmdbGatewayConfig,
 } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
-import { Hono } from "hono";
-import { cors } from "hono/cors";
-import { registerApiKeyRoutes } from "./api-keys.ts";
-import { registerAssociationRoutes } from "./associations.ts";
+import { createConnectRouter, createContextValues } from "@connectrpc/connect";
+import {
+  universalServerRequestFromFetch,
+  universalServerResponseToFetch,
+  type UniversalHandler,
+} from "@connectrpc/connect/protocol";
+import { accountServiceImpl } from "./api-keys.ts";
+import { associationServiceImpl } from "./associations.ts";
 import {
   AUTH_BASE_PATH,
   createAuth,
   isAllowedCorsOrigin,
-  requireAuthenticatedSession,
-  type ApiEnv,
   type AuthConfig,
   type AuthInstance,
 } from "./auth.ts";
-import { registerChangeRequestRoutes } from "./change-requests.ts";
-import { registerInvalidationRoutes } from "./invalidation.ts";
-import { registerLeadRoutes } from "./leads.ts";
-import { registerMediaAdminRoutes } from "./media-admin.ts";
-import { registerMediaRoutes } from "./media.ts";
+import { changeRequestServiceImpl } from "./change-requests.ts";
+import { kApiRequestRuntime, type ApiRequestRuntime } from "./context.ts";
+import { leadServiceImpl } from "./leads.ts";
+import { mediaServiceImpl } from "./media.ts";
 import {
   createReadRateLimitRuntime,
   resolveSubmissionQuotaConfig,
   type RateLimitBinding,
   type RateLimitConfig,
+  type ReadRateLimitRuntime,
 } from "./rate-limit.ts";
-import { registerReviewerRoutes } from "./reviewer.ts";
+import { reviewerServiceImpl } from "./reviewer.ts";
 
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
@@ -63,10 +67,45 @@ export interface ApiDeps {
   onBackgroundTaskError?: (error: unknown) => void;
   readKeyLimiter?: RateLimitBinding;
   readIpLimiter?: RateLimitBinding;
+  readRateLimitRuntime?: ReadRateLimitRuntime;
   config: ApiConfig;
 }
 
+export interface ApiApp {
+  fetch(request: Request, env?: unknown, ctx?: ExecutionContext): Promise<Response>;
+}
+
 const VALID_KINDS = new Set<ExternalTargetKind>(["platform", "catalog"]);
+
+const CORS_ALLOW_HEADERS =
+  "Content-Type, Authorization, X-API-Key, Connect-Protocol-Version, Connect-Timeout-Ms, X-Grpc-Web, X-User-Agent";
+const CORS_EXPOSE_HEADERS = "Retry-After, Grpc-Status, Grpc-Message, Grpc-Status-Details-Bin";
+const CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
+
+/**
+ * Module-level singleton ConnectRPC router shared across all Worker requests.
+ * Per-request dependencies (dual Hyperdrive pools, lazy Better Auth, rate limiters)
+ * are injected per call via Connect `ContextValues`.
+ */
+const connectRouter = createConnectRouter({
+  // Accept standard Connect binary/JSON, gRPC-Web, and gRPC requests without requiring
+  // manual `Connect-Protocol-Version` header for plain HTTP clients/tests.
+  requireConnectProtocolHeader: false,
+  jsonOptions: {
+    ignoreUnknownFields: false,
+  },
+});
+
+connectRouter.service(proto.MediaService, mediaServiceImpl);
+connectRouter.service(proto.ChangeRequestService, changeRequestServiceImpl);
+connectRouter.service(proto.LeadService, leadServiceImpl);
+connectRouter.service(proto.AssociationService, associationServiceImpl);
+connectRouter.service(proto.AccountService, accountServiceImpl);
+connectRouter.service(proto.ReviewerService, reviewerServiceImpl);
+
+const connectHandlerMap = new Map<string, UniversalHandler>(
+  connectRouter.handlers.map((handler) => [handler.requestPath, handler]),
+);
 
 function isValidHttpUrl(raw: string): boolean {
   try {
@@ -77,8 +116,52 @@ function isValidHttpUrl(raw: string): boolean {
   }
 }
 
-export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
-  const app = new Hono<ApiEnv>();
+function appendVaryOrigin(headers: Headers): void {
+  const existing = headers.get("vary");
+  if (!existing) {
+    headers.set("vary", "Origin");
+    return;
+  }
+  const parts = existing.split(",").map((part) => part.trim().toLowerCase());
+  if (!parts.includes("origin")) {
+    headers.set("vary", `${existing}, Origin`);
+  }
+}
+
+function applyCorsHeaders(request: Request, response: Response, config: AuthConfig): Response {
+  const origin = request.headers.get("origin");
+  if (!origin || !isAllowedCorsOrigin(origin, config)) {
+    return response;
+  }
+
+  const headers = new Headers(response.headers);
+  headers.set("access-control-allow-origin", origin);
+  headers.set("access-control-allow-credentials", "true");
+  headers.set("access-control-expose-headers", CORS_EXPOSE_HEADERS);
+  appendVaryOrigin(headers);
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function buildPreflightResponse(request: Request, config: AuthConfig): Response {
+  const origin = request.headers.get("origin");
+  const headers = new Headers();
+  if (origin && isAllowedCorsOrigin(origin, config)) {
+    headers.set("access-control-allow-origin", origin);
+    headers.set("access-control-allow-credentials", "true");
+    headers.set("access-control-allow-headers", CORS_ALLOW_HEADERS);
+    headers.set("access-control-allow-methods", CORS_ALLOW_METHODS);
+    headers.set("access-control-expose-headers", CORS_EXPOSE_HEADERS);
+    headers.set("vary", "Origin");
+  }
+  return new Response(null, { status: 204, headers });
+}
+
+export function createApiApp(deps: ApiDeps): ApiApp {
   let cachedAuth: AuthInstance | undefined;
 
   const getAuth = (): AuthInstance => {
@@ -93,22 +176,26 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
   const hasCustomClock = deps.config.now !== undefined;
   const now = deps.config.now ?? (() => new Date());
   const adapterRegistry = deps.adapterRegistry ?? createDefaultAdapterRegistry();
-  const readRateLimit = createReadRateLimitRuntime({
-    readKeyLimiter: deps.readKeyLimiter,
-    readIpLimiter: deps.readIpLimiter,
-    config: {
-      ...deps.config.rateLimits,
-      ...(deps.config.readKeyLimit !== undefined ? { readKeyLimit: deps.config.readKeyLimit } : {}),
-      ...(deps.config.readIpLimit !== undefined ? { readIpLimit: deps.config.readIpLimit } : {}),
-      ...(deps.config.readPeriodSeconds !== undefined
-        ? { readPeriodSeconds: deps.config.readPeriodSeconds }
-        : {}),
-      ...(deps.config.readRetryAfterSeconds !== undefined
-        ? { readRetryAfterSeconds: deps.config.readRetryAfterSeconds }
-        : {}),
-    },
-    now,
-  });
+  const readRateLimit =
+    deps.readRateLimitRuntime ??
+    createReadRateLimitRuntime({
+      readKeyLimiter: deps.readKeyLimiter,
+      readIpLimiter: deps.readIpLimiter,
+      config: {
+        ...deps.config.rateLimits,
+        ...(deps.config.readKeyLimit !== undefined
+          ? { readKeyLimit: deps.config.readKeyLimit }
+          : {}),
+        ...(deps.config.readIpLimit !== undefined ? { readIpLimit: deps.config.readIpLimit } : {}),
+        ...(deps.config.readPeriodSeconds !== undefined
+          ? { readPeriodSeconds: deps.config.readPeriodSeconds }
+          : {}),
+        ...(deps.config.readRetryAfterSeconds !== undefined
+          ? { readRetryAfterSeconds: deps.config.readRetryAfterSeconds }
+          : {}),
+      },
+      now,
+    });
   const submissionQuota = resolveSubmissionQuotaConfig({
     rateLimits: deps.config.rateLimits,
     submitBaseHourlyLimit: deps.config.submitBaseHourlyLimit,
@@ -120,109 +207,128 @@ export function createApiApp(deps: ApiDeps): Hono<ApiEnv> {
     deps.config.anonymousInvalidationThreshold,
   );
 
-  app.use(
-    "*",
-    cors({
-      origin: (origin) => (isAllowedCorsOrigin(origin, deps.config) ? origin : ""),
-      allowHeaders: ["Content-Type", "Authorization", "X-API-Key"],
-      allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      credentials: true,
-    }),
-  );
+  const baseRuntime: Omit<ApiRequestRuntime, "executionCtx"> = {
+    dbRead: deps.dbRead,
+    dbWrite: deps.dbWrite,
+    outbound: deps.outbound,
+    adapterRegistry,
+    catalogConfig: deps.config.catalog,
+    tmdbConfig: deps.config.tmdb,
+    tmdbGateway: deps.tmdbGateway,
+    now,
+    hasCustomClock,
+    readRateLimit,
+    submissionQuota,
+    anonymousInvalidationThreshold,
+    getAuth,
+    onBackgroundTask: deps.onBackgroundTask,
+    onBackgroundTaskError: deps.onBackgroundTaskError,
+  };
 
-  app.use("*", async (c, next) => {
-    c.set("dbRead", deps.dbRead);
-    c.set("dbWrite", deps.dbWrite);
-    c.set("outbound", deps.outbound);
-    c.set("adapterRegistry", adapterRegistry);
-    c.set("catalogConfig", deps.config.catalog);
-    c.set("tmdbConfig", deps.config.tmdb);
-    c.set("tmdbGateway", deps.tmdbGateway);
-    c.set("now", now);
-    c.set("onBackgroundTask", deps.onBackgroundTask);
-    c.set("onBackgroundTaskError", deps.onBackgroundTaskError);
-    c.set("hasCustomClock", hasCustomClock);
-    c.set("readRateLimit", readRateLimit);
-    c.set("submissionQuota", submissionQuota);
-    c.set("anonymousInvalidationThreshold", anonymousInvalidationThreshold);
-    c.set("session", null);
-    c.set("apiKey", null);
-    if (c.req.path !== "/health" && c.req.path !== "/health/outbound") {
-      c.set("auth", getAuth());
-    }
-    await next();
-  });
-
-  app.get("/health", async (c) => {
-    try {
-      const row = await deps.dbRead
-        .selectFrom("schema_meta")
-        .select("value")
-        .where("key", "=", "bootstrap_version")
-        .executeTakeFirst();
-
-      if (!row) {
-        return c.json({ ok: false, database: "uninitialized" }, 503);
+  return {
+    async fetch(request: Request, _env?: unknown, ctx?: ExecutionContext): Promise<Response> {
+      if (request.method === "OPTIONS") {
+        return buildPreflightResponse(request, deps.config);
       }
 
-      return c.json({ ok: true, database: "ok" }, 200);
-    } catch {
-      return c.json({ ok: false, database: "error" }, 503);
-    }
-  });
+      const url = new URL(request.url);
+      const pathname = url.pathname;
 
-  if (deps.config.enableHealthOutboundProbe) {
-    app.get("/health/outbound", async (c) => {
-      const kindParam = (c.req.query("kind") ?? "platform") as ExternalTargetKind;
-      const namespace = c.req.query("namespace")?.trim();
-      const url = c.req.query("url")?.trim();
+      if (pathname === "/health" && request.method === "GET") {
+        try {
+          const row = await deps.dbRead
+            .selectFrom("schema_meta")
+            .select("value")
+            .where("key", "=", "bootstrap_version")
+            .executeTakeFirst();
 
-      if (!VALID_KINDS.has(kindParam) || !namespace || !url || !isValidHttpUrl(url)) {
-        return c.json({ ok: false, error: "invalid_probe_parameters" }, 400);
+          const res = row
+            ? Response.json({ ok: true, database: "ok" }, { status: 200 })
+            : Response.json({ ok: false, database: "uninitialized" }, { status: 503 });
+          return applyCorsHeaders(request, res, deps.config);
+        } catch {
+          return applyCorsHeaders(
+            request,
+            Response.json({ ok: false, database: "error" }, { status: 503 }),
+            deps.config,
+          );
+        }
       }
 
-      try {
-        const upstream = await deps.outbound.fetchExternal({
-          kind: kindParam,
-          namespace,
-          url,
-          method: "GET",
-        });
+      if (
+        deps.config.enableHealthOutboundProbe &&
+        pathname === "/health/outbound" &&
+        request.method === "GET"
+      ) {
+        const kindParam = (url.searchParams.get("kind") ?? "platform") as ExternalTargetKind;
+        const namespace = url.searchParams.get("namespace")?.trim();
+        const targetUrl = url.searchParams.get("url")?.trim();
 
-        return c.json(
-          {
-            ok: true,
+        if (!VALID_KINDS.has(kindParam) || !namespace || !targetUrl || !isValidHttpUrl(targetUrl)) {
+          return applyCorsHeaders(
+            request,
+            Response.json({ ok: false, error: "invalid_probe_parameters" }, { status: 400 }),
+            deps.config,
+          );
+        }
+
+        try {
+          const upstream = await deps.outbound.fetchExternal({
             kind: kindParam,
             namespace,
-            upstreamStatus: upstream.status,
-            bodyPreview: upstream.body.slice(0, 512),
-          },
-          200,
-        );
-      } catch {
-        return c.json({ ok: false, error: "upstream_error" }, 502);
+            url: targetUrl,
+            method: "GET",
+          });
+
+          return applyCorsHeaders(
+            request,
+            Response.json(
+              {
+                ok: true,
+                kind: kindParam,
+                namespace,
+                upstreamStatus: upstream.status,
+                bodyPreview: upstream.body.slice(0, 512),
+              },
+              { status: 200 },
+            ),
+            deps.config,
+          );
+        } catch {
+          return applyCorsHeaders(
+            request,
+            Response.json({ ok: false, error: "upstream_error" }, { status: 502 }),
+            deps.config,
+          );
+        }
       }
-    });
-  }
 
-  app.on(["GET", "POST"], `${AUTH_BASE_PATH}/*`, (c) => c.get("auth").handler(c.req.raw));
+      if (
+        (pathname === AUTH_BASE_PATH || pathname.startsWith(`${AUTH_BASE_PATH}/`)) &&
+        (request.method === "GET" || request.method === "POST")
+      ) {
+        const authRes = await getAuth().handler(request);
+        return applyCorsHeaders(request, authRes, deps.config);
+      }
 
-  app.get("/v1/me", requireAuthenticatedSession, (c) => {
-    const session = c.get("session");
-    if (!session) {
-      return c.json({ error: "UNAUTHORIZED", message: "Authentication required" }, 401);
-    }
-    return c.json(session.user, 200);
-  });
+      const connectHandler = connectHandlerMap.get(pathname);
+      if (connectHandler) {
+        const runtime: ApiRequestRuntime = {
+          ...baseRuntime,
+          executionCtx: ctx,
+        };
+        const uReq = universalServerRequestFromFetch(request, {});
+        uReq.contextValues = createContextValues().set(kApiRequestRuntime, runtime);
+        const uRes = await connectHandler(uReq);
+        const fetchRes = universalServerResponseToFetch(uRes);
+        return applyCorsHeaders(request, fetchRes, deps.config);
+      }
 
-  registerApiKeyRoutes(app);
-  registerChangeRequestRoutes(app);
-  registerInvalidationRoutes(app);
-  registerLeadRoutes(app);
-  registerReviewerRoutes(app);
-  registerAssociationRoutes(app);
-  registerMediaAdminRoutes(app);
-  registerMediaRoutes(app);
-
-  return app;
+      return applyCorsHeaders(
+        request,
+        Response.json({ error: "NOT_FOUND", message: "Not found" }, { status: 404 }),
+        deps.config,
+      );
+    },
+  };
 }

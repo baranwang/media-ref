@@ -1,6 +1,6 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { resolveEpisode } from "@media-ref/client";
 import {
   createDefaultAdapterRegistry,
   createFakeOutboundClient,
@@ -15,15 +15,21 @@ import {
   isTier3Adapter,
   listDemands,
   seedTmdbExportIds,
-  type EmailMessage,
   type ExternalHttpResponse,
   type JobQueueMessage,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  expectRpcError,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  proto,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-multi-platform-exploration-e2e-0123456789abcdef";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -63,65 +69,16 @@ function makeIqiyiFeatureEpisodes(count: number, tvIdBase = 3493131456000000) {
   return list;
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupReadApiKey(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ): Promise<string> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Multi-Platform E2E Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const readKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read Key", canSubmit: false }),
-    }),
-  );
-  expect(readKeyRes.status).toBe(201);
-  const readKey = (await readKeyRes.json()) as { id: string; key: string };
+  const { cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Multi-Platform E2E Tester",
+  });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Read Key", canSubmit: false });
   return readKey.key;
 }
 
@@ -390,12 +347,13 @@ describe("Multi-platform Tier 3 exploration & Tier 2 exclusion (#30)", () => {
     const readKey = await setupReadApiKey(apiApp, outbound, "iqiyi-e2e@example.com");
 
     // 1. Read unseen TMDB TV series -> 404 miss + records demand
-    const missRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:218230?season=1&namespaceGroup=platform`, {
-        headers: { "x-api-key": readKey },
+    const missErr = await expectRpcError(
+      getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:218230", {
+        season: 1,
+        namespaceGroup: proto.NamespaceGroup.PLATFORM,
       }),
     );
-    expect(missRes.status).toBe(404);
+    expect(missErr.status).toBe(404);
     await Promise.all(pendingBgTasks);
 
     await seedTmdbExportIds(testDb.writeDb, [{ mediaType: "tv", tmdbId: "218230" }], "2026-11-24");
@@ -451,13 +409,7 @@ describe("Multi-platform Tier 3 exploration & Tier 2 exclusion (#30)", () => {
     expect(evSummary.completed).toBe(1);
 
     // 6. Read again -> 200 with confirmed iQIYI association & segments, resolvable via @media-ref/client
-    const hitRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:218230`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(hitRes.status).toBe(200);
-    const { document } = (await hitRes.json()) as { document: MediaDocument };
+    const { document } = await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:218230");
     expect(document.media.snapshot.title).toBe("狂飙");
     expect(document.variants).toHaveLength(1);
     expect(document.variants[0]).toMatchObject({
@@ -662,12 +614,12 @@ describe("Multi-platform Tier 3 exploration & Tier 2 exclusion (#30)", () => {
 
     const readKey = await setupReadApiKey(apiApp, outbound, "both-tier3-movie@example.com");
 
-    const missRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:535167?namespaceGroup=platform`, {
-        headers: { "x-api-key": readKey },
+    const missErr = await expectRpcError(
+      getMediaDocumentRpc(apiApp, readKey, "tmdb:movie:535167", {
+        namespaceGroup: proto.NamespaceGroup.PLATFORM,
       }),
     );
-    expect(missRes.status).toBe(404);
+    expect(missErr.status).toBe(404);
     await Promise.all(pendingBgTasks);
 
     await seedTmdbExportIds(
@@ -721,13 +673,7 @@ describe("Multi-platform Tier 3 exploration & Tier 2 exclusion (#30)", () => {
     const evSummary = await worker.queue(createQueueBatch(emitted, t0));
     expect(evSummary.completed).toBe(2);
 
-    const hitRes = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:535167`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(hitRes.status).toBe(200);
-    const { document } = (await hitRes.json()) as { document: MediaDocument };
+    const { document } = await getMediaDocumentRpc(apiApp, readKey, "tmdb:movie:535167");
     expect(
       document.associations.map((a) => `${a.namespace}:${a.nativeId}:${a.status}`).sort(),
     ).toEqual(["bilibili:ss28001:confirmed", "iqiyi:923452300:confirmed"]);
@@ -815,12 +761,11 @@ describe("Multi-platform Tier 3 exploration & Tier 2 exclusion (#30)", () => {
 
     const readKey = await setupReadApiKey(apiApp, outbound, "tier2-exclusion@example.com");
 
-    // 1. Trigger demand via GET
-    await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:777771?season=1&namespaceGroup=platform`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
+    // 1. Trigger demand via MediaService.GetMedia
+    await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:777771", {
+      season: 1,
+      namespaceGroup: proto.NamespaceGroup.PLATFORM,
+    });
     await Promise.all(pendingBgTasks);
 
     const emitted: JobQueueMessage[] = [];
@@ -855,12 +800,7 @@ describe("Multi-platform Tier 3 exploration & Tier 2 exclusion (#30)", () => {
       .execute();
     expect(checks.map((c) => c.platform).sort()).toEqual(["bilibili", "iqiyi"]);
 
-    const readAfter = await apiApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:777771`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    const { document } = (await readAfter.json()) as { document: MediaDocument };
+    const { document } = await getMediaDocumentRpc(apiApp, readKey, "tmdb:tv:777771");
     expect(document.platformStatuses?.bilibili).toEqual({
       status: "not_found",
       checkedAt: t0.toISOString(),

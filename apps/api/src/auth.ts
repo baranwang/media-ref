@@ -1,18 +1,8 @@
 import { apiKey } from "@better-auth/api-key";
-import type {
-  AdapterRegistry,
-  CatalogGatewayConfig,
-  OutboundClient,
-  SubmissionQuotaConfig,
-  TmdbGateway,
-  TmdbGatewayConfig,
-} from "@media-ref/core";
+import type { OutboundClient } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
 import { betterAuth } from "better-auth";
-import type { MiddlewareHandler } from "hono";
-import type { VerifiedApiKey } from "./api-keys.ts";
 import { buildOAuthAuthOptions, type OAuthConfig } from "./oauth.ts";
-import type { ReadRateLimitRuntime } from "./rate-limit.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
 export const DEFAULT_API_BASE_URL = "https://api.mediaref.org";
@@ -212,28 +202,6 @@ export function createAuth(deps: AuthDeps) {
 
 export type AuthInstance = ReturnType<typeof createAuth>;
 
-export interface ApiEnv {
-  Variables: {
-    auth: AuthInstance;
-    dbRead: Db;
-    dbWrite: Db;
-    outbound: OutboundClient;
-    adapterRegistry: AdapterRegistry;
-    catalogConfig: CatalogGatewayConfig | undefined;
-    tmdbConfig: TmdbGatewayConfig | undefined;
-    tmdbGateway: TmdbGateway | undefined;
-    now: () => Date;
-    onBackgroundTask: ((promise: Promise<unknown>) => void) | undefined;
-    onBackgroundTaskError: ((error: unknown) => void) | undefined;
-    hasCustomClock: boolean;
-    readRateLimit: ReadRateLimitRuntime;
-    submissionQuota: SubmissionQuotaConfig | undefined;
-    anonymousInvalidationThreshold: number;
-    session: AuthenticatedSession | null;
-    apiKey: VerifiedApiKey | null;
-  };
-}
-
 export async function getAuthenticatedSession(
   auth: AuthInstance,
   headers: Headers,
@@ -265,54 +233,3 @@ export async function getAuthenticatedSession(
     },
   };
 }
-
-export const requireAuthenticatedSession: MiddlewareHandler<ApiEnv> = async (c, next) => {
-  let session = c.get("session");
-  if (!session) {
-    session = await getAuthenticatedSession(c.get("auth"), c.req.raw.headers);
-  }
-
-  if (!session) {
-    return c.json(
-      {
-        error: "UNAUTHORIZED",
-        message: "Authentication required",
-      },
-      401,
-    );
-  }
-
-  c.set("session", session);
-  await next();
-};
-
-export const requireVerifiedUser: MiddlewareHandler<ApiEnv> = async (c, next) => {
-  let session = c.get("session");
-  if (!session) {
-    session = await getAuthenticatedSession(c.get("auth"), c.req.raw.headers);
-  }
-
-  if (!session) {
-    return c.json(
-      {
-        error: "UNAUTHORIZED",
-        message: "Authentication required",
-      },
-      401,
-    );
-  }
-
-  c.set("session", session);
-
-  if (!session.user.emailVerified) {
-    return c.json(
-      {
-        error: "EMAIL_NOT_VERIFIED",
-        message: "Email verification is required",
-      },
-      403,
-    );
-  }
-
-  await next();
-};

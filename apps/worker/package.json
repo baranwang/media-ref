@@ -18,7 +18,9 @@
     "@media-ref/db": "workspace:*"
   },
   "devDependencies": {
+    "@bufbuild/protobuf": "catalog:",
     "@cloudflare/workers-types": "catalog:",
+    "@connectrpc/connect": "catalog:",
     "@media-ref/api": "workspace:*",
     "@media-ref/client": "workspace:*",
     "@types/node": "catalog:",

@@ -1,4 +1,4 @@
-import { Link, createFileRoute, useRouter } from "@tanstack/react-router";
+import { Link, createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { AlertTriangleIcon, CheckIcon, RefreshIcon } from "#/components/Icons";
 import {
   BASELINE_LABELS,
@@ -19,7 +19,19 @@ import {
 
 export const Route = createFileRoute("/media/$key")({
   loader: async ({ params }): Promise<AnonymousMediaResult> => {
-    return fetchAnonymousMedia({ data: { key: params.key } });
+    const result = await fetchAnonymousMedia({ data: { key: params.key } });
+    if (result.status === "ok" && result.items.length === 1) {
+      const canonicalMediaId = result.document.media.id;
+      if (params.key.trim().toLowerCase() !== canonicalMediaId.toLowerCase()) {
+        throw redirect({
+          to: "/media/$key",
+          params: { key: canonicalMediaId },
+          statusCode: 302,
+          replace: true,
+        });
+      }
+    }
+    return result;
   },
   head: ({ loaderData }) => {
     if (loaderData?.status === "ok") {

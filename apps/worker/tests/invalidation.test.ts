@@ -1,9 +1,8 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import type { MediaDocument } from "@media-ref/client";
+import type { SegmentInput } from "@media-ref/client";
 import {
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -11,8 +10,18 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoReviewAlertStatus,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-invalidation-integration-tests-0123456789abcdef";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -40,61 +49,15 @@ function makeBilibiliEpisodes(count: number) {
   return episodes;
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupVerifiedUser(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ) {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  return {
-    userId: signUpBody.user.id,
-    cookie,
-  };
+  return signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Tester",
+  });
 }
 
 async function createUserApiKey(
@@ -102,18 +65,7 @@ async function createUserApiKey(
   cookie: string,
   options: { name: string; canSubmit?: boolean },
 ) {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        name: options.name,
-        canSubmit: options.canSubmit ?? false,
-      }),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; key: string };
+  return issueApiKeyRpc(app, cookie, options);
 }
 
 function createScheduledController(scheduledTime: Date): ScheduledController {
@@ -280,39 +232,28 @@ async function createConfirmedBilibiliAssociation(input: {
   const nativeId = input.nativeId ?? "ss34430";
   const variantDescription = input.variantDescription ?? "原声";
 
-  const submitRes = await input.app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": input.submitKey },
-      body: JSON.stringify({
-        targetExternalKey: "tmdb:tv:95479",
-        namespace: "bilibili",
-        nativeId,
-        variantDescription,
-        segments: [
-          {
-            season: 1,
-            episodeStart: 1,
-            episodeEnd: 24,
-            targetEpisodeStart: 1,
-            baseline: "tmdb",
-          },
-        ],
+  await createRpcClients(input.app, {
+    apiKey: input.submitKey,
+  }).changeRequest.createChangeRequest({
+    target: mediaRef("tmdb:tv:95479"),
+    namespace: "bilibili",
+    nativeId,
+    variantDescription,
+    segments: [
+      toProtoSegmentInput({
+        season: 1,
+        episodeStart: 1,
+        episodeEnd: 24,
+        targetEpisodeStart: 1,
+        baseline: "tmdb",
       }),
-    }),
-  );
-  expect(submitRes.status).toBe(201);
+    ],
+  });
 
   const cycle = await runWorkerCycle(input.worker, input.dispatched, input.now);
   expect(cycle.queue.completed).toBeGreaterThanOrEqual(1);
 
-  const readRes = await input.app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-      headers: { "x-api-key": input.readKey },
-    }),
-  );
-  expect(readRes.status).toBe(200);
-  const readBody = (await readRes.json()) as { document: MediaDocument };
+  const readBody = await getMediaDocumentRpc(input.app, input.readKey, "tmdb:tv:95479");
   const assoc = readBody.document.associations.find(
     (entry) => entry.namespace === "bilibili" && entry.nativeId === nativeId,
   );
@@ -407,48 +348,29 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     });
 
     // 1. Unauthenticated request is rejected with 401
-    const unauthRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocUserFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ reason: "gone" }),
-        },
-      ),
+    const unauthErr = await expectRpcError(
+      createRpcClients(app).association.reportInvalidation({
+        associationId: assocUserFlow.associationId,
+        reason: "gone",
+      }),
     );
-    expect(unauthRes.status).toBe(401);
+    expect(unauthErr.status).toBe(401);
+
+    const userRpc = createRpcClients(app, { cookie: user.cookie });
 
     // 2. Unknown association returns 404
-    const missingRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/00000000-0000-4000-8000-000000000000/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { cookie: user.cookie },
-        },
-      ),
+    const missingErr = await expectRpcError(
+      userRpc.association.reportInvalidation({
+        associationId: "00000000-0000-4000-8000-000000000000",
+      }),
     );
-    expect(missingRes.status).toBe(404);
+    expect(missingErr.status).toBe(404);
 
     // 3. Logged-in user report immediately enqueues an invalidation_recheck job
-    const userReportRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocUserFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json", cookie: user.cookie },
-          body: JSON.stringify({ reason: "Page returns 404" }),
-        },
-      ),
-    );
-    expect(userReportRes.status).toBe(202);
-    const userReportBody = (await userReportRes.json()) as {
-      triggered: boolean;
-      jobId: string | null;
-      reportCount: number;
-      threshold: number;
-    };
+    const userReportBody = await userRpc.association.reportInvalidation({
+      associationId: assocUserFlow.associationId,
+      reason: "Page returns 404",
+    });
     expect(userReportBody.triggered).toBe(true);
     expect(userReportBody.jobId).toBeTruthy();
     expect(userReportBody.reportCount).toBe(1);
@@ -465,84 +387,58 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     expect(userJob.payload).toEqual({ associationId: assocUserFlow.associationId });
 
     // 4. Revoked API key is immediately rejected with 401 via dbWrite
-    const deleteKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys/${revocableKey.id}`, {
-        method: "DELETE",
-        headers: { cookie: user.cookie },
+    const deleteKeyRes = await userRpc.account.deleteApiKey({ id: revocableKey.id });
+    expect(deleteKeyRes.success).toBe(true);
+
+    const revokedReportErr = await expectRpcError(
+      createRpcClients(app, { apiKey: revocableKey.key }).association.reportInvalidation({
+        associationId: assocAnonFlow.associationId,
       }),
     );
-    expect(deleteKeyRes.status).toBe(200);
-
-    const revokedReportRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocAnonFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "x-api-key": revocableKey.key },
-        },
-      ),
-    );
-    expect(revokedReportRes.status).toBe(401);
+    expect(revokedReportErr.status).toBe(401);
 
     // 5. Anonymous API key reports with threshold = 3:
+    const k1Rpc = createRpcClients(app, { apiKey: key1.key });
+    const k2Rpc = createRpcClients(app, { apiKey: key2.key });
+    const k3Rpc = createRpcClients(app, { apiKey: key3.key });
+
     // Key 1 report #1 -> count 1, NOT triggered
-    const k1First = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocAnonFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": key1.key },
-          body: JSON.stringify({ reason: "video unavailable" }),
-        },
-      ),
-    );
-    expect(k1First.status).toBe(202);
-    expect(await k1First.json()).toMatchObject({
+    const k1First = await k1Rpc.association.reportInvalidation({
+      associationId: assocAnonFlow.associationId,
+      reason: "video unavailable",
+    });
+    expect(k1First).toMatchObject({
       triggered: false,
-      jobId: null,
       reportCount: 1,
       threshold: 3,
       deduplicated: false,
     });
+    expect(k1First.jobId).toBeUndefined();
 
     // Key 1 report #2 (duplicate!) -> still count 1, NO job enqueued
-    const k1Dup = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocAnonFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": key1.key },
-          body: JSON.stringify({ reason: "spam retry" }),
-        },
-      ),
-    );
-    expect(k1Dup.status).toBe(202);
-    expect(await k1Dup.json()).toMatchObject({
+    const k1Dup = await k1Rpc.association.reportInvalidation({
+      associationId: assocAnonFlow.associationId,
+      reason: "spam retry",
+    });
+    expect(k1Dup).toMatchObject({
       triggered: false,
-      jobId: null,
       reportCount: 1,
       threshold: 3,
       deduplicated: true,
     });
+    expect(k1Dup.jobId).toBeUndefined();
 
     // Key 2 report -> count 2, NO job enqueued
-    const k2Res = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocAnonFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "x-api-key": key2.key },
-        },
-      ),
-    );
-    expect(k2Res.status).toBe(202);
-    expect(await k2Res.json()).toMatchObject({
+    const k2Res = await k2Rpc.association.reportInvalidation({
+      associationId: assocAnonFlow.associationId,
+    });
+    expect(k2Res).toMatchObject({
       triggered: false,
-      jobId: null,
       reportCount: 2,
       threshold: 3,
       deduplicated: false,
     });
+    expect(k2Res.jobId).toBeUndefined();
 
     const jobsBeforeThreshold = await testDb.readDb
       .selectFrom("background_jobs")
@@ -553,23 +449,9 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     expect(jobsBeforeThreshold).toHaveLength(0);
 
     // Key 3 report -> count 3 -> triggers invalidation_recheck job and closes the open cycle!
-    const k3Res = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocAnonFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "x-api-key": key3.key },
-        },
-      ),
-    );
-    expect(k3Res.status).toBe(202);
-    const k3Body = (await k3Res.json()) as {
-      triggered: boolean;
-      jobId: string | null;
-      reportCount: number;
-      threshold: number;
-      deduplicated: boolean;
-    };
+    const k3Body = await k3Rpc.association.reportInvalidation({
+      associationId: assocAnonFlow.associationId,
+    });
     expect(k3Body.triggered).toBe(true);
     expect(k3Body.jobId).toBeTruthy();
     expect(k3Body.reportCount).toBe(3);
@@ -587,23 +469,16 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     }
 
     // 6. Now that the cycle closed, Key 1 can open a fresh cycle (count = 1, not triggered)
-    const k1NextCycle = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocAnonFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "x-api-key": key1.key },
-        },
-      ),
-    );
-    expect(k1NextCycle.status).toBe(202);
-    expect(await k1NextCycle.json()).toMatchObject({
+    const k1NextCycle = await k1Rpc.association.reportInvalidation({
+      associationId: assocAnonFlow.associationId,
+    });
+    expect(k1NextCycle).toMatchObject({
       triggered: false,
-      jobId: null,
       reportCount: 1,
       threshold: 3,
       deduplicated: false,
     });
+    expect(k1NextCycle.jobId).toBeUndefined();
 
     // 7. Reporting an already-delisted association returns 409
     await testDb.writeDb
@@ -612,16 +487,12 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       .where("id", "=", assocAnonFlow.associationId)
       .execute();
 
-    const delistedReportRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${assocAnonFlow.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { cookie: user.cookie },
-        },
-      ),
+    const delistedReportErr = await expectRpcError(
+      userRpc.association.reportInvalidation({
+        associationId: assocAnonFlow.associationId,
+      }),
     );
-    expect(delistedReportRes.status).toBe(409);
+    expect(delistedReportErr.status).toBe(409);
   });
 
   test("confirmed not_found delists sole association, removes it from default and includeUnconfirmed reads, preserves revision history, and transitions platformStatuses to not_found with checkedAt", async () => {
@@ -690,18 +561,12 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     currentTime = new Date("2026-11-23T20:15:00.000Z");
     ss34430Deleted = true;
 
-    const reportRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${created.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json", cookie: user.cookie },
-          body: JSON.stringify({ reason: "Removed from Bilibili" }),
-        },
-      ),
-    );
-    expect(reportRes.status).toBe(202);
-    const reportBody = (await reportRes.json()) as { triggered: boolean; jobId: string | null };
+    const reportBody = await createRpcClients(app, {
+      cookie: user.cookie,
+    }).association.reportInvalidation({
+      associationId: created.associationId,
+      reason: "Removed from Bilibili",
+    });
     expect(reportBody.triggered).toBe(true);
     expect(reportBody.jobId).toBeTruthy();
 
@@ -710,13 +575,7 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     expect(cycle.queue.completed).toBe(1);
 
     // Default read: association is gone and bilibili platformStatus is not_found with checkedAt
-    const readDefaultRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(readDefaultRes.status).toBe(200);
-    const readDefault = (await readDefaultRes.json()) as { document: MediaDocument };
+    const readDefault = await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479");
     expect(readDefault.document.associations).toEqual([]);
     expect(readDefault.document.platformStatuses?.bilibili).toEqual({
       status: "not_found",
@@ -724,13 +583,9 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     });
 
     // includeUnconfirmed=true read: delisted association STILL must not appear
-    const readUnconfirmedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?includeUnconfirmed=true`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(readUnconfirmedRes.status).toBe(200);
-    const readUnconfirmed = (await readUnconfirmedRes.json()) as { document: MediaDocument };
+    const readUnconfirmed = await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479", {
+      includeUnconfirmed: true,
+    });
     expect(readUnconfirmed.document.associations).toEqual([]);
     expect(readUnconfirmed.document.platformStatuses?.bilibili).toEqual({
       status: "not_found",
@@ -738,19 +593,15 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     });
 
     // Reverse lookup by delisted platform key returns 404 (default & includeUnconfirmed)
-    const reverseDefault = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/bilibili:ss34430`, {
-        headers: { "x-api-key": readKey.key },
-      }),
+    const reverseDefaultErr = await expectRpcError(
+      getMediaDocumentRpc(app, readKey.key, "bilibili:ss34430"),
     );
-    expect(reverseDefault.status).toBe(404);
+    expect(reverseDefaultErr.status).toBe(404);
 
-    const reverseUnconfirmed = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/bilibili:ss34430?includeUnconfirmed=true`, {
-        headers: { "x-api-key": readKey.key },
-      }),
+    const reverseUnconfirmedErr = await expectRpcError(
+      getMediaDocumentRpc(app, readKey.key, "bilibili:ss34430", { includeUnconfirmed: true }),
     );
-    expect(reverseUnconfirmed.status).toBe(404);
+    expect(reverseUnconfirmedErr.status).toBe(404);
 
     // Association revisions preserve full history and current_revision_id points to the delisted revision
     const assocRow = await testDb.readDb
@@ -855,24 +706,14 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     currentTime = new Date("2026-11-23T21:00:00.000Z");
     ss34430Deleted = true;
 
-    const reportRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/associations/${assoc1.associationId}/invalidation-reports`, {
-        method: "POST",
-        headers: { cookie: user.cookie },
-      }),
-    );
-    expect(reportRes.status).toBe(202);
+    await createRpcClients(app, { cookie: user.cookie }).association.reportInvalidation({
+      associationId: assoc1.associationId,
+    });
 
     const cycle = await runWorkerCycle(worker, dispatched, currentTime);
     expect(cycle.queue.completed).toBe(1);
 
-    const readRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(readRes.status).toBe(200);
-    const readBody = (await readRes.json()) as { document: MediaDocument };
+    const readBody = await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479");
     expect(readBody.document.associations.map((a) => a.id)).toEqual([assoc2.associationId]);
     expect(readBody.document.platformStatuses?.bilibili).toEqual({ status: "associated" });
 
@@ -955,17 +796,11 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     currentTime = new Date("2026-11-23T19:00:00.000Z");
     failureMode = "timeout";
 
-    const reportRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${created.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { cookie: user.cookie },
-        },
-      ),
-    );
-    expect(reportRes.status).toBe(202);
-    const reportBody = (await reportRes.json()) as { jobId: string };
+    const reportBody = await createRpcClients(app, {
+      cookie: user.cookie,
+    }).association.reportInvalidation({
+      associationId: created.associationId,
+    });
 
     const cycle1 = await runWorkerCycle(worker, dispatched, currentTime);
     expect(cycle1.queue.rescheduled).toBe(1);
@@ -974,7 +809,7 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     const jobAfterTimeout = await testDb.readDb
       .selectFrom("background_jobs")
       .selectAll()
-      .where("id", "=", reportBody.jobId)
+      .where("id", "=", reportBody.jobId!)
       .executeTakeFirstOrThrow();
     expect(jobAfterTimeout.status).toBe("pending");
     expect(jobAfterTimeout.attempts).toBe(1);
@@ -992,20 +827,14 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     const jobAfter503 = await testDb.readDb
       .selectFrom("background_jobs")
       .selectAll()
-      .where("id", "=", reportBody.jobId)
+      .where("id", "=", reportBody.jobId!)
       .executeTakeFirstOrThrow();
     expect(jobAfter503.status).toBe("pending");
     expect(jobAfter503.attempts).toBe(2);
     expect(jobAfter503.error_message).toContain("http_503");
 
     // Read API confirms association is still live and platformStatuses is still associated
-    const readRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(readRes.status).toBe(200);
-    const readBody = (await readRes.json()) as { document: MediaDocument };
+    const readBody = await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479");
     expect(readBody.document.associations.map((a) => a.id)).toEqual([created.associationId]);
     expect(readBody.document.platformStatuses?.bilibili).toEqual({ status: "associated" });
 
@@ -1093,28 +922,16 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     currentTime = new Date("2026-11-23T20:00:00.000Z");
     ss34430Deleted = true;
 
-    const reportRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${created.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { cookie: reviewer.cookie },
-        },
-      ),
-    );
-    expect(reportRes.status).toBe(202);
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
+    await reviewerRpc.association.reportInvalidation({
+      associationId: created.associationId,
+    });
 
     const cycle = await runWorkerCycle(worker, dispatched, currentTime);
     expect(cycle.queue.completed).toBe(1);
 
     // Association stays confirmed and visible in read API
-    const readRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(readRes.status).toBe(200);
-    const readBody = (await readRes.json()) as { document: MediaDocument };
+    const readBody = await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479");
     expect(readBody.document.associations).toHaveLength(1);
     expect(readBody.document.associations[0]).toMatchObject({
       id: created.associationId,
@@ -1124,32 +941,19 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     expect(readBody.document.platformStatuses?.bilibili).toEqual({ status: "associated" });
 
     // Reviewer alert is created for triage
-    const alertsRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/alerts?alertType=locked_association_delisted`, {
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(alertsRes.status).toBe(200);
-    const alertsBody = (await alertsRes.json()) as {
-      alerts: Array<{
-        alertType: string;
-        mediaId: string | null;
-        associationId: string | null;
-        status: string;
-        details: Record<string, unknown>;
-      }>;
-      total: number;
-    };
+    const alertsBody = await reviewerRpc.reviewer.listReviewAlerts({
+      alertType: "locked_association_delisted",
+    });
     expect(alertsBody.total).toBe(1);
     expect(alertsBody.alerts[0]).toMatchObject({
       alertType: "locked_association_delisted",
       mediaId: created.mediaId,
       associationId: created.associationId,
-      status: "open",
       details: {
         reason: "platform_returned_not_found",
       },
     });
+    expect(fromProtoReviewAlertStatus(alertsBody.alerts[0]!.status)).toBe("open");
   });
 
   test("page still exists: matching content leaves association untouched; mismatched content keeps association confirmed with needsReview=true and creates association_content_mismatch alert", async () => {
@@ -1230,28 +1034,16 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     });
 
     // 1. False-alarm report while page still exists and matches catalog -> stays confirmed & clean
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
     currentTime = new Date("2026-11-23T19:00:00.000Z");
-    const falseAlarmRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${created.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { cookie: reviewer.cookie },
-        },
-      ),
-    );
-    expect(falseAlarmRes.status).toBe(202);
+    await reviewerRpc.association.reportInvalidation({
+      associationId: created.associationId,
+    });
 
     const cycle1 = await runWorkerCycle(worker, dispatched, currentTime);
     expect(cycle1.queue.completed).toBe(1);
 
-    const readAfterMatch = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(readAfterMatch.status).toBe(200);
-    const docAfterMatch = ((await readAfterMatch.json()) as { document: MediaDocument }).document;
+    const docAfterMatch = (await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479")).document;
     expect(docAfterMatch.associations).toHaveLength(1);
     expect(docAfterMatch.associations[0]?.status).toBe("confirmed");
     expect(docAfterMatch.associations[0]?.needsReview).toBeUndefined();
@@ -1263,27 +1055,14 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     currentTime = new Date("2026-11-23T21:00:00.000Z");
     contentChanged = true;
 
-    const mismatchReportRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/associations/${created.associationId}/invalidation-reports`,
-        {
-          method: "POST",
-          headers: { cookie: reviewer.cookie },
-        },
-      ),
-    );
-    expect(mismatchReportRes.status).toBe(202);
+    await reviewerRpc.association.reportInvalidation({
+      associationId: created.associationId,
+    });
 
     const cycle2 = await runWorkerCycle(worker, dispatched, currentTime);
     expect(cycle2.queue.completed).toBe(1);
 
-    const readAfterMismatch = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(readAfterMismatch.status).toBe(200);
-    const docAfterMismatch = ((await readAfterMismatch.json()) as { document: MediaDocument })
+    const docAfterMismatch = (await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479"))
       .document;
     expect(docAfterMismatch.associations).toHaveLength(1);
     expect(docAfterMismatch.associations[0]).toMatchObject({
@@ -1293,29 +1072,16 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     });
     expect(docAfterMismatch.platformStatuses?.bilibili).toEqual({ status: "associated" });
 
-    const mismatchAlertsRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/alerts?alertType=association_content_mismatch`, {
-        headers: { cookie: reviewer.cookie },
-      }),
-    );
-    expect(mismatchAlertsRes.status).toBe(200);
-    const mismatchAlertsBody = (await mismatchAlertsRes.json()) as {
-      alerts: Array<{
-        alertType: string;
-        mediaId: string | null;
-        associationId: string | null;
-        status: string;
-        details: Record<string, unknown>;
-      }>;
-      total: number;
-    };
+    const mismatchAlertsBody = await reviewerRpc.reviewer.listReviewAlerts({
+      alertType: "association_content_mismatch",
+    });
     expect(mismatchAlertsBody.total).toBe(1);
     expect(mismatchAlertsBody.alerts[0]).toMatchObject({
       alertType: "association_content_mismatch",
       mediaId: created.mediaId,
       associationId: created.associationId,
-      status: "open",
     });
+    expect(fromProtoReviewAlertStatus(mismatchAlertsBody.alerts[0]!.status)).toBe("open");
   });
 
   test("invalidation recheck loads association segments so valid split-season, open-ended ongoing, and nonLinear collections are NOT falsely flagged needs_review", async () => {
@@ -1426,7 +1192,11 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     const readKey = await createUserApiKey(app, user.cookie, { name: "Read Key" });
 
     // Submit & confirm all 3 valid associations: split-season, open-ended ongoing, and nonLinear
-    const submissions = [
+    const submissions: Array<{
+      nativeId: string;
+      variantDescription: string;
+      segments: SegmentInput[];
+    }> = [
       {
         nativeId: "ss34430",
         variantDescription: "原声",
@@ -1457,31 +1227,23 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       },
     ];
 
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const userRpc = createRpcClients(app, { cookie: user.cookie });
+
     const assocIds: string[] = [];
     for (const sub of submissions) {
-      const crRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:95479",
-            namespace: "bilibili",
-            ...sub,
-          }),
-        }),
-      );
-      expect(crRes.status).toBe(201);
+      await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:tv:95479"),
+        namespace: "bilibili",
+        nativeId: sub.nativeId,
+        variantDescription: sub.variantDescription,
+        segments: sub.segments.map(toProtoSegmentInput),
+      });
       const cycle = await runWorkerCycle(worker, dispatched, currentTime);
       expect(cycle.queue.completed).toBe(1);
     }
 
-    const mediaBefore = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": readKey.key },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaBefore = await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479");
     expect(mediaBefore.document.associations).toHaveLength(3);
     for (const assoc of mediaBefore.document.associations) {
       assocIds.push(assoc.id);
@@ -1490,26 +1252,14 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     // Trigger invalidation recheck on every single one of the 3 associations
     currentTime = new Date("2026-11-23T19:30:00.000Z");
     for (const assocId of assocIds) {
-      const reportRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/associations/${assocId}/invalidation-reports`, {
-          method: "POST",
-          headers: { cookie: user.cookie },
-        }),
-      );
-      expect(reportRes.status).toBe(202);
+      await userRpc.association.reportInvalidation({ associationId: assocId });
     }
 
     const recheckCycle = await runWorkerCycle(worker, dispatched, currentTime);
     expect(recheckCycle.queue.completed).toBe(3);
 
     // ALL 3 MUST remain confirmed with needsReview unset/false and ZERO mismatch alerts!
-    const mediaAfter = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": readKey.key },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaAfter = await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479");
     expect(mediaAfter.document.associations).toHaveLength(3);
     for (const assoc of mediaAfter.document.associations) {
       expect(assoc.status).toBe("confirmed");

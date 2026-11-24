@@ -6,8 +6,11 @@ Domain terminology is defined in [`GLOSSARY.md`](./GLOSSARY.md).
 
 ## Workspace Layout
 
-- `apps/api` (`@media-ref/api`): Hono API Cloudflare Worker (`api.mediaref.org`).
-- `apps/website` (`@media-ref/website`): TanStack Start SSR web app (`mediaref.org`).
+- `proto/mediaref/v1/`: Canonical Protobuf v3 API schemas (single source of truth for all business RPCs, including the structured `MediaRef` `oneof`, generated into `packages/client/src/gen` via Buf).
+- `apps/api` (`@media-ref/api`): ConnectRPC Protobuf Cloudflare Worker (`api.mediaref.org`) built directly on Web Fetch API (`@connectrpc/connect` + Better Auth + Kysely).
+- `apps/worker` (`@media-ref/worker`): Background Cloudflare Worker (Queues & Cron) for evidence gate checks, exploration agent loops, and TMDB daily sync.
+- `apps/website` (`@media-ref/website`): TanStack Start SSR web app (`mediaref.org`). Media detail routes (`/media/<key>`) accept external keys and merged UUIDs and redirect (`302`) to the canonical `/media/<uuid>` route on unique match.
+- `packages/client` (`@media-ref/client`): TypeScript SDK (`@connectrpc/connect-web` + `@bufbuild/protobuf`), generated Protobuf descriptors, and pure episode-resolution / segment-validation utilities.
 - `packages/db` (`@media-ref/db`): Kysely database types, PostgreSQL connection factory, TypeScript migrations, and ephemeral test DB helper.
 - `packages/core` (`@media-ref/core`): Shared core services and the outbound call layer (`OutboundClient`).
 - `packages/ui` (`@media-ref/ui`): Shared UI components.
@@ -21,6 +24,18 @@ Install dependencies:
 
 ```bash
 bun install
+```
+
+## Protobuf & ConnectRPC Codegen
+
+All business APIs are defined under [`proto/mediaref/v1/`](./proto/mediaref/v1/) (`MediaService`, `ChangeRequestService`, `LeadService`, `AssociationService`, `AccountService`, `ReviewerService`) and served over ConnectRPC (binary Protobuf by default, with Connect JSON and gRPC-Web interoperability). Better Auth (`/api/auth/*`) and health probes (`/health`) remain standard HTTP/JSON.
+
+```bash
+# Lint .proto schemas with Buf
+vp run proto:lint
+
+# Regenerate TypeScript Protobuf-ES & ConnectRPC descriptors into packages/client/src/gen
+vp run proto:gen
 ```
 
 ## Local PostgreSQL 19
@@ -62,9 +77,11 @@ Make sure local PostgreSQL 19 is running (`vp run db:up`). Database, core, API W
 vp run -r test
 
 # Run tests for a single package
+vp run @media-ref/client#test
 vp run @media-ref/db#test
 vp run @media-ref/core#test
 vp run @media-ref/api#test
+vp run @media-ref/worker#test
 ```
 
 To point tests at a different PostgreSQL admin URL:

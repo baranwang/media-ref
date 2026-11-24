@@ -1,91 +1,27 @@
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { create } from "@bufbuild/protobuf";
 import {
-  createFakeOutboundClient,
-  type EmailMessage,
-  type ExternalHttpRequest,
-} from "@media-ref/core";
+  fromProtoBatchItemResult,
+  fromProtoMediaDocument,
+  fromProtoMediaQueryItem,
+  fromProtoMediaRef,
+  proto,
+  resolveEpisode,
+} from "@media-ref/client";
+import { createFakeOutboundClient, type ExternalHttpRequest } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { createApiApp } from "../src/index.ts";
+import { createApiApp } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-read-api-integration-tests-0123456789";
-
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-async function signUpUser(
-  app: ReturnType<typeof createApiApp>,
-  outbound: ReturnType<typeof createFakeOutboundClient>,
-  input: { email: string; password: string; name: string; verify?: boolean },
-): Promise<{ userId: string; cookie: string }> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: input.email,
-        password: input.password,
-        name: input.name,
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  if (input.verify) {
-    const email = outbound.sentEmails[emailsBefore];
-    expect(email).toBeDefined();
-    const verifyRes = await app.fetch(
-      new Request(extractVerificationUrl(email!), {
-        method: "GET",
-        headers: { cookie },
-      }),
-    );
-    expect([200, 302]).toContain(verifyRes.status);
-    const refreshed = extractCookieHeader(verifyRes);
-    if (refreshed) {
-      cookie = refreshed;
-    }
-  }
-
-  return { userId: signUpBody.user.id, cookie };
-}
-
-async function createApiKey(
-  app: ReturnType<typeof createApiApp>,
-  cookie: string,
-  options: { name: string; canSubmit?: boolean },
-): Promise<{ id: string; key: string }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        name: options.name,
-        canSubmit: options.canSubmit ?? false,
-      }),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; key: string };
-}
 
 function createReadOnlyDb(connectionString: string) {
   const readOnlyUrl = new URL(connectionString);
@@ -182,10 +118,11 @@ describe("API Worker extended read API (#18)", () => {
       name: "Reader",
       verify: true,
     });
-    const readKey = await createApiKey(app, user.cookie, {
+    const readKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Read Only Key",
       canSubmit: false,
     });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
 
     const media = await testDb.writeDb
       .insertInto("media")
@@ -304,24 +241,19 @@ describe("API Worker extended read API (#18)", () => {
       ])
       .execute();
 
-    const res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
+    const body = await readRpc.media.getMedia({
+      ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+    });
+    const doc = fromProtoMediaDocument(body.document!);
 
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      key: string;
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-      items: Array<{ document: MediaDocument; matchedAssociationId: string | null }>;
-    };
-
-    expect(body.key).toBe("tmdb:tv:95479");
-    expect(body.matchedAssociationId).toBeNull();
+    expect(fromProtoMediaRef(body.ref)).toMatchObject({
+      ok: true,
+      ref: { tmdb: { type: "tv", id: 95479 } },
+      key: "tmdb:tv:95479",
+    });
+    expect(body.matchedAssociationId).toBeUndefined();
     expect(body.items).toHaveLength(1);
-    expect(body.document.platformStatuses).toEqual({
+    expect(doc.platformStatuses).toEqual({
       bilibili: { status: "associated" },
       iqiyi: { status: "not_found", checkedAt: "2026-11-20T08:30:00.000Z" },
       mgtv: { status: "not_found", checkedAt: "2026-11-21T09:45:00.000Z" },
@@ -356,10 +288,11 @@ describe("API Worker extended read API (#18)", () => {
       name: "Reader Reverse",
       verify: true,
     });
-    const readKey = await createApiKey(app, user.cookie, {
+    const readKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Read Reverse Key",
       canSubmit: false,
     });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
 
     // Two distinct canonical media sharing one Bilibili collection ss99999 (disjoint target episode ranges)
     const mediaA = await testDb.writeDb
@@ -503,55 +436,40 @@ describe("API Worker extended read API (#18)", () => {
       ])
       .execute();
 
-    const reverseRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/bilibili:ss99999`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(reverseRes.status).toBe(200);
-    const reverseBody = (await reverseRes.json()) as {
-      key: string;
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-      items: Array<{ document: MediaDocument; matchedAssociationId: string | null }>;
-    };
+    const reverseBody = await readRpc.media.getMedia({
+      ref: mediaRef({ platform: { platform: "bilibili", nativeId: "ss99999" } }),
+    });
+    const reverseItems = reverseBody.items.map(fromProtoMediaQueryItem);
 
-    expect(reverseBody.key).toBe("bilibili:ss99999");
-    expect(reverseBody.items).toHaveLength(2);
-    expect(reverseBody.items.map((item) => item.document.media.id)).toEqual([mediaA.id, mediaB.id]);
-    expect(reverseBody.items[0]?.matchedAssociationId).toBe(assocA.id);
-    expect(reverseBody.items[0]?.document.matchedAssociationIds).toEqual([assocA.id]);
-    expect(reverseBody.items[1]?.matchedAssociationId).toBe(assocB.id);
-    expect(reverseBody.items[1]?.document.matchedAssociationIds).toEqual([assocB.id]);
+    expect(fromProtoMediaRef(reverseBody.ref)).toMatchObject({
+      ok: true,
+      ref: { platform: { platform: "bilibili", nativeId: "ss99999" } },
+      key: "bilibili:ss99999",
+    });
+    expect(reverseItems).toHaveLength(2);
+    expect(reverseItems.map((item) => item.document.media.id)).toEqual([mediaA.id, mediaB.id]);
+    expect(reverseItems[0]?.matchedAssociationId).toBe(assocA.id);
+    expect(reverseItems[0]?.document.matchedAssociationIds).toEqual([assocA.id]);
+    expect(reverseItems[1]?.matchedAssociationId).toBe(assocB.id);
+    expect(reverseItems[1]?.document.matchedAssociationIds).toEqual([assocB.id]);
     // Backwards-compatible top-level fields mirror items[0]
-    expect(reverseBody.document.media.id).toBe(mediaA.id);
+    expect(reverseBody.document?.media?.id).toBe(mediaA.id);
     expect(reverseBody.matchedAssociationId).toBe(assocA.id);
 
     // Direct lookup by merged media UUID and legacy external ID redirects to canonical mediaA
-    const byOldUuid = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/${mergedIntoA.id}`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(byOldUuid.status).toBe(200);
-    const byOldUuidBody = (await byOldUuid.json()) as {
-      document: MediaDocument;
-      items: Array<{ document: MediaDocument }>;
-    };
-    expect(byOldUuidBody.document.media.id).toBe(mediaA.id);
+    const byOldUuidBody = await readRpc.media.getMedia({
+      ref: mediaRef({ mediaId: mergedIntoA.id }),
+    });
+    expect(byOldUuidBody.document?.media?.id).toBe(mediaA.id);
     expect(byOldUuidBody.items).toHaveLength(1);
 
-    const byOldImdb = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/imdb:tt9991001`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(byOldImdb.status).toBe(200);
-    const byOldImdbBody = (await byOldImdb.json()) as { document: MediaDocument };
-    expect(byOldImdbBody.document.media.id).toBe(mediaA.id);
+    const byOldImdbBody = await readRpc.media.getMedia({
+      ref: mediaRef({ imdb: "tt9991001" }),
+    });
+    expect(byOldImdbBody.document?.media?.id).toBe(mediaA.id);
   });
 
-  test("omits unconfirmed content by default, includes seed_unconfirmed + pending_evidence + needs_review with ?includeUnconfirmed=true|1, and always excludes rejected and delisted", async () => {
+  test("omits unconfirmed content by default, includes seed_unconfirmed + pending_evidence + needs_review with includeUnconfirmed=true, and always excludes rejected and delisted", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
     const readOnlyDb = createReadOnlyDb(testDb.connectionString);
@@ -577,10 +495,11 @@ describe("API Worker extended read API (#18)", () => {
       name: "Reader Unconfirmed",
       verify: true,
     });
-    const readKey = await createApiKey(app, user.cookie, {
+    const readKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Read Unconfirmed Key",
       canSubmit: false,
     });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
 
     const media = await testDb.writeDb
       .insertInto("media")
@@ -768,32 +687,30 @@ describe("API Worker extended read API (#18)", () => {
       .execute();
 
     // Default read: ONLY confirmed association
-    const defaultRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
+    const defaultDoc = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document!,
     );
-    expect(defaultRes.status).toBe(200);
-    const defaultBody = (await defaultRes.json()) as { document: MediaDocument };
-    expect(defaultBody.document.associations).toHaveLength(1);
-    expect(defaultBody.document.associations[0]).toMatchObject({
+    expect(defaultDoc.associations).toHaveLength(1);
+    expect(defaultDoc.associations[0]).toMatchObject({
       id: confirmedAssoc.id,
       namespace: "bilibili",
       nativeId: "ss34430",
       status: "confirmed",
     });
-    expect(defaultBody.document.associations[0]?.unconfirmed).toBeUndefined();
-    expect(defaultBody.document.variants.some((v) => v.namespace === "iqiyi")).toBe(false);
+    expect(defaultDoc.associations[0]?.unconfirmed).toBeUndefined();
+    expect(defaultDoc.variants.some((v) => v.namespace === "iqiyi")).toBe(false);
 
-    // Explicit ?includeUnconfirmed=true: returns confirmed + seed_unconfirmed + pending_evidence + needs_review
-    const unconfirmedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?includeUnconfirmed=true`, {
-        headers: { "x-api-key": readKey.key },
-      }),
+    // Explicit includeUnconfirmed=true: returns confirmed + seed_unconfirmed + pending_evidence + needs_review
+    const unconfirmedDoc = fromProtoMediaDocument(
+      (
+        await readRpc.media.getMedia({
+          ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+          includeUnconfirmed: true,
+        })
+      ).document!,
     );
-    expect(unconfirmedRes.status).toBe(200);
-    const unconfirmedBody = (await unconfirmedRes.json()) as { document: MediaDocument };
-    const assocs = unconfirmedBody.document.associations;
+    const assocs = unconfirmedDoc.associations;
 
     expect(assocs).toHaveLength(4);
     expect(assocs.map((a) => a.nativeId)).toEqual(
@@ -826,9 +743,7 @@ describe("API Worker extended read API (#18)", () => {
     expect(pendingEntry?.variantId).toBeTruthy();
 
     // Synthetic iqiyi variant is added so clients can inspect & resolve episodes against it
-    const iqiyiVariant = unconfirmedBody.document.variants.find(
-      (v) => v.id === pendingEntry?.variantId,
-    );
+    const iqiyiVariant = unconfirmedDoc.variants.find((v) => v.id === pendingEntry?.variantId);
     expect(iqiyiVariant).toMatchObject({
       namespace: "iqiyi",
       label: "原声",
@@ -849,7 +764,7 @@ describe("API Worker extended read API (#18)", () => {
     });
 
     // platformStatuses still counts ONLY confirmed associations as associated
-    expect(unconfirmedBody.document.platformStatuses).toEqual({
+    expect(unconfirmedDoc.platformStatuses).toEqual({
       bilibili: { status: "associated" },
       iqiyi: { status: "unchecked" },
       mgtv: { status: "unchecked" },
@@ -858,11 +773,12 @@ describe("API Worker extended read API (#18)", () => {
     });
 
     // Works seamlessly with @media-ref/client resolveEpisode
+    expect(resolveEpisode(unconfirmedDoc, { namespace: "iqiyi", season: 1, episode: 5 })).toEqual({
+      kind: "unmapped",
+      reason: "no_association",
+    });
     expect(
-      resolveEpisode(unconfirmedBody.document, { namespace: "iqiyi", season: 1, episode: 5 }),
-    ).toEqual({ kind: "unmapped", reason: "no_association" });
-    expect(
-      resolveEpisode(unconfirmedBody.document, {
+      resolveEpisode(unconfirmedDoc, {
         namespace: "iqiyi",
         season: 1,
         episode: 5,
@@ -874,7 +790,7 @@ describe("API Worker extended read API (#18)", () => {
       targetEpisode: 5,
     });
     expect(
-      resolveEpisode(unconfirmedBody.document, {
+      resolveEpisode(unconfirmedDoc, {
         namespace: "bilibili",
         season: 1,
         episode: 30,
@@ -886,86 +802,75 @@ describe("API Worker extended read API (#18)", () => {
       targetEpisode: 6,
     });
 
-    // ?includeUnconfirmed=1 alias behaves identically
-    const aliasRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?includeUnconfirmed=1`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(aliasRes.status).toBe(200);
-    const aliasBody = (await aliasRes.json()) as { document: MediaDocument };
-    expect(aliasBody.document.associations).toHaveLength(4);
-
     // Reverse lookup respects includeUnconfirmed flag and never leaks delisted/rejected
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/media/youku:yk-seed-1`, {
-            headers: { "x-api-key": readKey.key },
+        await expectRpcError(
+          readRpc.media.getMedia({
+            ref: mediaRef({ platform: { platform: "youku", nativeId: "yk-seed-1" } }),
           }),
         )
       ).status,
     ).toBe(404);
 
-    const reverseSeedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/youku:yk-seed-1?includeUnconfirmed=true`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(reverseSeedRes.status).toBe(200);
-    expect(await reverseSeedRes.json()).toMatchObject({
-      matchedAssociationId: seedAssoc.id,
+    const reverseSeedRes = await readRpc.media.getMedia({
+      ref: mediaRef({ platform: { platform: "youku", nativeId: "yk-seed-1" } }),
+      includeUnconfirmed: true,
     });
+    expect(reverseSeedRes.matchedAssociationId).toBe(seedAssoc.id);
 
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/media/iqiyi:iq-pending-1`, {
-            headers: { "x-api-key": readKey.key },
+        await expectRpcError(
+          readRpc.media.getMedia({
+            ref: mediaRef({ platform: { platform: "iqiyi", nativeId: "iq-pending-1" } }),
           }),
         )
       ).status,
     ).toBe(404);
 
-    const reversePendingRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/iqiyi:iq-pending-1?includeUnconfirmed=true`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(reversePendingRes.status).toBe(200);
-    expect(await reversePendingRes.json()).toMatchObject({
-      matchedAssociationId: `change-request:${pendingCr.id}`,
+    const reversePendingRes = await readRpc.media.getMedia({
+      ref: mediaRef({ platform: { platform: "iqiyi", nativeId: "iq-pending-1" } }),
+      includeUnconfirmed: true,
     });
+    expect(reversePendingRes.matchedAssociationId).toBe(`change-request:${pendingCr.id}`);
 
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/media/mgtv:mgtv-delisted-1?includeUnconfirmed=true`, {
-            headers: { "x-api-key": readKey.key },
+        await expectRpcError(
+          readRpc.media.getMedia({
+            ref: mediaRef({ platform: { platform: "mgtv", nativeId: "mgtv-delisted-1" } }),
+            includeUnconfirmed: true,
           }),
         )
       ).status,
     ).toBe(404);
     expect(
       (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/media/tencent:tc-rejected-1?includeUnconfirmed=true`, {
-            headers: { "x-api-key": readKey.key },
+        await expectRpcError(
+          readRpc.media.getMedia({
+            ref: mediaRef({ platform: { platform: "tencent", nativeId: "tc-rejected-1" } }),
+            includeUnconfirmed: true,
           }),
         )
       ).status,
     ).toBe(404);
 
-    // Invalid boolean query param -> 400
-    const badQueryRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?includeUnconfirmed=maybe`, {
-        headers: { "x-api-key": readKey.key },
+    // Invalid boolean type in Connect JSON -> 400
+    const badJsonRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/mediaref.v1.MediaService/GetMedia`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": readKey.key },
+        body: JSON.stringify({
+          ref: { tmdb: { type: "MEDIA_TYPE_TV", id: 95479 } },
+          includeUnconfirmed: "maybe",
+        }),
       }),
     );
-    expect(badQueryRes.status).toBe(400);
+    expect(badJsonRes.status).toBe(400);
   });
 
-  test("POST /v1/media/batch evaluates each key independently on strict read-only dbRead, honors includeUnconfirmed, enforces 1..100 limit, and exposes no search/dump endpoints", async () => {
+  test("MediaService.BatchGetMedia evaluates each key independently on strict read-only dbRead, honors includeUnconfirmed, enforces 1..100 limit, and exposes no search/dump endpoints", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
     const readOnlyDb = createReadOnlyDb(testDb.connectionString);
@@ -991,10 +896,11 @@ describe("API Worker extended read API (#18)", () => {
       name: "Reader Batch",
       verify: true,
     });
-    const readKey = await createApiKey(app, user.cookie, {
+    const readKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Read Batch Key",
       canSubmit: false,
     });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
 
     const media1 = await testDb.writeDb
       .insertInto("media")
@@ -1126,55 +1032,38 @@ describe("API Worker extended read API (#18)", () => {
       .execute();
 
     // Unauthenticated batch request -> 401
-    const unauthRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ keys: ["tmdb:tv:2001"] }),
-      }),
-    );
-    expect(unauthRes.status).toBe(401);
+    expect(
+      (
+        await expectRpcError(
+          createRpcClients(app).media.batchGetMedia({
+            refs: [mediaRef({ tmdb: { type: "tv", id: 2001 } })],
+          }),
+        )
+      ).status,
+    ).toBe(401);
 
-    // Mixed batch: valid hit, missing key, malformed key, shared collection hit, unconfirmed-only key
-    const mixedKeys = [
-      "tmdb:tv:2001",
-      "tmdb:tv:999999",
-      "not-a-valid-key",
-      "bilibili:ss-shared-batch",
-      "youku:yk-seed-batch",
+    // Mixed batch: valid hit, missing ref, invalid ref, shared collection hit, unconfirmed-only ref
+    const mixedRefs = [
+      mediaRef({ tmdb: { type: "tv", id: 2001 } }),
+      mediaRef({ tmdb: { type: "tv", id: 999999 } }),
+      create(proto.MediaRefSchema),
+      mediaRef({ platform: { platform: "bilibili", nativeId: "ss-shared-batch" } }),
+      mediaRef({ platform: { platform: "youku", nativeId: "yk-seed-batch" } }),
     ];
-    const mixedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readKey.key,
-        },
-        body: JSON.stringify({ keys: mixedKeys }),
-      }),
-    );
-    expect(mixedRes.status).toBe(200);
-    const mixedBody = (await mixedRes.json()) as {
-      results: Array<
-        | {
-            key: string;
-            ok: true;
-            items: Array<{ document: MediaDocument; matchedAssociationId: string | null }>;
-          }
-        | { key: string; ok: false; error: "INVALID_KEY" | "NOT_FOUND"; message: string }
-      >;
-    };
+    const mixedBody = await readRpc.media.batchGetMedia({ refs: mixedRefs });
+    const mixedResults = mixedBody.results.map(fromProtoBatchItemResult);
 
-    expect(mixedBody.results).toHaveLength(5);
-    expect(mixedBody.results[0]).toMatchObject({
+    expect(mixedResults).toHaveLength(5);
+    expect(mixedResults[0]).toMatchObject({
+      ref: { tmdb: { type: "tv", id: 2001 } },
       key: "tmdb:tv:2001",
       ok: true,
     });
-    if (mixedBody.results[0]?.ok) {
-      expect(mixedBody.results[0].items).toHaveLength(1);
-      expect(mixedBody.results[0].items[0]?.document.media.id).toBe(media1.id);
-      expect(mixedBody.results[0].items[0]?.document.associations).toHaveLength(1);
-      expect(mixedBody.results[0].items[0]?.document.platformStatuses).toEqual({
+    if (mixedResults[0]?.ok) {
+      expect(mixedResults[0].items).toHaveLength(1);
+      expect(mixedResults[0].items[0]?.document.media.id).toBe(media1.id);
+      expect(mixedResults[0].items[0]?.document.associations).toHaveLength(1);
+      expect(mixedResults[0].items[0]?.document.platformStatuses).toEqual({
         bilibili: { status: "associated" },
         tencent: { status: "not_found", checkedAt: "2026-11-22T00:00:00.000Z" },
         iqiyi: { status: "unchecked" },
@@ -1183,151 +1072,114 @@ describe("API Worker extended read API (#18)", () => {
       });
     }
 
-    expect(mixedBody.results[1]).toMatchObject({
+    expect(mixedResults[1]).toMatchObject({
+      ref: { tmdb: { type: "tv", id: 999999 } },
       key: "tmdb:tv:999999",
       ok: false,
       error: "NOT_FOUND",
     });
 
-    expect(mixedBody.results[2]).toMatchObject({
-      key: "not-a-valid-key",
+    expect(mixedResults[2]).toMatchObject({
+      ref: null,
       ok: false,
       error: "INVALID_KEY",
     });
 
-    expect(mixedBody.results[3]).toMatchObject({
+    expect(mixedResults[3]).toMatchObject({
+      ref: { platform: { platform: "bilibili", nativeId: "ss-shared-batch" } },
       key: "bilibili:ss-shared-batch",
       ok: true,
     });
-    if (mixedBody.results[3]?.ok) {
-      expect(mixedBody.results[3].items).toHaveLength(2);
-      expect(mixedBody.results[3].items.map((item) => item.document.media.id)).toEqual([
+    if (mixedResults[3]?.ok) {
+      expect(mixedResults[3].items).toHaveLength(2);
+      expect(mixedResults[3].items.map((item) => item.document.media.id)).toEqual([
         media1.id,
         media2.id,
       ]);
-      expect(mixedBody.results[3].items.map((item) => item.matchedAssociationId)).toEqual([
+      expect(mixedResults[3].items.map((item) => item.matchedAssociationId)).toEqual([
         assoc1.id,
         assoc2.id,
       ]);
     }
 
-    // Seed-only key is NOT_FOUND when includeUnconfirmed is omitted/false
-    expect(mixedBody.results[4]).toMatchObject({
+    // Seed-only ref is NOT_FOUND when includeUnconfirmed is omitted/false
+    expect(mixedResults[4]).toMatchObject({
+      ref: { platform: { platform: "youku", nativeId: "yk-seed-batch" } },
       key: "youku:yk-seed-batch",
       ok: false,
       error: "NOT_FOUND",
     });
 
     // Batch with includeUnconfirmed: true returns seed_unconfirmed + pending_evidence CR
-    const unconfirmedBatchRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readKey.key,
-        },
-        body: JSON.stringify({
-          keys: ["tmdb:tv:2001", "youku:yk-seed-batch", "iqiyi:iq-pending-batch"],
-          includeUnconfirmed: true,
-        }),
-      }),
-    );
-    expect(unconfirmedBatchRes.status).toBe(200);
-    const unconfirmedBatchBody = (await unconfirmedBatchRes.json()) as {
-      results: Array<
-        | {
-            key: string;
-            ok: true;
-            items: Array<{ document: MediaDocument; matchedAssociationId: string | null }>;
-          }
-        | { key: string; ok: false; error: "INVALID_KEY" | "NOT_FOUND"; message: string }
-      >;
-    };
-    expect(unconfirmedBatchBody.results[0]?.ok).toBe(true);
-    if (unconfirmedBatchBody.results[0]?.ok) {
-      const assocs = unconfirmedBatchBody.results[0].items[0]!.document.associations;
+    const unconfirmedBatchResults = (
+      await readRpc.media.batchGetMedia({
+        refs: [
+          mediaRef({ tmdb: { type: "tv", id: 2001 } }),
+          mediaRef({ platform: { platform: "youku", nativeId: "yk-seed-batch" } }),
+          mediaRef({ platform: { platform: "iqiyi", nativeId: "iq-pending-batch" } }),
+        ],
+        includeUnconfirmed: true,
+      })
+    ).results.map(fromProtoBatchItemResult);
+
+    expect(unconfirmedBatchResults[0]?.ok).toBe(true);
+    if (unconfirmedBatchResults[0]?.ok) {
+      const assocs = unconfirmedBatchResults[0].items[0]!.document.associations;
       expect(assocs).toHaveLength(3);
       expect(assocs.some((a) => a.id === seedAssoc.id && a.unconfirmed === true)).toBe(true);
       expect(assocs.some((a) => a.changeRequestId === pendingCr.id && a.unconfirmed === true)).toBe(
         true,
       );
     }
-    expect(unconfirmedBatchBody.results[1]).toMatchObject({
+    expect(unconfirmedBatchResults[1]).toMatchObject({
       key: "youku:yk-seed-batch",
       ok: true,
       items: [{ matchedAssociationId: seedAssoc.id }],
     });
-    expect(unconfirmedBatchBody.results[2]).toMatchObject({
+    expect(unconfirmedBatchResults[2]).toMatchObject({
       key: "iqiyi:iq-pending-batch",
       ok: true,
       items: [{ matchedAssociationId: `change-request:${pendingCr.id}` }],
     });
 
-    // Exactly 100 keys succeeds (200 with 100 results)
-    const keys100 = Array.from({ length: 100 }, (_, i) =>
-      i === 0 ? "tmdb:tv:2001" : `tmdb:tv:${500000 + i}`,
+    // Exactly 100 refs succeeds with 100 results
+    const refs100 = Array.from({ length: 100 }, (_, i) =>
+      mediaRef({ tmdb: { type: "tv", id: i === 0 ? 2001 : 500000 + i } }),
     );
-    const batch100Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readKey.key,
-        },
-        body: JSON.stringify({ keys: keys100 }),
-      }),
+    const batch100Results = (await readRpc.media.batchGetMedia({ refs: refs100 })).results.map(
+      fromProtoBatchItemResult,
     );
-    expect(batch100Res.status).toBe(200);
-    const batch100Body = (await batch100Res.json()) as {
-      results: Array<{ key: string; ok: boolean }>;
-    };
-    expect(batch100Body.results).toHaveLength(100);
-    expect(batch100Body.results[0]).toMatchObject({ key: "tmdb:tv:2001", ok: true });
-    expect(batch100Body.results[99]).toMatchObject({ key: "tmdb:tv:500099", ok: false });
+    expect(batch100Results).toHaveLength(100);
+    expect(batch100Results[0]).toMatchObject({ key: "tmdb:tv:2001", ok: true });
+    expect(batch100Results[99]).toMatchObject({ key: "tmdb:tv:500099", ok: false });
 
-    // 101 keys rejected with 400 BATCH_LIMIT_EXCEEDED
-    const keys101 = Array.from({ length: 101 }, (_, i) => `tmdb:tv:${600000 + i}`);
-    const batch101Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readKey.key,
-        },
-        body: JSON.stringify({ keys: keys101 }),
-      }),
+    // 101 refs rejected with 400 BATCH_LIMIT_EXCEEDED
+    const refs101 = Array.from({ length: 101 }, (_, i) =>
+      mediaRef({ tmdb: { type: "tv", id: 600000 + i } }),
     );
-    expect(batch101Res.status).toBe(400);
-    expect(await batch101Res.json()).toMatchObject({ error: "BATCH_LIMIT_EXCEEDED" });
+    const batch101Err = await expectRpcError(readRpc.media.batchGetMedia({ refs: refs101 }));
+    expect(batch101Err.status).toBe(400);
+    expect(batch101Err.code).toBe("BATCH_LIMIT_EXCEEDED");
 
     // Empty array rejected with 400 BATCH_LIMIT_EXCEEDED
-    const emptyBatchRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readKey.key,
-        },
-        body: JSON.stringify({ keys: [] }),
-      }),
-    );
-    expect(emptyBatchRes.status).toBe(400);
-    expect(await emptyBatchRes.json()).toMatchObject({ error: "BATCH_LIMIT_EXCEEDED" });
+    const emptyBatchErr = await expectRpcError(readRpc.media.batchGetMedia({ refs: [] }));
+    expect(emptyBatchErr.status).toBe(400);
+    expect(emptyBatchErr.code).toBe("BATCH_LIMIT_EXCEEDED");
 
     // No full-database dump endpoint and no search-by-title endpoint
     const dumpRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media`, {
-        headers: { "x-api-key": readKey.key },
+      new Request(`${TEST_BASE_URL}/mediaref.v1.MediaService/ListMedia`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": readKey.key },
+        body: "{}",
       }),
     );
     expect(dumpRes.status).toBe(404);
 
-    const searchRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/search?q=Show`, {
-        headers: { "x-api-key": readKey.key },
-      }),
+    const invalidRefErr = await expectRpcError(
+      readRpc.media.getMedia({ ref: create(proto.MediaRefSchema) }),
     );
-    expect(searchRes.status).toBe(400);
-    expect(await searchRes.json()).toMatchObject({ error: "INVALID_KEY" });
+    expect(invalidRefErr.status).toBe(400);
+    expect(invalidRefErr.code).toBe("INVALID_KEY");
   });
 });

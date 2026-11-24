@@ -1,85 +1,24 @@
 import type { ExecutionContext, Hyperdrive } from "@cloudflare/workers-types";
+import { fromProtoChangeRequestStatus, toProtoSegmentInput } from "@media-ref/client";
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import worker, { createApiApp, createInMemoryRateLimiter } from "../src/index.ts";
+import worker from "../src/index.ts";
+import { createApiApp, createInMemoryRateLimiter } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-rate-limit-integration-tests-0123456789";
-
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-async function signUpUser(
-  app: ReturnType<typeof createApiApp>,
-  outbound: ReturnType<typeof createFakeOutboundClient>,
-  input: { email: string; password: string; name: string },
-): Promise<{ userId: string; cookie: string }> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const email = outbound.sentEmails[emailsBefore];
-  expect(email).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(email!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  return { userId: signUpBody.user.id, cookie };
-}
-
-async function createApiKey(
-  app: ReturnType<typeof createApiApp>,
-  cookie: string,
-  options: { name: string; canSubmit?: boolean },
-): Promise<{ id: string; key: string }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        name: options.name,
-        canSubmit: options.canSubmit ?? false,
-      }),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; key: string };
-}
 
 function createCatalogStubHandler() {
   return (request: ExternalHttpRequest) => {
@@ -138,31 +77,24 @@ async function seedConfirmedMedia(
     .where("id", "=", owner.userId)
     .execute();
 
-  const crRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: owner.cookie },
-      body: JSON.stringify({
-        targetExternalKey: "tmdb:tv:95479",
-        namespace: "bilibili",
-        nativeId: "ss34430",
-        variantDescription: "原声",
-        segments: [
-          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-        ],
+  const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
+  const created = await ownerRpc.changeRequest.createChangeRequest({
+    target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+    namespace: "bilibili",
+    nativeId: "ss34430",
+    variantDescription: "原声",
+    segments: [
+      toProtoSegmentInput({
+        season: 1,
+        episodeStart: 1,
+        episodeEnd: 24,
+        targetEpisodeStart: 1,
+        baseline: "tmdb",
       }),
-    }),
-  );
-  expect(crRes.status).toBe(201);
-  const { changeRequest } = (await crRes.json()) as { changeRequest: { id: string } };
+    ],
+  });
 
-  const approveRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${changeRequest.id}/approve`, {
-      method: "POST",
-      headers: { cookie: owner.cookie },
-    }),
-  );
-  expect(approveRes.status).toBe(200);
+  await ownerRpc.reviewer.approveChangeRequest({ id: created.changeRequest!.id });
 }
 
 describe("API Worker rate limiting & submission quotas (#19)", () => {
@@ -217,61 +149,48 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       password: "StrongPassword123!",
       name: "Reader",
     });
-    const keyA = await createApiKey(app, user.cookie, { name: "Key A" });
-    const keyB = await createApiKey(app, user.cookie, { name: "Key B" });
+    const keyA = await issueApiKeyRpc(app, user.cookie, { name: "Key A" });
+    const keyB = await issueApiKeyRpc(app, user.cookie, { name: "Key B" });
+
+    const rpcA = createRpcClients(app, {
+      apiKey: keyA.key,
+      headers: { "cf-connecting-ip": "203.0.113.10" },
+    });
+    const rpcB = createRpcClients(app, {
+      apiKey: keyB.key,
+      headers: { "cf-connecting-ip": "203.0.113.20" },
+    });
 
     // First 3 requests for Key A succeed
     for (let i = 0; i < 3; i++) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: {
-            "x-api-key": keyA.key,
-            "cf-connecting-ip": "203.0.113.10",
-          },
-        }),
-      );
-      expect(res.status).toBe(200);
+      const res = await rpcA.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) });
+      expect(res.document?.media?.id).toBeTruthy();
     }
 
     // 4th request for Key A hits per-key rate limit -> 429 with Retry-After
-    const blockedA = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: {
-          "x-api-key": keyA.key,
-          "cf-connecting-ip": "203.0.113.10",
-        },
-      }),
+    const blockedA = await expectRpcError(
+      rpcA.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }),
     );
     expect(blockedA.status).toBe(429);
-    expect(blockedA.headers.get("retry-after")).toBe("60");
-    expect(await blockedA.json()).toMatchObject({
-      error: "RATE_LIMITED",
+    expect(blockedA.connectError.metadata.get("retry-after")).toBe("60");
+    expect(blockedA).toMatchObject({
+      code: "RATE_LIMITED",
       scope: "api_key",
       retryAfterSeconds: 60,
     });
 
     // Different API key from a different IP still succeeds
-    const allowedB = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: {
-          "x-api-key": keyB.key,
-          "cf-connecting-ip": "203.0.113.20",
-        },
-      }),
-    );
-    expect(allowedB.status).toBe(200);
+    expect(
+      (await rpcB.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) })).document
+        ?.media?.id,
+    ).toBeTruthy();
 
     // After the 60s fixed window rolls over, Key A succeeds again
     currentTime = new Date(currentTime.getTime() + 60_000);
-    const recoveredA = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: {
-          "x-api-key": keyA.key,
-          "cf-connecting-ip": "203.0.113.10",
-        },
-      }),
-    );
-    expect(recoveredA.status).toBe(200);
+    expect(
+      (await rpcA.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) })).document
+        ?.media?.id,
+    ).toBeTruthy();
   });
 
   test("enforces source-IP read rate limit across different API keys sharing the same IP", async () => {
@@ -309,60 +228,56 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       password: "StrongPassword123!",
       name: "User 2",
     });
-    const key1 = await createApiKey(app, user1.cookie, { name: "Key 1" });
-    const key2 = await createApiKey(app, user2.cookie, { name: "Key 2" });
+    const key1 = await issueApiKeyRpc(app, user1.cookie, { name: "Key 1" });
+    const key2 = await issueApiKeyRpc(app, user2.cookie, { name: "Key 2" });
 
     // 2 reads via Key 1 from 198.51.100.5
+    const key1Rpc = createRpcClients(app, {
+      apiKey: key1.key,
+      headers: { "cf-connecting-ip": "198.51.100.5" },
+    });
     for (let i = 0; i < 2; i++) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: {
-            "x-api-key": key1.key,
-            "cf-connecting-ip": "198.51.100.5",
-          },
-        }),
-      );
-      expect(res.status).toBe(200);
+      expect(
+        (await key1Rpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+          .document,
+      ).toBeDefined();
     }
 
     // 1 read via Key 2 from the same IP (via X-Forwarded-For) -> 3rd IP hit, succeeds
-    const thirdRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: {
-          "x-api-key": key2.key,
-          "x-forwarded-for": "198.51.100.5, 10.0.0.1",
-        },
-      }),
-    );
-    expect(thirdRes.status).toBe(200);
+    const key2XffRpc = createRpcClients(app, {
+      apiKey: key2.key,
+      headers: { "x-forwarded-for": "198.51.100.5, 10.0.0.1" },
+    });
+    expect(
+      (await key2XffRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document,
+    ).toBeDefined();
 
     // 4th read from the same IP via Key 2 hits the IP cap -> 429 with scope "ip"
-    const blockedIp = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: {
-          "x-api-key": key2.key,
-          "cf-connecting-ip": "198.51.100.5",
-        },
-      }),
+    const key2SameIpRpc = createRpcClients(app, {
+      apiKey: key2.key,
+      headers: { "cf-connecting-ip": "198.51.100.5" },
+    });
+    const blockedIp = await expectRpcError(
+      key2SameIpRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }),
     );
     expect(blockedIp.status).toBe(429);
-    expect(blockedIp.headers.get("retry-after")).toBe("45");
-    expect(await blockedIp.json()).toMatchObject({
-      error: "RATE_LIMITED",
+    expect(blockedIp.connectError.metadata.get("retry-after")).toBe("45");
+    expect(blockedIp).toMatchObject({
+      code: "RATE_LIMITED",
       scope: "ip",
       retryAfterSeconds: 45,
     });
 
     // Same Key 2 from a different IP still succeeds
-    const otherIpRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: {
-          "x-api-key": key2.key,
-          "cf-connecting-ip": "198.51.100.99",
-        },
-      }),
-    );
-    expect(otherIpRes.status).toBe(200);
+    const key2OtherIpRpc = createRpcClients(app, {
+      apiKey: key2.key,
+      headers: { "cf-connecting-ip": "198.51.100.99" },
+    });
+    expect(
+      (await key2OtherIpRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document,
+    ).toBeDefined();
   });
 
   test("wires Cloudflare RATE_LIMITER_READ_KEY and RATE_LIMITER_READ_IP bindings in default Worker fetch entrypoint", async () => {
@@ -390,7 +305,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       password: "StrongPassword123!",
       name: "Worker Reader",
     });
-    const readKey = await createApiKey(setupApp, user.cookie, { name: "Worker Read Key" });
+    const readKey = await issueApiKeyRpc(setupApp, user.cookie, { name: "Worker Read Key" });
 
     const keyBinding = createInMemoryRateLimiter({ limit: 1, periodSeconds: 60 });
     const ipBinding = createInMemoryRateLimiter({ limit: 10, periodSeconds: 60 });
@@ -415,31 +330,100 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       RATE_LIMIT_READ_RETRY_AFTER_SECONDS: "10",
     };
 
-    const first = await worker.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key, "cf-connecting-ip": "203.0.113.55" },
-      }),
-      workerEnv,
-      ctx,
-    );
-    expect(first.status).toBe(200);
+    const workerRpc = createRpcClients((req) => worker.fetch(req, workerEnv, ctx), {
+      apiKey: readKey.key,
+      headers: { "cf-connecting-ip": "203.0.113.55" },
+    });
 
-    const second = await worker.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key, "cf-connecting-ip": "203.0.113.55" },
-      }),
-      workerEnv,
-      ctx,
+    const first = await workerRpc.media.getMedia({
+      ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+    });
+    expect(first.document?.media?.id).toBeTruthy();
+
+    const secondErr = await expectRpcError(
+      workerRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }),
     );
     await Promise.all(pending);
 
-    expect(second.status).toBe(429);
-    expect(second.headers.get("retry-after")).toBe("10");
-    expect(await second.json()).toMatchObject({
-      error: "RATE_LIMITED",
+    expect(secondErr.status).toBe(429);
+    expect(secondErr.connectError.metadata.get("retry-after")).toBe("10");
+    expect(secondErr).toMatchObject({
+      code: "RATE_LIMITED",
       scope: "api_key",
       retryAfterSeconds: 10,
     });
+  });
+
+  test("persists module-scoped fallback read rate-limit buckets across requests when CF bindings are omitted", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createCatalogStubHandler(),
+    });
+    const setupApp = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      adapterRegistry: createAdapterRegistry(),
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    await seedConfirmedMedia(setupApp, testDb, outbound);
+
+    const user = await signUpUser(setupApp, outbound, {
+      email: "worker-fallback-rl@example.com",
+      password: "StrongPassword123!",
+      name: "Fallback Reader",
+    });
+    const readKey = await issueApiKeyRpc(setupApp, user.cookie, { name: "Fallback Key" });
+
+    const pending: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil(promise: Promise<unknown>) {
+        pending.push(promise);
+      },
+      passThroughOnException() {},
+      props: {},
+    } as unknown as ExecutionContext;
+
+    const hyperdrive = { connectionString: testDb.connectionString } as Hyperdrive;
+    const workerEnv = {
+      HYPERDRIVE_READ: hyperdrive,
+      HYPERDRIVE_WRITE: hyperdrive,
+      AUTH_SECRET: TEST_AUTH_SECRET,
+      API_BASE_URL: TEST_BASE_URL,
+      RATE_LIMIT_READ_KEY_LIMIT: "2",
+      RATE_LIMIT_READ_IP_LIMIT: "100",
+      RATE_LIMIT_READ_PERIOD_SECONDS: "60",
+      RATE_LIMIT_READ_RETRY_AFTER_SECONDS: "12",
+    };
+
+    const workerRpc = createRpcClients((req) => worker.fetch(req, workerEnv, ctx), {
+      apiKey: readKey.key,
+      headers: { "cf-connecting-ip": "203.0.113.88" },
+    });
+
+    expect(
+      (await workerRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document,
+    ).toBeDefined();
+    expect(
+      (await workerRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document,
+    ).toBeDefined();
+    const blocked = await expectRpcError(
+      workerRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }),
+    );
+    await Promise.all(pending);
+
+    expect(blocked.status).toBe(429);
+    expect(blocked.code).toBe("RATE_LIMITED");
+    expect(blocked.scope).toBe("api_key");
+    expect(blocked.retryAfterSeconds).toBe(12);
   });
 
   test("enforces hourly submission limit per account across multiple API keys and session with rolling-window Retry-After", async () => {
@@ -473,64 +457,60 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       name: "Other Contributor",
     });
 
-    const keyA = await createApiKey(app, contributor.cookie, { name: "Key A", canSubmit: true });
-    const keyB = await createApiKey(app, contributor.cookie, { name: "Key B", canSubmit: true });
-    const otherKey = await createApiKey(app, otherUser.cookie, {
+    const keyA = await issueApiKeyRpc(app, contributor.cookie, { name: "Key A", canSubmit: true });
+    const keyB = await issueApiKeyRpc(app, contributor.cookie, { name: "Key B", canSubmit: true });
+    const otherKey = await issueApiKeyRpc(app, otherUser.cookie, {
       name: "Other Key",
       canSubmit: true,
     });
 
-    const submitPayload = (nativeId: string) =>
-      JSON.stringify({
-        targetExternalKey: "tmdb:tv:95479",
-        namespace: "bilibili",
-        nativeId,
-        variantDescription: "原声",
-        segments: [
-          { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
-        ],
-      });
+    const rpcA = createRpcClients(app, { apiKey: keyA.key });
+    const rpcB = createRpcClients(app, { apiKey: keyB.key });
+    const sessionRpc = createRpcClients(app, { cookie: contributor.cookie });
+    const otherRpc = createRpcClients(app, { apiKey: otherKey.key });
+
+    const submitPayload = (nativeId: string) => ({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId,
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    });
 
     // 1st submission at 12:00:00Z via Key A
-    const sub1 = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": keyA.key },
-        body: submitPayload("ss10001"),
-      }),
-    );
-    expect(sub1.status).toBe(201);
+    expect(
+      (await rpcA.changeRequest.createChangeRequest(submitPayload("ss10001"))).changeRequest,
+    ).toBeDefined();
 
     // Advance 10 minutes to 12:10:00Z; submit 2 more via Key A and 2 via Key B (total 5)
     currentTime = new Date("2026-11-23T12:10:00.000Z");
-    for (const [key, nativeId] of [
-      [keyA.key, "ss10002"],
-      [keyA.key, "ss10003"],
-      [keyB.key, "ss10004"],
-      [keyB.key, "ss10005"],
+    for (const [rpc, nativeId] of [
+      [rpcA, "ss10002"],
+      [rpcA, "ss10003"],
+      [rpcB, "ss10004"],
+      [rpcB, "ss10005"],
     ] as const) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": key },
-          body: submitPayload(nativeId),
-        }),
-      );
-      expect(res.status).toBe(201);
+      expect(
+        (await rpc.changeRequest.createChangeRequest(submitPayload(nativeId))).changeRequest,
+      ).toBeDefined();
     }
 
     // 6th submission via Key B is rejected with 429 and exact Retry-After = 3000s (50 min left for 12:00Z row)
-    const blockedViaKeyB = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": keyB.key },
-        body: submitPayload("ss10006"),
-      }),
+    const blockedViaKeyB = await expectRpcError(
+      rpcB.changeRequest.createChangeRequest(submitPayload("ss10006")),
     );
     expect(blockedViaKeyB.status).toBe(429);
-    expect(blockedViaKeyB.headers.get("retry-after")).toBe("3000");
-    expect(await blockedViaKeyB.json()).toMatchObject({
-      error: "SUBMISSION_RATE_LIMITED",
+    expect(blockedViaKeyB.connectError.metadata.get("retry-after")).toBe("3000");
+    expect(blockedViaKeyB).toMatchObject({
+      code: "SUBMISSION_RATE_LIMITED",
       scope: "account",
       limit: 5,
       used: 5,
@@ -539,54 +519,36 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
     });
 
     // Submitting via browser session cookie for the SAME account is also rejected!
-    const blockedViaSession = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: contributor.cookie },
-        body: submitPayload("ss10007"),
-      }),
+    const blockedViaSession = await expectRpcError(
+      sessionRpc.changeRequest.createChangeRequest(submitPayload("ss10007")),
     );
     expect(blockedViaSession.status).toBe(429);
-    expect(blockedViaSession.headers.get("retry-after")).toBe("3000");
-    expect(await blockedViaSession.json()).toMatchObject({
-      error: "SUBMISSION_RATE_LIMITED",
+    expect(blockedViaSession.connectError.metadata.get("retry-after")).toBe("3000");
+    expect(blockedViaSession).toMatchObject({
+      code: "SUBMISSION_RATE_LIMITED",
       scope: "account",
       retryAfterSeconds: 3000,
     });
 
     // A different account is unaffected
-    const otherRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": otherKey.key },
-        body: submitPayload("ss20001"),
-      }),
-    );
-    expect(otherRes.status).toBe(201);
+    expect(
+      (await otherRpc.changeRequest.createChangeRequest(submitPayload("ss20001"))).changeRequest,
+    ).toBeDefined();
 
     // Advance clock to 13:00:00Z -> oldest submission (12:00:00Z) aged out of rolling 1h window -> 1 slot opens
     currentTime = new Date("2026-11-23T13:00:00.000Z");
-    const recovered = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": keyB.key },
-        body: submitPayload("ss10008"),
-      }),
-    );
-    expect(recovered.status).toBe(201);
+    expect(
+      (await rpcB.changeRequest.createChangeRequest(submitPayload("ss10008"))).changeRequest,
+    ).toBeDefined();
 
     // Immediately attempting a 7th fails with Retry-After = 600s (until 12:10:00Z batch ages out at 13:10:00Z)
-    const blockedAgain = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": keyA.key },
-        body: submitPayload("ss10009"),
-      }),
+    const blockedAgain = await expectRpcError(
+      rpcA.changeRequest.createChangeRequest(submitPayload("ss10009")),
     );
     expect(blockedAgain.status).toBe(429);
-    expect(blockedAgain.headers.get("retry-after")).toBe("600");
-    expect(await blockedAgain.json()).toMatchObject({
-      error: "SUBMISSION_RATE_LIMITED",
+    expect(blockedAgain.connectError.metadata.get("retry-after")).toBe("600");
+    expect(blockedAgain).toMatchObject({
+      code: "SUBMISSION_RATE_LIMITED",
       retryAfterSeconds: 600,
     });
   });
@@ -615,52 +577,59 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       password: "StrongPassword123!",
       name: "Concurrent Submitter",
     });
-    const keyA = await createApiKey(app, user.cookie, { name: "Parallel Key A", canSubmit: true });
-    const keyB = await createApiKey(app, user.cookie, { name: "Parallel Key B", canSubmit: true });
+    const keyA = await issueApiKeyRpc(app, user.cookie, {
+      name: "Parallel Key A",
+      canSubmit: true,
+    });
+    const keyB = await issueApiKeyRpc(app, user.cookie, {
+      name: "Parallel Key B",
+      canSubmit: true,
+    });
+    const rpcA = createRpcClients(app, { apiKey: keyA.key });
+    const rpcB = createRpcClients(app, { apiKey: keyB.key });
 
-    // Fire 10 parallel POST /v1/change-requests alternating between Key A and Key B
-    const responses = await Promise.all(
-      Array.from({ length: 10 }, async (_, idx) =>
-        app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "x-api-key": idx % 2 === 0 ? keyA.key : keyB.key,
-            },
-            body: JSON.stringify({
-              targetExternalKey: "tmdb:tv:95479",
-              namespace: "bilibili",
-              nativeId: `ss9000${idx}`,
-              variantDescription: "原声",
-              segments: [
-                {
-                  season: 1,
-                  episodeStart: 1,
-                  episodeEnd: 12,
-                  targetEpisodeStart: 1,
-                  baseline: "tmdb",
-                },
-              ],
-            }),
-          }),
-        ),
-      ),
+    // Fire 10 parallel CreateChangeRequest RPCs alternating between Key A and Key B
+    const results = await Promise.all(
+      Array.from({ length: 10 }, async (_, idx) => {
+        const rpc = idx % 2 === 0 ? rpcA : rpcB;
+        try {
+          await rpc.changeRequest.createChangeRequest({
+            target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+            namespace: "bilibili",
+            nativeId: `ss9000${idx}`,
+            variantDescription: "原声",
+            segments: [
+              toProtoSegmentInput({
+                season: 1,
+                episodeStart: 1,
+                episodeEnd: 12,
+                targetEpisodeStart: 1,
+                baseline: "tmdb",
+              }),
+            ],
+          });
+          return { ok: true as const };
+        } catch (err) {
+          return { ok: false as const, err: await expectRpcError(Promise.reject(err)) };
+        }
+      }),
     );
 
-    const createdResponses = responses.filter((res) => res.status === 201);
-    const rateLimitedResponses = responses.filter((res) => res.status === 429);
+    const createdResults = results.filter((r) => r.ok);
+    const rateLimitedResults = results.filter((r) => !r.ok);
 
-    expect(createdResponses).toHaveLength(5);
-    expect(rateLimitedResponses).toHaveLength(5);
+    expect(createdResults).toHaveLength(5);
+    expect(rateLimitedResults).toHaveLength(5);
 
-    for (const res of rateLimitedResponses) {
-      const retryAfter = Number(res.headers.get("retry-after"));
+    for (const result of rateLimitedResults) {
+      if (result.ok) continue;
+      expect(result.err.status).toBe(429);
+      const retryAfter = Number(result.err.connectError.metadata.get("retry-after"));
       expect(Number.isInteger(retryAfter)).toBe(true);
       expect(retryAfter).toBeGreaterThanOrEqual(1);
       expect(retryAfter).toBeLessThanOrEqual(3600);
-      expect(await res.json()).toMatchObject({
-        error: "SUBMISSION_RATE_LIMITED",
+      expect(result.err).toMatchObject({
+        code: "SUBMISSION_RATE_LIMITED",
         scope: "account",
         limit: 5,
       });
@@ -709,43 +678,43 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       .where("id", "=", reviewer.userId)
       .execute();
 
-    const userKey = await createApiKey(app, user.cookie, { name: "User Submit", canSubmit: true });
-    const reviewerKey = await createApiKey(app, reviewer.cookie, {
+    const userKey = await issueApiKeyRpc(app, user.cookie, {
+      name: "User Submit",
+      canSubmit: true,
+    });
+    const reviewerKey = await issueApiKeyRpc(app, reviewer.cookie, {
       name: "Reviewer Submit",
       canSubmit: true,
     });
 
-    const submitAs = (key: string, nativeId: string) =>
-      app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": key },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:95479",
-            namespace: "tencent",
-            nativeId,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 12,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+    const userRpc = createRpcClients(app, { apiKey: userKey.key });
+    const reviewerRpc = createRpcClients(app, { apiKey: reviewerKey.key });
+
+    const submitAs = (rpc: ReturnType<typeof createRpcClients>, nativeId: string) =>
+      rpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "tencent",
+        nativeId,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 12,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      );
+        ],
+      });
 
     // At reputation = 0, limit is 5/hr
     for (let i = 1; i <= 5; i++) {
-      expect((await submitAs(userKey.key, `ss3000${i}`)).status).toBe(201);
+      expect((await submitAs(userRpc, `ss3000${i}`)).changeRequest).toBeDefined();
     }
-    const blockedAtRep0 = await submitAs(userKey.key, "ss30006");
+    const blockedAtRep0 = await expectRpcError(submitAs(userRpc, "ss30006"));
     expect(blockedAtRep0.status).toBe(429);
-    expect(await blockedAtRep0.json()).toMatchObject({
-      error: "SUBMISSION_RATE_LIMITED",
+    expect(blockedAtRep0).toMatchObject({
+      code: "SUBMISSION_RATE_LIMITED",
       limit: 5,
       used: 5,
     });
@@ -758,17 +727,15 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       .execute();
 
     for (let i = 6; i <= 20; i++) {
-      const res = await submitAs(userKey.key, `ss300${i}`);
-      expect(res.status).toBe(201);
+      const res = await submitAs(userRpc, `ss300${i}`);
       // Reputation only affects quota — submissions still go through normal review / evidence gate
-      const body = (await res.json()) as { changeRequest: { status: string } };
-      expect(body.changeRequest.status).toBe("needs_review");
+      expect(fromProtoChangeRequestStatus(res.changeRequest!.status)).toBe("needs_review");
     }
 
-    const blockedAtRep10 = await submitAs(userKey.key, "ss30021");
+    const blockedAtRep10 = await expectRpcError(submitAs(userRpc, "ss30021"));
     expect(blockedAtRep10.status).toBe(429);
-    expect(await blockedAtRep10.json()).toMatchObject({
-      error: "SUBMISSION_RATE_LIMITED",
+    expect(blockedAtRep10).toMatchObject({
+      code: "SUBMISSION_RATE_LIMITED",
       limit: 20,
       used: 20,
     });
@@ -780,15 +747,12 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       .where("id", "=", user.userId)
       .execute();
 
-    const allowedAtRep50 = await submitAs(userKey.key, "ss30021");
-    expect(allowedAtRep50.status).toBe(201);
-    expect(
-      ((await allowedAtRep50.json()) as { changeRequest: { status: string } }).changeRequest.status,
-    ).toBe("needs_review");
+    const allowedAtRep50 = await submitAs(userRpc, "ss30021");
+    expect(fromProtoChangeRequestStatus(allowedAtRep50.changeRequest!.status)).toBe("needs_review");
 
     // Reviewers with reputation = 0 get elevated hourly quota per config
     for (let i = 1; i <= 7; i++) {
-      expect((await submitAs(reviewerKey.key, `ss4000${i}`)).status).toBe(201);
+      expect((await submitAs(reviewerRpc, `ss4000${i}`)).changeRequest).toBeDefined();
     }
   });
 
@@ -823,63 +787,58 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       password: "StrongPassword123!",
       name: "Override User",
     });
-    const submitKey = await createApiKey(baseOverrideApp, user.cookie, {
+    const submitKey = await issueApiKeyRpc(baseOverrideApp, user.cookie, {
       name: "Override Key",
       canSubmit: true,
     });
 
+    const baseRpc = createRpcClients(baseOverrideApp, {
+      apiKey: submitKey.key,
+      headers: { "cf-connecting-ip": "203.0.113.70" },
+    });
+
     // Read limit override (2) + custom Retry-After (15)
     for (let i = 0; i < 2; i++) {
-      const res = await baseOverrideApp.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": submitKey.key, "cf-connecting-ip": "203.0.113.70" },
-        }),
-      );
-      expect(res.status).toBe(200);
+      expect(
+        (await baseRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+          .document,
+      ).toBeDefined();
     }
-    const readLimited = await baseOverrideApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": submitKey.key, "cf-connecting-ip": "203.0.113.70" },
-      }),
+    const readLimited = await expectRpcError(
+      baseRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }),
     );
     expect(readLimited.status).toBe(429);
-    expect(readLimited.headers.get("retry-after")).toBe("15");
-    expect(await readLimited.json()).toMatchObject({
-      error: "RATE_LIMITED",
+    expect(readLimited.connectError.metadata.get("retry-after")).toBe("15");
+    expect(readLimited).toMatchObject({
+      code: "RATE_LIMITED",
       scope: "api_key",
       retryAfterSeconds: 15,
     });
 
     // Submit base hourly limit override (2)
     const makeSubmit = (appInstance: ReturnType<typeof createApiApp>, nativeId: string) =>
-      appInstance.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:95479",
-            namespace: "tencent",
-            nativeId,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 12,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+      createRpcClients(appInstance, { apiKey: submitKey.key }).changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "tencent",
+        nativeId,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 12,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      );
+        ],
+      });
 
-    expect((await makeSubmit(baseOverrideApp, "ss50001")).status).toBe(201);
-    expect((await makeSubmit(baseOverrideApp, "ss50002")).status).toBe(201);
-    const thirdBlocked = await makeSubmit(baseOverrideApp, "ss50003");
+    expect((await makeSubmit(baseOverrideApp, "ss50001")).changeRequest).toBeDefined();
+    expect((await makeSubmit(baseOverrideApp, "ss50002")).changeRequest).toBeDefined();
+    const thirdBlocked = await expectRpcError(makeSubmit(baseOverrideApp, "ss50003"));
     expect(thirdBlocked.status).toBe(429);
-    expect(await thirdBlocked.json()).toMatchObject({
-      error: "SUBMISSION_RATE_LIMITED",
+    expect(thirdBlocked).toMatchObject({
+      code: "SUBMISSION_RATE_LIMITED",
       limit: 2,
       used: 2,
     });
@@ -908,12 +867,12 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
     });
 
     // User already has 2 submissions; custom tier at reputation 5 allows 4/hr -> 3rd & 4th succeed, 5th fails
-    expect((await makeSubmit(customTiersApp, "ss50003")).status).toBe(201);
-    expect((await makeSubmit(customTiersApp, "ss50004")).status).toBe(201);
-    const fifthBlocked = await makeSubmit(customTiersApp, "ss50005");
+    expect((await makeSubmit(customTiersApp, "ss50003")).changeRequest).toBeDefined();
+    expect((await makeSubmit(customTiersApp, "ss50004")).changeRequest).toBeDefined();
+    const fifthBlocked = await expectRpcError(makeSubmit(customTiersApp, "ss50005"));
     expect(fifthBlocked.status).toBe(429);
-    expect(await fifthBlocked.json()).toMatchObject({
-      error: "SUBMISSION_RATE_LIMITED",
+    expect(fifthBlocked).toMatchObject({
+      code: "SUBMISSION_RATE_LIMITED",
       limit: 4,
       used: 4,
     });
@@ -928,40 +887,35 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       props: {},
     } as unknown as ExecutionContext;
     const hyperdrive = { connectionString: testDb.connectionString } as Hyperdrive;
+    const workerEnv = {
+      HYPERDRIVE_READ: hyperdrive,
+      HYPERDRIVE_WRITE: hyperdrive,
+      AUTH_SECRET: TEST_AUTH_SECRET,
+      API_BASE_URL: TEST_BASE_URL,
+      RATE_LIMIT_REPUTATION_TIERS: JSON.stringify([
+        { minReputation: 0, maxPerHour: 2 },
+        { minReputation: 5, maxPerHour: 6 },
+      ]),
+    };
 
-    const workerSubmit = await worker.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "tencent",
-          nativeId: "mzc002000050005",
-          variantDescription: "原声",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 1,
-              episodeEnd: 12,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-            },
-          ],
+    const workerSubmit = await createRpcClients((req) => worker.fetch(req, workerEnv, ctx), {
+      apiKey: submitKey.key,
+    }).changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "tencent",
+      nativeId: "mzc002000050005",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-      {
-        HYPERDRIVE_READ: hyperdrive,
-        HYPERDRIVE_WRITE: hyperdrive,
-        AUTH_SECRET: TEST_AUTH_SECRET,
-        API_BASE_URL: TEST_BASE_URL,
-        RATE_LIMIT_REPUTATION_TIERS: JSON.stringify([
-          { minReputation: 0, maxPerHour: 2 },
-          { minReputation: 5, maxPerHour: 6 },
-        ]),
-      },
-      ctx,
-    );
+      ],
+    });
     await Promise.all(pending);
-    expect(workerSubmit.status).toBe(201);
+    expect(workerSubmit.changeRequest?.id).toBeTruthy();
   });
 });

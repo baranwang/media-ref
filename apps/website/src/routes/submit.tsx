@@ -995,7 +995,8 @@ function SubmitChangeRequestPage() {
                   </span>
                 ) : (
                   <span>
-                    提交将调用 <code>POST /v1/change-requests</code>，成功后立即跳转至变更单状态页。
+                    提交将调用 <code>ChangeRequestService.CreateChangeRequest</code>（ConnectRPC
+                    Protobuf），成功后立即跳转至变更单状态页。
                   </span>
                 )}
               </div>

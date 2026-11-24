@@ -46,10 +46,13 @@ import type {
 import { listLeadsForTarget, type Lead } from "./leads.ts";
 import { createChangeRequest, MediaServiceError } from "./media-service.ts";
 import {
+  combineAbortSignals,
   DEFAULT_AI_MODEL,
   DEFAULT_AI_PROVIDER,
+  raceWithAbortSignal,
   type ModelMessage,
   type ModelToolDefinition,
+  type OutboundClient,
 } from "./outbound.ts";
 
 export const EXPLORATION_AGENT_USER_ID = "system:exploration-agent";
@@ -545,325 +548,93 @@ async function exploreSinglePlatform(
   let lastTransientReason = "transient_error";
   let lastTransientRetryAfterMs: number | undefined;
 
-  for (let step = 0; step < config.maxSteps; step += 1) {
-    if (clockMs() >= deadlineMs) {
-      return {
-        namespace,
-        status: "transient_error",
-        reason: "exploration_time_budget_exceeded",
-      };
+  const isBudgetExceeded = (): boolean => clockMs() >= deadlineMs;
+
+  const createBudgetSignal = (): { signal: AbortSignal; dispose: () => void } => {
+    const controller = new AbortController();
+    const remainingMs = Math.max(0, deadlineMs - clockMs());
+    if (remainingMs <= 0) {
+      controller.abort(new Error("exploration_time_budget_exceeded"));
+      return { signal: controller.signal, dispose: () => {} };
     }
+    const timer = setTimeout(() => {
+      controller.abort(new Error("exploration_time_budget_exceeded"));
+    }, remainingMs);
+    return {
+      signal: controller.signal,
+      dispose: () => clearTimeout(timer),
+    };
+  };
 
-    let modelResponse;
-    try {
-      modelResponse = await ctx.outbound.invokeModel({
-        provider: config.provider,
-        model: config.model,
-        ...(config.gatewayId ? { gatewayId: config.gatewayId } : {}),
-        messages: [...messages],
-        tools: [...EXPLORATION_TOOLS],
-        temperature: config.temperature,
-        maxTokens: config.maxTokens,
-      });
-    } catch (error) {
-      return {
-        namespace,
-        status: "transient_error",
-        reason: error instanceof Error ? error.message : "model_invocation_failed",
-      };
-    }
+  const withBudgetOutbound = (signal: AbortSignal): OutboundClient => ({
+    fetchExternal: (request) =>
+      raceWithAbortSignal(
+        ctx.outbound.fetchExternal({
+          ...request,
+          signal: combineAbortSignals(signal, request.timeoutMs),
+        }),
+        signal,
+        "exploration_time_budget_exceeded",
+      ),
+    sendEmail: (message) => ctx.outbound.sendEmail(message),
+    invokeModel: (request) =>
+      raceWithAbortSignal(
+        ctx.outbound.invokeModel({
+          ...request,
+          signal: combineAbortSignals(signal, request.timeoutMs),
+        }),
+        signal,
+        "exploration_time_budget_exceeded",
+      ),
+  });
 
-    const assistantText = modelResponse.text ?? modelResponse.content ?? "";
-    const toolCalls = modelResponse.toolCalls ?? [];
+  const budget = createBudgetSignal();
+  const budgetedOutbound = withBudgetOutbound(budget.signal);
 
-    messages.push({
-      role: "assistant",
-      content: assistantText,
-      ...(toolCalls.length > 0 ? { toolCalls } : {}),
-    });
-
-    if (toolCalls.length === 0) {
-      if (hadTransientError) {
+  try {
+    for (let step = 0; step < config.maxSteps; step += 1) {
+      if (isBudgetExceeded() || budget.signal.aborted) {
         return {
           namespace,
           status: "transient_error",
-          reason: lastTransientReason,
-          ...(lastTransientRetryAfterMs !== undefined
-            ? { retryAfterMs: lastTransientRetryAfterMs }
-            : {}),
+          reason: "exploration_time_budget_exceeded",
         };
       }
-      if (searchSucceededCount > 0) {
+
+      let modelResponse;
+      try {
+        modelResponse = await budgetedOutbound.invokeModel({
+          provider: config.provider,
+          model: config.model,
+          ...(config.gatewayId ? { gatewayId: config.gatewayId } : {}),
+          messages: [...messages],
+          tools: [...EXPLORATION_TOOLS],
+          temperature: config.temperature,
+          maxTokens: config.maxTokens,
+        });
+      } catch (error) {
         return {
           namespace,
-          status: "not_found",
-          reason: assistantText.trim() || "model_finished_without_candidate",
+          status: "transient_error",
+          reason:
+            budget.signal.aborted || isBudgetExceeded()
+              ? "exploration_time_budget_exceeded"
+              : error instanceof Error
+                ? error.message
+                : "model_invocation_failed",
         };
       }
-      return {
-        namespace,
-        status: "transient_error",
-        reason: "model_stopped_without_searching",
-      };
-    }
 
-    for (const toolCall of toolCalls) {
-      const args = toolCall.arguments ?? {};
+      const assistantText = modelResponse.text ?? modelResponse.content ?? "";
+      const toolCalls = modelResponse.toolCalls ?? [];
 
-      if (toolCall.name === "search_platform") {
-        const keyword =
-          typeof args.keyword === "string" && args.keyword.trim().length > 0
-            ? args.keyword.trim()
-            : ctx.media.snapshot.title;
-        const page =
-          typeof args.page === "number" && Number.isInteger(args.page) && args.page > 0
-            ? args.page
-            : 1;
-        const limit =
-          typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit > 0
-            ? Math.min(args.limit, 20)
-            : 10;
+      messages.push({
+        role: "assistant",
+        content: assistantText,
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      });
 
-        const searchResult = await adapter.search(
-          {
-            title: keyword,
-            originalTitle: ctx.media.snapshot.originalTitle,
-            year: targetYear,
-            mediaType: ctx.media.type,
-            season: ctx.season,
-            page,
-            limit,
-          },
-          ctx.outbound,
-        );
-
-        if (searchResult.status === "transient_error") {
-          hadTransientError = true;
-          lastTransientReason = searchResult.reason;
-          if (searchResult.retryAfterMs !== undefined) {
-            lastTransientRetryAfterMs = searchResult.retryAfterMs;
-          }
-          messages.push({
-            role: "tool",
-            toolCallId: toolCall.id,
-            name: toolCall.name,
-            content: JSON.stringify({
-              status: "transient_error",
-              reason: searchResult.reason,
-            }),
-          });
-        } else {
-          searchSucceededCount += 1;
-          messages.push({
-            role: "tool",
-            toolCallId: toolCall.id,
-            name: toolCall.name,
-            content: JSON.stringify({
-              status: "ok",
-              candidates: searchResult.candidates,
-            }),
-          });
-        }
-        continue;
-      }
-
-      if (toolCall.name === "inspect_collection") {
-        const rawNativeId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
-        if (rawNativeId.length === 0) {
-          messages.push({
-            role: "tool",
-            toolCallId: toolCall.id,
-            name: toolCall.name,
-            content: JSON.stringify({
-              status: "error",
-              reason: "nativeId must be a non-empty string",
-            }),
-          });
-          continue;
-        }
-
-        let canonicalId: string;
-        try {
-          canonicalId = await adapter.canonicalize(rawNativeId, ctx.outbound);
-        } catch (error) {
-          if (error instanceof InvalidNativeIdError) {
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                status: "invalid_id",
-                reason: error.reason,
-              }),
-            });
-            continue;
-          }
-          if (error instanceof AdapterTransientError) {
-            hadTransientError = true;
-            lastTransientReason = error.reason;
-            if (error.retryAfterMs !== undefined) {
-              lastTransientRetryAfterMs = error.retryAfterMs;
-            }
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                status: "transient_error",
-                reason: error.reason,
-              }),
-            });
-            continue;
-          }
-          throw error;
-        }
-
-        const evidence = await adapter.fetchCollection(canonicalId, ctx.outbound);
-        if (evidence.status === "transient_error") {
-          hadTransientError = true;
-          lastTransientReason = evidence.reason;
-          if (evidence.retryAfterMs !== undefined) {
-            lastTransientRetryAfterMs = evidence.retryAfterMs;
-          }
-          messages.push({
-            role: "tool",
-            toolCallId: toolCall.id,
-            name: toolCall.name,
-            content: JSON.stringify({
-              status: "transient_error",
-              reason: evidence.reason,
-            }),
-          });
-          continue;
-        }
-
-        if (evidence.status === "not_found") {
-          messages.push({
-            role: "tool",
-            toolCallId: toolCall.id,
-            name: toolCall.name,
-            content: JSON.stringify({
-              status: "not_found",
-              canonicalId,
-              reason: evidence.reason ?? "collection_not_found",
-            }),
-          });
-          continue;
-        }
-
-        const info = evidence.info;
-        const eps = info.featureEpisodes;
-        const sampleEpisodes =
-          eps.length <= MAX_SAMPLE_EPISODES_HEAD + MAX_SAMPLE_EPISODES_TAIL
-            ? eps
-            : [...eps.slice(0, MAX_SAMPLE_EPISODES_HEAD), ...eps.slice(-MAX_SAMPLE_EPISODES_TAIL)];
-
-        messages.push({
-          role: "tool",
-          toolCallId: toolCall.id,
-          name: toolCall.name,
-          content: JSON.stringify({
-            status: "found",
-            info: {
-              namespace: info.namespace,
-              canonicalId: info.canonicalId,
-              title: info.title,
-              originalTitle: info.originalTitle ?? null,
-              aliases: info.aliases ?? [],
-              year: info.year,
-              mediaType: info.mediaType,
-              featureEpisodeCount: info.featureEpisodeCount,
-              sampleEpisodes,
-            },
-          }),
-        });
-        continue;
-      }
-
-      if (toolCall.name === "submit_candidate") {
-        const rawNativeId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
-        if (rawNativeId.length === 0) {
-          messages.push({
-            role: "tool",
-            toolCallId: toolCall.id,
-            name: toolCall.name,
-            content: JSON.stringify({
-              ok: false,
-              error: "INVALID_NATIVE_ID",
-              message: "nativeId must be a non-empty string",
-            }),
-          });
-          continue;
-        }
-
-        await ensureExplorationAgentUser(ctx.db);
-        const variant = await resolveAgentVariantSubmission(
-          ctx.db,
-          ctx.media.id,
-          namespace,
-          args.variantDescription,
-        );
-        const segments = parseSubmitSegments(args.segments, ctx.media, ctx.season);
-        const targetExternalKey = selectTargetExternalKeyForMedia(ctx.media);
-
-        try {
-          const changeRequest = await createChangeRequest(
-            ctx.db,
-            {
-              submitterUserId: EXPLORATION_AGENT_USER_ID,
-              submitterKeyId: null,
-              submitterType: "agent",
-              taskId,
-              targetExternalKey,
-              namespace,
-              nativeId: rawNativeId,
-              variantId: variant.variantId,
-              variantDescription: variant.variantDescription,
-              setDefaultVariant: variant.setDefaultVariant,
-              segments,
-              now: ctx.now,
-            },
-            {
-              adapterRegistry: ctx.adapterRegistry,
-              outbound: ctx.outbound,
-              now: ctx.now,
-            },
-          );
-
-          return {
-            namespace,
-            status: "submitted",
-            changeRequestId: changeRequest.id,
-            nativeId: changeRequest.nativeId,
-          };
-        } catch (error) {
-          if (error instanceof MediaServiceError) {
-            if (error.code === "PLATFORM_UPSTREAM_ERROR") {
-              hadTransientError = true;
-              lastTransientReason = error.message;
-            }
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                ok: false,
-                error: error.code,
-                message: error.message,
-              }),
-            });
-            continue;
-          }
-          throw error;
-        }
-      }
-
-      if (toolCall.name === "mark_not_found") {
-        const reason =
-          typeof args.reason === "string" && args.reason.trim().length > 0
-            ? args.reason.trim()
-            : "no_matching_collection";
-
+      if (toolCalls.length === 0) {
         if (hadTransientError) {
           return {
             namespace,
@@ -874,65 +645,403 @@ async function exploreSinglePlatform(
               : {}),
           };
         }
+        if (searchSucceededCount > 0) {
+          return {
+            namespace,
+            status: "not_found",
+            reason: assistantText.trim() || "model_finished_without_candidate",
+          };
+        }
+        return {
+          namespace,
+          status: "transient_error",
+          reason: "model_stopped_without_searching",
+        };
+      }
 
-        if (searchSucceededCount === 0) {
+      for (const toolCall of toolCalls) {
+        if (isBudgetExceeded() || budget.signal.aborted) {
+          return {
+            namespace,
+            status: "transient_error",
+            reason: "exploration_time_budget_exceeded",
+          };
+        }
+
+        const args = toolCall.arguments ?? {};
+
+        if (toolCall.name === "search_platform") {
+          const keyword =
+            typeof args.keyword === "string" && args.keyword.trim().length > 0
+              ? args.keyword.trim()
+              : ctx.media.snapshot.title;
+          const page =
+            typeof args.page === "number" && Number.isInteger(args.page) && args.page > 0
+              ? args.page
+              : 1;
+          const limit =
+            typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit > 0
+              ? Math.min(args.limit, 20)
+              : 10;
+
+          let searchResult;
+          try {
+            searchResult = await raceWithAbortSignal(
+              adapter.search(
+                {
+                  title: keyword,
+                  originalTitle: ctx.media.snapshot.originalTitle,
+                  year: targetYear,
+                  mediaType: ctx.media.type,
+                  season: ctx.season,
+                  page,
+                  limit,
+                },
+                budgetedOutbound,
+              ),
+              budget.signal,
+              "exploration_time_budget_exceeded",
+            );
+          } catch (error) {
+            if (budget.signal.aborted || isBudgetExceeded()) {
+              return {
+                namespace,
+                status: "transient_error",
+                reason: "exploration_time_budget_exceeded",
+              };
+            }
+            throw error;
+          }
+
+          if (searchResult.status === "transient_error") {
+            hadTransientError = true;
+            lastTransientReason = searchResult.reason;
+            if (searchResult.retryAfterMs !== undefined) {
+              lastTransientRetryAfterMs = searchResult.retryAfterMs;
+            }
+            messages.push({
+              role: "tool",
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              content: JSON.stringify({
+                status: "transient_error",
+                reason: searchResult.reason,
+              }),
+            });
+          } else {
+            searchSucceededCount += 1;
+            messages.push({
+              role: "tool",
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              content: JSON.stringify({
+                status: "ok",
+                candidates: searchResult.candidates,
+              }),
+            });
+          }
+          continue;
+        }
+
+        if (toolCall.name === "inspect_collection") {
+          const rawNativeId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
+          if (rawNativeId.length === 0) {
+            messages.push({
+              role: "tool",
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              content: JSON.stringify({
+                status: "error",
+                reason: "nativeId must be a non-empty string",
+              }),
+            });
+            continue;
+          }
+
+          let canonicalId: string;
+          try {
+            canonicalId = await raceWithAbortSignal(
+              adapter.canonicalize(rawNativeId, budgetedOutbound),
+              budget.signal,
+              "exploration_time_budget_exceeded",
+            );
+          } catch (error) {
+            if (budget.signal.aborted || isBudgetExceeded()) {
+              return {
+                namespace,
+                status: "transient_error",
+                reason: "exploration_time_budget_exceeded",
+              };
+            }
+            if (error instanceof InvalidNativeIdError) {
+              messages.push({
+                role: "tool",
+                toolCallId: toolCall.id,
+                name: toolCall.name,
+                content: JSON.stringify({
+                  status: "invalid_id",
+                  reason: error.reason,
+                }),
+              });
+              continue;
+            }
+            if (error instanceof AdapterTransientError) {
+              hadTransientError = true;
+              lastTransientReason = error.reason;
+              if (error.retryAfterMs !== undefined) {
+                lastTransientRetryAfterMs = error.retryAfterMs;
+              }
+              messages.push({
+                role: "tool",
+                toolCallId: toolCall.id,
+                name: toolCall.name,
+                content: JSON.stringify({
+                  status: "transient_error",
+                  reason: error.reason,
+                }),
+              });
+              continue;
+            }
+            throw error;
+          }
+
+          let evidence;
+          try {
+            evidence = await raceWithAbortSignal(
+              adapter.fetchCollection(canonicalId, budgetedOutbound),
+              budget.signal,
+              "exploration_time_budget_exceeded",
+            );
+          } catch (error) {
+            if (budget.signal.aborted || isBudgetExceeded()) {
+              return {
+                namespace,
+                status: "transient_error",
+                reason: "exploration_time_budget_exceeded",
+              };
+            }
+            throw error;
+          }
+          if (evidence.status === "transient_error") {
+            hadTransientError = true;
+            lastTransientReason = evidence.reason;
+            if (evidence.retryAfterMs !== undefined) {
+              lastTransientRetryAfterMs = evidence.retryAfterMs;
+            }
+            messages.push({
+              role: "tool",
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              content: JSON.stringify({
+                status: "transient_error",
+                reason: evidence.reason,
+              }),
+            });
+            continue;
+          }
+
+          if (evidence.status === "not_found") {
+            messages.push({
+              role: "tool",
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              content: JSON.stringify({
+                status: "not_found",
+                canonicalId,
+                reason: evidence.reason ?? "collection_not_found",
+              }),
+            });
+            continue;
+          }
+
+          const info = evidence.info;
+          const eps = info.featureEpisodes;
+          const sampleEpisodes =
+            eps.length <= MAX_SAMPLE_EPISODES_HEAD + MAX_SAMPLE_EPISODES_TAIL
+              ? eps
+              : [
+                  ...eps.slice(0, MAX_SAMPLE_EPISODES_HEAD),
+                  ...eps.slice(-MAX_SAMPLE_EPISODES_TAIL),
+                ];
+
           messages.push({
             role: "tool",
             toolCallId: toolCall.id,
             name: toolCall.name,
             content: JSON.stringify({
-              ok: false,
-              error: "SEARCH_REQUIRED_BEFORE_NOT_FOUND",
-              message: "Call search_platform at least once before marking not_found.",
+              status: "found",
+              info: {
+                namespace: info.namespace,
+                canonicalId: info.canonicalId,
+                title: info.title,
+                originalTitle: info.originalTitle ?? null,
+                aliases: info.aliases ?? [],
+                year: info.year,
+                mediaType: info.mediaType,
+                featureEpisodeCount: info.featureEpisodeCount,
+                sampleEpisodes,
+              },
             }),
           });
           continue;
         }
 
-        return {
-          namespace,
-          status: "not_found",
-          reason,
-        };
+        if (toolCall.name === "submit_candidate") {
+          const rawNativeId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
+          if (rawNativeId.length === 0) {
+            messages.push({
+              role: "tool",
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              content: JSON.stringify({
+                ok: false,
+                error: "INVALID_NATIVE_ID",
+                message: "nativeId must be a non-empty string",
+              }),
+            });
+            continue;
+          }
+
+          await ensureExplorationAgentUser(ctx.db);
+          const variant = await resolveAgentVariantSubmission(
+            ctx.db,
+            ctx.media.id,
+            namespace,
+            args.variantDescription,
+          );
+          const segments = parseSubmitSegments(args.segments, ctx.media, ctx.season);
+          const targetExternalKey = selectTargetExternalKeyForMedia(ctx.media);
+
+          try {
+            const changeRequest = await createChangeRequest(
+              ctx.db,
+              {
+                submitterUserId: EXPLORATION_AGENT_USER_ID,
+                submitterKeyId: null,
+                submitterType: "agent",
+                taskId,
+                targetExternalKey,
+                namespace,
+                nativeId: rawNativeId,
+                variantId: variant.variantId,
+                variantDescription: variant.variantDescription,
+                setDefaultVariant: variant.setDefaultVariant,
+                segments,
+                now: ctx.now,
+              },
+              {
+                adapterRegistry: ctx.adapterRegistry,
+                outbound: ctx.outbound,
+                now: ctx.now,
+              },
+            );
+
+            return {
+              namespace,
+              status: "submitted",
+              changeRequestId: changeRequest.id,
+              nativeId: changeRequest.nativeId,
+            };
+          } catch (error) {
+            if (error instanceof MediaServiceError) {
+              if (error.code === "PLATFORM_UPSTREAM_ERROR") {
+                hadTransientError = true;
+                lastTransientReason = error.message;
+              }
+              messages.push({
+                role: "tool",
+                toolCallId: toolCall.id,
+                name: toolCall.name,
+                content: JSON.stringify({
+                  ok: false,
+                  error: error.code,
+                  message: error.message,
+                }),
+              });
+              continue;
+            }
+            throw error;
+          }
+        }
+
+        if (toolCall.name === "mark_not_found") {
+          const reason =
+            typeof args.reason === "string" && args.reason.trim().length > 0
+              ? args.reason.trim()
+              : "no_matching_collection";
+
+          if (hadTransientError) {
+            return {
+              namespace,
+              status: "transient_error",
+              reason: lastTransientReason,
+              ...(lastTransientRetryAfterMs !== undefined
+                ? { retryAfterMs: lastTransientRetryAfterMs }
+                : {}),
+            };
+          }
+
+          if (searchSucceededCount === 0) {
+            messages.push({
+              role: "tool",
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              content: JSON.stringify({
+                ok: false,
+                error: "SEARCH_REQUIRED_BEFORE_NOT_FOUND",
+                message: "Call search_platform at least once before marking not_found.",
+              }),
+            });
+            continue;
+          }
+
+          return {
+            namespace,
+            status: "not_found",
+            reason,
+          };
+        }
+
+        messages.push({
+          role: "tool",
+          toolCallId: toolCall.id,
+          name: toolCall.name,
+          content: JSON.stringify({
+            ok: false,
+            error: "UNKNOWN_TOOL",
+            message: `Unknown tool "${toolCall.name}"`,
+          }),
+        });
       }
-
-      messages.push({
-        role: "tool",
-        toolCallId: toolCall.id,
-        name: toolCall.name,
-        content: JSON.stringify({
-          ok: false,
-          error: "UNKNOWN_TOOL",
-          message: `Unknown tool "${toolCall.name}"`,
-        }),
-      });
     }
-  }
 
-  if (hadTransientError) {
+    if (hadTransientError) {
+      return {
+        namespace,
+        status: "transient_error",
+        reason: lastTransientReason,
+        ...(lastTransientRetryAfterMs !== undefined
+          ? { retryAfterMs: lastTransientRetryAfterMs }
+          : {}),
+      };
+    }
+
+    if (searchSucceededCount > 0) {
+      return {
+        namespace,
+        status: "not_found",
+        reason: "max_steps_exhausted",
+      };
+    }
+
     return {
       namespace,
       status: "transient_error",
-      reason: lastTransientReason,
-      ...(lastTransientRetryAfterMs !== undefined
-        ? { retryAfterMs: lastTransientRetryAfterMs }
-        : {}),
+      reason: "max_steps_exhausted_without_search",
     };
+  } finally {
+    budget.dispose();
   }
-
-  if (searchSucceededCount > 0) {
-    return {
-      namespace,
-      status: "not_found",
-      reason: "max_steps_exhausted",
-    };
-  }
-
-  return {
-    namespace,
-    status: "transient_error",
-    reason: "max_steps_exhausted_without_search",
-  };
 }
 
 export function createExplorationAgentExecutor(

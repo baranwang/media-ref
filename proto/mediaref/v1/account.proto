@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package mediaref.v1;
+
+import "mediaref/v1/types.proto";
+
+message User {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  bool email_verified = 4;
+  string role = 5;
+}
+
+message ApiKeyPermissions {
+  repeated ApiKeyAction media = 1;
+}
+
+message ApiKeySummary {
+  string id = 1;
+  optional string name = 2;
+  optional string prefix = 3;
+  optional string start = 4;
+  bool enabled = 5;
+  ApiKeyPermissions permissions = 6;
+  bool can_submit = 7;
+  string created_at = 8;
+  optional string expires_at = 9;
+}
+
+message GetCurrentUserRequest {}
+
+message GetCurrentUserResponse {
+  User user = 1;
+}
+
+message GetCurrentApiKeyRequest {}
+
+message GetCurrentApiKeyResponse {
+  string key_id = 1;
+  string user_id = 2;
+  optional string name = 3;
+  optional string prefix = 4;
+  optional string start = 5;
+  ApiKeyPermissions permissions = 6;
+  bool can_submit = 7;
+  bool email_verified = 8;
+  string role = 9;
+  optional string expires_at = 10;
+}
+
+message CreateApiKeyRequest {
+  optional string name = 1;
+  optional bool can_submit = 2;
+  repeated ApiKeyScope scopes = 3;
+  optional int32 expires_in = 4;
+}
+
+message CreateApiKeyResponse {
+  ApiKeySummary api_key = 1;
+  string key = 2;
+}
+
+message ListApiKeysRequest {}
+
+message ListApiKeysResponse {
+  repeated ApiKeySummary api_keys = 1;
+  int32 total = 2;
+}
+
+message DeleteApiKeyRequest {
+  string id = 1;
+}
+
+message DeleteApiKeyResponse {
+  bool success = 1;
+  string id = 2;
+}
+
+service AccountService {
+  rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc GetCurrentApiKey(GetCurrentApiKeyRequest) returns (GetCurrentApiKeyResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse);
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc DeleteApiKey(DeleteApiKeyRequest) returns (DeleteApiKeyResponse);
+}

@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
+    ".": "./src/lib.ts",
+    "./worker": "./src/index.ts",
     "./app": "./src/app.ts"
   },
   "scripts": {
@@ -16,11 +17,12 @@
   },
   "dependencies": {
     "@better-auth/api-key": "1.7.27",
+    "@bufbuild/protobuf": "catalog:",
+    "@connectrpc/connect": "catalog:",
     "@media-ref/client": "workspace:*",
     "@media-ref/core": "workspace:*",
     "@media-ref/db": "workspace:*",
-    "better-auth": "1.7.27",
-    "hono": "^4.13.21"
+    "better-auth": "1.7.27"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",

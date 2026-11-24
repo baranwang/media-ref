@@ -52,6 +52,36 @@ export interface ExternalKey {
   nativeId: string;
 }
 
+export interface TmdbRef {
+  type: MediaType;
+  id: number;
+}
+
+export interface TvdbRef {
+  id: number;
+  type?: MediaType;
+}
+
+export interface TraktRef {
+  id: string;
+  type?: MediaType;
+}
+
+export interface PlatformRef {
+  platform: PlatformNamespace;
+  nativeId: string;
+}
+
+export type MediaRef =
+  | { mediaId: string }
+  | { tmdb: TmdbRef }
+  | { imdb: string }
+  | { tvdb: TvdbRef }
+  | { trakt: TraktRef }
+  | { douban: string }
+  | { bangumi: string }
+  | { platform: PlatformRef };
+
 export interface SeasonSnapshot {
   season: number;
   episodeCount: number;

@@ -1,9 +1,8 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { resolveEpisode } from "@media-ref/client";
 import {
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -11,8 +10,19 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoChangeRequestStatus,
+  getChangeRequestStateRpc,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-mgtv-evidence-integration-tests-0123456789abcdef";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -50,79 +60,20 @@ function makeMgtvEpisodeItem(
   };
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupVerifiedUserAndKeys(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ) {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Mgtv Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const submitKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Submit Key", canSubmit: true }),
-    }),
-  );
-  expect(submitKeyRes.status).toBe(201);
-  const submitKey = (await submitKeyRes.json()) as { id: string; key: string };
-
-  const readKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read Key", canSubmit: false }),
-    }),
-  );
-  expect(readKeyRes.status).toBe(201);
-  const readKey = (await readKeyRes.json()) as { id: string; key: string };
+  const { userId, cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Mgtv Tester",
+  });
+  const submitKey = await issueApiKeyRpc(app, cookie, { name: "Submit Key", canSubmit: true });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Read Key", canSubmit: false });
 
   return {
-    userId: signUpBody.user.id,
+    userId,
     cookie,
     submitKey: submitKey.key,
     readKey: readKey.key,
@@ -405,7 +356,7 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     }
   });
 
-  test("canonicalizes Mango TV URLs on submit, rejects invalid URLs, auto-approves via scheduled + queue, and serves via GET /v1/media/...", async () => {
+  test("canonicalizes Mango TV URLs on submit, rejects invalid URLs, auto-approves via scheduled + queue, and serves via MediaService.GetMedia", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -427,6 +378,7 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "mgtv-submitter@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // 1. Invalid Mango TV URLs / IDs are rejected with 400 INVALID_NATIVE_ID
     for (const badInput of [
@@ -435,29 +387,25 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
       "https://evil.example.com/h/510924.html",
       "mg510924",
     ]) {
-      const badRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:217492",
-            namespace: "mgtv",
-            nativeId: badInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 40,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
-          }),
+      const badErr = await expectRpcError(
+        submitRpc.changeRequest.createChangeRequest({
+          target: mediaRef({ tmdb: { type: "tv", id: 217492 } }),
+          namespace: "mgtv",
+          nativeId: badInput,
+          variantDescription: "原声",
+          segments: [
+            toProtoSegmentInput({
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: 40,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+            }),
+          ],
         }),
       );
-      expect(badRes.status).toBe(400);
-      expect(await badRes.json()).toMatchObject({ error: "INVALID_NATIVE_ID" });
+      expect(badErr.status).toBe(400);
+      expect(badErr.code).toBe("INVALID_NATIVE_ID");
     }
 
     // 2. Submit Mango TV /b/<id>/<vid>.html, /h/<id>.html, mobile URL, and bare ID -> canonical collection_id stored
@@ -469,40 +417,27 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     ];
     const submittedIds: string[] = [];
     for (const rawInput of urlVariants) {
-      const submitRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:217492",
-            namespace: "mgtv",
-            nativeId: rawInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 40,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+      const submitBody = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 217492 } }),
+        namespace: "mgtv",
+        nativeId: rawInput,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 40,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
+        ],
+      });
+      expect(fromProtoChangeRequestStatus(submitBody.changeRequest!.status)).toBe(
+        "pending_evidence",
       );
-      expect(submitRes.status).toBe(201);
-      const submitBody = (await submitRes.json()) as {
-        changeRequest: {
-          id: string;
-          status: string;
-          rawNativeId: string;
-          nativeId: string;
-        };
-      };
-      expect(submitBody.changeRequest.status).toBe("pending_evidence");
-      expect(submitBody.changeRequest.rawNativeId).toBe(rawInput);
-      expect(submitBody.changeRequest.nativeId).toBe("510924");
-      submittedIds.push(submitBody.changeRequest.id);
+      expect(submitBody.changeRequest!.rawNativeId).toBe(rawInput);
+      expect(submitBody.changeRequest!.nativeId).toBe("510924");
+      submittedIds.push(submitBody.changeRequest!.id);
     }
 
     // 3. Run Background Worker scheduled -> queue on the /b/<id>/<vid>.html submission
@@ -531,33 +466,16 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     expect(tracked[0]?.acked).toBe(true);
 
     // 4. Change request is auto-approved
-    const crRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests/${submittedIds[0]}`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(crRes.status).toBe(200);
-    const crBody = (await crRes.json()) as {
-      changeRequest: {
-        status: string;
-        nativeId: string;
-        reviewerUserId: string | null;
-        decisionReason: string | null;
-      };
-    };
-    expect(crBody.changeRequest.status).toBe("approved");
-    expect(crBody.changeRequest.nativeId).toBe("510924");
-    expect(crBody.changeRequest.reviewerUserId).toBeNull();
-    expect(crBody.changeRequest.decisionReason).toBe("evidence_gate_passed");
+    const crBody = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, submittedIds[0]!);
+    expect(crBody.status).toBe("approved");
+    expect(crBody.nativeId).toBe("510924");
+    expect(crBody.reviewerUserId).toBeNull();
+    expect(crBody.decisionReason).toBe("evidence_gate_passed");
 
-    // 5. Readable via GET /v1/media/tmdb:tv:217492 AND reverse lookup GET /v1/media/mgtv:510924
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:217492`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(mediaRes.status).toBe(200);
-    const mediaBody = (await mediaRes.json()) as { document: MediaDocument };
+    // 5. Readable via TMDB ref AND reverse lookup via Mango TV ref
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, {
+      tmdb: { type: "tv", id: 217492 },
+    });
     expect(mediaBody.document.associations).toHaveLength(1);
     expect(mediaBody.document.associations[0]).toMatchObject({
       namespace: "mgtv",
@@ -572,17 +490,10 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
       targetEpisode: 35,
     });
 
-    const reverseRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/mgtv:510924`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(reverseRes.status).toBe(200);
-    const reverseBody = (await reverseRes.json()) as {
-      items: Array<{ document: MediaDocument; matchedAssociationIds: string[] }>;
-    };
-    expect(reverseBody.items).toHaveLength(1);
-    expect(reverseBody.items[0]?.document.associations[0]?.nativeId).toBe("510924");
+    const reverseBody = await getMediaDocumentRpc(app, user.readKey, {
+      platform: { platform: "mgtv", nativeId: "510924" },
+    });
+    expect(reverseBody.document.associations[0]?.nativeId).toBe("510924");
   });
 
   test("routes submissions with missing release year or missing feature episode count to needs_review instead of auto-approving", async () => {
@@ -607,63 +518,59 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "mgtv-missing@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
+    const readRpc = createRpcClients(app, { apiKey: user.readKey });
 
     // 1. Missing releaseTime in video/info -> year: null -> needs_review (year_missing)
-    const missingYearRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:244890",
-          namespace: "mgtv",
-          nativeId: "https://www.mgtv.com/h/593455.html",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 40, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const missingYearCr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 244890 } }),
+      namespace: "mgtv",
+      nativeId: "https://www.mgtv.com/h/593455.html",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 40,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(missingYearRes.status).toBe(201);
-    const missingYearCr = (await missingYearRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
     // 2. Only preview items (isIntact === "3") -> featureEpisodeCount: null -> needs_review (episode_count_missing)
-    const missingEpsRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:244890",
-          namespace: "mgtv",
-          nativeId: "https://www.mgtv.com/b/593456/22020001.html",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 40, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const missingEpsCr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 244890 } }),
+      namespace: "mgtv",
+      nativeId: "https://www.mgtv.com/b/593456/22020001.html",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 40,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(missingEpsRes.status).toBe(201);
-    const missingEpsCr = (await missingEpsRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
     // 3. Collection not found on Mango TV -> needs_review (collection_not_found)
-    const notFoundRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:244890",
-          namespace: "mgtv",
-          nativeId: "999999999",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 40, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const notFoundCr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 244890 } }),
+      namespace: "mgtv",
+      nativeId: "999999999",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 40,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(notFoundRes.status).toBe(201);
-    const notFoundCr = (await notFoundRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -684,38 +591,37 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     const summary = await worker.queue(createQueueBatch(emitted, t0).batch);
     expect(summary.completed).toBe(3);
 
-    const inspectCr = async (id: string) => {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      );
-      expect(res.status).toBe(200);
-      return (await res.json()) as {
-        changeRequest: { status: string; conflictReason: string | null };
-      };
-    };
-
-    expect((await inspectCr(missingYearCr.changeRequest.id)).changeRequest).toMatchObject({
+    expect(
+      await getChangeRequestStateRpc(
+        app,
+        { apiKey: user.readKey },
+        missingYearCr.changeRequest!.id,
+      ),
+    ).toMatchObject({
       status: "needs_review",
       conflictReason: "year_missing",
     });
-    expect((await inspectCr(missingEpsCr.changeRequest.id)).changeRequest).toMatchObject({
+    expect(
+      await getChangeRequestStateRpc(app, { apiKey: user.readKey }, missingEpsCr.changeRequest!.id),
+    ).toMatchObject({
       status: "needs_review",
       conflictReason: "episode_count_missing",
     });
-    expect((await inspectCr(notFoundCr.changeRequest.id)).changeRequest).toMatchObject({
+    expect(
+      await getChangeRequestStateRpc(app, { apiKey: user.readKey }, notFoundCr.changeRequest!.id),
+    ).toMatchObject({
       status: "needs_review",
       conflictReason: "collection_not_found",
     });
 
     // None of them were auto-approved or exposed on default read API
-    const readRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:244890`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(readRes.status).toBe(404);
+    expect(
+      (
+        await expectRpcError(
+          readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 244890 } }) }),
+        )
+      ).status,
+    ).toBe(404);
   });
 
   test("retries transient Mango TV errors (403/503) while keeping change request in pending_evidence until recovery", async () => {
@@ -751,24 +657,23 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "mgtv-retry@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:217492",
-          namespace: "mgtv",
-          nativeId: "https://www.mgtv.com/b/510924/18030368.html",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 40, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const { changeRequest } = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 217492 } }),
+      namespace: "mgtv",
+      nativeId: "https://www.mgtv.com/b/510924/18030368.html",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 40,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(submitRes.status).toBe(201);
-    const { changeRequest } = (await submitRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -792,14 +697,9 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     const attempt1 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt1.rescheduled).toBe(1);
 
-    const statusAfter1 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(statusAfter1.changeRequest.status).toBe("pending_evidence");
+    expect(
+      (await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest!.id)).status,
+    ).toBe("pending_evidence");
 
     // Attempt 2: recovers -> auto-approved
     now = new Date(now.getTime() + 30_000);
@@ -808,13 +708,8 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
     const attempt2 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt2.completed).toBe(1);
 
-    const statusAfter2 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(statusAfter2.changeRequest.status).toBe("approved");
+    expect(
+      (await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest!.id)).status,
+    ).toBe("approved");
   });
 });

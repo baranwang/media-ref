@@ -1,12 +1,11 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { resolveEpisode, type SegmentInput } from "@media-ref/client";
 import {
   bilibiliAdapter,
   createAdapterRegistry,
   createFakeOutboundClient,
   createTier1Adapter,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -15,8 +14,19 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoChangeRequestStatus,
+  getChangeRequestStateRpc,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-evidence-check-integration-tests-0123456789abcdef";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -64,79 +74,20 @@ function makeBilibiliEpisodes(count: number, includeTrailers = true) {
   return episodes;
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupVerifiedUserAndKeys(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ) {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const submitKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Submit Key", canSubmit: true }),
-    }),
-  );
-  expect(submitKeyRes.status).toBe(201);
-  const submitKey = (await submitKeyRes.json()) as { id: string; key: string };
-
-  const readKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read Key", canSubmit: false }),
-    }),
-  );
-  expect(readKeyRes.status).toBe(201);
-  const readKey = (await readKeyRes.json()) as { id: string; key: string };
+  const { userId, cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Tester",
+  });
+  const submitKey = await issueApiKeyRpc(app, cookie, { name: "Submit Key", canSubmit: true });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Read Key", canSubmit: false });
 
   return {
-    userId: signUpBody.user.id,
+    userId,
     cookie,
     submitKey: submitKey.key,
     readKey: readKey.key,
@@ -344,6 +295,7 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "bili-submitter@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // 1. Invalid Bilibili URLs / IDs are rejected immediately with 400 INVALID_NATIVE_ID
     for (const badInput of [
@@ -352,29 +304,25 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
       "https://evil.example.com/bangumi/play/ss34430",
       "34430",
     ]) {
-      const badRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:95479",
-            namespace: "bilibili",
-            nativeId: badInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 24,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
-          }),
+      const badErr = await expectRpcError(
+        submitRpc.changeRequest.createChangeRequest({
+          target: mediaRef("tmdb:tv:95479"),
+          namespace: "bilibili",
+          nativeId: badInput,
+          variantDescription: "原声",
+          segments: [
+            toProtoSegmentInput({
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: 24,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+            }),
+          ],
         }),
       );
-      expect(badRes.status).toBe(400);
-      expect(await badRes.json()).toMatchObject({ error: "INVALID_NATIVE_ID" });
+      expect(badErr.status).toBe(400);
+      expect(badErr.code).toBe("INVALID_NATIVE_ID");
     }
 
     // 2. All valid Bilibili URL/ID forms canonicalize to ss34430 and enter pending_evidence
@@ -387,49 +335,33 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     ];
     const submittedIds: string[] = [];
     for (const rawInput of urlVariants) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:95479",
-            namespace: "bilibili",
-            nativeId: rawInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 24,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+      const res = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:tv:95479"),
+        namespace: "bilibili",
+        nativeId: rawInput,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 24,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      );
-      expect(res.status).toBe(201);
-      const body = (await res.json()) as {
-        changeRequest: {
-          id: string;
-          status: string;
-          rawNativeId: string;
-          nativeId: string;
-        };
-      };
-      expect(body.changeRequest.status).toBe("pending_evidence");
-      expect(body.changeRequest.rawNativeId).toBe(rawInput);
-      expect(body.changeRequest.nativeId).toBe("ss34430");
-      submittedIds.push(body.changeRequest.id);
+        ],
+      });
+      const cr = res.changeRequest!;
+      expect(fromProtoChangeRequestStatus(cr.status)).toBe("pending_evidence");
+      expect(cr.rawNativeId).toBe(rawInput);
+      expect(cr.nativeId).toBe("ss34430");
+      submittedIds.push(cr.id);
     }
 
     // Before background worker runs, media is NOT readable yet
-    const preRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": user.readKey },
-      }),
+    const preReadErr = await expectRpcError(
+      getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479"),
     );
-    expect(preRead.status).toBe(404);
+    expect(preReadErr.status).toBe(404);
 
     // 3. Run Background Worker scheduled -> queue on the first enqueued evidence_check job
     const emitted: JobQueueMessage[] = [];
@@ -458,33 +390,18 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     expect(tracked[0]?.acked).toBe(true);
 
     // 4. Change request is now auto-approved with recorded evidence and null reviewerUserId
-    const crStatusRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests/${submittedIds[0]}`, {
-        headers: { "x-api-key": user.readKey },
-      }),
+    const crStatusBody = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      submittedIds[0]!,
     );
-    expect(crStatusRes.status).toBe(200);
-    const crStatusBody = (await crStatusRes.json()) as {
-      changeRequest: {
-        status: string;
-        reviewerUserId: string | null;
-        decisionReason: string | null;
-        evidence: Record<string, unknown> | null;
-      };
-    };
-    expect(crStatusBody.changeRequest.status).toBe("approved");
-    expect(crStatusBody.changeRequest.reviewerUserId).toBeNull();
-    expect(crStatusBody.changeRequest.decisionReason).toBe("evidence_gate_passed");
-    expect(crStatusBody.changeRequest.evidence).toBeTruthy();
+    expect(crStatusBody.status).toBe("approved");
+    expect(crStatusBody.reviewerUserId).toBeNull();
+    expect(crStatusBody.decisionReason).toBe("evidence_gate_passed");
+    expect(crStatusBody.evidence).toBeTruthy();
 
-    // 5. Media document is now readable via GET /v1/media/tmdb:tv:95479 and usable with resolveEpisode
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(mediaRes.status).toBe(200);
-    const mediaBody = (await mediaRes.json()) as { document: MediaDocument };
+    // 5. Media document is now readable via MediaService.GetMedia and usable with resolveEpisode
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
     expect(mediaBody.document.associations).toHaveLength(1);
     expect(mediaBody.document.associations[0]).toMatchObject({
       namespace: "bilibili",
@@ -521,45 +438,60 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "conflict-tester@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    // Submit conflicting year collection (ss77777) AND try to sneak extra submitted externalIds (must be ignored!)
-    const conflictSubmitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
+    // Strict Protobuf JSON rejects extra unknown fields like externalIds
+    const unknownFieldRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/mediaref.v1.ChangeRequestService/CreateChangeRequest`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": user.submitKey },
         body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
+          target: { tmdb: { type: "MEDIA_TYPE_TV", id: 95479 } },
           namespace: "bilibili",
           nativeId: "ss77777",
           variantDescription: "原声",
           externalIds: { imdb: "tt12343534" },
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+          segments: [],
         }),
       }),
     );
-    expect(conflictSubmitRes.status).toBe(201);
-    const conflictCr = (await conflictSubmitRes.json()) as { changeRequest: { id: string } };
+    expect(unknownFieldRes.status).toBe(400);
+
+    // Submit conflicting year collection (ss77777)
+    const conflictSubmitRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss77777",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    });
+    const conflictCr = conflictSubmitRes.changeRequest!;
 
     // Submit non-existent Bilibili collection (ss404404 -> code -404)
-    const missingSubmitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss404404",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const missingSubmitRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss404404",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(missingSubmitRes.status).toBe(201);
-    const missingCr = (await missingSubmitRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const missingCr = missingSubmitRes.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -581,49 +513,28 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     expect(summary.completed).toBe(2);
 
     // Inspect both change requests
-    const conflictInspect = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${conflictCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as {
-      changeRequest: {
-        status: string;
-        conflictReason: string | null;
-        decisionReason: string | null;
-        evidence: Record<string, unknown> | null;
-      };
-    };
-    expect(conflictInspect.changeRequest.status).toBe("needs_review");
-    expect(conflictInspect.changeRequest.conflictReason).toBe("year_mismatch");
-    expect(conflictInspect.changeRequest.decisionReason).toBeTruthy();
-    expect(conflictInspect.changeRequest.evidence).toBeTruthy();
+    const conflictInspect = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      conflictCr.id,
+    );
+    expect(conflictInspect.status).toBe("needs_review");
+    expect(conflictInspect.conflictReason).toBe("year_mismatch");
+    expect(conflictInspect.decisionReason).toBeTruthy();
+    expect(conflictInspect.evidence).toBeTruthy();
 
-    const missingInspect = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${missingCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as {
-      changeRequest: {
-        status: string;
-        conflictReason: string | null;
-        evidence: Record<string, unknown> | null;
-      };
-    };
-    expect(missingInspect.changeRequest.status).toBe("needs_review");
-    expect(missingInspect.changeRequest.conflictReason).toBe("collection_not_found");
-    expect(missingInspect.changeRequest.evidence).toBeTruthy();
+    const missingInspect = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      missingCr.id,
+    );
+    expect(missingInspect.status).toBe("needs_review");
+    expect(missingInspect.conflictReason).toBe("collection_not_found");
+    expect(missingInspect.evidence).toBeTruthy();
 
     // Neither conflicting nor missing CR appears in default read API
-    const readRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(readRes.status).toBe(404);
+    const readErr = await expectRpcError(getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479"));
+    expect(readErr.status).toBe(404);
   });
 
   test("retries transient platform and TMDB errors while keeping change request in pending_evidence until recovery", async () => {
@@ -667,24 +578,24 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "retry-tester@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:108545",
-          namespace: "bilibili",
-          nativeId: "ss43123",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 30, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const submitRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:108545"),
+      namespace: "bilibili",
+      nativeId: "ss43123",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 30,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(submitRes.status).toBe(201);
-    const { changeRequest } = (await submitRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const changeRequest = submitRes.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -708,14 +619,12 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     const attempt1 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt1.rescheduled).toBe(1);
 
-    const afterAttempt1 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(afterAttempt1.changeRequest.status).toBe("pending_evidence");
+    const afterAttempt1 = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      changeRequest.id,
+    );
+    expect(afterAttempt1.status).toBe("pending_evidence");
 
     // Attempt 2 after 30s backoff: second upstream fails transiently -> rescheduled, STILL pending_evidence
     now = new Date(now.getTime() + 30_000);
@@ -724,14 +633,12 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     const attempt2 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt2.rescheduled).toBe(1);
 
-    const afterAttempt2 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(afterAttempt2.changeRequest.status).toBe("pending_evidence");
+    const afterAttempt2 = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      changeRequest.id,
+    );
+    expect(afterAttempt2.status).toBe("pending_evidence");
 
     // Attempt 3 after 30s backoff: both upstream services recover -> auto-approved!
     now = new Date(now.getTime() + 30_000);
@@ -740,22 +647,14 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     const attempt3 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt3.completed).toBe(1);
 
-    const afterAttempt3 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(afterAttempt3.changeRequest.status).toBe("approved");
-
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:108545`, {
-        headers: { "x-api-key": user.readKey },
-      }),
+    const afterAttempt3 = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      changeRequest.id,
     );
-    expect(mediaRes.status).toBe(200);
-    const mediaBody = (await mediaRes.json()) as { document: MediaDocument };
+    expect(afterAttempt3.status).toBe("approved");
+
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:108545");
     expect(mediaBody.document.associations[0]?.nativeId).toBe("ss43123");
   });
 
@@ -802,53 +701,34 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "tier1-tester@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // Invalid Youku URL is still rejected by Tier 1 canonicalization
-    const badRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:550",
-          namespace: "youku",
-          nativeId: "https://example.com/not-youku",
-          variantDescription: "原声",
-          segments: [],
-        }),
+    const badErr = await expectRpcError(
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:movie:550"),
+        namespace: "youku",
+        nativeId: "https://example.com/not-youku",
+        variantDescription: "原声",
+        segments: [],
       }),
     );
-    expect(badRes.status).toBe(400);
-    expect(await badRes.json()).toMatchObject({ error: "INVALID_NATIVE_ID" });
+    expect(badErr.status).toBe(400);
+    expect(badErr.code).toBe("INVALID_NATIVE_ID");
 
     // Valid Youku URL canonicalizes AND goes straight to needs_review (no evidence_check job!)
-    const okRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:550",
-          namespace: "youku",
-          nativeId: "https://list.youku.com/show/id_zcc001f06962411de83b1.html",
-          variantDescription: "原声",
-          segments: [],
-        }),
-      }),
-    );
-    expect(okRes.status).toBe(201);
-    const okBody = (await okRes.json()) as {
-      changeRequest: {
-        status: string;
-        nativeId: string;
-        rawNativeId: string;
-        decisionReason: string | null;
-      };
-    };
-    expect(okBody.changeRequest.status).toBe("needs_review");
-    expect(okBody.changeRequest.nativeId).toBe("cc001f06962411de83b1");
-    expect(okBody.changeRequest.rawNativeId).toBe(
-      "https://list.youku.com/show/id_zcc001f06962411de83b1.html",
-    );
-    expect(okBody.changeRequest.decisionReason).toBe("adapter_tier_1_manual_review");
+    const okRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:movie:550"),
+      namespace: "youku",
+      nativeId: "https://list.youku.com/show/id_zcc001f06962411de83b1.html",
+      variantDescription: "原声",
+      segments: [],
+    });
+    const okCr = okRes.changeRequest!;
+    expect(fromProtoChangeRequestStatus(okCr.status)).toBe("needs_review");
+    expect(okCr.nativeId).toBe("cc001f06962411de83b1");
+    expect(okCr.rawNativeId).toBe("https://list.youku.com/show/id_zcc001f06962411de83b1.html");
+    expect(okCr.decisionReason).toBe("adapter_tier_1_manual_review");
 
     // Background worker finds zero jobs to claim
     const emitted: JobQueueMessage[] = [];
@@ -939,36 +819,23 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "shared-id@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const passRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bangumi",
-          nativeId: "294993",
-          segments: [{ season: 1, baseline: "tmdb" }],
-        }),
-      }),
-    );
-    expect(passRes.status).toBe(201);
-    const passCr = (await passRes.json()) as { changeRequest: { id: string } };
+    const passRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bangumi",
+      nativeId: "294993",
+      segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
+    });
+    const passCr = passRes.changeRequest!;
 
-    const conflictRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bangumi",
-          nativeId: "999999",
-          segments: [{ season: 2, baseline: "tmdb" }],
-        }),
-      }),
-    );
-    expect(conflictRes.status).toBe(201);
-    const conflictCr = (await conflictRes.json()) as { changeRequest: { id: string } };
+    const conflictRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bangumi",
+      nativeId: "999999",
+      segments: [toProtoSegmentInput({ season: 2, baseline: "tmdb" })],
+    });
+    const conflictCr = conflictRes.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -988,24 +855,16 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     expect(emitted).toHaveLength(2);
     await worker.queue(createQueueBatch(emitted, t0).batch);
 
-    const passState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${passCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(passState.changeRequest.status).toBe("approved");
+    const passState = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, passCr.id);
+    expect(passState.status).toBe("approved");
 
-    const conflictState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${conflictCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
-    expect(conflictState.changeRequest.status).toBe("needs_review");
-    expect(conflictState.changeRequest.conflictReason).toBe("shared_id_conflict");
+    const conflictState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      conflictCr.id,
+    );
+    expect(conflictState.status).toBe("needs_review");
+    expect(conflictState.conflictReason).toBe("shared_id_conflict");
   });
 
   test("enforces lease generation fencing on evidence_check and routes concurrent segment overlap at auto-approval to needs_review", async () => {
@@ -1049,43 +908,42 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "fence-overlap@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // Submit two overlapping Bilibili CRs in the same variant while media is uncreated
-    const cr1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const cr1Res = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(cr1Res.status).toBe(201);
-    const cr1 = (await cr1Res.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const cr1 = cr1Res.changeRequest!;
 
-    const cr2Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34431",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const cr2Res = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34431",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(cr2Res.status).toBe(201);
-    const cr2 = (await cr2Res.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const cr2 = cr2Res.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -1118,49 +976,26 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     // Stale generation 1 delivery is discarded without approving either CR
     const staleSummary = await worker.queue(createQueueBatch(gen1Messages, now).batch);
     expect(staleSummary.discarded).toBe(2);
-    expect(
-      (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-            headers: { "x-api-key": user.readKey },
-          }),
-        )
-      ).status,
-    ).toBe(404);
+    const staleReadErr = await expectRpcError(
+      getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479"),
+    );
+    expect(staleReadErr.status).toBe(404);
 
     // Generation 2 processes CR #1 then CR #2: CR #1 auto-approves, CR #2 hits segment overlap -> needs_review
-    const cr1Msg = gen2Messages.find((m) => m.payload.changeRequestId === cr1.changeRequest.id)!;
-    const cr2Msg = gen2Messages.find((m) => m.payload.changeRequestId === cr2.changeRequest.id)!;
+    const cr1Msg = gen2Messages.find((m) => m.payload.changeRequestId === cr1.id)!;
+    const cr2Msg = gen2Messages.find((m) => m.payload.changeRequestId === cr2.id)!;
     const freshSummary = await worker.queue(createQueueBatch([cr1Msg, cr2Msg], now).batch);
     expect(freshSummary.completed).toBe(2);
 
-    const cr1State = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${cr1.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(cr1State.changeRequest.status).toBe("approved");
+    const cr1State = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, cr1.id);
+    expect(cr1State.status).toBe("approved");
 
-    const cr2State = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${cr2.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
-    expect(cr2State.changeRequest.status).toBe("needs_review");
-    expect(cr2State.changeRequest.conflictReason).toBe("segment_overlap");
+    const cr2State = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, cr2.id);
+    expect(cr2State.status).toBe("needs_review");
+    expect(cr2State.conflictReason).toBe("segment_overlap");
 
     // Only one association exists in the confirmed MediaDocument
-    const mediaBody = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
     expect(mediaBody.document.associations).toHaveLength(1);
     expect(mediaBody.document.associations[0]?.nativeId).toBe("ss34430");
   });
@@ -1447,17 +1282,25 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "step2-reject@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitCr = async (body: Record<string, unknown>) => {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify(body),
-        }),
-      );
-      expect(res.status).toBe(201);
-      return ((await res.json()) as { changeRequest: { id: string } }).changeRequest.id;
+    const submitCr = async (body: {
+      targetExternalKey: string;
+      namespace: string;
+      nativeId: string;
+      variantDescription?: string;
+      segments: SegmentInput[];
+    }) => {
+      const res = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef(body.targetExternalKey),
+        namespace: body.namespace,
+        nativeId: body.nativeId,
+        ...(body.variantDescription !== undefined
+          ? { variantDescription: body.variantDescription }
+          : {}),
+        segments: body.segments.map(toProtoSegmentInput),
+      });
+      return res.changeRequest!.id;
     };
 
     // 1. Wrong season: S2 collection (2023, 23 eps) submitted as S1
@@ -1513,42 +1356,29 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(3);
 
     const inspectCr = async (id: string) => {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      );
-      expect(res.status).toBe(200);
-      return (await res.json()) as {
-        changeRequest: {
-          status: string;
-          conflictReason: string | null;
-          evidence: { gate?: { step1?: { decision: string }; step2?: { decision: string } } };
-        };
+      const cr = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, id);
+      return cr as typeof cr & {
+        evidence: { gate?: { step1?: { decision: string }; step2?: { decision: string } } };
       };
     };
 
     const wrongSeason = await inspectCr(wrongSeasonId);
-    expect(wrongSeason.changeRequest.status).toBe("needs_review");
-    expect(wrongSeason.changeRequest.conflictReason).toBe("segment_year_mismatch");
-    expect(wrongSeason.changeRequest.evidence.gate?.step1?.decision).toBe("pass");
-    expect(wrongSeason.changeRequest.evidence.gate?.step2?.decision).toBe("needs_review");
+    expect(wrongSeason.status).toBe("needs_review");
+    expect(wrongSeason.conflictReason).toBe("segment_year_mismatch");
+    expect(wrongSeason.evidence.gate?.step1?.decision).toBe("pass");
+    expect(wrongSeason.evidence.gate?.step2?.decision).toBe("needs_review");
 
     const wrongOffset = await inspectCr(wrongOffsetId);
-    expect(wrongOffset.changeRequest.status).toBe("needs_review");
-    expect(wrongOffset.changeRequest.conflictReason).toBe("target_episode_start_mismatch");
+    expect(wrongOffset.status).toBe("needs_review");
+    expect(wrongOffset.conflictReason).toBe("target_episode_start_mismatch");
 
     const wrongCount = await inspectCr(wrongCountId);
-    expect(wrongCount.changeRequest.status).toBe("needs_review");
-    expect(wrongCount.changeRequest.conflictReason).toBe("segment_episode_count_mismatch");
+    expect(wrongCount.status).toBe("needs_review");
+    expect(wrongCount.conflictReason).toBe("segment_episode_count_mismatch");
 
     // None of the rejected submissions appear in the default read API
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(mediaRes.status).toBe(404);
+    const mediaErr = await expectRpcError(getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479"));
+    expect(mediaErr.status).toBe(404);
   });
 
   test("auto-approves open-ended ongoing seasons (episodeEnd: null) and routes over-limit counts to needs_review", async () => {
@@ -1569,56 +1399,43 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "step2-ongoing@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // 10 aired episodes <= 24 season episodes with episodeEnd: null -> auto-approve
-    const okRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:200100",
-          namespace: "bilibili",
-          nativeId: "ss80100",
-          variantDescription: "原声",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 1,
-              episodeEnd: null,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-            },
-          ],
+    const okRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:200100"),
+      namespace: "bilibili",
+      nativeId: "ss80100",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(okRes.status).toBe(201);
-    const okCr = (await okRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const okCr = okRes.changeRequest!;
 
     // 26 episodes > 24 season episodes -> needs_review
-    const overRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:200100",
-          namespace: "bilibili",
-          nativeId: "ss80101",
-          variantDescription: "备用",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 1,
-              episodeEnd: null,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-            },
-          ],
+    const overRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:200100"),
+      namespace: "bilibili",
+      nativeId: "ss80101",
+      variantDescription: "备用",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(overRes.status).toBe(201);
-    const overCr = (await overRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const overCr = overRes.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -1639,31 +1456,13 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(2);
 
-    const okState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${okCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(okState.changeRequest.status).toBe("approved");
+    const okState = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, okCr.id);
+    expect(okState.status).toBe("approved");
 
-    const overState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${overCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(overState.changeRequest.status).toBe("needs_review");
+    const overState = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, overCr.id);
+    expect(overState.status).toBe("needs_review");
 
-    const mediaBody = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:200100`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:200100");
     expect(
       resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 1, episode: 10 }),
     ).toMatchObject({ kind: "mapped", nativeId: "ss80100", targetEpisode: 10 });
@@ -1687,73 +1486,59 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "step2-split@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const part1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95480",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const part1Res = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95480"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(part1Res.status).toBe(201);
-    const part1Cr = (await part1Res.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const part1Cr = part1Res.changeRequest!;
 
-    const part2Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95480",
-          namespace: "bilibili",
-          nativeId: "ss45574",
-          variantDescription: "原声",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 25,
-              episodeEnd: 47,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-            },
-          ],
+    const part2Res = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95480"),
+      namespace: "bilibili",
+      nativeId: "ss45574",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 25,
+          episodeEnd: 47,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(part2Res.status).toBe(201);
-    const part2Cr = (await part2Res.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const part2Cr = part2Res.changeRequest!;
 
     // Wrong targetEpisodeStart (25 instead of 1) on part 2 -> needs_review
-    const badOffsetRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95480",
-          namespace: "bilibili",
-          nativeId: "ss45575",
-          variantDescription: "错偏移变体",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 25,
-              episodeEnd: 47,
-              targetEpisodeStart: 25,
-              baseline: "tmdb",
-            },
-          ],
+    const badOffsetRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95480"),
+      namespace: "bilibili",
+      nativeId: "ss45575",
+      variantDescription: "错偏移变体",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 25,
+          episodeEnd: 47,
+          targetEpisodeStart: 25,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(badOffsetRes.status).toBe(201);
-    const badOffsetCr = (await badOffsetRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const badOffsetCr = badOffsetRes.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -1774,29 +1559,18 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(3);
 
-    const checkStatus = async (id: string) =>
-      (await (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
-            headers: { "x-api-key": user.readKey },
-          }),
-        )
-      ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
+    expect((await getChangeRequestStateRpc(app, { apiKey: user.readKey }, part1Cr.id)).status).toBe(
+      "approved",
+    );
+    expect((await getChangeRequestStateRpc(app, { apiKey: user.readKey }, part2Cr.id)).status).toBe(
+      "approved",
+    );
 
-    expect((await checkStatus(part1Cr.changeRequest.id)).changeRequest.status).toBe("approved");
-    expect((await checkStatus(part2Cr.changeRequest.id)).changeRequest.status).toBe("approved");
+    const badOffset = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, badOffsetCr.id);
+    expect(badOffset.status).toBe("needs_review");
+    expect(badOffset.conflictReason).toBe("target_episode_start_mismatch");
 
-    const badOffset = await checkStatus(badOffsetCr.changeRequest.id);
-    expect(badOffset.changeRequest.status).toBe("needs_review");
-    expect(badOffset.changeRequest.conflictReason).toBe("target_episode_start_mismatch");
-
-    const mediaBody = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95480`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95480");
     expect(mediaBody.document.associations).toHaveLength(2);
     expect(
       resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 1, episode: 5 }),
@@ -1824,17 +1598,25 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "step2-merged@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitCr = async (body: Record<string, unknown>) => {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify(body),
-        }),
-      );
-      expect(res.status).toBe(201);
-      return ((await res.json()) as { changeRequest: { id: string } }).changeRequest.id;
+    const submitCr = async (body: {
+      targetExternalKey: string;
+      namespace: string;
+      nativeId: string;
+      variantDescription?: string;
+      segments: SegmentInput[];
+    }) => {
+      const res = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef(body.targetExternalKey),
+        namespace: body.namespace,
+        nativeId: body.nativeId,
+        ...(body.variantDescription !== undefined
+          ? { variantDescription: body.variantDescription }
+          : {}),
+        segments: body.segments.map(toProtoSegmentInput),
+      });
+      return res.changeRequest!.id;
     };
 
     // Valid merged 2-season collection (year 2022 = S1 premiere year, 12 + 12 = 24 eps)
@@ -1892,32 +1674,21 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(3);
 
-    const readCr = async (id: string) =>
-      (await (
-        await app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/change-requests/${id}`, {
-            headers: { "x-api-key": user.readKey },
-          }),
-        )
-      ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
-
-    expect((await readCr(validId)).changeRequest.status).toBe("approved");
-    expect((await readCr(badYearId)).changeRequest).toMatchObject({
+    expect((await getChangeRequestStateRpc(app, { apiKey: user.readKey }, validId)).status).toBe(
+      "approved",
+    );
+    expect(await getChangeRequestStateRpc(app, { apiKey: user.readKey }, badYearId)).toMatchObject({
       status: "needs_review",
       conflictReason: "segment_year_mismatch",
     });
-    expect((await readCr(badSecondOffsetId)).changeRequest).toMatchObject({
+    expect(
+      await getChangeRequestStateRpc(app, { apiKey: user.readKey }, badSecondOffsetId),
+    ).toMatchObject({
       status: "needs_review",
       conflictReason: "target_episode_start_mismatch",
     });
 
-    const mediaBody = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:200200`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:200200");
     expect(
       resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 2, episode: 3 }),
     ).toMatchObject({ kind: "mapped", nativeId: "ss80200", targetEpisode: 15 });
@@ -1941,22 +1712,16 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "step2-movie@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:550",
-          namespace: "bilibili",
-          nativeId: "ss28281",
-          variantDescription: "原声",
-          segments: [],
-        }),
-      }),
-    );
-    expect(submitRes.status).toBe(201);
-    const { changeRequest } = (await submitRes.json()) as { changeRequest: { id: string } };
+    const submitRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:movie:550"),
+      namespace: "bilibili",
+      nativeId: "ss28281",
+      variantDescription: "原声",
+      segments: [],
+    });
+    const changeRequest = submitRes.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -1977,31 +1742,21 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
 
-    const crBody = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as {
-      changeRequest: {
-        status: string;
-        evidence: { gate?: { step2?: { decision: string; skipped?: boolean } } };
-      };
+    const crBody = (await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      changeRequest.id,
+    )) as {
+      status: string;
+      evidence: { gate?: { step2?: { decision: string; skipped?: boolean } } } | null;
     };
-    expect(crBody.changeRequest.status).toBe("approved");
-    expect(crBody.changeRequest.evidence.gate?.step2).toMatchObject({
+    expect(crBody.status).toBe("approved");
+    expect(crBody.evidence?.gate?.step2).toMatchObject({
       decision: "pass",
       skipped: true,
     });
 
-    const mediaBody = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:550`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:movie:550");
     expect(mediaBody.document.media.type).toBe("movie");
     expect(mediaBody.document.associations).toHaveLength(1);
     expect(mediaBody.document.associations[0]?.nativeId).toBe("ss28281");
@@ -2025,58 +1780,45 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "step2-nonlinear@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // 30 feature eps vs TMDB 12 eps, matching S1 year 2023 + nonLinear: true -> auto-approves!
-    const okRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:200300",
-          namespace: "bilibili",
-          nativeId: "ss80300",
-          variantDescription: "原声",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 1,
-              episodeEnd: null,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-              nonLinear: true,
-            },
-          ],
+    const okRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:200300"),
+      namespace: "bilibili",
+      nativeId: "ss80300",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: true,
         }),
-      }),
-    );
-    expect(okRes.status).toBe(201);
-    const okCr = (await okRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const okCr = okRes.changeRequest!;
 
     // Wrong year (2024 collection submitted for S1 2023) with nonLinear: true -> needs_review!
-    const badYearRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:200300",
-          namespace: "bilibili",
-          nativeId: "ss80301",
-          variantDescription: "错年份变体",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 1,
-              episodeEnd: null,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-              nonLinear: true,
-            },
-          ],
+    const badYearRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:200300"),
+      namespace: "bilibili",
+      nativeId: "ss80301",
+      variantDescription: "错年份变体",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: true,
         }),
-      }),
-    );
-    expect(badYearRes.status).toBe(201);
-    const badYearCr = (await badYearRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const badYearCr = badYearRes.changeRequest!;
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -2097,32 +1839,18 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(2);
 
-    const okState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${okCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(okState.changeRequest.status).toBe("approved");
+    const okState = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, okCr.id);
+    expect(okState.status).toBe("approved");
 
-    const badYearState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${badYearCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
-    expect(badYearState.changeRequest.status).toBe("needs_review");
-    expect(badYearState.changeRequest.conflictReason).toBe("segment_year_mismatch");
+    const badYearState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      badYearCr.id,
+    );
+    expect(badYearState.status).toBe("needs_review");
+    expect(badYearState.conflictReason).toBe("segment_year_mismatch");
 
-    const mediaBody = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:200300`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:200300");
     expect(
       resolveEpisode(mediaBody.document, { namespace: "bilibili", season: 1, episode: 4 }),
     ).toMatchObject({ kind: "collection_only", reason: "non_linear", nativeId: "ss80300" });
@@ -2146,6 +1874,7 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       },
     });
     const user = await setupVerifiedUserAndKeys(app, outbound, "step2-variant@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -2165,198 +1894,169 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
     });
 
     // 1. Brand-new non-original variant ("中配") explicitly marked setDefaultVariant: true -> needs_review
-    const dubDefaultRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34432",
-          variantDescription: "中配",
-          setDefaultVariant: true,
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const dubDefaultRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34432",
+      variantDescription: "中配",
+      setDefaultVariant: true,
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(dubDefaultRes.status).toBe(201);
-    const dubDefaultCr = (await dubDefaultRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const dubDefaultCr = dubDefaultRes.changeRequest!;
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
-    const dubDefaultState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${dubDefaultCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
-    expect(dubDefaultState.changeRequest).toMatchObject({
+    const dubDefaultState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      dubDefaultCr.id,
+    );
+    expect(dubDefaultState).toMatchObject({
       status: "needs_review",
       conflictReason: "non_original_default_variant",
     });
 
     // 2. Neutral first variant ("标准版") auto-approves and becomes default
-    const neutralRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "标准版",
-          setDefaultVariant: false,
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const neutralRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "标准版",
+      setDefaultVariant: false,
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(neutralRes.status).toBe(201);
-    const neutralCr = (await neutralRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const neutralCr = neutralRes.changeRequest!;
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
-    const neutralState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${neutralCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(neutralState.changeRequest.status).toBe("approved");
+    const neutralState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      neutralCr.id,
+    );
+    expect(neutralState.status).toBe("approved");
 
     // 3. Adding "中配" with setDefaultVariant: false auto-approves as non-default
-    const dubNonDefaultRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34432",
-          variantDescription: "中配",
-          setDefaultVariant: false,
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const dubNonDefaultRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34432",
+      variantDescription: "中配",
+      setDefaultVariant: false,
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(dubNonDefaultRes.status).toBe(201);
-    const dubNonDefaultCr = (await dubNonDefaultRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const dubNonDefaultCr = dubNonDefaultRes.changeRequest!;
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
-    const dubNonDefaultState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${dubNonDefaultCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(dubNonDefaultState.changeRequest.status).toBe("approved");
+    const dubNonDefaultState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      dubNonDefaultCr.id,
+    );
+    expect(dubNonDefaultState.status).toBe("approved");
 
-    const mediaAfterDub = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaAfterDub = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
     const neutralVariant = mediaAfterDub.document.variants.find((v) => v.label === "标准版");
     const dubVariant = mediaAfterDub.document.variants.find((v) => v.label === "中配");
     expect(neutralVariant?.isDefault).toBe(true);
     expect(dubVariant?.isDefault).toBe(false);
 
     // 4a. Submitting a new collection (S2 ss45600) referencing dub variantId with setDefaultVariant: true -> needs_review (non_original_default_variant)
-    const newColOverrideRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss45600",
-          variantId: dubVariant!.id,
-          setDefaultVariant: true,
-          segments: [
-            { season: 2, episodeStart: 1, episodeEnd: 23, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const newColOverrideRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss45600",
+      variantId: dubVariant!.id,
+      setDefaultVariant: true,
+      segments: [
+        toProtoSegmentInput({
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 23,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(newColOverrideRes.status).toBe(201);
-    const newColOverrideCr = (await newColOverrideRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const newColOverrideCr = newColOverrideRes.changeRequest!;
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
-    const newColOverrideState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${newColOverrideCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
-    expect(newColOverrideState.changeRequest).toMatchObject({
+    const newColOverrideState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      newColOverrideCr.id,
+    );
+    expect(newColOverrideState).toMatchObject({
       status: "needs_review",
       conflictReason: "non_original_default_variant",
     });
 
     // 4b. Re-submitting already-confirmed ss34432 with dub variantId and setDefaultVariant: true -> conflict re-check catches Step 2 non_original_default_variant
-    const overrideRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34432",
-          variantId: dubVariant!.id,
-          setDefaultVariant: true,
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const overrideRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34432",
+      variantId: dubVariant!.id,
+      setDefaultVariant: true,
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(overrideRes.status).toBe(201);
-    const overrideCr = (await overrideRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    const overrideCr = overrideRes.changeRequest!;
 
     expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(1);
-    const overrideState = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${overrideCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as {
-      changeRequest: {
-        status: string;
-        conflictReason: string | null;
-        evidence: {
-          gate?: {
-            decision?: string;
-            step2?: { conflicts?: Array<{ code: string }> };
-          };
-        } | null;
-      };
+    const overrideState = (await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      overrideCr.id,
+    )) as {
+      status: string;
+      conflictReason: string | null;
+      evidence: {
+        gate?: {
+          decision?: string;
+          step2?: { conflicts?: Array<{ code: string }> };
+        };
+      } | null;
     };
-    expect(overrideState.changeRequest).toMatchObject({
+    expect(overrideState).toMatchObject({
       status: "needs_review",
       conflictReason: "new_failed_old_passed",
     });
-    expect(overrideState.changeRequest.evidence?.gate?.step2?.conflicts?.[0]?.code).toBe(
+    expect(overrideState.evidence?.gate?.step2?.conflicts?.[0]?.code).toBe(
       "non_original_default_variant",
     );
 
     // Default variant remains unchanged ("标准版")
-    const mediaFinal = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { document: MediaDocument };
+    const mediaFinal = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
     expect(mediaFinal.document.variants.find((v) => v.label === "标准版")?.isDefault).toBe(true);
     expect(mediaFinal.document.variants.find((v) => v.label === "中配")?.isDefault).toBe(false);
   });

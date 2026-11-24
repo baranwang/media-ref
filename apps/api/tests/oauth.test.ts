@@ -1,15 +1,22 @@
 import type { ExecutionContext, Hyperdrive } from "@cloudflare/workers-types";
 import {
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import worker, { createApiApp, requireVerifiedUser } from "../src/index.ts";
+import worker from "../src/index.ts";
+import { createApiApp } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  extractCookieHeader,
+  extractVerificationUrl,
+  mergeCookies,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_WEBSITE_URL = "https://mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-api-oauth-integration-tests-0123456789";
 
@@ -23,30 +30,6 @@ const TEST_TRAKT_CREDS = {
   clientSecret: "trakt-client-secret-test",
 };
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function mergeCookies(...cookieHeaders: string[]): string {
-  const jar = new Map<string, string>();
-  for (const header of cookieHeaders) {
-    for (const part of header.split(";")) {
-      const trimmed = part.trim();
-      if (!trimmed) continue;
-      const eqIndex = trimmed.indexOf("=");
-      if (eqIndex <= 0) continue;
-      const name = trimmed.slice(0, eqIndex).trim();
-      const value = trimmed.slice(eqIndex + 1).trim();
-      jar.set(name, value);
-    }
-  }
-  return [...jar.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
-}
-
 function jsonResponse(url: string, data: unknown, status = 200): ExternalHttpResponse {
   return {
     status,
@@ -54,14 +37,6 @@ function jsonResponse(url: string, data: unknown, status = 200): ExternalHttpRes
     body: JSON.stringify(data),
     url,
   };
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
 }
 
 describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
@@ -76,7 +51,7 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     }
   });
 
-  test("GitHub OAuth with verified primary email signs in with emailVerified=true, sends no verification email, and passes requireVerifiedUser", async () => {
+  test("GitHub OAuth with verified primary email signs in with emailVerified=true, sends no verification email, and passes verified-only RPCs", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -129,11 +104,6 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       },
     });
 
-    app.post("/v1/verified-action", requireVerifiedUser, (c) => {
-      const session = c.get("session")!;
-      return c.json({ ok: true, userId: session.user.id }, 200);
-    });
-
     const initRes = await app.fetch(
       new Request(`${TEST_BASE_URL}/api/auth/sign-in/social`, {
         method: "POST",
@@ -181,19 +151,8 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       "oauth:github:https://api.github.com/user/emails",
     ]);
 
-    const meRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, {
-        headers: { cookie: sessionCookie },
-      }),
-    );
-    expect(meRes.status).toBe(200);
-    const me = (await meRes.json()) as {
-      id: string;
-      email: string;
-      name: string;
-      emailVerified: boolean;
-      role: string;
-    };
+    const rpc = createRpcClients(app, { cookie: sessionCookie });
+    const me = (await rpc.account.getCurrentUser({})).user!;
     expect(me).toMatchObject({
       email: "octo@example.com",
       name: "Octo Dev",
@@ -201,27 +160,10 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       role: "user",
     });
 
-    const verifiedActionRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, {
-        method: "POST",
-        headers: { cookie: sessionCookie },
-      }),
-    );
-    expect(verifiedActionRes.status).toBe(200);
-    expect(await verifiedActionRes.json()).toEqual({ ok: true, userId: me.id });
-
     // Verified GitHub user can create an API key immediately without additional email verification.
-    const createKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: sessionCookie,
-        },
-        body: JSON.stringify({ name: "GitHub Key" }),
-      }),
-    );
-    expect(createKeyRes.status).toBe(201);
+    const createdKey = await rpc.account.createApiKey({ name: "GitHub Key" });
+    expect(createdKey.key.startsWith("mref_")).toBe(true);
+    expect(createdKey.apiKey?.name).toBe("GitHub Key");
   });
 
   test("GitHub OAuth with unverified primary email keeps emailVerified=false, sends verification email, and unlocks after verification", async () => {
@@ -269,10 +211,6 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       },
     });
 
-    app.post("/v1/verified-action", requireVerifiedUser, (c) => {
-      return c.json({ ok: true, userId: c.get("session")!.user.id }, 200);
-    });
-
     const initRes = await app.fetch(
       new Request(`${TEST_BASE_URL}/api/auth/sign-in/social`, {
         method: "POST",
@@ -305,24 +243,16 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     expect(outbound.sentEmails).toHaveLength(1);
     expect(outbound.sentEmails[0]!.to).toBe("unverified-gh@example.com");
 
-    const meBefore = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, { headers: { cookie: sessionCookie } }),
-    );
-    expect(meBefore.status).toBe(200);
-    const meBeforeBody = (await meBefore.json()) as { id: string; emailVerified: boolean };
-    expect(meBeforeBody.emailVerified).toBe(false);
+    const unverifiedRpc = createRpcClients(app, { cookie: sessionCookie });
+    const meBefore = (await unverifiedRpc.account.getCurrentUser({})).user!;
+    expect(meBefore.emailVerified).toBe(false);
 
-    const blockedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, {
-        method: "POST",
-        headers: { cookie: sessionCookie },
-      }),
+    const blockedErr = await expectRpcError(
+      unverifiedRpc.account.createApiKey({ name: "Blocked Key" }),
     );
-    expect(blockedRes.status).toBe(403);
-    expect(await blockedRes.json()).toEqual({
-      error: "EMAIL_NOT_VERIFIED",
-      message: "Email verification is required",
-    });
+    expect(blockedErr.status).toBe(403);
+    expect(blockedErr.code).toBe("EMAIL_NOT_VERIFIED");
+    expect(blockedErr.message).toBe("Email verification is required");
 
     const verifyUrl = extractVerificationUrl(outbound.sentEmails[0]!);
     const verifyRes = await app.fetch(
@@ -331,17 +261,12 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     expect([200, 302]).toContain(verifyRes.status);
     const verifiedCookie = mergeCookies(sessionCookie, extractCookieHeader(verifyRes));
 
-    const allowedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, {
-        method: "POST",
-        headers: { cookie: verifiedCookie },
-      }),
-    );
-    expect(allowedRes.status).toBe(200);
-    expect(await allowedRes.json()).toEqual({ ok: true, userId: meBeforeBody.id });
+    const verifiedRpc = createRpcClients(app, { cookie: verifiedCookie });
+    const allowedRes = await verifiedRpc.account.createApiKey({ name: "Verified Key" });
+    expect(allowedRes.key.startsWith("mref_")).toBe(true);
   });
 
-  test("Trakt OAuth via genericOAuth creates unverified user, sends verification email, blocks requireVerifiedUser until verified, and reuses account on repeat login", async () => {
+  test("Trakt OAuth via genericOAuth creates unverified user, sends verification email, blocks verified-only RPCs until verified, and reuses account on repeat login", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -410,10 +335,6 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       },
     });
 
-    app.post("/v1/verified-action", requireVerifiedUser, (c) => {
-      return c.json({ ok: true, userId: c.get("session")!.user.id }, 200);
-    });
-
     const initRes = await app.fetch(
       new Request(`${TEST_BASE_URL}/api/auth/sign-in/social`, {
         method: "POST",
@@ -457,17 +378,8 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     expect(outbound.sentEmails).toHaveLength(1);
     expect(outbound.sentEmails[0]!.to).toBe("cinephile@example.com");
 
-    const meBefore = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, { headers: { cookie: sessionCookie } }),
-    );
-    expect(meBefore.status).toBe(200);
-    const firstUser = (await meBefore.json()) as {
-      id: string;
-      email: string;
-      name: string;
-      emailVerified: boolean;
-      role: string;
-    };
+    const unverifiedRpc = createRpcClients(app, { cookie: sessionCookie });
+    const firstUser = (await unverifiedRpc.account.getCurrentUser({})).user!;
     expect(firstUser).toMatchObject({
       email: "cinephile@example.com",
       name: "Cine Phile",
@@ -475,33 +387,12 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       role: "user",
     });
 
-    const blockedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, {
-        method: "POST",
-        headers: { cookie: sessionCookie },
-      }),
+    const blockedKeyErr = await expectRpcError(
+      unverifiedRpc.account.createApiKey({ name: "Blocked Trakt Key" }),
     );
-    expect(blockedRes.status).toBe(403);
-    expect(await blockedRes.json()).toEqual({
-      error: "EMAIL_NOT_VERIFIED",
-      message: "Email verification is required",
-    });
-
-    const blockedKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: sessionCookie,
-        },
-        body: JSON.stringify({ name: "Blocked Trakt Key" }),
-      }),
-    );
-    expect(blockedKeyRes.status).toBe(403);
-    expect(await blockedKeyRes.json()).toEqual({
-      error: "EMAIL_NOT_VERIFIED",
-      message: "Email verification is required",
-    });
+    expect(blockedKeyErr.status).toBe(403);
+    expect(blockedKeyErr.code).toBe("EMAIL_NOT_VERIFIED");
+    expect(blockedKeyErr.message).toBe("Email verification is required");
 
     const verifyUrl = extractVerificationUrl(outbound.sentEmails[0]!);
     const verifyRes = await app.fetch(
@@ -510,36 +401,16 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     expect([200, 302]).toContain(verifyRes.status);
     const verifiedCookie = mergeCookies(sessionCookie, extractCookieHeader(verifyRes));
 
-    const meAfter = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, { headers: { cookie: verifiedCookie } }),
-    );
-    expect(meAfter.status).toBe(200);
-    expect(await meAfter.json()).toMatchObject({
+    const verifiedRpc = createRpcClients(app, { cookie: verifiedCookie });
+    const meAfter = (await verifiedRpc.account.getCurrentUser({})).user!;
+    expect(meAfter).toMatchObject({
       id: firstUser.id,
       email: "cinephile@example.com",
       emailVerified: true,
     });
 
-    const allowedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, {
-        method: "POST",
-        headers: { cookie: verifiedCookie },
-      }),
-    );
-    expect(allowedRes.status).toBe(200);
-    expect(await allowedRes.json()).toEqual({ ok: true, userId: firstUser.id });
-
-    const allowedKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: verifiedCookie,
-        },
-        body: JSON.stringify({ name: "Verified Trakt Key" }),
-      }),
-    );
-    expect(allowedKeyRes.status).toBe(201);
+    const allowedKey = await verifiedRpc.account.createApiKey({ name: "Verified Trakt Key" });
+    expect(allowedKey.key.startsWith("mref_")).toBe(true);
 
     // Second Trakt sign-in reuses the existing verified user without re-sending verification email.
     const secondInitRes = await app.fetch(
@@ -572,11 +443,10 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       extractCookieHeader(secondCallbackRes),
     );
 
-    const meRepeat = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, { headers: { cookie: secondSessionCookie } }),
-    );
-    expect(meRepeat.status).toBe(200);
-    expect(await meRepeat.json()).toMatchObject({
+    const meRepeat = (
+      await createRpcClients(app, { cookie: secondSessionCookie }).account.getCurrentUser({})
+    ).user!;
+    expect(meRepeat).toMatchObject({
       id: firstUser.id,
       email: "cinephile@example.com",
       emailVerified: true,
@@ -753,11 +623,10 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     expect(callbackRes.headers.get("location")).toBe(`${TEST_WEBSITE_URL}/dashboard`);
     const ghSessionCookie = mergeCookies(stateCookie, extractCookieHeader(callbackRes));
 
-    const meRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, { headers: { cookie: ghSessionCookie } }),
+    const meRes = await createRpcClients(app, { cookie: ghSessionCookie }).account.getCurrentUser(
+      {},
     );
-    expect(meRes.status).toBe(200);
-    expect(await meRes.json()).toMatchObject({
+    expect(meRes.user).toMatchObject({
       id: signUpData.user.id,
       email: "shared@example.com",
       emailVerified: true,
@@ -1039,11 +908,9 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     scenario = "trakt-first";
     const traktFirst = await runProviderFlow("trakt", "trakt-1");
     expect(traktFirst.callbackRes.headers.get("location")).toBe(`${TEST_WEBSITE_URL}/dashboard`);
-    const traktMe = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/me`, { headers: { cookie: traktFirst.sessionCookie } }),
-      )
-    ).json()) as { id: string; emailVerified: boolean };
+    const traktMe = (
+      await createRpcClients(app, { cookie: traktFirst.sessionCookie }).account.getCurrentUser({})
+    ).user!;
     expect(traktMe.emailVerified).toBe(false);
     expect(outbound.sentEmails).toHaveLength(1);
 
@@ -1061,11 +928,11 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
 
     const ghAfterVerify = await runProviderFlow("github", "gh-after-verify");
     expect(ghAfterVerify.callbackRes.headers.get("location")).toBe(`${TEST_WEBSITE_URL}/dashboard`);
-    const linkedMe = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/me`, { headers: { cookie: ghAfterVerify.sessionCookie } }),
+    const linkedMe = (
+      await createRpcClients(app, { cookie: ghAfterVerify.sessionCookie }).account.getCurrentUser(
+        {},
       )
-    ).json()) as { id: string; email: string; emailVerified: boolean };
+    ).user!;
     expect(linkedMe).toMatchObject({
       id: traktMe.id,
       email: "trakt-first@example.com",

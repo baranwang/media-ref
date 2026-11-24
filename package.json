@@ -13,9 +13,13 @@
     "db:up": "vp run @media-ref/db#up",
     "db:down": "vp run @media-ref/db#down",
     "db:migrate": "vp run @media-ref/db#migrate",
+    "proto:lint": "buf lint",
+    "proto:gen": "buf generate && vp fmt packages/client/src/gen",
     "prepare": "vp config"
   },
   "devDependencies": {
+    "@bufbuild/buf": "catalog:",
+    "@bufbuild/protoc-gen-es": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:"
   },
@@ -33,7 +37,12 @@
     "node": ">=22.18.0"
   },
   "catalog": {
+    "@bufbuild/buf": "^1.75.0",
+    "@bufbuild/protobuf": "^2.17.0",
+    "@bufbuild/protoc-gen-es": "^2.17.0",
     "@cloudflare/workers-types": "^5.20261123.1",
+    "@connectrpc/connect": "^2.3.0",
+    "@connectrpc/connect-web": "^2.3.0",
     "@tailwindcss/vite": "^4.1.18",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",

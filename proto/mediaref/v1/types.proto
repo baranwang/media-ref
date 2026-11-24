@@ -1,0 +1,281 @@
+syntax = "proto3";
+
+package mediaref.v1;
+
+import "google/protobuf/struct.proto";
+
+enum MediaType {
+  MEDIA_TYPE_UNSPECIFIED = 0;
+  MEDIA_TYPE_MOVIE = 1;
+  MEDIA_TYPE_TV = 2;
+}
+
+enum NamespaceGroup {
+  NAMESPACE_GROUP_UNSPECIFIED = 0;
+  NAMESPACE_GROUP_PLATFORM = 1;
+  NAMESPACE_GROUP_CATALOG = 2;
+}
+
+enum AssociationStatus {
+  ASSOCIATION_STATUS_UNSPECIFIED = 0;
+  ASSOCIATION_STATUS_CONFIRMED = 1;
+  ASSOCIATION_STATUS_SEED_UNCONFIRMED = 2;
+  ASSOCIATION_STATUS_DELISTED = 3;
+}
+
+enum ChangeRequestStatus {
+  CHANGE_REQUEST_STATUS_UNSPECIFIED = 0;
+  CHANGE_REQUEST_STATUS_PENDING_EVIDENCE = 1;
+  CHANGE_REQUEST_STATUS_APPROVED = 2;
+  CHANGE_REQUEST_STATUS_NEEDS_REVIEW = 3;
+  CHANGE_REQUEST_STATUS_REJECTED = 4;
+}
+
+enum UnconfirmedAssociationSource {
+  UNCONFIRMED_ASSOCIATION_SOURCE_UNSPECIFIED = 0;
+  UNCONFIRMED_ASSOCIATION_SOURCE_SEED_UNCONFIRMED = 1;
+  UNCONFIRMED_ASSOCIATION_SOURCE_CHANGE_REQUEST = 2;
+}
+
+enum PlatformStatus {
+  PLATFORM_STATUS_UNSPECIFIED = 0;
+  PLATFORM_STATUS_ASSOCIATED = 1;
+  PLATFORM_STATUS_NOT_FOUND = 2;
+  PLATFORM_STATUS_UNCHECKED = 3;
+}
+
+enum SubmitterType {
+  SUBMITTER_TYPE_UNSPECIFIED = 0;
+  SUBMITTER_TYPE_HUMAN = 1;
+  SUBMITTER_TYPE_AGENT = 2;
+}
+
+enum SortOrder {
+  SORT_ORDER_UNSPECIFIED = 0;
+  SORT_ORDER_ASC = 1;
+  SORT_ORDER_DESC = 2;
+}
+
+enum ReviewAlertStatus {
+  REVIEW_ALERT_STATUS_UNSPECIFIED = 0;
+  REVIEW_ALERT_STATUS_OPEN = 1;
+  REVIEW_ALERT_STATUS_RESOLVED = 2;
+}
+
+enum ApiKeyAction {
+  API_KEY_ACTION_UNSPECIFIED = 0;
+  API_KEY_ACTION_READ = 1;
+  API_KEY_ACTION_REPORT = 2;
+  API_KEY_ACTION_SUBMIT = 3;
+}
+
+enum ApiKeyScope {
+  API_KEY_SCOPE_UNSPECIFIED = 0;
+  API_KEY_SCOPE_READ_REPORT = 1;
+  API_KEY_SCOPE_SUBMIT = 2;
+}
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_TENCENT = 1;
+  PLATFORM_IQIYI = 2;
+  PLATFORM_YOUKU = 3;
+  PLATFORM_BILIBILI = 4;
+  PLATFORM_MGTV = 5;
+}
+
+message TmdbRef {
+  MediaType type = 1;
+  int32 id = 2;
+}
+
+message TvdbRef {
+  int32 id = 1;
+  MediaType type = 2;
+}
+
+message TraktRef {
+  string id = 1;
+  MediaType type = 2;
+}
+
+message PlatformRef {
+  Platform platform = 1;
+  string native_id = 2;
+}
+
+message MediaRef {
+  oneof id {
+    string media_id = 1;
+    TmdbRef tmdb = 2;
+    string imdb = 3;
+    TvdbRef tvdb = 4;
+    TraktRef trakt = 5;
+    string douban = 6;
+    string bangumi = 7;
+    PlatformRef platform = 8;
+  }
+}
+
+message ExternalId {
+  string namespace = 1;
+  string native_id = 2;
+  optional bool locked = 3;
+}
+
+message SeasonSnapshot {
+  int32 season = 1;
+  int32 episode_count = 2;
+  optional int32 air_year = 3;
+}
+
+message MediaSnapshot {
+  string title = 1;
+  optional string original_title = 2;
+  optional int32 year = 3;
+  MediaType type = 4;
+  repeated SeasonSnapshot seasons = 5;
+}
+
+message Media {
+  string id = 1;
+  MediaType type = 2;
+  optional string baseline = 3;
+  MediaSnapshot snapshot = 4;
+}
+
+message Variant {
+  string id = 1;
+  optional string media_id = 2;
+  string namespace = 3;
+  string label = 4;
+  bool is_default = 5;
+  optional bool unconfirmed = 6;
+}
+
+message Segment {
+  int32 season = 1;
+  int32 episode_start = 2;
+  optional int32 episode_end = 3;
+  int32 target_episode_start = 4;
+  string baseline = 5;
+  bool non_linear = 6;
+  bool needs_review = 7;
+}
+
+message WholeSeasonSegmentInput {
+  int32 season = 1;
+  string baseline = 2;
+  bool non_linear = 3;
+  bool needs_review = 4;
+}
+
+message ExplicitSegmentInput {
+  int32 season = 1;
+  int32 episode_start = 2;
+  optional int32 episode_end = 3;
+  int32 target_episode_start = 4;
+  string baseline = 5;
+  bool non_linear = 6;
+  bool needs_review = 7;
+}
+
+message SegmentInput {
+  oneof kind {
+    WholeSeasonSegmentInput whole_season = 1;
+    ExplicitSegmentInput explicit = 2;
+  }
+}
+
+message PlatformStatusEntry {
+  PlatformStatus status = 1;
+  optional string checked_at = 2;
+}
+
+message Association {
+  string id = 1;
+  optional string media_id = 2;
+  string namespace = 3;
+  string native_id = 4;
+  optional string variant_id = 5;
+  AssociationStatus status = 6;
+  repeated Segment segments = 7;
+  optional bool needs_review = 8;
+  optional bool locked = 9;
+  optional bool unconfirmed = 10;
+  optional UnconfirmedAssociationSource unconfirmed_source = 11;
+  optional string change_request_id = 12;
+  optional ChangeRequestStatus change_request_status = 13;
+}
+
+message MediaDocument {
+  Media media = 1;
+  repeated ExternalId external_ids = 2;
+  repeated Variant variants = 3;
+  repeated Association associations = 4;
+  repeated string matched_association_ids = 5;
+  map<string, PlatformStatusEntry> platform_statuses = 6;
+}
+
+message MediaQueryItem {
+  MediaDocument document = 1;
+  optional string matched_association_id = 2;
+}
+
+message ChangeRequest {
+  string id = 1;
+  ChangeRequestStatus status = 2;
+  string submitter_user_id = 3;
+  optional string submitter_key_id = 4;
+  SubmitterType submitter_type = 5;
+  optional string task_id = 6;
+  optional string media_id = 7;
+  MediaRef target = 8;
+  string namespace = 9;
+  string raw_native_id = 10;
+  string native_id = 11;
+  optional string variant_id = 12;
+  optional string variant_description = 13;
+  bool set_default_variant = 14;
+  repeated Segment segments = 15;
+  optional google.protobuf.Struct evidence = 16;
+  optional string conflict_reason = 17;
+  optional string decision_reason = 18;
+  optional string reviewer_user_id = 19;
+  optional string reviewed_at = 20;
+  optional string applied_association_id = 21;
+  optional string applied_revision_id = 22;
+  optional string replaces_association_id = 23;
+  string created_at = 24;
+  string updated_at = 25;
+}
+
+message AssociationSummary {
+  string id = 1;
+  string media_id = 2;
+  string namespace = 3;
+  string native_id = 4;
+  optional string variant_id = 5;
+  AssociationStatus status = 6;
+  bool needs_review = 7;
+  bool locked = 8;
+  optional string current_revision_id = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+message SegmentValidationErrorDetail {
+  string code = 1;
+  string message = 2;
+  optional int32 segment_index = 3;
+}
+
+message ErrorInfoDetail {
+  string error_code = 1;
+  optional string scope = 2;
+  optional int32 limit = 3;
+  optional int32 used = 4;
+  optional int32 window_seconds = 5;
+  optional int32 retry_after_seconds = 6;
+  repeated SegmentValidationErrorDetail validation_errors = 7;
+}

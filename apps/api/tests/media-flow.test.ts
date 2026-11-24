@@ -1,92 +1,30 @@
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import {
+  fromProtoChangeRequestStatus,
+  fromProtoMediaDocument,
+  fromProtoMediaRef,
+  resolveEpisode,
+  toProtoSegmentInput,
+  type MediaRef,
+} from "@media-ref/client";
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
 } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { createApiApp } from "../src/index.ts";
+import { createApiApp } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-media-flow-integration-tests-0123456789";
-
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-async function signUpUser(
-  app: ReturnType<typeof createApiApp>,
-  outbound: ReturnType<typeof createFakeOutboundClient>,
-  input: { email: string; password: string; name: string; verify?: boolean },
-): Promise<{ userId: string; cookie: string }> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: input.email,
-        password: input.password,
-        name: input.name,
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  if (input.verify) {
-    const email = outbound.sentEmails[emailsBefore];
-    expect(email).toBeDefined();
-    const verifyRes = await app.fetch(
-      new Request(extractVerificationUrl(email!), {
-        method: "GET",
-        headers: { cookie },
-      }),
-    );
-    expect([200, 302]).toContain(verifyRes.status);
-    const refreshed = extractCookieHeader(verifyRes);
-    if (refreshed) {
-      cookie = refreshed;
-    }
-  }
-
-  return { userId: signUpBody.user.id, cookie };
-}
-
-async function createApiKey(
-  app: ReturnType<typeof createApiApp>,
-  cookie: string,
-  options: { name: string; canSubmit?: boolean },
-): Promise<{ id: string; key: string }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        name: options.name,
-        canSubmit: options.canSubmit ?? false,
-      }),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; key: string };
-}
 
 function createCatalogStubHandler() {
   return (request: ExternalHttpRequest) => {
@@ -269,179 +207,105 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       .where("id", "=", owner.userId)
       .execute();
 
-    const submitKey = await createApiKey(app, submitter.cookie, {
+    const submitKey = await issueApiKeyRpc(app, submitter.cookie, {
       name: "Submit Key",
       canSubmit: true,
     });
-    const readKey = await createApiKey(app, submitter.cookie, {
+    const readKey = await issueApiKeyRpc(app, submitter.cookie, {
       name: "Read Key",
       canSubmit: false,
     });
 
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
+    const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
+
     // Submit CR #1 for Jujutsu Kaisen (tmdb:tv:95479 does not exist in DB yet)
-    const cr1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": submitKey.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 1,
-              episodeEnd: 24,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-            },
-          ],
+    const cr1Body = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(cr1Res.status).toBe(201);
-    const cr1Body = (await cr1Res.json()) as {
-      changeRequest: {
-        id: string;
-        status: string;
-        mediaId: string | null;
-        targetExternalKey: string;
-        namespace: string;
-        nativeId: string;
-      };
-    };
-    expect(cr1Body.changeRequest.id).toBeTruthy();
-    expect(cr1Body.changeRequest.status).toBe("needs_review");
-    expect(cr1Body.changeRequest.mediaId).toBeNull();
-    expect(cr1Body.changeRequest.targetExternalKey).toBe("tmdb:tv:95479");
-    expect(cr1Body.changeRequest.namespace).toBe("bilibili");
-    expect(cr1Body.changeRequest.nativeId).toBe("ss34430");
+      ],
+    });
+    const cr1 = cr1Body.changeRequest!;
+    expect(cr1.id).toBeTruthy();
+    expect(fromProtoChangeRequestStatus(cr1.status)).toBe("needs_review");
+    expect(cr1.mediaId).toBeUndefined();
+    expect(fromProtoMediaRef(cr1.target, { mode: "target" })).toMatchObject({
+      ok: true,
+      key: "tmdb:tv:95479",
+    });
+    expect(cr1.namespace).toBe("bilibili");
+    expect(cr1.nativeId).toBe("ss34430");
 
     // Media must NOT exist yet before reviewer approves
-    const preApproveRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(preApproveRead.status).toBe(404);
+    expect(
+      (
+        await expectRpcError(
+          readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }),
+        )
+      ).status,
+    ).toBe(404);
     expect(outbound.httpRequests).toHaveLength(0);
 
-    // Submitter can inspect the pending change request via GET /v1/change-requests/:id
-    const inspectCr1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests/${cr1Body.changeRequest.id}`, {
-        headers: { "x-api-key": submitKey.key },
-      }),
-    );
-    expect(inspectCr1Res.status).toBe(200);
-    expect(await inspectCr1Res.json()).toMatchObject({
-      changeRequest: {
-        id: cr1Body.changeRequest.id,
-        status: "needs_review",
-      },
-    });
+    // Submitter can inspect the pending change request via GetChangeRequest
+    const inspectCr1 = await submitRpc.changeRequest.getChangeRequest({ id: cr1.id });
+    expect(inspectCr1.changeRequest?.id).toBe(cr1.id);
+    expect(fromProtoChangeRequestStatus(inspectCr1.changeRequest!.status)).toBe("needs_review");
 
     // Reviewer sees CR #1 in review queue
-    const queueRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests`, {
-        headers: { cookie: owner.cookie },
-      }),
-    );
-    expect(queueRes.status).toBe(200);
-    const queueBody = (await queueRes.json()) as {
-      changeRequests: Array<{ id: string; status: string }>;
-      total: number;
-    };
+    const queueBody = await ownerRpc.reviewer.listChangeRequests({});
     expect(queueBody.total).toBe(1);
-    expect(queueBody.changeRequests[0]?.id).toBe(cr1Body.changeRequest.id);
+    expect(queueBody.changeRequests[0]?.id).toBe(cr1.id);
 
     // Reviewer approves CR #1 -> creates media with TMDB minimal snapshot + IMDb/TVDB/Trakt external IDs
-    const approve1Res = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${cr1Body.changeRequest.id}/approve`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            cookie: owner.cookie,
-          },
-          body: JSON.stringify({ reason: "Verified S1 part 1 on Bilibili" }),
-        },
-      ),
-    );
-    expect(approve1Res.status).toBe(200);
-    const approve1Body = (await approve1Res.json()) as {
-      changeRequest: { id: string; status: string; decisionReason: string | null };
-      mediaId: string;
-      associationId: string;
-      revisionId: string;
-    };
-    expect(approve1Body.changeRequest.status).toBe("approved");
-    expect(approve1Body.changeRequest.decisionReason).toBe("Verified S1 part 1 on Bilibili");
+    const approve1Body = await ownerRpc.reviewer.approveChangeRequest({
+      id: cr1.id,
+      reason: "Verified S1 part 1 on Bilibili",
+    });
+    expect(fromProtoChangeRequestStatus(approve1Body.changeRequest!.status)).toBe("approved");
+    expect(approve1Body.changeRequest!.decisionReason).toBe("Verified S1 part 1 on Bilibili");
     expect(approve1Body.mediaId).toBeTruthy();
     expect(approve1Body.associationId).toBeTruthy();
     expect(approve1Body.revisionId).toBeTruthy();
 
     // Submit CR #2 for S1 E25-47 (ss45574) in the same default variant ("原声") and approve
-    const cr2Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": submitKey.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss45574",
-          variantDescription: "原声",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 25,
-              episodeEnd: 47,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-            },
-          ],
+    const cr2Body = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss45574",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 25,
+          episodeEnd: 47,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(cr2Res.status).toBe(201);
-    const cr2Body = (await cr2Res.json()) as { changeRequest: { id: string } };
-
-    const approve2Res = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${cr2Body.changeRequest.id}/approve`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            cookie: owner.cookie,
-          },
-          body: JSON.stringify({ reason: "Verified S1 part 2 on Bilibili" }),
-        },
-      ),
-    );
-    expect(approve2Res.status).toBe(200);
-    const approve2Body = (await approve2Res.json()) as { associationId: string };
+      ],
+    });
+    const approve2Body = await ownerRpc.reviewer.approveChangeRequest({
+      id: cr2Body.changeRequest!.id,
+      reason: "Verified S1 part 2 on Bilibili",
+    });
 
     // Read by tmdb:tv:95479
-    const byTmdbRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(byTmdbRes.status).toBe(200);
-    const byTmdbBody = (await byTmdbRes.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
-    expect(byTmdbBody.matchedAssociationId).toBeNull();
-    expect(byTmdbBody.document.media).toEqual({
+    const byTmdbRes = await readRpc.media.getMedia({
+      ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+    });
+    const byTmdbDoc = fromProtoMediaDocument(byTmdbRes.document!);
+    expect(byTmdbRes.matchedAssociationId).toBeUndefined();
+    expect(byTmdbDoc.media).toEqual({
       id: approve1Body.mediaId,
       type: "tv",
       baseline: "tmdb",
@@ -456,7 +320,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         ],
       },
     });
-    expect(byTmdbBody.document.externalIds).toEqual(
+    expect(byTmdbDoc.externalIds).toEqual(
       expect.arrayContaining([
         { namespace: "tmdb", nativeId: "tv:95479" },
         { namespace: "imdb", nativeId: "tt12343534" },
@@ -464,55 +328,40 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         { namespace: "trakt", nativeId: "show:159384" },
       ]),
     );
-    expect(byTmdbBody.document.variants).toHaveLength(1);
-    expect(byTmdbBody.document.variants[0]).toMatchObject({
+    expect(byTmdbDoc.variants).toHaveLength(1);
+    expect(byTmdbDoc.variants[0]).toMatchObject({
       namespace: "bilibili",
       label: "原声",
       isDefault: true,
     });
-    expect(byTmdbBody.document.associations).toHaveLength(2);
+    expect(byTmdbDoc.associations).toHaveLength(2);
 
-    // Read by media UUID, IMDb, TVDB, Trakt, and platform collection reverse key
-    const byUuidRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/${approve1Body.mediaId}`, {
-        headers: { authorization: `Bearer ${readKey.key}` },
-      }),
-    );
-    expect(byUuidRes.status).toBe(200);
-    const byUuidBody = (await byUuidRes.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
-    expect(byUuidBody.document.media.id).toBe(approve1Body.mediaId);
-    expect(byUuidBody.matchedAssociationId).toBeNull();
+    // Read by media UUID, IMDb, TVDB, Trakt, and platform collection reverse ref
+    const byUuidRes = await createRpcClients(app, {
+      bearerToken: readKey.key,
+    }).media.getMedia({ ref: mediaRef({ mediaId: approve1Body.mediaId }) });
+    expect(byUuidRes.document?.media?.id).toBe(approve1Body.mediaId);
+    expect(byUuidRes.matchedAssociationId).toBeUndefined();
 
-    for (const extKey of ["imdb:tt12343534", "tvdb:377543", "trakt:show:159384"]) {
-      const extRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/${extKey}`, {
-          headers: { "x-api-key": readKey.key },
-        }),
-      );
-      expect(extRes.status).toBe(200);
-      const extBody = (await extRes.json()) as { document: MediaDocument };
-      expect(extBody.document.media.id).toBe(approve1Body.mediaId);
+    const extRefs: MediaRef[] = [
+      { imdb: "tt12343534" },
+      { tvdb: { id: 377543 } },
+      { trakt: { id: "159384", type: "tv" } },
+    ];
+    for (const extRef of extRefs) {
+      const extRes = await readRpc.media.getMedia({ ref: mediaRef(extRef) });
+      expect(extRes.document?.media?.id).toBe(approve1Body.mediaId);
     }
 
-    // Read by platform collection key marks matchedAssociationId
-    const byCollectionRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/bilibili:ss45574`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(byCollectionRes.status).toBe(200);
-    const byCollectionBody = (await byCollectionRes.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
-    expect(byCollectionBody.matchedAssociationId).toBe(approve2Body.associationId);
-    expect(byCollectionBody.document.matchedAssociationIds).toEqual([approve2Body.associationId]);
+    // Read by platform collection ref marks matchedAssociationId
+    const byCollectionRes = await readRpc.media.getMedia({
+      ref: mediaRef({ platform: { platform: "bilibili", nativeId: "ss45574" } }),
+    });
+    expect(byCollectionRes.matchedAssociationId).toBe(approve2Body.associationId);
+    expect(byCollectionRes.document?.matchedAssociationIds).toEqual([approve2Body.associationId]);
 
     // Pass returned MediaDocument directly into @media-ref/client's resolveEpisode!
-    const resolvedS1E30 = resolveEpisode(byTmdbBody.document, {
+    const resolvedS1E30 = resolveEpisode(byTmdbDoc, {
       namespace: "bilibili",
       season: 1,
       episode: 30,
@@ -564,190 +413,135 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       .where("id", "=", owner.userId)
       .execute();
 
-    const submitKey = await createApiKey(app, user.cookie, { name: "Submit", canSubmit: true });
-    const readKey = await createApiKey(app, user.cookie, { name: "Read", canSubmit: false });
+    const submitKey = await issueApiKeyRpc(app, user.cookie, { name: "Submit", canSubmit: true });
+    const readKey = await issueApiKeyRpc(app, user.cookie, { name: "Read", canSubmit: false });
+
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
+    const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
 
     // Seed an existing media + variant by approving a non-overlapping segment (S1 E1-10)
-    const seedCrRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss10001",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 10, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const seedCr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss10001",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 10,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(seedCrRes.status).toBe(201);
-    const seedCr = (await seedCrRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
+    await ownerRpc.reviewer.approveChangeRequest({ id: seedCr.changeRequest!.id });
 
-    const seedApprove = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${seedCr.changeRequest.id}/approve`,
-        {
-          method: "POST",
-          headers: { cookie: owner.cookie },
-        },
-      ),
+    const mediaDoc = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document!,
     );
-    expect(seedApprove.status).toBe(200);
-
-    const mediaDocRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    const mediaDoc = (await mediaDocRes.json()) as { document: MediaDocument };
-    const variantId = mediaDoc.document.variants[0]!.id;
+    const variantId = mediaDoc.variants[0]!.id;
 
     // Submit two pending CRs with overlapping ranges in the same existing variant:
     // CR A: S1 E11-25, CR B: S1 E20-35 (overlap on E20-25). Neither is approved yet.
-    const [crARes, crBRes] = await Promise.all([
-      app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:95479",
-            namespace: "bilibili",
-            nativeId: "ss10002",
-            variantId,
-            segments: [
-              {
-                season: 1,
-                episodeStart: 11,
-                episodeEnd: 25,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+    const [crA, crB] = await Promise.all([
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss10002",
+        variantId,
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 11,
+            episodeEnd: 25,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      ),
-      app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:95479",
-            namespace: "bilibili",
-            nativeId: "ss10003",
-            variantId,
-            segments: [
-              {
-                season: 1,
-                episodeStart: 20,
-                episodeEnd: 35,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+        ],
+      }),
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss10003",
+        variantId,
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 20,
+            episodeEnd: 35,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      ),
+        ],
+      }),
     ]);
-    expect(crARes.status).toBe(201);
-    expect(crBRes.status).toBe(201);
-    const crA = (await crARes.json()) as { changeRequest: { id: string } };
-    const crB = (await crBRes.json()) as { changeRequest: { id: string } };
 
     // Approve BOTH concurrently against real PostgreSQL 19!
+    const approveAttempt = async (id: string) => {
+      try {
+        await ownerRpc.reviewer.approveChangeRequest({ id });
+        return { status: 200 as const, code: null as string | null };
+      } catch (err) {
+        const info = await expectRpcError(Promise.reject(err));
+        return { status: info.status, code: info.code };
+      }
+    };
+
     const [approveARes, approveBRes] = await Promise.all([
-      app.fetch(
-        new Request(
-          `${TEST_BASE_URL}/v1/reviewer/change-requests/${crA.changeRequest.id}/approve`,
-          {
-            method: "POST",
-            headers: { cookie: owner.cookie },
-          },
-        ),
-      ),
-      app.fetch(
-        new Request(
-          `${TEST_BASE_URL}/v1/reviewer/change-requests/${crB.changeRequest.id}/approve`,
-          {
-            method: "POST",
-            headers: { cookie: owner.cookie },
-          },
-        ),
-      ),
+      approveAttempt(crA.changeRequest!.id),
+      approveAttempt(crB.changeRequest!.id),
     ]);
 
     const statuses = [approveARes.status, approveBRes.status].sort((a, b) => a - b);
     expect(statuses).toEqual([200, 409]);
 
-    const failedRes = approveARes.status === 409 ? approveARes : approveBRes;
-    expect(await failedRes.json()).toMatchObject({ error: "SEGMENT_OVERLAP" });
+    const failed = approveARes.status === 409 ? approveARes : approveBRes;
+    expect(failed.code).toBe("SEGMENT_OVERLAP");
 
     // Confirm zero overlapping rows exist in the database / MediaDocument
-    const afterDocRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
+    const afterDoc = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+        .document!,
     );
-    expect(afterDocRes.status).toBe(200);
-    const afterDoc = (await afterDocRes.json()) as { document: MediaDocument };
-    expect(afterDoc.document.associations).toHaveLength(2);
-    const nativeIds = afterDoc.document.associations.map((a) => a.nativeId);
+    expect(afterDoc.associations).toHaveLength(2);
+    const nativeIds = afterDoc.associations.map((a) => a.nativeId);
     expect(nativeIds).toContain("ss10001");
     expect(nativeIds.includes("ss10002") !== nativeIds.includes("ss10003")).toBe(true);
 
     // Also test 4 concurrent overlapping approvals on a BRAND-NEW uncreated media (tmdb:tv:108545)
     const pendingNewMediaIds: string[] = [];
     for (let i = 1; i <= 4; i++) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:108545",
-            namespace: "tencent",
-            nativeId: `mzc00200000000${i}`,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 30,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
+      const res = await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 108545 } }),
+        namespace: "tencent",
+        nativeId: `mzc00200000000${i}`,
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 30,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
           }),
-        }),
-      );
-      expect(res.status).toBe(201);
-      const body = (await res.json()) as { changeRequest: { id: string } };
-      pendingNewMediaIds.push(body.changeRequest.id);
+        ],
+      });
+      pendingNewMediaIds.push(res.changeRequest!.id);
     }
 
-    const concurrentNewResults = await Promise.all(
-      pendingNewMediaIds.map(async (id) =>
-        app.fetch(
-          new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${id}/approve`, {
-            method: "POST",
-            headers: { cookie: owner.cookie },
-          }),
-        ),
-      ),
-    );
+    const concurrentNewResults = await Promise.all(pendingNewMediaIds.map(approveAttempt));
     const newStatuses = concurrentNewResults.map((r) => r.status).sort((a, b) => a - b);
     expect(newStatuses).toEqual([200, 409, 409, 409]);
 
-    const santiDocRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:108545`, {
-        headers: { "x-api-key": readKey.key },
-      }),
+    const santiDoc = fromProtoMediaDocument(
+      (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 108545 } }) }))
+        .document!,
     );
-    expect(santiDocRes.status).toBe(200);
-    const santiDoc = (await santiDocRes.json()) as { document: MediaDocument };
-    expect(santiDoc.document.variants).toHaveLength(1);
-    expect(santiDoc.document.associations).toHaveLength(1);
+    expect(santiDoc.variants).toHaveLength(1);
+    expect(santiDoc.associations).toHaveLength(1);
   });
 
   test("rejects invalid and overlapping segments immediately at submission time, including shared-collection conflicts", async () => {
@@ -787,108 +581,90 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       .where("id", "=", owner.userId)
       .execute();
 
-    const submitKey = await createApiKey(app, user.cookie, { name: "Submit", canSubmit: true });
+    const submitKey = await issueApiKeyRpc(app, user.cookie, { name: "Submit", canSubmit: true });
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
 
     // Invalid segment syntax (episodeEnd < episodeStart)
-    const badSyntaxRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 10, episodeEnd: 5, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
-        }),
+    const badSyntaxErr = await expectRpcError(
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 10,
+            episodeEnd: 5,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+          }),
+        ],
       }),
     );
-    expect(badSyntaxRes.status).toBe(400);
-    expect(await badSyntaxRes.json()).toMatchObject({ error: "INVALID_SEGMENTS" });
+    expect(badSyntaxErr.status).toBe(400);
+    expect(badSyntaxErr.code).toBe("INVALID_SEGMENTS");
 
     // Approve initial association ss34430 (S1 E1-24, target 1..24) on tmdb:tv:95479
-    const cr1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const cr1 = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(cr1Res.status).toBe(201);
-    const cr1 = (await cr1Res.json()) as { changeRequest: { id: string } };
-    expect(
-      (
-        await app.fetch(
-          new Request(
-            `${TEST_BASE_URL}/v1/reviewer/change-requests/${cr1.changeRequest.id}/approve`,
-            {
-              method: "POST",
-              headers: { cookie: owner.cookie },
-            },
-          ),
-        )
-      ).status,
-    ).toBe(200);
+      ],
+    });
+    await ownerRpc.reviewer.approveChangeRequest({ id: cr1.changeRequest!.id });
 
     // Submitting a new overlapping association in the same variant is rejected immediately (400)
-    const overlapSubmitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss88888",
-          variantDescription: "原声",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 20,
-              episodeEnd: 30,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-            },
-          ],
-        }),
+    const overlapErr = await expectRpcError(
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        namespace: "bilibili",
+        nativeId: "ss88888",
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 20,
+            episodeEnd: 30,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+          }),
+        ],
       }),
     );
-    expect(overlapSubmitRes.status).toBe(400);
-    expect(await overlapSubmitRes.json()).toMatchObject({ error: "SEGMENT_OVERLAP" });
+    expect(overlapErr.status).toBe(400);
+    expect(overlapErr.code).toBe("SEGMENT_OVERLAP");
 
     // Submitting the same collection ss34430 on ANOTHER media with overlapping target range [10..19] is rejected
-    const sharedOverlapRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:108545",
-          namespace: "bilibili",
-          nativeId: "ss34430",
-          variantDescription: "原声",
-          segments: [
-            {
-              season: 1,
-              episodeStart: 1,
-              episodeEnd: 10,
-              targetEpisodeStart: 10,
-              baseline: "tmdb",
-            },
-          ],
-        }),
+    const sharedOverlapErr = await expectRpcError(
+      submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 108545 } }),
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 10,
+            targetEpisodeStart: 10,
+            baseline: "tmdb",
+          }),
+        ],
       }),
     );
-    expect(sharedOverlapRes.status).toBe(400);
-    expect(await sharedOverlapRes.json()).toMatchObject({ error: "SEGMENT_OVERLAP" });
+    expect(sharedOverlapErr.status).toBe(400);
+    expect(sharedOverlapErr.code).toBe("SEGMENT_OVERLAP");
   });
 
   test("handles rejection, association revision updates, movie whole-media associations, catalog associations, and default variant switching", async () => {
@@ -928,133 +704,85 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       .where("id", "=", owner.userId)
       .execute();
 
-    const submitKey = await createApiKey(app, user.cookie, { name: "Submit", canSubmit: true });
-    const readKey = await createApiKey(app, user.cookie, { name: "Read", canSubmit: false });
+    const submitKey = await issueApiKeyRpc(app, user.cookie, { name: "Submit", canSubmit: true });
+    const readKey = await issueApiKeyRpc(app, user.cookie, { name: "Read", canSubmit: false });
 
-    // 1. Rejected change request does not create media or appear in GET /v1/media
-    const rejectedCrRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:95479",
-          namespace: "bilibili",
-          nativeId: "ss99999",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const userSessionRpc = createRpcClients(app, { cookie: user.cookie });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
+    const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
+
+    // 1. Rejected change request does not create media or appear in GetMedia
+    const rejectedCr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "ss99999",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(rejectedCrRes.status).toBe(201);
-    const rejectedCr = (await rejectedCrRes.json()) as { changeRequest: { id: string } };
-
-    const rejectRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${rejectedCr.changeRequest.id}/reject`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json", cookie: owner.cookie },
-          body: JSON.stringify({ reason: "Wrong collection ID" }),
-        },
-      ),
-    );
-    expect(rejectRes.status).toBe(200);
-    expect(await rejectRes.json()).toMatchObject({
-      changeRequest: {
-        id: rejectedCr.changeRequest.id,
-        status: "rejected",
-        decisionReason: "Wrong collection ID",
-        reviewerUserId: owner.userId,
-      },
+      ],
     });
 
-    // Rejected CR cannot be approved afterwards and does not appear in GET /v1/media
-    const approveRejectedRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${rejectedCr.changeRequest.id}/approve`,
-        {
-          method: "POST",
-          headers: { cookie: owner.cookie },
-        },
-      ),
-    );
-    expect(approveRejectedRes.status).toBe(409);
+    const rejectRes = await ownerRpc.reviewer.rejectChangeRequest({
+      id: rejectedCr.changeRequest!.id,
+      reason: "Wrong collection ID",
+    });
+    expect(rejectRes.changeRequest).toMatchObject({
+      id: rejectedCr.changeRequest!.id,
+      decisionReason: "Wrong collection ID",
+      reviewerUserId: owner.userId,
+    });
+    expect(fromProtoChangeRequestStatus(rejectRes.changeRequest!.status)).toBe("rejected");
 
-    const readAfterReject = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(readAfterReject.status).toBe(404);
+    // Rejected CR cannot be approved afterwards and does not appear in GetMedia
+    expect(
+      (
+        await expectRpcError(
+          ownerRpc.reviewer.approveChangeRequest({ id: rejectedCr.changeRequest!.id }),
+        )
+      ).status,
+    ).toBe(409);
+
+    expect(
+      (
+        await expectRpcError(
+          readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }),
+        )
+      ).status,
+    ).toBe(404);
 
     // 2. Movie whole-media submission + revision 2 update + default variant switch + catalog association
-    const movieCr1Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: user.cookie },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:550",
-          namespace: "youku",
-          nativeId: "cc001f06962411de83b1",
-          variantDescription: "原声",
-          segments: [],
-        }),
-      }),
-    );
-    expect(movieCr1Res.status).toBe(201);
-    const movieCr1 = (await movieCr1Res.json()) as { changeRequest: { id: string } };
-
-    const movieApp1Res = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${movieCr1.changeRequest.id}/approve`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json", cookie: owner.cookie },
-          body: JSON.stringify({ reason: "Initial approval" }),
-        },
-      ),
-    );
-    expect(movieApp1Res.status).toBe(200);
-    const movieApp1 = (await movieApp1Res.json()) as {
-      associationId: string;
-      revisionId: string;
-    };
+    const movieCr1 = await userSessionRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "movie", id: 550 } }),
+      namespace: "youku",
+      nativeId: "cc001f06962411de83b1",
+      variantDescription: "原声",
+      segments: [],
+    });
+    const movieApp1 = await ownerRpc.reviewer.approveChangeRequest({
+      id: movieCr1.changeRequest!.id,
+      reason: "Initial approval",
+    });
 
     // Submit a second CR updating the same collection -> creates revision 2
-    const movieCr2Res = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:550",
-          namespace: "youku",
-          nativeId: "cc001f06962411de83b1",
-          variantDescription: "国配",
-          setDefaultVariant: true,
-          segments: [],
-        }),
-      }),
-    );
-    expect(movieCr2Res.status).toBe(201);
-    const movieCr2 = (await movieCr2Res.json()) as { changeRequest: { id: string } };
-
-    const movieApp2Res = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${movieCr2.changeRequest.id}/approve`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json", cookie: owner.cookie },
-          body: JSON.stringify({ reason: "Reclassified as Mandarin dub and set default" }),
-        },
-      ),
-    );
-    expect(movieApp2Res.status).toBe(200);
-    const movieApp2 = (await movieApp2Res.json()) as {
-      associationId: string;
-      revisionId: string;
-    };
+    const movieCr2 = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "movie", id: 550 } }),
+      namespace: "youku",
+      nativeId: "cc001f06962411de83b1",
+      variantDescription: "国配",
+      setDefaultVariant: true,
+      segments: [],
+    });
+    const movieApp2 = await ownerRpc.reviewer.approveChangeRequest({
+      id: movieCr2.changeRequest!.id,
+      reason: "Reclassified as Mandarin dub and set default",
+    });
     expect(movieApp2.associationId).toBe(movieApp1.associationId);
     expect(movieApp2.revisionId).not.toBe(movieApp1.revisionId);
 
@@ -1069,71 +797,43 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     expect(revisions[1]?.id).toBe(movieApp2.revisionId);
 
     // Add a Douban catalog association (no variant)
-    const doubanCrRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": submitKey.key },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:550",
-          namespace: "douban",
-          nativeId: "1292052",
-          segments: [],
-        }),
-      }),
-    );
-    expect(doubanCrRes.status).toBe(201);
-    const doubanCr = (await doubanCrRes.json()) as { changeRequest: { id: string } };
-    expect(
-      (
-        await app.fetch(
-          new Request(
-            `${TEST_BASE_URL}/v1/reviewer/change-requests/${doubanCr.changeRequest.id}/approve`,
-            {
-              method: "POST",
-              headers: { cookie: owner.cookie },
-            },
-          ),
-        )
-      ).status,
-    ).toBe(200);
+    const doubanCr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "movie", id: 550 } }),
+      namespace: "douban",
+      nativeId: "1292052",
+      segments: [],
+    });
+    await ownerRpc.reviewer.approveChangeRequest({ id: doubanCr.changeRequest!.id });
 
-    const movieDocRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/douban:1292052`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(movieDocRes.status).toBe(200);
-    const movieDocBody = (await movieDocRes.json()) as {
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-    };
-    expect(movieDocBody.matchedAssociationId).toBeTruthy();
-    expect(movieDocBody.document.media.snapshot).toEqual({
+    const movieDocRes = await readRpc.media.getMedia({ ref: mediaRef({ douban: "1292052" }) });
+    const movieDoc = fromProtoMediaDocument(movieDocRes.document!);
+    expect(movieDocRes.matchedAssociationId).toBeTruthy();
+    expect(movieDoc.media.snapshot).toEqual({
       title: "搏击俱乐部",
       originalTitle: "Fight Club",
       year: 1999,
       type: "movie",
       seasons: [],
     });
-    expect(movieDocBody.document.externalIds).toEqual(
+    expect(movieDoc.externalIds).toEqual(
       expect.arrayContaining([
         { namespace: "tmdb", nativeId: "movie:550" },
         { namespace: "imdb", nativeId: "tt0137523" },
         { namespace: "trakt", nativeId: "movie:727" },
       ]),
     );
-    const defaultYoukuVariants = movieDocBody.document.variants.filter(
+    const defaultYoukuVariants = movieDoc.variants.filter(
       (v) => v.namespace === "youku" && v.isDefault,
     );
     expect(defaultYoukuVariants).toHaveLength(1);
     expect(defaultYoukuVariants[0]?.label).toBe("国配");
 
-    expect(resolveEpisode(movieDocBody.document, { namespace: "youku" })).toMatchObject({
+    expect(resolveEpisode(movieDoc, { namespace: "youku" })).toMatchObject({
       kind: "collection_only",
       reason: "whole_media",
       nativeId: "cc001f06962411de83b1",
     });
-    expect(resolveEpisode(movieDocBody.document, { namespace: "douban" })).toMatchObject({
+    expect(resolveEpisode(movieDoc, { namespace: "douban" })).toMatchObject({
       kind: "collection_only",
       reason: "whole_media",
       nativeId: "1292052",
@@ -1145,7 +845,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
-    // Use a strict PostgreSQL read-only session on dbRead to prove GET /v1/media/:key never writes
+    // Use a strict PostgreSQL read-only session on dbRead to prove GetMedia never writes
     const readOnlyUrl = new URL(testDb.connectionString);
     readOnlyUrl.searchParams.set("options", "-c default_transaction_read_only=on");
     const readOnlyDb = createDb(readOnlyUrl.toString());
@@ -1190,171 +890,119 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         .where("id", "=", owner.userId)
         .execute();
 
-      const readOnlyKey = await createApiKey(app, regularUser.cookie, {
+      const readOnlyKey = await issueApiKeyRpc(app, regularUser.cookie, {
         name: "Read Only",
         canSubmit: false,
       });
-      const submitKey = await createApiKey(app, regularUser.cookie, {
+      const submitKey = await issueApiKeyRpc(app, regularUser.cookie, {
         name: "Submit",
         canSubmit: true,
       });
 
-      const validPayload = JSON.stringify({
-        targetExternalKey: "tmdb:tv:95479",
+      const validPayload = {
+        target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
         namespace: "bilibili",
         nativeId: "ss34430",
         variantDescription: "原声",
         segments: [
-          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 24,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+          }),
         ],
-      });
+      };
+
+      const unauthRpc = createRpcClients(app);
+      const readKeyRpc = createRpcClients(app, { apiKey: readOnlyKey.key });
+      const submitKeyRpc = createRpcClients(app, { apiKey: submitKey.key });
+      const unverifiedRpc = createRpcClients(app, { cookie: unverified.cookie });
+      const regularRpc = createRpcClients(app, { cookie: regularUser.cookie });
+      const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
 
       // Read without API key -> 401
-      const noKeyRead = await app.fetch(new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`));
-      expect(noKeyRead.status).toBe(401);
+      expect(
+        (
+          await expectRpcError(
+            unauthRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }),
+          )
+        ).status,
+      ).toBe(401);
 
       // Submit without auth -> 401
-      const noAuthSubmit = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: validPayload,
-        }),
-      );
-      expect(noAuthSubmit.status).toBe(401);
+      expect(
+        (await expectRpcError(unauthRpc.changeRequest.createChangeRequest(validPayload))).status,
+      ).toBe(401);
 
       // Submit with read-only API key -> 403
-      const readKeySubmit = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": readOnlyKey.key,
-          },
-          body: validPayload,
-        }),
+      const readKeySubmitErr = await expectRpcError(
+        readKeyRpc.changeRequest.createChangeRequest(validPayload),
       );
-      expect(readKeySubmit.status).toBe(403);
-      expect(await readKeySubmit.json()).toMatchObject({ error: "INSUFFICIENT_PERMISSIONS" });
+      expect(readKeySubmitErr.status).toBe(403);
+      expect(readKeySubmitErr.code).toBe("INSUFFICIENT_PERMISSIONS");
 
       // Submit with unverified user session -> 403
-      const unverifiedSubmit = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            cookie: unverified.cookie,
-          },
-          body: validPayload,
-        }),
+      const unverifiedErr = await expectRpcError(
+        unverifiedRpc.changeRequest.createChangeRequest(validPayload),
       );
-      expect(unverifiedSubmit.status).toBe(403);
-      expect(await unverifiedSubmit.json()).toMatchObject({ error: "EMAIL_NOT_VERIFIED" });
+      expect(unverifiedErr.status).toBe(403);
+      expect(unverifiedErr.code).toBe("EMAIL_NOT_VERIFIED");
 
-      // Submit with valid submit API key -> 201
-      const okSubmit = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": submitKey.key,
-          },
-          body: validPayload,
-        }),
-      );
-      expect(okSubmit.status).toBe(201);
-      const { changeRequest } = (await okSubmit.json()) as { changeRequest: { id: string } };
+      // Submit with valid submit API key -> succeeds
+      const okSubmit = await submitKeyRpc.changeRequest.createChangeRequest(validPayload);
+      const crId = okSubmit.changeRequest!.id;
 
       // Regular user cannot list, approve, or reject reviewer queue -> 403
+      expect((await expectRpcError(regularRpc.reviewer.listChangeRequests({}))).status).toBe(403);
       expect(
-        (
-          await app.fetch(
-            new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests`, {
-              headers: { cookie: regularUser.cookie },
-            }),
-          )
-        ).status,
+        (await expectRpcError(regularRpc.reviewer.approveChangeRequest({ id: crId }))).status,
       ).toBe(403);
       expect(
-        (
-          await app.fetch(
-            new Request(
-              `${TEST_BASE_URL}/v1/reviewer/change-requests/${changeRequest.id}/approve`,
-              {
-                method: "POST",
-                headers: { cookie: regularUser.cookie },
-              },
-            ),
-          )
-        ).status,
-      ).toBe(403);
-      expect(
-        (
-          await app.fetch(
-            new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${changeRequest.id}/reject`, {
-              method: "POST",
-              headers: { cookie: regularUser.cookie },
-            }),
-          )
-        ).status,
+        (await expectRpcError(regularRpc.reviewer.rejectChangeRequest({ id: crId }))).status,
       ).toBe(403);
 
       // Regular user cannot appoint reviewers -> 403
-      const nonOwnerRoleRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/admin/users/${regularUser.userId}/role`, {
-          method: "PUT",
-          headers: { "content-type": "application/json", cookie: regularUser.cookie },
-          body: JSON.stringify({ role: "reviewer" }),
-        }),
-      );
-      expect(nonOwnerRoleRes.status).toBe(403);
-
-      // Owner appoints regularUser as reviewer -> 200
-      const appointRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/admin/users/${regularUser.userId}/role`, {
-          method: "PUT",
-          headers: { "content-type": "application/json", cookie: owner.cookie },
-          body: JSON.stringify({ role: "reviewer" }),
-        }),
-      );
-      expect(appointRes.status).toBe(200);
-      expect(await appointRes.json()).toMatchObject({
-        user: {
-          id: regularUser.userId,
-          role: "reviewer",
-        },
-      });
-
-      // Appointed reviewer still cannot call owner-only admin endpoint -> 403
       expect(
         (
-          await app.fetch(
-            new Request(`${TEST_BASE_URL}/v1/admin/users/${unverified.userId}/role`, {
-              method: "PUT",
-              headers: { "content-type": "application/json", cookie: regularUser.cookie },
-              body: JSON.stringify({ role: "reviewer" }),
-            }),
+          await expectRpcError(
+            regularRpc.reviewer.setUserRole({ userId: regularUser.userId, role: "reviewer" }),
+          )
+        ).status,
+      ).toBe(403);
+
+      // Owner appoints regularUser as reviewer -> succeeds
+      const appointRes = await ownerRpc.reviewer.setUserRole({
+        userId: regularUser.userId,
+        role: "reviewer",
+      });
+      expect(appointRes.user).toMatchObject({
+        id: regularUser.userId,
+        role: "reviewer",
+      });
+
+      // Appointed reviewer still cannot call owner-only SetUserRole -> 403
+      expect(
+        (
+          await expectRpcError(
+            regularRpc.reviewer.setUserRole({ userId: unverified.userId, role: "reviewer" }),
           )
         ).status,
       ).toBe(403);
 
       // Newly appointed reviewer can now approve the change request!
-      const newReviewerApprove = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/reviewer/change-requests/${changeRequest.id}/approve`, {
-          method: "POST",
-          headers: { "content-type": "application/json", cookie: regularUser.cookie },
-          body: JSON.stringify({ reason: "Approved by newly appointed reviewer" }),
-        }),
-      );
-      expect(newReviewerApprove.status).toBe(200);
+      const approved = await regularRpc.reviewer.approveChangeRequest({
+        id: crId,
+        reason: "Approved by newly appointed reviewer",
+      });
+      expect(approved.mediaId).toBeTruthy();
 
       // Read media via strict read-only dbRead connection succeeds!
-      const readRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-          headers: { "x-api-key": readOnlyKey.key },
-        }),
-      );
-      expect(readRes.status).toBe(200);
+      const readRes = await readKeyRpc.media.getMedia({
+        ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      });
+      expect(readRes.document?.media?.id).toBe(approved.mediaId);
     } finally {
       await readOnlyDb.destroy();
     }

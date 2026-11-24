@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package mediaref.v1;
+
+import "mediaref/v1/types.proto";
+
+message AssociationRevision {
+  string id = 1;
+  string association_id = 2;
+  int32 revision_number = 3;
+  optional string change_request_id = 4;
+  optional string variant_id = 5;
+  AssociationStatus status = 6;
+  repeated Segment segments = 7;
+  optional string actor_user_id = 8;
+  optional string submitter_user_id = 9;
+  optional string reviewer_user_id = 10;
+  optional string reason = 11;
+  string created_at = 12;
+}
+
+message ReportInvalidationRequest {
+  string association_id = 1;
+  optional string reason = 2;
+}
+
+message ReportInvalidationResponse {
+  string report_id = 1;
+  bool deduplicated = 2;
+  bool triggered = 3;
+  optional string job_id = 4;
+  int32 report_count = 5;
+  int32 threshold = 6;
+}
+
+message ListAssociationRevisionsRequest {
+  string association_id = 1;
+  SortOrder order = 2;
+  optional int32 limit = 3;
+  optional int32 offset = 4;
+}
+
+message ListAssociationRevisionsResponse {
+  AssociationSummary association = 1;
+  repeated AssociationRevision revisions = 2;
+  int32 total = 3;
+}
+
+service AssociationService {
+  rpc ReportInvalidation(ReportInvalidationRequest) returns (ReportInvalidationResponse);
+  rpc ListAssociationRevisions(ListAssociationRevisionsRequest) returns (ListAssociationRevisionsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}

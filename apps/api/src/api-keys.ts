@@ -1,6 +1,14 @@
+import { create } from "@bufbuild/protobuf";
+import { createDomainConnectError, proto, toProtoApiKeyAction } from "@media-ref/client";
 import type { Db } from "@media-ref/db";
-import type { Hono, MiddlewareHandler } from "hono";
-import { requireAuthenticatedSession, requireVerifiedUser, type ApiEnv } from "./auth.ts";
+import type { ServiceImpl } from "@connectrpc/connect";
+import {
+  getRuntime,
+  requireApiKeyAuth,
+  requireSessionAuth,
+  requireVerifiedUserAuth,
+} from "./context.ts";
+import { toProtoApiKeySummary } from "./proto-records.ts";
 
 export const DEFAULT_API_KEY_PREFIX = "mref_";
 export const DEFAULT_API_KEY_CONFIG_ID = "default";
@@ -45,7 +53,6 @@ export interface VerifiedApiKey {
 }
 
 const VALID_ACTIONS = new Set<ApiKeyAction>(["read", "report", "submit"]);
-const VALID_SCOPES = new Set<ApiKeyScope>(["read_report", "submit"]);
 
 export function buildApiKeyPermissions(canSubmit: boolean): ApiKeyPermissions {
   return canSubmit ? { media: ["read", "report", "submit"] } : { media: ["read", "report"] };
@@ -118,129 +125,6 @@ function toApiKeySummary(record: {
   };
 }
 
-interface ParsedCreateApiKeyRequest {
-  name?: string;
-  canSubmit: boolean;
-  expiresIn?: number;
-}
-
-type ParseCreateResult =
-  | { ok: true; value: ParsedCreateApiKeyRequest }
-  | { ok: false; code: string; message: string };
-
-function parseCreateApiKeyRequest(body: unknown): ParseCreateResult {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return {
-      ok: false,
-      code: "INVALID_REQUEST",
-      message: "Request body must be a JSON object",
-    };
-  }
-
-  const record = body as Record<string, unknown>;
-
-  if (record.permissions !== undefined) {
-    return {
-      ok: false,
-      code: "INVALID_PERMISSIONS",
-      message: "Specify permissions using canSubmit or scopes instead of raw permissions",
-    };
-  }
-
-  let name: string | undefined;
-  if (record.name !== undefined && record.name !== null) {
-    if (typeof record.name !== "string") {
-      return {
-        ok: false,
-        code: "INVALID_NAME",
-        message: "API key name must be a string",
-      };
-    }
-    const trimmed = record.name.trim();
-    if (trimmed.length === 0 || trimmed.length > MAX_API_KEY_NAME_LENGTH) {
-      return {
-        ok: false,
-        code: "INVALID_NAME",
-        message: `API key name must be between 1 and ${MAX_API_KEY_NAME_LENGTH} characters`,
-      };
-    }
-    name = trimmed;
-  }
-
-  let canSubmitFromFlag: boolean | undefined;
-  if (record.canSubmit !== undefined) {
-    if (typeof record.canSubmit !== "boolean") {
-      return {
-        ok: false,
-        code: "INVALID_PERMISSIONS",
-        message: "canSubmit must be a boolean",
-      };
-    }
-    canSubmitFromFlag = record.canSubmit;
-  }
-
-  let canSubmitFromScopes: boolean | undefined;
-  if (record.scopes !== undefined) {
-    if (!Array.isArray(record.scopes) || record.scopes.length === 0) {
-      return {
-        ok: false,
-        code: "INVALID_PERMISSIONS",
-        message: "scopes must be a non-empty array of valid scopes",
-      };
-    }
-    for (const scope of record.scopes) {
-      if (typeof scope !== "string" || !VALID_SCOPES.has(scope as ApiKeyScope)) {
-        return {
-          ok: false,
-          code: "INVALID_PERMISSIONS",
-          message: `Unsupported scope: ${String(scope)}`,
-        };
-      }
-    }
-    canSubmitFromScopes = record.scopes.includes("submit");
-  }
-
-  if (
-    canSubmitFromFlag !== undefined &&
-    canSubmitFromScopes !== undefined &&
-    canSubmitFromFlag !== canSubmitFromScopes
-  ) {
-    return {
-      ok: false,
-      code: "INVALID_PERMISSIONS",
-      message: "canSubmit and scopes disagree on submit permission",
-    };
-  }
-
-  const canSubmit = canSubmitFromFlag ?? canSubmitFromScopes ?? false;
-
-  let expiresIn: number | undefined;
-  if (record.expiresIn !== undefined && record.expiresIn !== null) {
-    if (
-      typeof record.expiresIn !== "number" ||
-      !Number.isInteger(record.expiresIn) ||
-      record.expiresIn < 1 ||
-      record.expiresIn > MAX_API_KEY_EXPIRES_IN_SECONDS
-    ) {
-      return {
-        ok: false,
-        code: "INVALID_EXPIRES_IN",
-        message: `expiresIn must be an integer between 1 and ${MAX_API_KEY_EXPIRES_IN_SECONDS} seconds`,
-      };
-    }
-    expiresIn = record.expiresIn;
-  }
-
-  return {
-    ok: true,
-    value: {
-      name,
-      canSubmit,
-      expiresIn,
-    },
-  };
-}
-
 function isKeyNotFoundError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
@@ -276,11 +160,6 @@ export type VerifyApiKeyFailureCode =
 export type VerifyApiKeyResult =
   | { ok: true; apiKey: VerifiedApiKey }
   | { ok: false; status: 401 | 403; code: VerifyApiKeyFailureCode; message: string };
-
-export interface RequireApiKeyOptions {
-  db: "read" | "write";
-  permission: ApiKeyAction;
-}
 
 /**
  * Computes SHA-256(UTF-8(rawKey)) encoded as RFC 4648 base64url without `=` padding,
@@ -425,137 +304,164 @@ export async function verifyApiKey(input: VerifyApiKeyInput): Promise<VerifyApiK
   };
 }
 
-export function requireApiKey(options: RequireApiKeyOptions): MiddlewareHandler<ApiEnv> {
-  return async (c, next) => {
-    const rawKey = extractApiKeyFromHeaders(c.req.raw.headers);
-    if (!rawKey) {
-      return c.json(
-        {
-          error: "API_KEY_REQUIRED",
-          message: "API key is required",
-        },
-        401,
-      );
-    }
-
-    const db = options.db === "read" ? c.get("dbRead") : c.get("dbWrite");
-    const result = await verifyApiKey({
-      db,
-      rawKey,
-      requiredPermission: options.permission,
-      now: c.get("now")(),
+export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
+  async getCurrentUser(_req, ctx) {
+    const session = await requireSessionAuth(ctx);
+    return create(proto.GetCurrentUserResponseSchema, {
+      user: create(proto.UserSchema, {
+        id: session.user.id,
+        email: session.user.email,
+        name: session.user.name,
+        emailVerified: session.user.emailVerified,
+        role: session.user.role,
+      }),
     });
+  },
 
-    if (!result.ok) {
-      return c.json(
-        {
-          error: result.code,
-          message: result.message,
-        },
-        result.status,
-      );
+  async getCurrentApiKey(_req, ctx) {
+    const verified = await requireApiKeyAuth(ctx, { db: "read", permission: "read" });
+    const expiresAt = toIsoDate(verified.expiresAt);
+    return create(proto.GetCurrentApiKeyResponseSchema, {
+      keyId: verified.keyId,
+      userId: verified.userId,
+      ...(verified.name !== null ? { name: verified.name } : {}),
+      ...(verified.prefix !== null ? { prefix: verified.prefix } : {}),
+      ...(verified.start !== null ? { start: verified.start } : {}),
+      permissions: create(proto.ApiKeyPermissionsSchema, {
+        media: verified.permissions.media.map(toProtoApiKeyAction),
+      }),
+      canSubmit: verified.canSubmit,
+      emailVerified: verified.emailVerified,
+      role: verified.role,
+      ...(expiresAt !== null ? { expiresAt } : {}),
+    });
+  },
+
+  async createApiKey(req, ctx) {
+    const session = await requireVerifiedUserAuth(ctx);
+    const runtime = getRuntime(ctx);
+
+    let name: string | undefined;
+    if (req.name !== undefined) {
+      const trimmed = req.name.trim();
+      if (trimmed.length === 0 || trimmed.length > MAX_API_KEY_NAME_LENGTH) {
+        throw createDomainConnectError({
+          status: 400,
+          code: "INVALID_NAME",
+          message: `API key name must be between 1 and ${MAX_API_KEY_NAME_LENGTH} characters`,
+        });
+      }
+      name = trimmed;
     }
 
-    c.set("apiKey", result.apiKey);
-    await next();
-  };
-}
-
-export function registerApiKeyRoutes(app: Hono<ApiEnv>): void {
-  app.get("/v1/api-keys/me", requireApiKey({ db: "read", permission: "read" }), (c) => {
-    const verified = c.get("apiKey");
-    if (!verified) {
-      return c.json({ error: "API_KEY_REQUIRED", message: "API key is required" }, 401);
+    let canSubmitFromScopes: boolean | undefined;
+    if (req.scopes.length > 0) {
+      for (const scope of req.scopes) {
+        if (scope !== proto.ApiKeyScope.READ_REPORT && scope !== proto.ApiKeyScope.SUBMIT) {
+          throw createDomainConnectError({
+            status: 400,
+            code: "INVALID_PERMISSIONS",
+            message: `Unsupported scope: ${String(scope)}`,
+          });
+        }
+      }
+      canSubmitFromScopes = req.scopes.includes(proto.ApiKeyScope.SUBMIT);
     }
 
-    return c.json(
-      {
-        keyId: verified.keyId,
-        userId: verified.userId,
-        name: verified.name,
-        prefix: verified.prefix,
-        start: verified.start,
-        permissions: verified.permissions,
-        canSubmit: verified.canSubmit,
-        emailVerified: verified.emailVerified,
-        role: verified.role,
-        expiresAt: toIsoDate(verified.expiresAt),
-      },
-      200,
-    );
-  });
-
-  app.post("/v1/api-keys", requireVerifiedUser, async (c) => {
-    const session = c.get("session");
-    if (!session) {
-      return c.json({ error: "UNAUTHORIZED", message: "Authentication required" }, 401);
+    if (
+      req.canSubmit !== undefined &&
+      canSubmitFromScopes !== undefined &&
+      req.canSubmit !== canSubmitFromScopes
+    ) {
+      throw createDomainConnectError({
+        status: 400,
+        code: "INVALID_PERMISSIONS",
+        message: "canSubmit and scopes disagree on submit permission",
+      });
     }
 
-    let rawBody: unknown;
-    try {
-      rawBody = await c.req.json();
-    } catch {
-      return c.json({ error: "INVALID_JSON", message: "Request body must be valid JSON" }, 400);
+    const canSubmit = req.canSubmit ?? canSubmitFromScopes ?? false;
+
+    let expiresIn: number | undefined;
+    if (req.expiresIn !== undefined) {
+      if (
+        !Number.isInteger(req.expiresIn) ||
+        req.expiresIn < 1 ||
+        req.expiresIn > MAX_API_KEY_EXPIRES_IN_SECONDS
+      ) {
+        throw createDomainConnectError({
+          status: 400,
+          code: "INVALID_EXPIRES_IN",
+          message: `expiresIn must be an integer between 1 and ${MAX_API_KEY_EXPIRES_IN_SECONDS} seconds`,
+        });
+      }
+      expiresIn = req.expiresIn;
     }
 
-    const parsed = parseCreateApiKeyRequest(rawBody);
-    if (!parsed.ok) {
-      return c.json({ error: parsed.code, message: parsed.message }, 400);
-    }
-
-    const permissions = buildApiKeyPermissions(parsed.value.canSubmit);
+    const permissions = buildApiKeyPermissions(canSubmit);
 
     // Server-side call WITHOUT `headers` so Better Auth permits server-only `permissions`.
-    const created = await c.get("auth").api.createApiKey({
+    const created = await runtime.getAuth().api.createApiKey({
       body: {
         userId: session.user.id,
-        name: parsed.value.name,
+        name,
         permissions,
-        expiresIn: parsed.value.expiresIn,
+        expiresIn,
       },
     });
 
-    const response: CreatedApiKeyResponse = {
-      ...toApiKeySummary(created),
+    const summary = toApiKeySummary(created);
+    return create(proto.CreateApiKeyResponseSchema, {
+      apiKey: toProtoApiKeySummary(summary),
       key: created.key,
-    };
+    });
+  },
 
-    return c.json(response, 201);
-  });
-
-  app.get("/v1/api-keys", requireAuthenticatedSession, async (c) => {
-    const listed = await c.get("auth").api.listApiKeys({
-      headers: c.req.raw.headers,
+  async listApiKeys(_req, ctx) {
+    await requireSessionAuth(ctx);
+    const runtime = getRuntime(ctx);
+    const listed = await runtime.getAuth().api.listApiKeys({
+      headers: ctx.requestHeader,
     });
 
-    const apiKeys = listed.apiKeys.map((item) => toApiKeySummary(item));
-    return c.json(
-      {
-        apiKeys,
-        total: listed.total,
-      },
-      200,
-    );
-  });
+    const apiKeys = listed.apiKeys.map((item) => toProtoApiKeySummary(toApiKeySummary(item)));
+    return create(proto.ListApiKeysResponseSchema, {
+      apiKeys,
+      total: listed.total,
+    });
+  },
 
-  app.delete("/v1/api-keys/:id", requireAuthenticatedSession, async (c) => {
-    const keyId = c.req.param("id").trim();
+  async deleteApiKey(req, ctx) {
+    await requireSessionAuth(ctx);
+    const runtime = getRuntime(ctx);
+    const keyId = req.id.trim();
     if (keyId.length === 0) {
-      return c.json({ error: "INVALID_KEY_ID", message: "API key ID is required" }, 400);
+      throw createDomainConnectError({
+        status: 400,
+        code: "INVALID_KEY_ID",
+        message: "API key ID is required",
+      });
     }
 
     try {
-      await c.get("auth").api.deleteApiKey({
+      await runtime.getAuth().api.deleteApiKey({
         body: { keyId },
-        headers: c.req.raw.headers,
+        headers: ctx.requestHeader,
       });
     } catch (error) {
       if (isKeyNotFoundError(error)) {
-        return c.json({ error: "API_KEY_NOT_FOUND", message: "API key not found" }, 404);
+        throw createDomainConnectError({
+          status: 404,
+          code: "API_KEY_NOT_FOUND",
+          message: "API key not found",
+        });
       }
       throw error;
     }
 
-    return c.json({ success: true, id: keyId }, 200);
-  });
-}
+    return create(proto.DeleteApiKeyResponseSchema, {
+      success: true,
+      id: keyId,
+    });
+  },
+};

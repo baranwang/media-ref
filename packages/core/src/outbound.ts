@@ -10,6 +10,7 @@ export interface ExternalHttpRequest {
   headers?: Record<string, string>;
   body?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
   redirect?: "follow" | "error" | "manual";
 }
 
@@ -114,6 +115,8 @@ export interface ModelInvocationRequest {
   tools?: ModelToolDefinition[];
   temperature?: number;
   maxTokens?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface ModelInvocationResponse {
@@ -666,19 +669,66 @@ async function invokeCloudflareAiBinding(
   return normalizeModelPayload(raw, model, provider);
 }
 
+export function combineAbortSignals(
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): AbortSignal | undefined {
+  const timeoutSignal =
+    timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? AbortSignal.timeout(Math.ceil(timeoutMs))
+      : undefined;
+  if (signal && timeoutSignal) {
+    return AbortSignal.any([signal, timeoutSignal]);
+  }
+  return signal ?? timeoutSignal;
+}
+
+export function raceWithAbortSignal<T>(
+  work: Promise<T>,
+  signal?: AbortSignal,
+  reasonMessage = "Operation aborted",
+): Promise<T> {
+  if (!signal) {
+    return work;
+  }
+  if (signal.aborted) {
+    const err = signal.reason instanceof Error ? signal.reason : new Error(reasonMessage);
+    work.catch(() => {});
+    return Promise.reject(err);
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      const err = signal.reason instanceof Error ? signal.reason : new Error(reasonMessage);
+      reject(err);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}): OutboundClient {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
   return {
     async fetchExternal(request) {
       const resolved = resolveExternalRequest(request, options.proxyConfig);
+      const signal = combineAbortSignals(request.signal, request.timeoutMs);
       const response = await fetchImpl(resolved.url, {
         method: request.method ?? "GET",
         headers: resolved.headers,
         body: request.body,
         ...(request.redirect !== undefined ? { redirect: request.redirect } : {}),
-        signal:
-          request.timeoutMs !== undefined ? AbortSignal.timeout(request.timeoutMs) : undefined,
+        ...(signal !== undefined ? { signal } : {}),
       });
 
       const headers = headersToRecord(response.headers);
@@ -733,11 +783,20 @@ export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}
     },
 
     async invokeModel(request) {
+      const signal = combineAbortSignals(request.signal, request.timeoutMs);
       if (options.invokeModel) {
-        return options.invokeModel(request);
+        return raceWithAbortSignal(
+          options.invokeModel(signal ? { ...request, signal } : request),
+          signal,
+          "Model invocation aborted",
+        );
       }
       if (options.aiBinding) {
-        return invokeCloudflareAiBinding(options.aiBinding, request, options);
+        return raceWithAbortSignal(
+          invokeCloudflareAiBinding(options.aiBinding, request, options),
+          signal,
+          "Model invocation aborted",
+        );
       }
       throw new Error("Outbound model transport is not configured");
     },

@@ -1,92 +1,26 @@
+import { create } from "@bufbuild/protobuf";
+import type { ExecutionContext } from "@cloudflare/workers-types";
+import { proto, toProtoSegmentInput } from "@media-ref/client";
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
   listDemands,
-  type EmailMessage,
   type ExternalHttpRequest,
 } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { createApiApp } from "../src/index.ts";
+import { createApiApp } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-demands-integration-tests-0123456789";
-
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-async function signUpUser(
-  app: ReturnType<typeof createApiApp>,
-  outbound: ReturnType<typeof createFakeOutboundClient>,
-  input: { email: string; password: string; name: string; verify?: boolean },
-): Promise<{ userId: string; cookie: string }> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: input.email,
-        password: input.password,
-        name: input.name,
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  if (input.verify) {
-    const email = outbound.sentEmails[emailsBefore];
-    expect(email).toBeDefined();
-    const verifyRes = await app.fetch(
-      new Request(extractVerificationUrl(email!), {
-        method: "GET",
-        headers: { cookie },
-      }),
-    );
-    expect([200, 302]).toContain(verifyRes.status);
-    const refreshed = extractCookieHeader(verifyRes);
-    if (refreshed) {
-      cookie = refreshed;
-    }
-  }
-
-  return { userId: signUpBody.user.id, cookie };
-}
-
-async function createApiKey(
-  app: ReturnType<typeof createApiApp>,
-  cookie: string,
-  options: { name: string; canSubmit?: boolean },
-): Promise<{ id: string; key: string }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        name: options.name,
-        canSubmit: options.canSubmit ?? false,
-      }),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; key: string };
-}
 
 function createReadOnlyDb(connectionString: string) {
   const readOnlyUrl = new URL(connectionString);
@@ -208,10 +142,11 @@ describe("API Worker demand recording on read misses (#27)", () => {
       name: "Demand Reader",
       verify: true,
     });
-    const readKey = await createApiKey(app, user.cookie, {
+    const readKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Demand Read Key",
       canSubmit: false,
     });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
 
     const media = await testDb.writeDb
       .insertInto("media")
@@ -274,34 +209,31 @@ describe("API Worker demand recording on read misses (#27)", () => {
       .execute();
 
     // Season 1 is already covered in platform group -> NO demand recorded
-    const coveredRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?season=1&namespaceGroup=platform`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(coveredRes.status).toBe(200);
+    await readRpc.media.getMedia({
+      ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      season: 1,
+      namespaceGroup: proto.NamespaceGroup.PLATFORM,
+    });
     await Promise.all(bgTasks);
 
     expect(await listDemands(testDb.readDb, { mediaId: media.id })).toEqual([]);
 
     // Season 2 is NOT covered in platform group -> called twice -> demandCount = 2
     for (let i = 0; i < 2; i++) {
-      const missRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?season=2&namespaceGroup=platform`, {
-          headers: { "x-api-key": readKey.key },
-        }),
-      );
-      expect(missRes.status).toBe(200);
+      await readRpc.media.getMedia({
+        ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        season: 2,
+        namespaceGroup: proto.NamespaceGroup.PLATFORM,
+      });
     }
     await Promise.all(bgTasks);
 
     // Season 1 in catalog group has NO confirmed catalog association -> demandCount = 1
-    const catalogMissRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?season=1&namespaceGroup=catalog`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(catalogMissRes.status).toBe(200);
+    await readRpc.media.getMedia({
+      ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      season: 1,
+      namespaceGroup: proto.NamespaceGroup.CATALOG,
+    });
     await Promise.all(bgTasks);
 
     const demands = await listDemands(testDb.readDb, { mediaId: media.id });
@@ -323,11 +255,28 @@ describe("API Worker demand recording on read misses (#27)", () => {
       status: "open",
     });
 
-    // Invalid season / namespaceGroup query params are rejected with 400 and record no demand
-    for (const qs of ["season=-1", "season=abc", "season=1.5", "namespaceGroup=invalid"]) {
+    // Invalid season / namespaceGroup inputs are rejected with 400 and record no demand
+    expect(
+      (
+        await expectRpcError(
+          readRpc.media.getMedia({
+            ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+            season: -1,
+          }),
+        )
+      ).status,
+    ).toBe(400);
+    const jsonTmdbRef = { tmdb: { type: "MEDIA_TYPE_TV", id: 95479 } };
+    for (const badBody of [
+      JSON.stringify({ ref: jsonTmdbRef, season: "abc" }),
+      JSON.stringify({ ref: jsonTmdbRef, season: 1.5 }),
+      JSON.stringify({ ref: jsonTmdbRef, namespaceGroup: "invalid" }),
+    ]) {
       const badRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?${qs}`, {
-          headers: { "x-api-key": readKey.key },
+        new Request(`${TEST_BASE_URL}/mediaref.v1.MediaService/GetMedia`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": readKey.key },
+          body: badBody,
         }),
       );
       expect(badRes.status).toBe(400);
@@ -367,10 +316,11 @@ describe("API Worker demand recording on read misses (#27)", () => {
       name: "Demand Case2",
       verify: true,
     });
-    const readKey = await createApiKey(app, user.cookie, {
+    const readKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Case 2 Read Key",
       canSubmit: false,
     });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
 
     // TV show with specials (0) + 3 regular seasons (1, 2, 3)
     const tvMedia = await testDb.writeDb
@@ -485,16 +435,12 @@ describe("API Worker demand recording on read misses (#27)", () => {
       })
       .execute();
 
-    // Request omits season, passes namespaceGroup=platform & includeUnconfirmed=true
-    const tvRes1 = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/media/tmdb:tv:95479?namespaceGroup=platform&includeUnconfirmed=true`,
-        {
-          headers: { "x-api-key": readKey.key },
-        },
-      ),
-    );
-    expect(tvRes1.status).toBe(200);
+    // Request omits season, passes namespaceGroup=PLATFORM & includeUnconfirmed=true
+    await readRpc.media.getMedia({
+      ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespaceGroup: proto.NamespaceGroup.PLATFORM,
+      includeUnconfirmed: true,
+    });
     await Promise.all(bgTasks);
 
     const tvDemandsAfterFirst = await listDemands(testDb.readDb, { mediaId: tvMedia.id });
@@ -504,12 +450,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
     ]);
 
     // Second request omits both season AND namespaceGroup (defaults to "platform")
-    const tvRes2 = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(tvRes2.status).toBe(200);
+    await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) });
     await Promise.all(bgTasks);
 
     const tvDemandsAfterSecond = await listDemands(testDb.readDb, { mediaId: tvMedia.id });
@@ -547,12 +488,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
       })
       .execute();
 
-    const movieRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:55555`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(movieRes.status).toBe(200);
+    await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "movie", id: 55555 } }) });
     await Promise.all(bgTasks);
 
     const movieDemands = await listDemands(testDb.readDb, { mediaId: movieMedia.id });
@@ -588,12 +524,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
       })
       .execute();
 
-    const coveredMovieRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:55555`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-    );
-    expect(coveredMovieRes.status).toBe(200);
+    await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "movie", id: 55555 } }) });
     await Promise.all(bgTasks);
 
     const movieDemandsAfterCover = await listDemands(testDb.readDb, { mediaId: movieMedia.id });
@@ -637,56 +568,75 @@ describe("API Worker demand recording on read misses (#27)", () => {
       .where("id", "=", reviewer.userId)
       .execute();
 
-    const submitKey = await createApiKey(app, reviewer.cookie, {
+    const submitKey = await issueApiKeyRpc(app, reviewer.cookie, {
       name: "Submit + Read Key",
       canSubmit: true,
     });
+    const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
+    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
 
     // 1. Query uncreated tmdb:tv:77777 season=1 three times
     for (let i = 0; i < 3; i++) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:77777?season=1&namespaceGroup=platform`, {
-          headers: { "x-api-key": submitKey.key },
-        }),
-      );
-      expect(res.status).toBe(404);
+      expect(
+        (
+          await expectRpcError(
+            submitRpc.media.getMedia({
+              ref: mediaRef({ tmdb: { type: "tv", id: 77777 } }),
+              season: 1,
+              namespaceGroup: proto.NamespaceGroup.PLATFORM,
+            }),
+          )
+        ).status,
+      ).toBe(404);
     }
 
     // 2. Query uncreated tmdb:tv:77777 without season once (to test expansion on TV creation)
-    const noSeasonRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:77777?namespaceGroup=platform`, {
-        headers: { "x-api-key": submitKey.key },
-      }),
-    );
-    expect(noSeasonRes.status).toBe(404);
+    expect(
+      (
+        await expectRpcError(
+          submitRpc.media.getMedia({
+            ref: mediaRef({ tmdb: { type: "tv", id: 77777 } }),
+            namespaceGroup: proto.NamespaceGroup.PLATFORM,
+          }),
+        )
+      ).status,
+    ).toBe(404);
 
     // 3. Query uncreated imdb:tt7777700 season=1 twice (synced secondary external ID)
     for (let i = 0; i < 2; i++) {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/imdb:tt7777700?season=1&namespaceGroup=platform`, {
-          headers: { "x-api-key": submitKey.key },
-        }),
-      );
-      expect(res.status).toBe(404);
+      expect(
+        (
+          await expectRpcError(
+            submitRpc.media.getMedia({
+              ref: mediaRef({ imdb: "tt7777700" }),
+              season: 1,
+              namespaceGroup: proto.NamespaceGroup.PLATFORM,
+            }),
+          )
+        ).status,
+      ).toBe(404);
     }
 
-    // 4. Random nonexistent UUID and invalid key must NEVER record demands
-    const uuidMissRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/media/11111111-1111-4111-8111-111111111111?season=1&namespaceGroup=platform`,
-        {
-          headers: { "x-api-key": submitKey.key },
-        },
-      ),
-    );
-    expect(uuidMissRes.status).toBe(404);
+    // 4. Random nonexistent UUID and invalid ref must NEVER record demands
+    expect(
+      (
+        await expectRpcError(
+          submitRpc.media.getMedia({
+            ref: mediaRef({ mediaId: "11111111-1111-4111-8111-111111111111" }),
+            season: 1,
+            namespaceGroup: proto.NamespaceGroup.PLATFORM,
+          }),
+        )
+      ).status,
+    ).toBe(404);
 
-    const invalidKeyRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/not-an-external-key?season=1`, {
-        headers: { "x-api-key": submitKey.key },
-      }),
-    );
-    expect(invalidKeyRes.status).toBe(400);
+    expect(
+      (
+        await expectRpcError(
+          submitRpc.media.getMedia({ ref: create(proto.MediaRefSchema), season: 1 }),
+        )
+      ).status,
+    ).toBe(400);
 
     await Promise.all(bgTasks);
 
@@ -728,40 +678,18 @@ describe("API Worker demand recording on read misses (#27)", () => {
       },
     ]);
 
-    // 5. Submit change request for tmdb:tv:77777 and approve via reviewer HTTP API -> creates media & merges demands
-    const submitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": submitKey.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:77777",
-          namespace: "douban",
-          nativeId: "35555777",
-          segments: [{ season: 1 }],
-        }),
-      }),
-    );
-    expect(submitRes.status).toBe(201);
-    const submitBody = (await submitRes.json()) as { changeRequest: { id: string } };
+    // 5. Submit change request for tmdb:tv:77777 and approve via reviewer RPC -> creates media & merges demands
+    const submitBody = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 77777 } }),
+      namespace: "douban",
+      nativeId: "35555777",
+      segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
+    });
 
-    const approveRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${submitBody.changeRequest.id}/approve`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            cookie: reviewer.cookie,
-          },
-          body: JSON.stringify({ reason: "Verified TMDB show" }),
-        },
-      ),
-    );
-    expect(approveRes.status).toBe(200);
-    const approveBody = (await approveRes.json()) as { mediaId: string };
+    const approveBody = await reviewerRpc.reviewer.approveChangeRequest({
+      id: submitBody.changeRequest!.id,
+      reason: "Verified TMDB show",
+    });
 
     // Orphan external-key demands are completely gone
     expect(await listDemands(testDb.readDb, { externalKey: "tmdb:tv:77777" })).toEqual([]);
@@ -798,47 +726,28 @@ describe("API Worker demand recording on read misses (#27)", () => {
     ]);
 
     // 6. Movie external-key demand merges with season=null when movie is created
-    const movieMissRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:55555?namespaceGroup=platform`, {
-        headers: { "x-api-key": submitKey.key },
-      }),
-    );
-    expect(movieMissRes.status).toBe(404);
+    expect(
+      (
+        await expectRpcError(
+          submitRpc.media.getMedia({
+            ref: mediaRef({ tmdb: { type: "movie", id: 55555 } }),
+            namespaceGroup: proto.NamespaceGroup.PLATFORM,
+          }),
+        )
+      ).status,
+    ).toBe(404);
     await Promise.all(bgTasks);
 
-    const movieSubmitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": submitKey.key,
-        },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:55555",
-          namespace: "douban",
-          nativeId: "35555555",
-          segments: [],
-        }),
-      }),
-    );
-    expect(movieSubmitRes.status).toBe(201);
-    const movieSubmitBody = (await movieSubmitRes.json()) as { changeRequest: { id: string } };
-
-    const movieApproveRes = await app.fetch(
-      new Request(
-        `${TEST_BASE_URL}/v1/reviewer/change-requests/${movieSubmitBody.changeRequest.id}/approve`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            cookie: reviewer.cookie,
-          },
-          body: JSON.stringify({ reason: "Verified movie" }),
-        },
-      ),
-    );
-    expect(movieApproveRes.status).toBe(200);
-    const movieApproveBody = (await movieApproveRes.json()) as { mediaId: string };
+    const movieSubmitBody = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "movie", id: 55555 } }),
+      namespace: "douban",
+      nativeId: "35555555",
+      segments: [],
+    });
+    const movieApproveBody = await reviewerRpc.reviewer.approveChangeRequest({
+      id: movieSubmitBody.changeRequest!.id,
+      reason: "Verified movie",
+    });
 
     expect(await listDemands(testDb.readDb, { externalKey: "tmdb:movie:55555" })).toEqual([]);
     expect(await listDemands(testDb.readDb, { mediaId: movieApproveBody.mediaId })).toEqual([
@@ -852,7 +761,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
     ]);
   });
 
-  test("Non-blocking: read HTTP response returns immediately while PostgreSQL demands table is locked, and survives write failures", async () => {
+  test("Non-blocking: read RPC response returns immediately while PostgreSQL demands table is locked, and survives write failures", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
     const readOnlyDb = createReadOnlyDb(testDb.connectionString);
@@ -878,7 +787,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
       name: "Nonblocking Reader",
       verify: true,
     });
-    const readKey = await createApiKey(app, user.cookie, {
+    const readKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Nonblocking Read Key",
       canSubmit: false,
     });
@@ -932,19 +841,23 @@ describe("API Worker demand recording on read misses (#27)", () => {
       },
       passThroughOnException() {},
       props: {},
-    };
+    } as unknown as ExecutionContext;
+
+    const lockedRpc = createRpcClients((req) => app.fetch(req, undefined, executionCtx), {
+      apiKey: readKey.key,
+    });
 
     try {
-      const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:77777?season=1&namespaceGroup=platform`, {
-          headers: { "x-api-key": readKey.key },
+      const err = await expectRpcError(
+        lockedRpc.media.getMedia({
+          ref: mediaRef({ tmdb: { type: "tv", id: 77777 } }),
+          season: 1,
+          namespaceGroup: proto.NamespaceGroup.PLATFORM,
         }),
-        undefined,
-        executionCtx,
       );
 
-      // HTTP response resolved IMMEDIATELY while PostgreSQL still holds the FOR UPDATE row lock!
-      expect(res.status).toBe(404);
+      // RPC response resolved IMMEDIATELY while PostgreSQL still holds the FOR UPDATE row lock!
+      expect(err.status).toBe(404);
       expect(waitUntilPromises).toHaveLength(1);
       expect(backgroundSettled).toBe(false);
 
@@ -969,7 +882,7 @@ describe("API Worker demand recording on read misses (#27)", () => {
       demandCount: 2,
     });
 
-    // Real DB write failure (read-only dbWrite) must NEVER fail or crash a read HTTP request
+    // Real DB write failure (read-only dbWrite) must NEVER fail or crash a read RPC request
     const recordedErrors: unknown[] = [];
     const failingWriteApp = createApiApp({
       dbRead: readOnlyDb,
@@ -986,26 +899,30 @@ describe("API Worker demand recording on read misses (#27)", () => {
     });
 
     const failWaitUntil: Promise<unknown>[] = [];
-    const resilientRes = await failingWriteApp.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:77777?season=2&namespaceGroup=platform`, {
-        headers: { "x-api-key": readKey.key },
-      }),
-      undefined,
-      {
-        waitUntil(promise: Promise<unknown>) {
-          failWaitUntil.push(promise);
-        },
-        passThroughOnException() {},
-        props: {},
+    const failCtx = {
+      waitUntil(promise: Promise<unknown>) {
+        failWaitUntil.push(promise);
       },
+      passThroughOnException() {},
+      props: {},
+    } as unknown as ExecutionContext;
+
+    const resilientErr = await expectRpcError(
+      createRpcClients((req) => failingWriteApp.fetch(req, undefined, failCtx), {
+        apiKey: readKey.key,
+      }).media.getMedia({
+        ref: mediaRef({ tmdb: { type: "tv", id: 77777 } }),
+        season: 2,
+        namespaceGroup: proto.NamespaceGroup.PLATFORM,
+      }),
     );
-    expect(resilientRes.status).toBe(404);
+    expect(resilientErr.status).toBe(404);
     await Promise.all(failWaitUntil);
     expect(recordedErrors).toHaveLength(1);
     expect(recordedErrors[0]).toBeInstanceOf(Error);
   });
 
-  test("Batch read (POST /v1/media/batch) records demands for missed keys and uncovered seasons without blocking", async () => {
+  test("Batch read (MediaService.BatchGetMedia) records demands for missed keys and uncovered seasons without blocking", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
     const readOnlyDb = createReadOnlyDb(testDb.connectionString);
@@ -1036,10 +953,11 @@ describe("API Worker demand recording on read misses (#27)", () => {
       name: "Batch Reader",
       verify: true,
     });
-    const readKey = await createApiKey(app, user.cookie, {
+    const readKey = await issueApiKeyRpc(app, user.cookie, {
       name: "Batch Read Key",
       canSubmit: false,
     });
+    const readRpc = createRpcClients(app, { apiKey: readKey.key });
 
     const media = await testDb.writeDb
       .insertInto("media")
@@ -1102,27 +1020,17 @@ describe("API Worker demand recording on read misses (#27)", () => {
       .execute();
 
     // Batch with explicit season=2 and namespaceGroup="platform"
-    const batchRes1 = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readKey.key,
-        },
-        body: JSON.stringify({
-          keys: [
-            "tmdb:tv:95479",
-            "tmdb:tv:88888",
-            "tmdb:tv:88888",
-            "11111111-1111-4111-8111-111111111111",
-            "bad-key",
-          ],
-          season: 2,
-          namespaceGroup: "platform",
-        }),
-      }),
-    );
-    expect(batchRes1.status).toBe(200);
+    await readRpc.media.batchGetMedia({
+      refs: [
+        mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        mediaRef({ tmdb: { type: "tv", id: 88888 } }),
+        mediaRef({ tmdb: { type: "tv", id: 88888 } }),
+        mediaRef({ mediaId: "11111111-1111-4111-8111-111111111111" }),
+        create(proto.MediaRefSchema),
+      ],
+      season: 2,
+      namespaceGroup: proto.NamespaceGroup.PLATFORM,
+    });
     await Promise.all(bgTasks);
 
     const demandsAfterBatch1 = await listDemands(testDb.readDb);
@@ -1153,19 +1061,12 @@ describe("API Worker demand recording on read misses (#27)", () => {
 
     // Batch omitting season & namespaceGroup -> expands uncovered seasons on existing media (s2 -> count 2)
     // and records season=null for uncreated external key
-    const batchRes2 = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": readKey.key,
-        },
-        body: JSON.stringify({
-          keys: ["tmdb:tv:95479", "tmdb:tv:88888"],
-        }),
-      }),
-    );
-    expect(batchRes2.status).toBe(200);
+    await readRpc.media.batchGetMedia({
+      refs: [
+        mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+        mediaRef({ tmdb: { type: "tv", id: 88888 } }),
+      ],
+    });
     await Promise.all(bgTasks);
 
     const demandsAfterBatch2 = await listDemands(testDb.readDb);
@@ -1179,13 +1080,24 @@ describe("API Worker demand recording on read misses (#27)", () => {
     ).toBe(1);
 
     // Invalid batch season / namespaceGroup rejected with 400
+    expect(
+      (
+        await expectRpcError(
+          readRpc.media.batchGetMedia({
+            refs: [mediaRef({ tmdb: { type: "tv", id: 95479 } })],
+            season: -1,
+          }),
+        )
+      ).status,
+    ).toBe(400);
+
+    const jsonTmdbBatchRef = { tmdb: { type: "MEDIA_TYPE_TV", id: 95479 } };
     for (const invalidPayload of [
-      { keys: ["tmdb:tv:95479"], season: -1 },
-      { keys: ["tmdb:tv:95479"], season: "2" },
-      { keys: ["tmdb:tv:95479"], namespaceGroup: "unknown" },
+      { refs: [jsonTmdbBatchRef], season: "not-a-number" },
+      { refs: [jsonTmdbBatchRef], namespaceGroup: "unknown" },
     ]) {
       const badBatchRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/media/batch`, {
+        new Request(`${TEST_BASE_URL}/mediaref.v1.MediaService/BatchGetMedia`, {
           method: "POST",
           headers: {
             "content-type": "application/json",

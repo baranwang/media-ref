@@ -1,9 +1,8 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import { resolveEpisode, type MediaDocument } from "@media-ref/client";
+import { resolveEpisode } from "@media-ref/client";
 import {
   createFakeOutboundClient,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -11,8 +10,19 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoChangeRequestStatus,
+  getChangeRequestStateRpc,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+  toProtoSegmentInput,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-iqiyi-evidence-integration-tests-0123456789abcdef";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -63,79 +73,20 @@ function makeIqiyiEpisodes(startOrder: number, count: number, includeTrailers = 
   return list;
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function setupVerifiedUserAndKeys(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ) {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "iQIYI Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  const signUpBody = (await signUpRes.json()) as { user: { id: string } };
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const submitKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Submit Key", canSubmit: true }),
-    }),
-  );
-  expect(submitKeyRes.status).toBe(201);
-  const submitKey = (await submitKeyRes.json()) as { id: string; key: string };
-
-  const readKeyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read Key", canSubmit: false }),
-    }),
-  );
-  expect(readKeyRes.status).toBe(201);
-  const readKey = (await readKeyRes.json()) as { id: string; key: string };
+  const { userId, cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "iQIYI Tester",
+  });
+  const submitKey = await issueApiKeyRpc(app, cookie, { name: "Submit Key", canSubmit: true });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Read Key", canSubmit: false });
 
   return {
-    userId: signUpBody.user.id,
+    userId,
     cookie,
     submitKey: submitKey.key,
     readKey: readKey.key,
@@ -370,7 +321,7 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     }
   });
 
-  test("submits desktop v_ share URL, stores canonical albumId, auto-approves via scheduled + queue, and serves via GET /v1/media", async () => {
+  test("submits desktop v_ share URL, stores canonical albumId, auto-approves via scheduled + queue, and serves via MediaService.GetMedia", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -392,6 +343,7 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "iqiyi-submitter@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
     // 1. Unparseable iQIYI URLs and SPA shells missing IDs are rejected with 400 INVALID_NATIVE_ID
     for (const badInput of [
@@ -400,94 +352,64 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
       "https://www.iqiyi.com/v_spashell00.html",
       "123",
     ]) {
-      const badRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-          body: JSON.stringify({
-            targetExternalKey: "tmdb:tv:218574",
-            namespace: "iqiyi",
-            nativeId: badInput,
-            variantDescription: "原声",
-            segments: [
-              {
-                season: 1,
-                episodeStart: 1,
-                episodeEnd: 39,
-                targetEpisodeStart: 1,
-                baseline: "tmdb",
-              },
-            ],
-          }),
-        }),
-      );
-      expect(badRes.status).toBe(400);
-      expect(await badRes.json()).toMatchObject({ error: "INVALID_NATIVE_ID" });
-    }
-
-    // 2. Submit desktop v_ share URL -> rewritten to m.iqiyi.com -> canonical albumId stored
-    const shareUrl = "https://www.iqiyi.com/v_xkt6z3z798.html?vfrm=pcw_home";
-    const tvSubmitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:218574",
+      const badErr = await expectRpcError(
+        submitRpc.changeRequest.createChangeRequest({
+          target: mediaRef({ tmdb: { type: "tv", id: 218574 } }),
           namespace: "iqiyi",
-          nativeId: shareUrl,
+          nativeId: badInput,
           variantDescription: "原声",
           segments: [
-            {
+            toProtoSegmentInput({
               season: 1,
               episodeStart: 1,
               episodeEnd: 39,
               targetEpisodeStart: 1,
               baseline: "tmdb",
-            },
+            }),
           ],
         }),
-      }),
+      );
+      expect(badErr.status).toBe(400);
+      expect(badErr.code).toBe("INVALID_NATIVE_ID");
+    }
+
+    // 2. Submit desktop v_ share URL -> rewritten to m.iqiyi.com -> canonical albumId stored
+    const shareUrl = "https://www.iqiyi.com/v_xkt6z3z798.html?vfrm=pcw_home";
+    const tvSubmitBody = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 218574 } }),
+      namespace: "iqiyi",
+      nativeId: shareUrl,
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 39,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    });
+    expect(fromProtoChangeRequestStatus(tvSubmitBody.changeRequest!.status)).toBe(
+      "pending_evidence",
     );
-    expect(tvSubmitRes.status).toBe(201);
-    const tvSubmitBody = (await tvSubmitRes.json()) as {
-      changeRequest: {
-        id: string;
-        status: string;
-        rawNativeId: string;
-        nativeId: string;
-      };
-    };
-    expect(tvSubmitBody.changeRequest.status).toBe("pending_evidence");
-    expect(tvSubmitBody.changeRequest.rawNativeId).toBe(shareUrl);
-    expect(tvSubmitBody.changeRequest.nativeId).toBe("5328486914190101");
+    expect(tvSubmitBody.changeRequest!.rawNativeId).toBe(shareUrl);
+    expect(tvSubmitBody.changeRequest!.nativeId).toBe("5328486914190101");
 
     // Also submit movie share URL -> m.iqiyi.com -> video/baseinfo -> 923452300
     const movieShareUrl = "https://www.iqiyi.com/v_19rrfe142o.html";
-    const movieSubmitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:movie:535167",
-          namespace: "iqiyi",
-          nativeId: movieShareUrl,
-          variantDescription: "原声",
-          segments: [],
-        }),
-      }),
+    const movieSubmitBody = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "movie", id: 535167 } }),
+      namespace: "iqiyi",
+      nativeId: movieShareUrl,
+      variantDescription: "原声",
+      segments: [],
+    });
+    expect(fromProtoChangeRequestStatus(movieSubmitBody.changeRequest!.status)).toBe(
+      "pending_evidence",
     );
-    expect(movieSubmitRes.status).toBe(201);
-    const movieSubmitBody = (await movieSubmitRes.json()) as {
-      changeRequest: {
-        id: string;
-        status: string;
-        rawNativeId: string;
-        nativeId: string;
-      };
-    };
-    expect(movieSubmitBody.changeRequest.status).toBe("pending_evidence");
-    expect(movieSubmitBody.changeRequest.rawNativeId).toBe(movieShareUrl);
-    expect(movieSubmitBody.changeRequest.nativeId).toBe("923452300");
+    expect(movieSubmitBody.changeRequest!.rawNativeId).toBe(movieShareUrl);
+    expect(movieSubmitBody.changeRequest!.nativeId).toBe("923452300");
 
     // 3. Run Background Worker scheduled -> queue
     const emitted: JobQueueMessage[] = [];
@@ -511,33 +433,17 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     expect(tracked.every((t) => t.acked)).toBe(true);
 
     // 4. Both change requests are auto-approved
-    for (const crId of [tvSubmitBody.changeRequest.id, movieSubmitBody.changeRequest.id]) {
-      const crRes = await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${crId}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      );
-      expect(crRes.status).toBe(200);
-      const crBody = (await crRes.json()) as {
-        changeRequest: {
-          status: string;
-          reviewerUserId: string | null;
-          decisionReason: string | null;
-        };
-      };
-      expect(crBody.changeRequest.status).toBe("approved");
-      expect(crBody.changeRequest.reviewerUserId).toBeNull();
-      expect(crBody.changeRequest.decisionReason).toBe("evidence_gate_passed");
+    for (const crId of [tvSubmitBody.changeRequest!.id, movieSubmitBody.changeRequest!.id]) {
+      const crBody = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, crId);
+      expect(crBody.status).toBe("approved");
+      expect(crBody.reviewerUserId).toBeNull();
+      expect(crBody.decisionReason).toBe("evidence_gate_passed");
     }
 
-    // 5. TV media document is readable via TMDB key & iQIYI canonical key, and works with resolveEpisode
-    const tvReadRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:218574`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(tvReadRes.status).toBe(200);
-    const tvDoc = ((await tvReadRes.json()) as { document: MediaDocument }).document;
+    // 5. TV media document is readable via TMDB ref & iQIYI canonical ref, and works with resolveEpisode
+    const { document: tvDoc } = await getMediaDocumentRpc(app, user.readKey, {
+      tmdb: { type: "tv", id: 218574 },
+    });
     expect(tvDoc.associations).toHaveLength(1);
     expect(tvDoc.associations[0]).toMatchObject({
       namespace: "iqiyi",
@@ -550,21 +456,15 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
       targetEpisode: 15,
     });
 
-    const reverseReadRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/iqiyi:5328486914190101`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(reverseReadRes.status).toBe(200);
+    const reverseRead = await getMediaDocumentRpc(app, user.readKey, {
+      platform: { platform: "iqiyi", nativeId: "5328486914190101" },
+    });
+    expect(reverseRead.document.media.id).toBe(tvDoc.media.id);
 
-    // 6. Movie document is readable via TMDB key
-    const movieReadRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:535167`, {
-        headers: { "x-api-key": user.readKey },
-      }),
-    );
-    expect(movieReadRes.status).toBe(200);
-    const movieDoc = ((await movieReadRes.json()) as { document: MediaDocument }).document;
+    // 6. Movie document is readable via TMDB ref
+    const { document: movieDoc } = await getMediaDocumentRpc(app, user.readKey, {
+      tmdb: { type: "movie", id: 535167 },
+    });
     expect(movieDoc.associations[0]).toMatchObject({
       namespace: "iqiyi",
       nativeId: "923452300",
@@ -599,44 +499,42 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "iqiyi-missing-fields@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
+    const readRpc = createRpcClients(app, { apiKey: user.readKey });
 
     // 1. Missing premiere year on TV album (700000001)
-    const noYearRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:218574",
-          namespace: "iqiyi",
-          nativeId: "700000001",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 39, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const noYearCr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 218574 } }),
+      namespace: "iqiyi",
+      nativeId: "700000001",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 39,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(noYearRes.status).toBe(201);
-    const noYearCr = (await noYearRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
     // 2. Trailer-only / missing feature episode count (700000002)
-    const noEpsRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:218574",
-          namespace: "iqiyi",
-          nativeId: "700000002",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 39, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const noEpsCr = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 218574 } }),
+      namespace: "iqiyi",
+      nativeId: "700000002",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 39,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(noEpsRes.status).toBe(201);
-    const noEpsCr = (await noEpsRes.json()) as { changeRequest: { id: string } };
+      ],
+    });
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -656,33 +554,30 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     const summary = await worker.queue(createQueueBatch(emitted, t0).batch);
     expect(summary.completed).toBe(2);
 
-    const noYearInspect = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${noYearCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
-    expect(noYearInspect.changeRequest.status).toBe("needs_review");
-    expect(noYearInspect.changeRequest.conflictReason).toBe("year_missing");
-
-    const noEpsInspect = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${noEpsCr.changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string; conflictReason: string | null } };
-    expect(noEpsInspect.changeRequest.status).toBe("needs_review");
-    expect(noEpsInspect.changeRequest.conflictReason).toBe("episode_count_missing");
-
-    // Neither change request appears in default GET /v1/media
-    const mediaRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:218574`, {
-        headers: { "x-api-key": user.readKey },
-      }),
+    const noYearInspect = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      noYearCr.changeRequest!.id,
     );
-    expect(mediaRes.status).toBe(404);
+    expect(noYearInspect.status).toBe("needs_review");
+    expect(noYearInspect.conflictReason).toBe("year_missing");
+
+    const noEpsInspect = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      noEpsCr.changeRequest!.id,
+    );
+    expect(noEpsInspect.status).toBe("needs_review");
+    expect(noEpsInspect.conflictReason).toBe("episode_count_missing");
+
+    // Neither change request appears in default MediaService.GetMedia
+    expect(
+      (
+        await expectRpcError(
+          readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 218574 } }) }),
+        )
+      ).status,
+    ).toBe(404);
   });
 
   test("retries transient iQIYI 503 errors while keeping change request in pending_evidence until recovery", async () => {
@@ -721,27 +616,24 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     });
 
     const user = await setupVerifiedUserAndKeys(app, outbound, "iqiyi-retry@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    const submitRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": user.submitKey },
-        body: JSON.stringify({
-          targetExternalKey: "tmdb:tv:218574",
-          namespace: "iqiyi",
-          nativeId: "https://www.iqiyi.com/a_1fkgtbddd2x.html",
-          variantDescription: "原声",
-          segments: [
-            { season: 1, episodeStart: 1, episodeEnd: 39, targetEpisodeStart: 1, baseline: "tmdb" },
-          ],
+    const { changeRequest } = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef({ tmdb: { type: "tv", id: 218574 } }),
+      namespace: "iqiyi",
+      nativeId: "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 39,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
         }),
-      }),
-    );
-    expect(submitRes.status).toBe(201);
-    const { changeRequest } = (await submitRes.json()) as {
-      changeRequest: { id: string; nativeId: string };
-    };
-    expect(changeRequest.nativeId).toBe("5328486914190101");
+      ],
+    });
+    expect(changeRequest!.nativeId).toBe("5328486914190101");
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -765,14 +657,9 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     const attempt1 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt1.rescheduled).toBe(1);
 
-    const afterAttempt1 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(afterAttempt1.changeRequest.status).toBe("pending_evidence");
+    expect(
+      (await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest!.id)).status,
+    ).toBe("pending_evidence");
 
     // Attempt 2 after backoff: upstream recovers -> auto-approved!
     now = new Date(now.getTime() + 30_000);
@@ -781,13 +668,8 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     const attempt2 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
     expect(attempt2.completed).toBe(1);
 
-    const afterAttempt2 = (await (
-      await app.fetch(
-        new Request(`${TEST_BASE_URL}/v1/change-requests/${changeRequest.id}`, {
-          headers: { "x-api-key": user.readKey },
-        }),
-      )
-    ).json()) as { changeRequest: { status: string } };
-    expect(afterAttempt2.changeRequest.status).toBe("approved");
+    expect(
+      (await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest!.id)).status,
+    ).toBe("approved");
   });
 });

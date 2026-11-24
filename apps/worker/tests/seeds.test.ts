@@ -1,13 +1,11 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import type { MediaDocument } from "@media-ref/client";
 import {
   createFakeOutboundClient,
   importBangumiDataSeeds,
   importWikidataMovieSeeds,
   SEED_EVIDENCE_CHECK_JOB_TYPE,
   SEED_EVIDENCE_FAILED_ALERT_TYPE,
-  type EmailMessage,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -15,8 +13,17 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  fromProtoBatchItemResult,
+  getMediaDocumentRpc,
+  issueApiKeyRpc,
+  mediaRef,
+  signUpAndVerifyUser,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-seed-evidence-check-e2e-tests-0123456789abcdef";
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
@@ -44,66 +51,17 @@ function makeBilibiliEpisodes(count: number) {
   return episodes;
 }
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
 async function createReadApiKey(
   app: ReturnType<typeof createApiApp>,
   outbound: ReturnType<typeof createFakeOutboundClient>,
   email: string,
 ): Promise<string> {
-  const emailsBefore = outbound.sentEmails.length;
-  const signUpRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password: "StrongPassword123!",
-        name: "Seed Tester",
-      }),
-    }),
-  );
-  expect(signUpRes.status).toBe(200);
-  let cookie = extractCookieHeader(signUpRes);
-
-  const verificationEmail = outbound.sentEmails[emailsBefore];
-  expect(verificationEmail).toBeDefined();
-  const verifyRes = await app.fetch(
-    new Request(extractVerificationUrl(verificationEmail!), {
-      method: "GET",
-      headers: { cookie },
-    }),
-  );
-  expect([200, 302]).toContain(verifyRes.status);
-  const refreshed = extractCookieHeader(verifyRes);
-  if (refreshed) {
-    cookie = refreshed;
-  }
-
-  const keyRes = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Seed Read Key", canSubmit: false }),
-    }),
-  );
-  expect(keyRes.status).toBe(201);
-  const keyBody = (await keyRes.json()) as { key: string };
-  return keyBody.key;
+  const { cookie } = await signUpAndVerifyUser(app, outbound, {
+    email,
+    name: "Seed Tester",
+  });
+  const readKey = await issueApiKeyRpc(app, cookie, { name: "Seed Read Key", canSubmit: false });
+  return readKey.key;
 }
 
 function createScheduledController(scheduledTime: Date): ScheduledController {
@@ -235,14 +193,8 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
 
     const readKey = await createReadApiKey(app, outbound, "seed-e2e-1@example.com");
 
-    // 1. Default GET hides seed_unconfirmed association
-    const firstRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:278`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(firstRead.status).toBe(200);
-    const firstBody = (await firstRead.json()) as { document: MediaDocument };
+    // 1. Default GetMedia hides seed_unconfirmed association
+    const firstBody = await getMediaDocumentRpc(app, readKey, "tmdb:movie:278");
     expect(firstBody.document.associations).toEqual([]);
 
     await Promise.all(bgTasks.splice(0));
@@ -263,14 +215,10 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
       .execute();
     expect(budgetBefore).toHaveLength(0);
 
-    // 2. ?includeUnconfirmed=true returns seed_unconfirmed with unconfirmed marker and does NOT duplicate job
-    const unconfirmedRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:278?includeUnconfirmed=true`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(unconfirmedRead.status).toBe(200);
-    const unconfirmedBody = (await unconfirmedRead.json()) as { document: MediaDocument };
+    // 2. includeUnconfirmed=true returns seed_unconfirmed with unconfirmed marker and does NOT duplicate job
+    const unconfirmedBody = await getMediaDocumentRpc(app, readKey, "tmdb:movie:278", {
+      includeUnconfirmed: true,
+    });
     expect(unconfirmedBody.document.associations).toHaveLength(1);
     expect(unconfirmedBody.document.associations[0]).toMatchObject({
       namespace: "douban",
@@ -322,14 +270,8 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
       .execute();
     expect(budgetAfter).toHaveLength(0);
 
-    // 4. Subsequent default GET returns confirmed association & refreshed TMDB metadata/IMDb external ID!
-    const confirmedRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:278`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(confirmedRead.status).toBe(200);
-    const confirmedBody = (await confirmedRead.json()) as { document: MediaDocument };
+    // 4. Subsequent default GetMedia returns confirmed association & refreshed TMDB metadata/IMDb external ID!
+    const confirmedBody = await getMediaDocumentRpc(app, readKey, "tmdb:movie:278");
     expect(confirmedBody.document.media.snapshot.title).toBe("肖申克的救赎");
     expect(confirmedBody.document.media.snapshot.originalTitle).toBe("The Shawshank Redemption");
     expect(confirmedBody.document.media.snapshot.year).toBe(1994);
@@ -348,12 +290,8 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     expect(confirmedBody.document.associations[0]?.unconfirmed).toBeUndefined();
 
     // Reverse lookup by douban:1292052 now succeeds by default too
-    const reverseRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/douban:1292052`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(reverseRead.status).toBe(200);
+    const reverseRead = await getMediaDocumentRpc(app, readKey, "douban:1292052");
+    expect(reverseRead.document.media.id).toBe(confirmedBody.document.media.id);
 
     // Verify revision history preserved seed_unconfirmed (rev 1) -> confirmed (rev 2)
     const revisions = await testDb.writeDb
@@ -455,19 +393,14 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     });
     const readKey = await createReadApiKey(app, outbound, "seed-e2e-2@example.com");
 
-    const batchRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/batch`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": readKey },
-        body: JSON.stringify({ keys: ["tmdb:tv:62564"] }),
-      }),
+    const batchRes = await createRpcClients(app, { apiKey: readKey }).media.batchGetMedia({
+      refs: [mediaRef("tmdb:tv:62564")],
+    });
+    const batchResults = batchRes.results.map(fromProtoBatchItemResult);
+    expect(batchResults[0]?.ok).toBe(true);
+    expect(batchResults[0]?.ok ? batchResults[0].items[0]?.document.associations : null).toEqual(
+      [],
     );
-    expect(batchRes.status).toBe(200);
-    const batchBody = (await batchRes.json()) as {
-      results: Array<{ ok: boolean; items?: Array<{ document: MediaDocument }> }>;
-    };
-    expect(batchBody.results[0]?.ok).toBe(true);
-    expect(batchBody.results[0]?.items?.[0]?.document.associations).toEqual([]);
 
     await Promise.all(bgTasks.splice(0));
 
@@ -494,13 +427,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     const queueSummary = await worker.queue(batch);
     expect(queueSummary.completed).toBe(2);
 
-    const readAfter = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:62564`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(readAfter.status).toBe(200);
-    const afterBody = (await readAfter.json()) as { document: MediaDocument };
+    const afterBody = await getMediaDocumentRpc(app, readKey, "tmdb:tv:62564");
     expect(afterBody.document.associations).toHaveLength(2);
     expect(afterBody.document.associations.every((a) => a.status === "confirmed")).toBe(true);
     expect(afterBody.document.platformStatuses?.bilibili?.status).toBe("associated");
@@ -561,11 +488,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     const readKey = await createReadApiKey(app, outbound, "seed-e2e-3@example.com");
 
     // First read triggers check
-    await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:550`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
+    await getMediaDocumentRpc(app, readKey, "tmdb:movie:550");
     await Promise.all(bgTasks.splice(0));
 
     const dispatched: JobQueueMessage[] = [];
@@ -610,13 +533,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     expect(alerts[0]?.status).toBe("open");
 
     // Subsequent default read still hides it AND does NOT create a second job!
-    const secondRead = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:movie:550`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(secondRead.status).toBe(200);
-    const secondBody = (await secondRead.json()) as { document: MediaDocument };
+    const secondBody = await getMediaDocumentRpc(app, readKey, "tmdb:movie:550");
     expect(secondBody.document.associations).toEqual([]);
 
     await Promise.all(bgTasks.splice(0));
@@ -699,11 +616,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     });
     const readKey = await createReadApiKey(app, outbound, "seed-e2e-step2@example.com");
 
-    await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
+    await getMediaDocumentRpc(app, readKey, "tmdb:tv:95479");
     await Promise.all(bgTasks.splice(0));
 
     const dispatched: JobQueueMessage[] = [];
@@ -747,13 +660,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     expect(alerts[0]?.status).toBe("open");
 
     // Remains absent from default read
-    const readAfter = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(readAfter.status).toBe(200);
-    const afterBody = (await readAfter.json()) as { document: MediaDocument };
+    const afterBody = await getMediaDocumentRpc(app, readKey, "tmdb:tv:95479");
     expect(afterBody.document.associations).toEqual([]);
   });
 
@@ -815,12 +722,10 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     const readKey = await createReadApiKey(app, outbound, "seed-e2e-4@example.com");
 
     // Reverse lookup on unconfirmed seed returns 404 AND triggers first-read seed_evidence_check
-    const initialReverse = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/douban:1851857`, {
-        headers: { "x-api-key": readKey },
-      }),
+    const initialReverseErr = await expectRpcError(
+      getMediaDocumentRpc(app, readKey, "douban:1851857"),
     );
-    expect(initialReverse.status).toBe(404);
+    expect(initialReverseErr.status).toBe(404);
     await Promise.all(bgTasks.splice(0));
 
     const dispatched: JobQueueMessage[] = [];
@@ -870,15 +775,11 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     const secondQueueSummary = await worker.queue(secondBatch.batch);
     expect(secondQueueSummary.completed).toBe(1);
 
-    const reverseAfterConfirm = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/douban:1851857`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(reverseAfterConfirm.status).toBe(200);
+    const reverseAfterConfirm = await getMediaDocumentRpc(app, readKey, "douban:1851857");
+    expect(reverseAfterConfirm.document.associations[0]?.status).toBe("confirmed");
   });
 
-  test("default read does NOT leak empty variants created solely for seed_unconfirmed rows, while ?includeUnconfirmed=true exposes them and confirmation promotes them", async () => {
+  test("default read does NOT leak empty variants created solely for seed_unconfirmed rows, while includeUnconfirmed=true exposes them and confirmation promotes them", async () => {
     const testDb = await setupDb();
     const now = new Date("2026-11-24T08:00:00.000Z");
 
@@ -952,25 +853,15 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     const readKey = await createReadApiKey(app, outbound, "seed-variant-leak@example.com");
 
     // 1. Default read MUST NOT leak the empty variant created solely for seed_unconfirmed
-    const defaultRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(defaultRes.status).toBe(200);
-    const defaultBody = (await defaultRes.json()) as { document: MediaDocument };
+    const defaultBody = await getMediaDocumentRpc(app, readKey, "tmdb:tv:95479");
     expect(defaultBody.document.associations).toEqual([]);
     expect(defaultBody.document.variants).toEqual([]);
     await Promise.all(bgTasks.splice(0));
 
-    // 2. ?includeUnconfirmed=true MUST return both the variant and the seed_unconfirmed association
-    const unconfirmedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479?includeUnconfirmed=true`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(unconfirmedRes.status).toBe(200);
-    const unconfirmedBody = (await unconfirmedRes.json()) as { document: MediaDocument };
+    // 2. includeUnconfirmed=true MUST return both the variant and the seed_unconfirmed association
+    const unconfirmedBody = await getMediaDocumentRpc(app, readKey, "tmdb:tv:95479", {
+      includeUnconfirmed: true,
+    });
     expect(unconfirmedBody.document.associations).toHaveLength(1);
     expect(unconfirmedBody.document.associations[0]?.status).toBe("seed_unconfirmed");
     expect(unconfirmedBody.document.variants).toHaveLength(1);
@@ -999,13 +890,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     const summary = await worker.queue(batch);
     expect(summary.completed).toBe(1);
 
-    const confirmedRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/media/tmdb:tv:95479`, {
-        headers: { "x-api-key": readKey },
-      }),
-    );
-    expect(confirmedRes.status).toBe(200);
-    const confirmedBody = (await confirmedRes.json()) as { document: MediaDocument };
+    const confirmedBody = await getMediaDocumentRpc(app, readKey, "tmdb:tv:95479");
     expect(confirmedBody.document.associations).toHaveLength(1);
     expect(confirmedBody.document.associations[0]?.status).toBe("confirmed");
     expect(confirmedBody.document.variants).toHaveLength(1);

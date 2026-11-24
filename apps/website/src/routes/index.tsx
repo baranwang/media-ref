@@ -233,7 +233,7 @@ function DashboardPage() {
           即可验证密钥状态并调用接口：
         </p>
         <pre className="m-0 overflow-x-auto rounded-xl border border-[var(--line)] bg-[var(--chip-bg)] p-4 text-xs leading-relaxed text-[var(--sea-ink)]">
-          <code>{`curl -H "X-API-Key: mref_your_api_key_here" \\\n  ${apiBaseUrl}/v1/api-keys/me`}</code>
+          <code>{`curl -X POST -H "Content-Type: application/json" \\\n  -H "X-API-Key: mref_your_api_key_here" \\\n  -d '{}' \\\n  ${apiBaseUrl}/mediaref.v1.AccountService/GetCurrentApiKey`}</code>
         </pre>
       </section>
     </main>

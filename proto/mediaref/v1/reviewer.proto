@@ -1,0 +1,212 @@
+syntax = "proto3";
+
+package mediaref.v1;
+
+import "google/protobuf/struct.proto";
+import "mediaref/v1/types.proto";
+
+message ExternalIdRecord {
+  string id = 1;
+  string media_id = 2;
+  string namespace = 3;
+  string native_id = 4;
+  bool locked = 5;
+  string source = 6;
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message ReviewAlert {
+  string id = 1;
+  string alert_type = 2;
+  optional string media_id = 3;
+  optional string association_id = 4;
+  ReviewAlertStatus status = 5;
+  google.protobuf.Struct details = 6;
+  string created_at = 7;
+  optional string resolved_at = 8;
+  optional string resolved_by_user_id = 9;
+}
+
+message NeedsReviewSegment {
+  string segment_id = 1;
+  string association_id = 2;
+  string media_id = 3;
+  string media_title = 4;
+  MediaType media_type = 5;
+  optional string media_baseline = 6;
+  string namespace = 7;
+  string native_id = 8;
+  optional string variant_id = 9;
+  int32 season = 10;
+  int32 episode_start = 11;
+  optional int32 episode_end = 12;
+  int32 target_episode_start = 13;
+  string baseline = 14;
+  bool non_linear = 15;
+  bool needs_review = 16;
+  string updated_at = 17;
+}
+
+message UpdatedUserRole {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  string role = 4;
+}
+
+message ListChangeRequestsRequest {
+  ChangeRequestStatus status = 1;
+  optional int32 limit = 2;
+  optional int32 offset = 3;
+}
+
+message ListChangeRequestsResponse {
+  repeated ChangeRequest change_requests = 1;
+  int32 total = 2;
+}
+
+message ApproveChangeRequestRequest {
+  string id = 1;
+  optional string reason = 2;
+}
+
+message ApproveChangeRequestResponse {
+  ChangeRequest change_request = 1;
+  string media_id = 2;
+  string association_id = 3;
+  string revision_id = 4;
+}
+
+message RejectChangeRequestRequest {
+  string id = 1;
+  optional string reason = 2;
+}
+
+message RejectChangeRequestResponse {
+  ChangeRequest change_request = 1;
+}
+
+message SetAssociationLockRequest {
+  string association_id = 1;
+  optional bool locked = 2;
+}
+
+message SetAssociationLockResponse {
+  AssociationSummary association = 1;
+  string association_id = 2;
+  bool locked = 3;
+}
+
+message OverrideMediaExternalIdRequest {
+  string media_id = 1;
+  string namespace = 2;
+  string native_id = 3;
+  optional bool locked = 4;
+}
+
+message OverrideMediaExternalIdResponse {
+  ExternalIdRecord external_id = 1;
+}
+
+message SetMediaExternalIdLockRequest {
+  string media_id = 1;
+  string namespace = 2;
+  bool locked = 3;
+}
+
+message SetMediaExternalIdLockResponse {
+  ExternalIdRecord external_id = 1;
+}
+
+message MergeMediaRequest {
+  string source_media_id = 1;
+  string target_media_id = 2;
+  optional string reason = 3;
+}
+
+message MergeMediaResponse {
+  string source_media_id = 1;
+  string target_media_id = 2;
+  int32 moved_external_id_count = 3;
+  int32 moved_variant_count = 4;
+  int32 moved_association_count = 5;
+  int32 flagged_segment_count = 6;
+  int32 resolved_alert_count = 7;
+  bool already_merged = 8;
+}
+
+message SwitchMediaBaselineRequest {
+  string media_id = 1;
+  optional string baseline = 2;
+  optional string reason = 3;
+}
+
+message SwitchMediaBaselineResponse {
+  string media_id = 1;
+  optional string previous_baseline = 2;
+  optional string baseline = 3;
+  int32 flagged_segment_count = 4;
+}
+
+message ListReviewAlertsRequest {
+  ReviewAlertStatus status = 1;
+  optional string alert_type = 2;
+  optional string media_id = 3;
+  optional int32 limit = 4;
+  optional int32 offset = 5;
+}
+
+message ListReviewAlertsResponse {
+  repeated ReviewAlert alerts = 1;
+  int32 total = 2;
+}
+
+message ResolveReviewAlertRequest {
+  string alert_id = 1;
+}
+
+message ResolveReviewAlertResponse {
+  ReviewAlert alert = 1;
+}
+
+message ListNeedsReviewSegmentsRequest {
+  optional string media_id = 1;
+  optional int32 limit = 2;
+  optional int32 offset = 3;
+}
+
+message ListNeedsReviewSegmentsResponse {
+  repeated NeedsReviewSegment segments = 1;
+  int32 total = 2;
+}
+
+message SetUserRoleRequest {
+  string user_id = 1;
+  string role = 2;
+}
+
+message SetUserRoleResponse {
+  UpdatedUserRole user = 1;
+}
+
+service ReviewerService {
+  rpc ListChangeRequests(ListChangeRequestsRequest) returns (ListChangeRequestsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ApproveChangeRequest(ApproveChangeRequestRequest) returns (ApproveChangeRequestResponse);
+  rpc RejectChangeRequest(RejectChangeRequestRequest) returns (RejectChangeRequestResponse);
+  rpc SetAssociationLock(SetAssociationLockRequest) returns (SetAssociationLockResponse);
+  rpc OverrideMediaExternalId(OverrideMediaExternalIdRequest) returns (OverrideMediaExternalIdResponse);
+  rpc SetMediaExternalIdLock(SetMediaExternalIdLockRequest) returns (SetMediaExternalIdLockResponse);
+  rpc MergeMedia(MergeMediaRequest) returns (MergeMediaResponse);
+  rpc SwitchMediaBaseline(SwitchMediaBaselineRequest) returns (SwitchMediaBaselineResponse);
+  rpc ListReviewAlerts(ListReviewAlertsRequest) returns (ListReviewAlertsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ResolveReviewAlert(ResolveReviewAlertRequest) returns (ResolveReviewAlertResponse);
+  rpc ListNeedsReviewSegments(ListNeedsReviewSegmentsRequest) returns (ListNeedsReviewSegmentsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc SetUserRole(SetUserRoleRequest) returns (SetUserRoleResponse);
+}

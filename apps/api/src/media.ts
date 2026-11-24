@@ -1,6 +1,19 @@
-import { parseExternalKey, type MediaDocument, type NamespaceGroup } from "@media-ref/client";
+import { create } from "@bufbuild/protobuf";
 import {
-  BatchMediaQueryError,
+  createDomainConnectError,
+  fromProtoMediaRef,
+  fromProtoNamespaceGroup,
+  parseExternalKey,
+  proto,
+  toProtoBatchItemResult,
+  toProtoMediaDocument,
+  toProtoMediaQueryItem,
+  toProtoMediaRef,
+  type MediaDocument,
+  type MediaRef,
+  type NamespaceGroup,
+} from "@media-ref/client";
+import {
   computeDemandTargetsForBatchRead,
   computeDemandTargetsForRead,
   DEFAULT_DEMAND_NAMESPACE_GROUP,
@@ -15,13 +28,16 @@ import {
   type MediaQueryItem,
   type UnmatchedAssociationLookupKey,
 } from "@media-ref/core";
-import type { Context, Hono } from "hono";
-import { requireApiKey } from "./api-keys.ts";
-import type { ApiEnv } from "./auth.ts";
-import { requireReadRateLimit } from "./rate-limit.ts";
+import type { ServiceImpl } from "@connectrpc/connect";
+import {
+  enforceReadRateLimit,
+  getRuntime,
+  requireApiKeyAuth,
+  rethrowDomainError,
+  scheduleBackgroundTask,
+} from "./context.ts";
 
 const MAX_SEASON_NUMBER = 2_147_483_647;
-const NON_NEGATIVE_INTEGER_PATTERN = /^\d+$/;
 
 export interface MediaReadResponse {
   key: string;
@@ -34,284 +50,75 @@ export interface BatchMediaReadResponse {
   results: BatchMediaQueryResult[];
 }
 
-function parseBooleanQueryParam(
-  raw: string | undefined,
-): { ok: true; value: boolean } | { ok: false } {
-  if (raw === undefined || raw === "") {
-    return { ok: true, value: false };
+function validateSeasonParam(season: number | undefined): number | undefined {
+  if (season === undefined) {
+    return undefined;
   }
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === "true" || normalized === "1") {
-    return { ok: true, value: true };
-  }
-  if (normalized === "false" || normalized === "0") {
-    return { ok: true, value: false };
-  }
-  return { ok: false };
-}
-
-function parseSeasonQueryParam(
-  raw: string | undefined,
-): { ok: true; value: number | undefined } | { ok: false } {
-  if (raw === undefined || raw === "") {
-    return { ok: true, value: undefined };
-  }
-  const trimmed = raw.trim();
-  if (!NON_NEGATIVE_INTEGER_PATTERN.test(trimmed)) {
-    return { ok: false };
-  }
-  const parsed = Number.parseInt(trimmed, 10);
-  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > MAX_SEASON_NUMBER) {
-    return { ok: false };
-  }
-  return { ok: true, value: parsed };
-}
-
-function parseNamespaceGroupQueryParam(
-  raw: string | undefined,
-): { ok: true; value: NamespaceGroup } | { ok: false } {
-  if (raw === undefined || raw === "") {
-    return { ok: true, value: DEFAULT_DEMAND_NAMESPACE_GROUP };
-  }
-  const normalized = raw.trim();
-  if (normalized === "platform" || normalized === "catalog") {
-    return { ok: true, value: normalized };
-  }
-  return { ok: false };
-}
-
-function scheduleBackgroundTask(c: Context<ApiEnv>, work: () => Promise<unknown>): void {
-  const onError = c.get("onBackgroundTaskError");
-  const promise = Promise.resolve()
-    .then(work)
-    .catch((error: unknown) => {
-      onError?.(error);
+  if (!Number.isInteger(season) || season < 0 || season > MAX_SEASON_NUMBER) {
+    throw createDomainConnectError({
+      status: 400,
+      code: "INVALID_QUERY",
+      message: "season must be a non-negative integer",
     });
-
-  const onBackgroundTask = c.get("onBackgroundTask");
-  onBackgroundTask?.(promise);
-
-  try {
-    c.executionCtx.waitUntil(promise);
-  } catch {
-    // No ExecutionContext attached (e.g. direct app.fetch calls in tests).
   }
+  return season;
 }
 
-type ParseBatchRequestResult =
-  | {
-      ok: true;
-      keys: string[];
-      includeUnconfirmed: boolean;
-      season: number | undefined;
-      namespaceGroup: NamespaceGroup;
-    }
-  | { ok: false; code: string; message: string };
-
-function parseBatchMediaRequest(body: unknown): ParseBatchRequestResult {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return {
-      ok: false,
-      code: "INVALID_REQUEST",
-      message: "Request body must be a JSON object",
-    };
+function resolveNamespaceGroupParam(group: proto.NamespaceGroup): NamespaceGroup {
+  if (group === proto.NamespaceGroup.UNSPECIFIED) {
+    return DEFAULT_DEMAND_NAMESPACE_GROUP;
   }
-
-  const record = body as Record<string, unknown>;
-  if (!Array.isArray(record.keys)) {
-    return {
-      ok: false,
-      code: "INVALID_REQUEST",
-      message: "keys must be an array of strings",
-    };
+  const mapped = fromProtoNamespaceGroup(group);
+  if (!mapped) {
+    throw createDomainConnectError({
+      status: 400,
+      code: "INVALID_QUERY",
+      message: "namespaceGroup must be either 'platform' or 'catalog'",
+    });
   }
-
-  if (record.keys.length === 0 || record.keys.length > MAX_BATCH_MEDIA_KEYS) {
-    return {
-      ok: false,
-      code: "BATCH_LIMIT_EXCEEDED",
-      message: `keys must contain between 1 and ${MAX_BATCH_MEDIA_KEYS} items`,
-    };
-  }
-
-  let includeUnconfirmed = false;
-  if (record.includeUnconfirmed !== undefined) {
-    if (typeof record.includeUnconfirmed !== "boolean") {
-      return {
-        ok: false,
-        code: "INVALID_REQUEST",
-        message: "includeUnconfirmed must be a boolean",
-      };
-    }
-    includeUnconfirmed = record.includeUnconfirmed;
-  }
-
-  let season: number | undefined;
-  if (record.season !== undefined && record.season !== null) {
-    if (
-      typeof record.season !== "number" ||
-      !Number.isInteger(record.season) ||
-      record.season < 0 ||
-      record.season > MAX_SEASON_NUMBER
-    ) {
-      return {
-        ok: false,
-        code: "INVALID_REQUEST",
-        message: "season must be a non-negative integer",
-      };
-    }
-    season = record.season;
-  }
-
-  let namespaceGroup: NamespaceGroup = DEFAULT_DEMAND_NAMESPACE_GROUP;
-  if (record.namespaceGroup !== undefined && record.namespaceGroup !== null) {
-    if (record.namespaceGroup !== "platform" && record.namespaceGroup !== "catalog") {
-      return {
-        ok: false,
-        code: "INVALID_REQUEST",
-        message: "namespaceGroup must be either 'platform' or 'catalog'",
-      };
-    }
-    namespaceGroup = record.namespaceGroup;
-  }
-
-  return {
-    ok: true,
-    keys: record.keys as string[],
-    includeUnconfirmed,
-    season,
-    namespaceGroup,
-  };
+  return mapped;
 }
 
-export function registerMediaRoutes(app: Hono<ApiEnv>): void {
-  app.use("/v1/media/*", requireApiKey({ db: "read", permission: "read" }), requireReadRateLimit);
+export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
+  async getMedia(req, ctx) {
+    const apiKey = await requireApiKeyAuth(ctx, { db: "read", permission: "read" });
+    await enforceReadRateLimit(ctx, apiKey);
 
-  app.post("/v1/media/batch", async (c) => {
-    let rawBody: unknown;
-    try {
-      rawBody = await c.req.json();
-    } catch {
-      return c.json({ error: "INVALID_JSON", message: "Request body must be valid JSON" }, 400);
-    }
-
-    const parsed = parseBatchMediaRequest(rawBody);
-    if (!parsed.ok) {
-      return c.json({ error: parsed.code, message: parsed.message }, 400);
-    }
-
-    try {
-      const results = await queryMediaBatch(c.get("dbRead"), {
-        keys: parsed.keys,
-        includeUnconfirmed: parsed.includeUnconfirmed,
+    const runtime = getRuntime(ctx);
+    const season = validateSeasonParam(req.season);
+    const namespaceGroup = resolveNamespaceGroupParam(req.namespaceGroup);
+    const decoded = fromProtoMediaRef(req.ref, { mode: "read" });
+    if (!decoded.ok) {
+      throw createDomainConnectError({
+        status: 400,
+        code: "INVALID_KEY",
+        message: decoded.message,
       });
-
-      const batchDemandInput = {
-        results,
-        season: parsed.season,
-        namespaceGroup: parsed.namespaceGroup,
-      };
-      if (computeDemandTargetsForBatchRead(batchDemandInput).length > 0) {
-        const dbWrite = c.get("dbWrite");
-        const now = c.get("now")();
-        scheduleBackgroundTask(c, () =>
-          recordDemandsForBatchRead(dbWrite, {
-            ...batchDemandInput,
-            now,
-          }),
-        );
-      }
-
-      const resolvedBatchMediaIds: string[] = [];
-      const unmatchedBatchAssocKeys: UnmatchedAssociationLookupKey[] = [];
-      for (const entry of results) {
-        if (entry.ok) {
-          for (const item of entry.items) {
-            resolvedBatchMediaIds.push(item.document.media.id);
-          }
-        } else if (entry.error === "NOT_FOUND") {
-          const parsedKey = parseExternalKey(entry.key.trim());
-          if (parsedKey && isAssociationNamespace(parsedKey.namespace)) {
-            unmatchedBatchAssocKeys.push({
-              namespace: parsedKey.namespace,
-              nativeId: parsedKey.nativeId,
-            });
-          }
-        }
-      }
-      if (resolvedBatchMediaIds.length > 0 || unmatchedBatchAssocKeys.length > 0) {
-        const dbWrite = c.get("dbWrite");
-        const now = c.get("now")();
-        scheduleBackgroundTask(c, () =>
-          enqueueSeedEvidenceChecksForMedia(dbWrite, resolvedBatchMediaIds, {
-            now,
-            unmatchedAssociationKeys: unmatchedBatchAssocKeys,
-          }),
-        );
-      }
-
-      const response: BatchMediaReadResponse = { results };
-      return c.json(response, 200);
-    } catch (error) {
-      if (error instanceof BatchMediaQueryError) {
-        return c.json({ error: error.code, message: error.message }, error.status as 400);
-      }
-      throw error;
     }
-  });
+    const rawKey = decoded.key;
 
-  app.get("/v1/media/:key", async (c) => {
-    const includeUnconfirmedParsed = parseBooleanQueryParam(c.req.query("includeUnconfirmed"));
-    if (!includeUnconfirmedParsed.ok) {
-      return c.json(
-        {
-          error: "INVALID_QUERY",
-          message: "includeUnconfirmed must be a boolean (true, false, 1, or 0)",
-        },
-        400,
-      );
-    }
-    const seasonParsed = parseSeasonQueryParam(c.req.query("season"));
-    if (!seasonParsed.ok) {
-      return c.json(
-        {
-          error: "INVALID_QUERY",
-          message: "season must be a non-negative integer",
-        },
-        400,
-      );
-    }
-
-    const namespaceGroupParsed = parseNamespaceGroupQueryParam(c.req.query("namespaceGroup"));
-    if (!namespaceGroupParsed.ok) {
-      return c.json(
-        {
-          error: "INVALID_QUERY",
-          message: "namespaceGroup must be either 'platform' or 'catalog'",
-        },
-        400,
-      );
-    }
-
-    const rawKey = c.req.param("key").trim();
-    const result = await queryMediaByKey(c.get("dbRead"), rawKey, {
-      includeUnconfirmed: includeUnconfirmedParsed.value,
+    const result = await queryMediaByKey(runtime.dbRead, rawKey, {
+      includeUnconfirmed: req.includeUnconfirmed,
     });
 
     if (result.kind === "invalid_key") {
-      return c.json({ error: "INVALID_KEY", message: result.message }, 400);
+      throw createDomainConnectError({
+        status: 400,
+        code: "INVALID_KEY",
+        message: result.message,
+      });
     }
 
     const demandInput = {
       rawKey,
       queryResult: result,
-      season: seasonParsed.value,
-      namespaceGroup: namespaceGroupParsed.value,
+      season,
+      namespaceGroup,
     };
     if (computeDemandTargetsForRead(demandInput).length > 0) {
-      const dbWrite = c.get("dbWrite");
-      const now = c.get("now")();
-      scheduleBackgroundTask(c, () =>
+      const dbWrite = runtime.dbWrite;
+      const now = runtime.now();
+      scheduleBackgroundTask(runtime, () =>
         recordDemandForRead(dbWrite, {
           ...demandInput,
           now,
@@ -324,9 +131,9 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
       if (parsedMissingKey && isAssociationNamespace(parsedMissingKey.namespace)) {
         const missingNamespace = parsedMissingKey.namespace;
         const missingNativeId = parsedMissingKey.nativeId;
-        const dbWrite = c.get("dbWrite");
-        const now = c.get("now")();
-        scheduleBackgroundTask(c, () =>
+        const dbWrite = runtime.dbWrite;
+        const now = runtime.now();
+        scheduleBackgroundTask(runtime, () =>
           enqueueSeedEvidenceChecksForMedia(dbWrite, [], {
             now,
             unmatchedAssociationKeys: [
@@ -338,26 +145,161 @@ export function registerMediaRoutes(app: Hono<ApiEnv>): void {
           }),
         );
       }
-      return c.json({ error: "MEDIA_NOT_FOUND", message: "Media not found" }, 404);
+      throw createDomainConnectError({
+        status: 404,
+        code: "MEDIA_NOT_FOUND",
+        message: "Media not found",
+      });
     }
 
     const resolvedMediaIds = [...new Set(result.items.map((item) => item.document.media.id))];
     if (resolvedMediaIds.length > 0) {
-      const dbWrite = c.get("dbWrite");
-      const now = c.get("now")();
-      scheduleBackgroundTask(c, () =>
+      const dbWrite = runtime.dbWrite;
+      const now = runtime.now();
+      scheduleBackgroundTask(runtime, () =>
         enqueueSeedEvidenceChecksForMedia(dbWrite, resolvedMediaIds, { now }),
       );
     }
 
     const primary = result.items[0]!;
-    const response: MediaReadResponse = {
-      key: result.key,
-      document: primary.document,
-      matchedAssociationId: primary.matchedAssociationId,
-      items: result.items,
-    };
+    return create(proto.GetMediaResponseSchema, {
+      ref: toProtoMediaRef(decoded.ref),
+      document: toProtoMediaDocument(primary.document),
+      ...(primary.matchedAssociationId !== null
+        ? { matchedAssociationId: primary.matchedAssociationId }
+        : {}),
+      items: result.items.map(toProtoMediaQueryItem),
+    });
+  },
 
-    return c.json(response, 200);
-  });
-}
+  async batchGetMedia(req, ctx) {
+    const apiKey = await requireApiKeyAuth(ctx, { db: "read", permission: "read" });
+    await enforceReadRateLimit(ctx, apiKey);
+
+    const runtime = getRuntime(ctx);
+    if (req.refs.length === 0 || req.refs.length > MAX_BATCH_MEDIA_KEYS) {
+      throw createDomainConnectError({
+        status: 400,
+        code: "BATCH_LIMIT_EXCEEDED",
+        message: `refs must contain between 1 and ${MAX_BATCH_MEDIA_KEYS} items`,
+      });
+    }
+
+    const season = validateSeasonParam(req.season);
+    const namespaceGroup = resolveNamespaceGroupParam(req.namespaceGroup);
+
+    const decodedEntries: Array<
+      | { ok: true; index: number; ref: MediaRef; key: string }
+      | { ok: false; index: number; rawRef: proto.MediaRef; message: string }
+    > = [];
+    const validKeys: string[] = [];
+
+    for (let i = 0; i < req.refs.length; i += 1) {
+      const rawRef = req.refs[i]!;
+      const decoded = fromProtoMediaRef(rawRef, { mode: "read" });
+      if (decoded.ok) {
+        decodedEntries.push({ ok: true, index: i, ref: decoded.ref, key: decoded.key });
+        validKeys.push(decoded.key);
+      } else {
+        decodedEntries.push({ ok: false, index: i, rawRef, message: decoded.message });
+      }
+    }
+
+    try {
+      const queryResults: BatchMediaQueryResult[] =
+        validKeys.length > 0
+          ? await queryMediaBatch(runtime.dbRead, {
+              keys: validKeys,
+              includeUnconfirmed: req.includeUnconfirmed,
+            })
+          : [];
+
+      if (queryResults.length > 0) {
+        const batchDemandInput = {
+          results: queryResults,
+          season,
+          namespaceGroup,
+        };
+        if (computeDemandTargetsForBatchRead(batchDemandInput).length > 0) {
+          const dbWrite = runtime.dbWrite;
+          const now = runtime.now();
+          scheduleBackgroundTask(runtime, () =>
+            recordDemandsForBatchRead(dbWrite, {
+              ...batchDemandInput,
+              now,
+            }),
+          );
+        }
+
+        const resolvedBatchMediaIds: string[] = [];
+        const unmatchedBatchAssocKeys: UnmatchedAssociationLookupKey[] = [];
+        for (const entry of queryResults) {
+          if (entry.ok) {
+            for (const item of entry.items) {
+              resolvedBatchMediaIds.push(item.document.media.id);
+            }
+          } else if (entry.error === "NOT_FOUND") {
+            const parsedKey = parseExternalKey(entry.key.trim());
+            if (parsedKey && isAssociationNamespace(parsedKey.namespace)) {
+              unmatchedBatchAssocKeys.push({
+                namespace: parsedKey.namespace,
+                nativeId: parsedKey.nativeId,
+              });
+            }
+          }
+        }
+        if (resolvedBatchMediaIds.length > 0 || unmatchedBatchAssocKeys.length > 0) {
+          const dbWrite = runtime.dbWrite;
+          const now = runtime.now();
+          scheduleBackgroundTask(runtime, () =>
+            enqueueSeedEvidenceChecksForMedia(dbWrite, resolvedBatchMediaIds, {
+              now,
+              unmatchedAssociationKeys: unmatchedBatchAssocKeys,
+            }),
+          );
+        }
+      }
+
+      const protoResults: proto.BatchMediaItemResult[] = [];
+      let validCursor = 0;
+      for (const entry of decodedEntries) {
+        if (!entry.ok) {
+          protoResults.push(
+            toProtoBatchItemResult({
+              ref: entry.rawRef,
+              ok: false,
+              error: "INVALID_KEY",
+              message: entry.message,
+            }),
+          );
+          continue;
+        }
+        const queryEntry = queryResults[validCursor++]!;
+        if (queryEntry.ok) {
+          protoResults.push(
+            toProtoBatchItemResult({
+              ref: entry.ref,
+              ok: true,
+              items: queryEntry.items,
+            }),
+          );
+        } else {
+          protoResults.push(
+            toProtoBatchItemResult({
+              ref: entry.ref,
+              ok: false,
+              error: queryEntry.error,
+              message: queryEntry.message,
+            }),
+          );
+        }
+      }
+
+      return create(proto.BatchGetMediaResponseSchema, {
+        results: protoResults,
+      });
+    } catch (error) {
+      rethrowDomainError(error);
+    }
+  },
+};

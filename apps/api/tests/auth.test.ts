@@ -1,29 +1,20 @@
 import type { ExecutionContext, Hyperdrive, SendEmail } from "@cloudflare/workers-types";
-import { createFakeOutboundClient, type EmailMessage } from "@media-ref/core";
+import { createFakeOutboundClient } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import worker, { createApiApp, requireVerifiedUser } from "../src/index.ts";
+import worker from "../src/index.ts";
+import { createApiApp } from "../src/lib.ts";
+import {
+  createRpcClients,
+  expectRpcError,
+  extractCookieHeader,
+  extractVerificationUrl,
+  TEST_BASE_URL,
+} from "./rpc-helpers.ts";
 
-const TEST_BASE_URL = "https://api.mediaref.org";
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-api-auth-integration-tests-0123456789";
 
-function extractCookieHeader(response: Response): string {
-  const setCookies = response.headers.getSetCookie();
-  return setCookies
-    .map((entry) => entry.split(";")[0]?.trim())
-    .filter((pair): pair is string => Boolean(pair))
-    .join("; ");
-}
-
-function extractVerificationUrl(email: EmailMessage): string {
-  const match = email.text.match(/https?:\/\/\S+\/api\/auth\/verify-email\?\S+/);
-  if (!match) {
-    throw new Error(`No verification URL found in email text: ${email.text}`);
-  }
-  return match[0];
-}
-
-describe("API Worker auth HTTP entrypoint", () => {
+describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
   const handles: TestDbHandle[] = [];
 
   afterEach(async () => {
@@ -35,7 +26,7 @@ describe("API Worker auth HTTP entrypoint", () => {
     }
   });
 
-  test("signs up with email + password, sends verification email via OutboundClient, and authenticates GET /v1/me", async () => {
+  test("signs up with email + password, sends verification email via OutboundClient, and authenticates AccountService.GetCurrentUser", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -50,12 +41,11 @@ describe("API Worker auth HTTP entrypoint", () => {
       },
     });
 
-    const unauthMe = await app.fetch(new Request(`${TEST_BASE_URL}/v1/me`));
-    expect(unauthMe.status).toBe(401);
-    expect(await unauthMe.json()).toEqual({
-      error: "UNAUTHORIZED",
-      message: "Authentication required",
-    });
+    const unauthRpc = createRpcClients(app);
+    const unauthErr = await expectRpcError(unauthRpc.account.getCurrentUser({}));
+    expect(unauthErr.status).toBe(401);
+    expect(unauthErr.code).toBe("UNAUTHORIZED");
+    expect(unauthErr.message).toBe("Authentication required");
 
     const signUpRes = await app.fetch(
       new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
@@ -100,13 +90,9 @@ describe("API Worker auth HTTP entrypoint", () => {
     expect(verifyUrl.startsWith(`${TEST_BASE_URL}/api/auth/verify-email?token=`)).toBe(true);
     expect(email.html).toContain(verifyUrl.replaceAll("&", "&amp;"));
 
-    const meRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, {
-        headers: { cookie: cookieHeader },
-      }),
-    );
-    expect(meRes.status).toBe(200);
-    expect(await meRes.json()).toEqual({
+    const authedRpc = createRpcClients(app, { cookie: cookieHeader });
+    const meRes = await authedRpc.account.getCurrentUser({});
+    expect(meRes.user).toMatchObject({
       id: signUpBody.user.id,
       email: "alice@example.com",
       name: "Alice",
@@ -169,13 +155,9 @@ describe("API Worker auth HTTP entrypoint", () => {
     const sessionCookie = extractCookieHeader(signInRes);
     expect(sessionCookie).toContain("session_token=");
 
-    const meBeforeSignOut = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, {
-        headers: { cookie: sessionCookie },
-      }),
-    );
-    expect(meBeforeSignOut.status).toBe(200);
-    expect(await meBeforeSignOut.json()).toMatchObject({
+    const bobRpc = createRpcClients(app, { cookie: sessionCookie });
+    const meBeforeSignOut = await bobRpc.account.getCurrentUser({});
+    expect(meBeforeSignOut.user).toMatchObject({
       email: "bob@example.com",
       name: "Bob",
       emailVerified: false,
@@ -194,15 +176,11 @@ describe("API Worker auth HTTP entrypoint", () => {
     );
     expect(signOutRes.status).toBe(200);
 
-    const meAfterSignOut = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, {
-        headers: { cookie: sessionCookie },
-      }),
-    );
-    expect(meAfterSignOut.status).toBe(401);
+    const meAfterSignOutErr = await expectRpcError(bobRpc.account.getCurrentUser({}));
+    expect(meAfterSignOutErr.status).toBe(401);
   });
 
-  test("blocks unverified users on requireVerifiedUser routes and allows them after clicking verification link", async () => {
+  test("blocks unverified users on verified-only RPCs and allows them after clicking verification link", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -217,19 +195,12 @@ describe("API Worker auth HTTP entrypoint", () => {
       },
     });
 
-    app.post("/v1/verified-action", requireVerifiedUser, (c) => {
-      const session = c.get("session")!;
-      return c.json({ ok: true, userId: session.user.id }, 200);
-    });
-
-    const unauthAction = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, { method: "POST" }),
+    const unauthErr = await expectRpcError(
+      createRpcClients(app).account.createApiKey({ name: "No Auth" }),
     );
-    expect(unauthAction.status).toBe(401);
-    expect(await unauthAction.json()).toEqual({
-      error: "UNAUTHORIZED",
-      message: "Authentication required",
-    });
+    expect(unauthErr.status).toBe(401);
+    expect(unauthErr.code).toBe("UNAUTHORIZED");
+    expect(unauthErr.message).toBe("Authentication required");
 
     const signUpRes = await app.fetch(
       new Request(`${TEST_BASE_URL}/api/auth/sign-up/email`, {
@@ -246,17 +217,12 @@ describe("API Worker auth HTTP entrypoint", () => {
     const signUpData = (await signUpRes.json()) as { user: { id: string } };
     const sessionCookie = extractCookieHeader(signUpRes);
 
-    const blockedAction = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, {
-        method: "POST",
-        headers: { cookie: sessionCookie },
-      }),
+    const blockedErr = await expectRpcError(
+      createRpcClients(app, { cookie: sessionCookie }).account.createApiKey({ name: "Blocked" }),
     );
-    expect(blockedAction.status).toBe(403);
-    expect(await blockedAction.json()).toEqual({
-      error: "EMAIL_NOT_VERIFIED",
-      message: "Email verification is required",
-    });
+    expect(blockedErr.status).toBe(403);
+    expect(blockedErr.code).toBe("EMAIL_NOT_VERIFIED");
+    expect(blockedErr.message).toBe("Email verification is required");
 
     const resendRes = await app.fetch(
       new Request(`${TEST_BASE_URL}/api/auth/send-verification-email`, {
@@ -281,14 +247,10 @@ describe("API Worker auth HTTP entrypoint", () => {
     expect([200, 302]).toContain(verifyRes.status);
 
     const refreshedCookie = extractCookieHeader(verifyRes) || sessionCookie;
+    const verifiedRpc = createRpcClients(app, { cookie: refreshedCookie });
 
-    const meAfterVerify = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, {
-        headers: { cookie: refreshedCookie },
-      }),
-    );
-    expect(meAfterVerify.status).toBe(200);
-    expect(await meAfterVerify.json()).toEqual({
+    const meAfterVerify = await verifiedRpc.account.getCurrentUser({});
+    expect(meAfterVerify.user).toMatchObject({
       id: signUpData.user.id,
       email: "carol@example.com",
       name: "Carol",
@@ -296,17 +258,9 @@ describe("API Worker auth HTTP entrypoint", () => {
       role: "user",
     });
 
-    const allowedAction = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, {
-        method: "POST",
-        headers: { cookie: refreshedCookie },
-      }),
-    );
-    expect(allowedAction.status).toBe(200);
-    expect(await allowedAction.json()).toEqual({
-      ok: true,
-      userId: signUpData.user.id,
-    });
+    const allowedAction = await verifiedRpc.account.createApiKey({ name: "Verified Key" });
+    expect(allowedAction.key.startsWith("mref_")).toBe(true);
+    expect(allowedAction.apiKey?.name).toBe("Verified Key");
   });
 
   test("auto-signs in user when verification link is opened without an existing session cookie", async () => {
@@ -322,11 +276,6 @@ describe("API Worker auth HTTP entrypoint", () => {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
       },
-    });
-
-    app.post("/v1/verified-action", requireVerifiedUser, (c) => {
-      const session = c.get("session")!;
-      return c.json({ ok: true, email: session.user.email }, 200);
     });
 
     const signUpRes = await app.fetch(
@@ -349,17 +298,14 @@ describe("API Worker auth HTTP entrypoint", () => {
     const autoSignedInCookie = extractCookieHeader(verifyRes);
     expect(autoSignedInCookie).toContain("session_token=");
 
-    const allowedAction = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/verified-action`, {
-        method: "POST",
-        headers: { cookie: autoSignedInCookie },
-      }),
-    );
-    expect(allowedAction.status).toBe(200);
-    expect(await allowedAction.json()).toEqual({
-      ok: true,
+    const daveRpc = createRpcClients(app, { cookie: autoSignedInCookie });
+    const me = await daveRpc.account.getCurrentUser({});
+    expect(me.user).toMatchObject({
       email: "dave@example.com",
+      emailVerified: true,
     });
+    const created = await daveRpc.account.createApiKey({ name: "Auto Verified Key" });
+    expect(created.key.startsWith("mref_")).toBe(true);
   });
 
   test("sets cross-subdomain session cookie Domain and allows trusted subdomain CORS when cookieDomain is configured", async () => {
@@ -405,12 +351,29 @@ describe("API Worker auth HTTP entrypoint", () => {
     expect(sessionSetCookie).toMatch(/Secure/i);
     expect(sessionSetCookie).toMatch(/SameSite=Lax/i);
 
+    const trustedPreflight = await app.fetch(
+      new Request(`${TEST_BASE_URL}/mediaref.v1.AccountService/GetCurrentUser`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://mediaref.org",
+          "access-control-request-method": "POST",
+        },
+      }),
+    );
+    expect(trustedPreflight.status).toBe(204);
+    expect(trustedPreflight.headers.get("access-control-allow-origin")).toBe(
+      "https://mediaref.org",
+    );
+    expect(trustedPreflight.headers.get("access-control-allow-headers")).toContain(
+      "Connect-Protocol-Version",
+    );
+
     const untrustedPreflight = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, {
+      new Request(`${TEST_BASE_URL}/mediaref.v1.AccountService/GetCurrentUser`, {
         method: "OPTIONS",
         headers: {
           origin: "https://evil.example",
-          "access-control-request-method": "GET",
+          "access-control-request-method": "POST",
         },
       }),
     );
@@ -453,13 +416,9 @@ describe("API Worker auth HTTP entrypoint", () => {
     const verifyRes = await app.fetch(new Request(verifyUrl, { headers: { cookie } }));
     expect([200, 302]).toContain(verifyRes.status);
 
-    const meRes = await app.fetch(
-      new Request(`${TEST_BASE_URL}/v1/me`, {
-        headers: { cookie: extractCookieHeader(verifyRes) || cookie },
-      }),
-    );
-    expect(meRes.status).toBe(200);
-    expect(await meRes.json()).toMatchObject({
+    const rpc = createRpcClients(app, { cookie: extractCookieHeader(verifyRes) || cookie });
+    const meRes = await rpc.account.getCurrentUser({});
+    expect(meRes.user).toMatchObject({
       email: "writeonly@example.com",
       emailVerified: true,
     });

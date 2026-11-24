@@ -1,5 +1,5 @@
 import type { ExecutionContext, Hyperdrive, RateLimit } from "@cloudflare/workers-types";
-import type { MediaDocument } from "@media-ref/client";
+import { toProtoSegmentInput, type MediaDocument } from "@media-ref/client";
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
@@ -8,12 +8,9 @@ import {
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import worker, {
-  createApiApp,
-  createInMemoryIpRateLimiter,
-  createInternalMediaApp,
-  InternalMediaEntrypoint,
-} from "../src/index.ts";
+import worker, { InternalMediaEntrypoint } from "../src/index.ts";
+import { createApiApp, createInMemoryIpRateLimiter, createInternalMediaApp } from "../src/lib.ts";
+import { createRpcClients, issueApiKeyRpc, mediaRef } from "./rpc-helpers.ts";
 
 const TEST_BASE_URL = "https://api.mediaref.org";
 const INTERNAL_BASE_URL = "https://internal.mediaref.org";
@@ -80,18 +77,7 @@ async function createApiKey(
   cookie: string,
   options: { name: string; canSubmit?: boolean },
 ): Promise<{ id: string; key: string }> {
-  const res = await app.fetch(
-    new Request(`${TEST_BASE_URL}/v1/api-keys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({
-        name: options.name,
-        canSubmit: options.canSubmit ?? false,
-      }),
-    }),
-  );
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; key: string };
+  return issueApiKeyRpc(app, cookie, options);
 }
 
 function createCatalogStubHandler() {
@@ -212,95 +198,52 @@ async function seedConfirmedMediaFixture(testDb: TestDbHandle) {
     canSubmit: false,
   });
 
-  // Confirmed association: bilibili:ss34430 (S1 E1-24)
-  const cr1Res = await publicApp.fetch(
-    new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": submitKey.key,
-      },
-      body: JSON.stringify({
-        targetExternalKey: "tmdb:tv:95479",
-        namespace: "bilibili",
-        nativeId: "ss34430",
-        variantDescription: "原声",
-        segments: [
-          {
-            season: 1,
-            episodeStart: 1,
-            episodeEnd: 24,
-            targetEpisodeStart: 1,
-            baseline: "tmdb",
-          },
-        ],
-      }),
-    }),
-  );
-  expect(cr1Res.status).toBe(201);
-  const cr1Body = (await cr1Res.json()) as { changeRequest: { id: string } };
+  const submitRpc = createRpcClients(publicApp, { apiKey: submitKey.key });
+  const ownerRpc = createRpcClients(publicApp, { cookie: owner.cookie });
 
-  const approve1Res = await publicApp.fetch(
-    new Request(
-      `${TEST_BASE_URL}/v1/reviewer/change-requests/${cr1Body.changeRequest.id}/approve`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: owner.cookie,
-        },
-        body: JSON.stringify({ reason: "Verified S1 part 1" }),
-      },
-    ),
-  );
-  expect(approve1Res.status).toBe(200);
-  const approve1Body = (await approve1Res.json()) as {
-    mediaId: string;
-    associationId: string;
-  };
+  // Confirmed association: bilibili:ss34430 (S1 E1-24)
+  const cr1Body = await submitRpc.changeRequest.createChangeRequest({
+    target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+    namespace: "bilibili",
+    nativeId: "ss34430",
+    variantDescription: "原声",
+    segments: [
+      toProtoSegmentInput({
+        season: 1,
+        episodeStart: 1,
+        episodeEnd: 24,
+        targetEpisodeStart: 1,
+        baseline: "tmdb",
+      }),
+    ],
+  });
+
+  const approve1Body = await ownerRpc.reviewer.approveChangeRequest({
+    id: cr1Body.changeRequest!.id,
+    reason: "Verified S1 part 1",
+  });
 
   // Rejected change request (must never appear in anonymous media response)
-  const crRejectedRes = await publicApp.fetch(
-    new Request(`${TEST_BASE_URL}/v1/change-requests`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": submitKey.key,
-      },
-      body: JSON.stringify({
-        targetExternalKey: "tmdb:tv:95479",
-        namespace: "tencent",
-        nativeId: "mzc00200rejected",
-        variantDescription: "原声",
-        segments: [
-          {
-            season: 1,
-            episodeStart: 1,
-            episodeEnd: 24,
-            targetEpisodeStart: 1,
-            baseline: "tmdb",
-          },
-        ],
+  const crRejectedBody = await submitRpc.changeRequest.createChangeRequest({
+    target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+    namespace: "tencent",
+    nativeId: "mzc00200rejected",
+    variantDescription: "原声",
+    segments: [
+      toProtoSegmentInput({
+        season: 1,
+        episodeStart: 1,
+        episodeEnd: 24,
+        targetEpisodeStart: 1,
+        baseline: "tmdb",
       }),
-    }),
-  );
-  expect(crRejectedRes.status).toBe(201);
-  const crRejectedBody = (await crRejectedRes.json()) as { changeRequest: { id: string } };
+    ],
+  });
 
-  const rejectRes = await publicApp.fetch(
-    new Request(
-      `${TEST_BASE_URL}/v1/reviewer/change-requests/${crRejectedBody.changeRequest.id}/reject`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: owner.cookie,
-        },
-        body: JSON.stringify({ reason: "Wrong collection" }),
-      },
-    ),
-  );
-  expect(rejectRes.status).toBe(200);
+  await ownerRpc.reviewer.rejectChangeRequest({
+    id: crRejectedBody.changeRequest!.id,
+    reason: "Wrong collection",
+  });
 
   // Seed unconfirmed & delisted associations directly in DB (must NOT be returned by internal anonymous read)
   const variant = await testDb.writeDb
@@ -360,7 +303,7 @@ describe("API Worker internal anonymous single-media entrypoint (#25)", () => {
 
     const fixture = await seedConfirmedMediaFixture(testDb);
 
-    // 1. Public Hono app MUST NOT expose /internal/media/:key (with or without API key)
+    // 1. Public API app MUST NOT expose /internal/media/:key (with or without API key)
     const publicAnonRes = await fixture.publicApp.fetch(
       new Request(`${TEST_BASE_URL}/internal/media/${fixture.mediaId}`),
     );

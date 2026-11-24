@@ -13,6 +13,9 @@
     "deploy": "bun run build && wrangler deploy"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "catalog:",
+    "@connectrpc/connect": "catalog:",
+    "@connectrpc/connect-web": "catalog:",
     "@media-ref/client": "workspace:*",
     "@tailwindcss/vite": "catalog:",
     "@tanstack/react-devtools": "0.10.15",

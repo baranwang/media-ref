@@ -78,6 +78,10 @@ export type AnonymousMediaResult =
       status: "ok";
       document: MediaDocument;
       matchedAssociationId: string | null;
+      items: Array<{
+        document: MediaDocument;
+        matchedAssociationId: string | null;
+      }>;
     }
   | {
       status: "invalid_key";
@@ -102,8 +106,36 @@ export type AnonymousMediaResult =
       message: string;
     };
 
+type InternalMediaRpcResult =
+  | {
+      status: 200;
+      document: MediaDocument;
+      matchedAssociationId: string | null;
+      items?: Array<{
+        document: MediaDocument;
+        matchedAssociationId: string | null;
+      }>;
+    }
+  | {
+      status: 400;
+      error: "INVALID_KEY";
+      message: string;
+    }
+  | {
+      status: 404;
+      error: "MEDIA_NOT_FOUND";
+      message: string;
+    }
+  | {
+      status: 429;
+      error: "RATE_LIMITED";
+      message: string;
+      retryAfterSeconds: number;
+    };
+
 interface ServiceBindingFetcher {
-  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  fetch?(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  getMedia?(key: string, clientIp?: string): Promise<InternalMediaRpcResult>;
 }
 
 interface WebsiteWorkerEnv {
@@ -114,6 +146,10 @@ interface WebsiteWorkerEnv {
 interface RawInternalResponseBody {
   document?: MediaDocument;
   matchedAssociationId?: string | null;
+  items?: Array<{
+    document: MediaDocument;
+    matchedAssociationId: string | null;
+  }>;
   error?: unknown;
   message?: unknown;
   retryAfter?: unknown;
@@ -212,6 +248,45 @@ export const fetchAnonymousMedia = createServerFn({ method: "GET" })
     const encodedPath = `/internal/media/${encodeURIComponent(trimmedKey)}`;
     const workerEnv = await loadCloudflareWorkerEnv();
 
+    if (workerEnv?.API_INTERNAL && typeof workerEnv.API_INTERNAL.getMedia === "function") {
+      try {
+        const rpcRes = await workerEnv.API_INTERNAL.getMedia(trimmedKey, visitorIp ?? undefined);
+        if (rpcRes.status === 200) {
+          return {
+            status: "ok",
+            document: rpcRes.document,
+            matchedAssociationId: rpcRes.matchedAssociationId,
+            items: rpcRes.items ?? [
+              { document: rpcRes.document, matchedAssociationId: rpcRes.matchedAssociationId },
+            ],
+          };
+        }
+        if (rpcRes.status === 400) {
+          return {
+            status: "invalid_key",
+            message: rpcRes.message,
+          };
+        }
+        if (rpcRes.status === 404) {
+          return {
+            status: "not_found",
+            message: "未找到对应的已确认媒体记录。",
+          };
+        }
+        return {
+          status: "rate_limited",
+          retryAfterSeconds: rpcRes.retryAfterSeconds,
+          message: `当前 IP 访问过于频繁，请约 ${rpcRes.retryAfterSeconds} 秒后再试。`,
+        };
+      } catch {
+        return {
+          status: "error",
+          code: "INTERNAL_SERVICE_UNREACHABLE",
+          message: "暂时无法连接到内部媒体查询服务，请稍后重试。",
+        };
+      }
+    }
+
     let response: Response;
     try {
       if (workerEnv?.API_INTERNAL && typeof workerEnv.API_INTERNAL.fetch === "function") {
@@ -252,6 +327,12 @@ export const fetchAnonymousMedia = createServerFn({ method: "GET" })
         status: "ok",
         document: body.document,
         matchedAssociationId: body.matchedAssociationId ?? null,
+        items: body.items ?? [
+          {
+            document: body.document,
+            matchedAssociationId: body.matchedAssociationId ?? null,
+          },
+        ],
       };
     }
 
