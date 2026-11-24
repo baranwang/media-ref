@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package mediaref.v1;
+
+import "mediaref/v1/types.proto";
+
+message GetMediaRequest {
+  MediaRef ref = 1;
+  bool include_unconfirmed = 2;
+  optional int32 season = 3;
+  NamespaceGroup namespace_group = 4;
+}
+
+message GetMediaResponse {
+  MediaRef ref = 1;
+  MediaDocument document = 2;
+  optional string matched_association_id = 3;
+  repeated MediaQueryItem items = 4;
+}
+
+message BatchGetMediaRequest {
+  repeated MediaRef refs = 1;
+  bool include_unconfirmed = 2;
+  optional int32 season = 3;
+  NamespaceGroup namespace_group = 4;
+}
+
+message BatchMediaItemSuccess {
+  repeated MediaQueryItem items = 1;
+}
+
+message BatchMediaItemError {
+  string code = 1;
+  string message = 2;
+}
+
+message BatchMediaItemResult {
+  MediaRef ref = 1;
+  oneof outcome {
+    BatchMediaItemSuccess success = 2;
+    BatchMediaItemError error = 3;
+  }
+}
+
+message BatchGetMediaResponse {
+  repeated BatchMediaItemResult results = 1;
+}
+
+service MediaService {
+  rpc GetMedia(GetMediaRequest) returns (GetMediaResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc BatchGetMedia(BatchGetMediaRequest) returns (BatchGetMediaResponse);
+}

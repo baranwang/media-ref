@@ -1,0 +1,27 @@
+{
+  "name": "@media-ref/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "up": "docker compose up -d",
+    "down": "docker compose down",
+    "migrate": "vpx ./src/migrate.ts",
+    "test": "vp test --run",
+    "check": "vp check"
+  },
+  "dependencies": {
+    "kysely": "catalog:",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/pg": "^8.23.1",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

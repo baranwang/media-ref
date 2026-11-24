@@ -1,0 +1,37 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "media-ref-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE_READ",
+      "id": "00000000000000000000000000000000",
+      "localConnectionString": "postgres://postgres:postgres@127.0.0.1:54329/media_ref_dev",
+    },
+    {
+      "binding": "HYPERDRIVE_WRITE",
+      "id": "00000000000000000000000000000000",
+      "localConnectionString": "postgres://postgres:postgres@127.0.0.1:54329/media_ref_dev",
+    },
+  ],
+  "ratelimits": [
+    {
+      "name": "RATE_LIMITER_READ_KEY",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 120,
+        "period": 60,
+      },
+    },
+    {
+      "name": "RATE_LIMITER_READ_IP",
+      "namespace_id": "1002",
+      "simple": {
+        "limit": 300,
+        "period": 60,
+      },
+    },
+  ],
+}
