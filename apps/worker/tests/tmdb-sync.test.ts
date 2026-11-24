@@ -244,7 +244,8 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
 
     // Lock the IMDb external ID so sync must NOT overwrite it, while leaving TVDB unlocked
     await testDb.writeDb
-      .updateTable("external_ids")
+      .updateTable("associations")
+      .where("is_external_id", "=", true)
       .set({ native_id: "tt9999999", locked: true, source: "reviewer" })
       .where("media_id", "=", mediaId)
       .where("namespace", "=", "imdb")

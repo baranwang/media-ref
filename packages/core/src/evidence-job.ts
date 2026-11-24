@@ -1,5 +1,5 @@
 import { formatExternalKey, type CatalogNamespace } from "@media-ref/client";
-import type { Database, Db, JsonObject } from "@media-ref/db";
+import type { Database, Db, ExternalIdNamespaceRow, JsonObject } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import {
   createDefaultAdapterRegistry,
@@ -89,12 +89,15 @@ async function resolveAuthoritativeCatalogKey(
   if (mediaId) {
     const [extRows, catalogAssocRows] = await Promise.all([
       db
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select(["namespace", "native_id"])
         .where("media_id", "=", mediaId)
+        .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
         .execute(),
       db
         .selectFrom("associations")
+        .where("is_external_id", "=", false)
         .select(["namespace", "native_id"])
         .where("media_id", "=", mediaId)
         .where("namespace", "in", ["bangumi", "douban"])

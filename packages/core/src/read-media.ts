@@ -19,6 +19,7 @@ import type {
   Db,
   SeasonSnapshotRow,
   StoredSegmentJson,
+  ExternalIdNamespaceRow,
 } from "@media-ref/db";
 import { isAssociationNamespace, isUuid } from "./media-service.ts";
 
@@ -328,7 +329,8 @@ async function lookupExternalIdsBatch(
 
   const entries = [...byNamespace.entries()];
   const rows = await dbRead
-    .selectFrom("external_ids")
+    .selectFrom("associations")
+    .where("is_external_id", "=", true)
     .select(["media_id", "namespace", "native_id"])
     .where((eb) =>
       eb.or(
@@ -374,6 +376,7 @@ async function lookupAssociationsBatch(
 
   const rows = await dbRead
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select(["id", "media_id", "namespace", "native_id", "status"])
     .where("status", "in", allowedStatuses)
     .where((eb) =>
@@ -482,11 +485,13 @@ async function hydrateMediaDocuments(
 
   const [externalIdRows, variantRows, associationRows, platformCheckRows] = await Promise.all([
     dbRead
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select(["media_id", "namespace", "native_id", "locked"])
       .where("media_id", "in", mediaIds)
       .orderBy("namespace", "asc")
       .orderBy("native_id", "asc")
+      .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
       .execute(),
     dbRead
       .selectFrom("variants")
@@ -499,6 +504,7 @@ async function hydrateMediaDocuments(
       .execute(),
     dbRead
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select([
         "id",
         "media_id",
@@ -508,6 +514,8 @@ async function hydrateMediaDocuments(
         "status",
         "needs_review",
         "locked",
+        "title",
+        "episode_count",
       ])
       .where("media_id", "in", mediaIds)
       .where("status", "in", allowedStatuses)
@@ -580,9 +588,11 @@ async function hydrateMediaDocuments(
       const mergedOnlyIds = allMediaIds.filter((id) => !mediaIds.includes(id));
       if (mergedOnlyIds.length > 0) {
         const mergedExtRows = await dbRead
-          .selectFrom("external_ids")
+          .selectFrom("associations")
+          .where("is_external_id", "=", true)
           .select(["media_id", "namespace", "native_id"])
           .where("media_id", "in", mergedOnlyIds)
+          .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
           .execute();
         for (const ext of mergedExtRows) {
           const canonicalId = canonicalByAnyId.get(ext.media_id);
@@ -756,6 +766,8 @@ async function hydrateMediaDocuments(
       ...(row.status === "seed_unconfirmed"
         ? { unconfirmed: true, unconfirmedSource: "seed_unconfirmed" as const }
         : {}),
+      ...(row.title !== null ? { title: row.title } : {}),
+      ...(row.episode_count !== null ? { episodeCount: row.episode_count } : {}),
     }));
 
     if (includeUnconfirmed && mediaChangeRequests.length > 0) {
@@ -927,7 +939,9 @@ async function resolveKeysBatch(
     parsedKeys.push({ rawKey: raw, parsed });
     if (parsed?.kind === "external_id") {
       externalIdPairs.push({ namespace: parsed.namespace, nativeId: parsed.nativeId });
-    } else if (parsed?.kind === "association") {
+    }
+    // Authority-catalog keys may also name a season/episode entry rather than an External ID.
+    if (parsed?.kind === "external_id" || parsed?.kind === "association") {
       associationPairs.push({ namespace: parsed.namespace, nativeId: parsed.nativeId });
     }
   }
@@ -987,12 +1001,10 @@ async function resolveKeysBatch(
       if (parsed.kind === "media_id") {
         matches.push({ rawMediaId: parsed.mediaId, matchedAssociationId: null });
         allRawMediaIds.add(parsed.mediaId);
-      } else if (parsed.kind === "external_id") {
-        const mediaId = mediaIdByExternalKey.get(parsed.canonicalKey);
-        if (mediaId) {
-          matches.push({ rawMediaId: mediaId, matchedAssociationId: null });
-          allRawMediaIds.add(mediaId);
-        }
+      } else if (parsed.kind === "external_id" && mediaIdByExternalKey.has(parsed.canonicalKey)) {
+        const mediaId = mediaIdByExternalKey.get(parsed.canonicalKey)!;
+        matches.push({ rawMediaId: mediaId, matchedAssociationId: null });
+        allRawMediaIds.add(mediaId);
       } else {
         const assocRows = assocRowsByKey.get(parsed.canonicalKey) ?? [];
         for (const row of assocRows) {

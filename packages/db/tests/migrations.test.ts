@@ -82,6 +82,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0013_unified_associations",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -273,23 +278,77 @@ describe("packages/db migrations", () => {
       title: "咒术回战",
     });
 
+    // External IDs are whole-media associations on authority catalogs (0013_unified_associations)
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
         media_id: insertedMedia.id,
         namespace: "tmdb",
         native_id: "tv:95479",
+        status: "confirmed",
+        is_external_id: true,
+        source: "sync",
       })
       .execute();
 
     // Unique (namespace, native_id) rejects duplicate external IDs
     await expect(
       testDb.writeDb
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
           media_id: insertedMedia.id,
           namespace: "tmdb",
           native_id: "tv:95479",
+          status: "confirmed",
+          is_external_id: true,
+          source: "sync",
+        })
+        .execute(),
+    ).rejects.toThrow();
+
+    // IMDb season/episode entries coexist with the show's External ID
+    await testDb.writeDb
+      .insertInto("associations")
+      .values([
+        {
+          media_id: insertedMedia.id,
+          namespace: "imdb",
+          native_id: "tt12343534",
+          status: "confirmed",
+          is_external_id: true,
+          source: "sync",
+        },
+        {
+          media_id: insertedMedia.id,
+          namespace: "imdb",
+          native_id: "tt13624322",
+          status: "confirmed",
+          title: "Episode #1.1",
+          episode_count: 1,
+        },
+      ])
+      .execute();
+
+    // Namespace registry: unknown namespaces and platform rows without a variant are rejected
+    await expect(
+      testDb.writeDb
+        .insertInto("associations")
+        .values({
+          media_id: insertedMedia.id,
+          namespace: "unknown_ns" as never,
+          native_id: "1",
+          status: "confirmed",
+        })
+        .execute(),
+    ).rejects.toThrow();
+    await expect(
+      testDb.writeDb
+        .insertInto("associations")
+        .values({
+          media_id: insertedMedia.id,
+          namespace: "bilibili",
+          native_id: "ss-without-variant",
+          status: "confirmed",
         })
         .execute(),
     ).rejects.toThrow();

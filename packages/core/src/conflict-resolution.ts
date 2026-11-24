@@ -11,7 +11,8 @@ import type {
   Database,
   Db,
   ExternalIdSourceRow,
-  ExternalIdsTable,
+  AssociationsTable,
+  ExternalIdNamespaceRow,
   JsonObject,
   StoredSegmentJson,
 } from "@media-ref/db";
@@ -259,14 +260,15 @@ function isPgUniqueViolation(error: unknown): boolean {
   return code === "23505";
 }
 
-function toExternalIdRecord(row: Selectable<ExternalIdsTable>): ExternalIdRecord {
+function toExternalIdRecord(row: Selectable<AssociationsTable>): ExternalIdRecord {
   return {
     id: row.id,
     mediaId: row.media_id,
-    namespace: row.namespace,
+    // External ID rows (is_external_id) always carry an authority namespace and a source.
+    namespace: row.namespace as ExternalIdNamespaceRow,
     nativeId: row.native_id,
     locked: Boolean(row.locked),
-    source: row.source,
+    source: row.source ?? "sync",
     createdAt: toIsoString(row.created_at),
     updatedAt: toIsoString(row.updated_at),
   };
@@ -309,6 +311,7 @@ export async function listAssociationRevisions(
 
   const assocRow = await db
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select([
       "id",
       "media_id",
@@ -531,7 +534,8 @@ export async function overrideMediaExternalId(
       );
 
       const claimedByOther = await trx
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select(["id", "media_id"])
         .where("namespace", "=", namespace)
         .where("native_id", "=", nativeId)
@@ -547,7 +551,8 @@ export async function overrideMediaExternalId(
       }
 
       const existing = await trx
-        .selectFrom("external_ids")
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
         .select("id")
         .where("media_id", "=", canonicalMediaId)
         .where("namespace", "=", namespace)
@@ -555,7 +560,8 @@ export async function overrideMediaExternalId(
 
       if (existing) {
         const updated = await trx
-          .updateTable("external_ids")
+          .updateTable("associations")
+          .where("is_external_id", "=", true)
           .set({
             native_id: nativeId,
             source: "reviewer",
@@ -570,8 +576,10 @@ export async function overrideMediaExternalId(
       }
 
       const inserted = await trx
-        .insertInto("external_ids")
+        .insertInto("associations")
         .values({
+          status: "confirmed",
+          is_external_id: true,
           media_id: canonicalMediaId,
           namespace,
           native_id: nativeId,
@@ -626,7 +634,8 @@ export async function setMediaExternalIdLock(
   }
 
   const updated = await dbWrite
-    .updateTable("external_ids")
+    .updateTable("associations")
+    .where("is_external_id", "=", true)
     .set({
       locked: input.locked,
       updated_at: now,
@@ -723,7 +732,8 @@ async function resolveMediaIdForChangeRequest(
 
   if (isExternalIdNamespace(ns)) {
     const ext = await db
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select("media_id")
       .where("namespace", "=", ns)
       .where("native_id", "=", nativeId)
@@ -757,6 +767,7 @@ export async function findConflictingAssociations(
   if (input.replacesAssociationId && isUuid(input.replacesAssociationId)) {
     const replacedRow = await db
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["id", "media_id", "namespace", "native_id", "variant_id", "status", "locked"])
       .where("id", "=", input.replacesAssociationId)
       .where("media_id", "=", mediaId)
@@ -770,6 +781,7 @@ export async function findConflictingAssociations(
 
   const sameCollectionRow = await db
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select(["id", "media_id", "namespace", "native_id", "variant_id", "status", "locked"])
     .where("media_id", "=", mediaId)
     .where("namespace", "=", input.namespace)

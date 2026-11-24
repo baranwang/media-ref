@@ -1077,6 +1077,8 @@ export function toProtoMediaDocument(doc: MediaDocument): ProtoMediaDocument {
         ...(assoc.changeRequestStatus !== undefined
           ? { changeRequestStatus: toProtoChangeRequestStatus(assoc.changeRequestStatus) }
           : {}),
+        ...(assoc.title !== undefined ? { title: assoc.title } : {}),
+        ...(assoc.episodeCount !== undefined ? { episodeCount: assoc.episodeCount } : {}),
       }),
     ),
     matchedAssociationIds: doc.matchedAssociationIds ? [...doc.matchedAssociationIds] : [],
@@ -1160,6 +1162,8 @@ export function fromProtoMediaDocument(proto: ProtoMediaDocument): MediaDocument
       ...(crStatus === "pending_evidence" || crStatus === "needs_review"
         ? { changeRequestStatus: crStatus }
         : {}),
+      ...(a.title !== undefined ? { title: a.title } : {}),
+      ...(a.episodeCount !== undefined ? { episodeCount: a.episodeCount } : {}),
     };
   });
 

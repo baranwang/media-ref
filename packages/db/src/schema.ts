@@ -1,4 +1,4 @@
-import type { ColumnType, Generated } from "kysely";
+import type { ColumnType, Generated, GeneratedAlways } from "kysely";
 
 export interface SchemaMetaTable {
   key: string;
@@ -113,7 +113,12 @@ export type ExternalIdNamespaceRow = "tmdb" | "imdb" | "tvdb" | "trakt";
 export type ExternalIdSourceRow = "sync" | "reviewer" | "submission";
 export type PlatformNamespaceRow = "tencent" | "iqiyi" | "youku" | "bilibili" | "mgtv";
 export type PlatformCheckStatusRow = "not_found";
-export type AssociationNamespaceRow = PlatformNamespaceRow | "douban" | "bangumi";
+export type AssociationNamespaceRow =
+  | PlatformNamespaceRow
+  | ExternalIdNamespaceRow
+  | "douban"
+  | "bangumi";
+export type NamespaceVerificationModeRow = "sync" | "evidence";
 export type AssociationStatusRow = "confirmed" | "seed_unconfirmed" | "delisted";
 export type ChangeRequestStatusRow = "pending_evidence" | "approved" | "needs_review" | "rejected";
 export type SubmitterTypeRow = "human" | "agent";
@@ -153,15 +158,13 @@ export interface MediaTable {
   updated_at: Generated<Date>;
 }
 
-export interface ExternalIdsTable {
-  id: Generated<string>;
-  media_id: string;
-  namespace: ExternalIdNamespaceRow;
-  native_id: string;
-  locked: Generated<boolean>;
-  source: Generated<ExternalIdSourceRow>;
-  created_at: Generated<Date>;
-  updated_at: Generated<Date>;
+/** Namespace capability registry (ADR 0001); mirrors NAMESPACE_CAPABILITIES in @media-ref/client. */
+export interface NamespacesTable {
+  namespace: AssociationNamespaceRow;
+  namespace_group: DemandNamespaceGroupRow;
+  supports_variants: boolean;
+  allow_hierarchical_scopes: boolean;
+  verification_mode: NamespaceVerificationModeRow;
 }
 
 export interface VariantsTable {
@@ -184,6 +187,14 @@ export interface AssociationsTable {
   needs_review: Generated<boolean>;
   locked: Generated<boolean>;
   current_revision_id: string | null;
+  /** Display snapshot of the collection/entry from evidence check or upstream sync. */
+  title: string | null;
+  episode_count: number | null;
+  /** The whole-media association on an authority catalog: the media's External ID. */
+  is_external_id: Generated<boolean>;
+  /** Only set on External IDs. */
+  source: ExternalIdSourceRow | null;
+  has_variant: GeneratedAlways<boolean>;
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
 }
@@ -352,7 +363,7 @@ export interface Database {
   background_jobs: BackgroundJobsTable;
   apikey: ApiKeyTable;
   media: MediaTable;
-  external_ids: ExternalIdsTable;
+  namespaces: NamespacesTable;
   variants: VariantsTable;
   associations: AssociationsTable;
   association_revisions: AssociationRevisionsTable;

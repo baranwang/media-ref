@@ -1,7 +1,9 @@
 import {
   EXTERNAL_ID_NAMESPACES,
-  PLATFORM_NAMESPACES,
   formatExternalKey,
+  getNamespaceCapabilities,
+  isExternalIdNamespace,
+  isNamespace,
   isPlatformNamespace,
   normalizeSegments,
   parseExternalKey,
@@ -51,12 +53,6 @@ import { queryMediaByKey, type MediaQueryItem } from "./read-media.ts";
 import { type TmdbGateway, type TmdbGatewayConfig, type TmdbMediaFetchResult } from "./tmdb.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const EXTERNAL_ID_NAMESPACE_SET: ReadonlySet<string> = new Set(EXTERNAL_ID_NAMESPACES);
-const ASSOCIATION_NAMESPACE_SET: ReadonlySet<string> = new Set<AssociationNamespaceRow>([
-  ...PLATFORM_NAMESPACES,
-  "douban",
-  "bangumi",
-]);
 
 export const EVIDENCE_CHECK_JOB_TYPE = "evidence_check";
 export const TIER1_MANUAL_REVIEW_REASON = "adapter_tier_1_manual_review";
@@ -226,12 +222,29 @@ export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
 
+/** Every registered namespace can hold associations (ADR 0001). */
 export function isAssociationNamespace(value: string): value is AssociationNamespace {
-  return ASSOCIATION_NAMESPACE_SET.has(value);
+  return isNamespace(value);
 }
 
-function isExternalIdNamespace(value: string): value is ExternalIdNamespace {
-  return EXTERNAL_ID_NAMESPACE_SET.has(value);
+/** Display snapshot of the collection/entry from `evidence.collection` (ADR 0001). */
+export function extractCollectionDisplay(evidence: unknown): {
+  title?: string;
+  episode_count?: number;
+} {
+  const collection = parseJsonObject(evidence)?.collection;
+  if (!collection || typeof collection !== "object") {
+    return {};
+  }
+  const { title, featureEpisodeCount } = collection as Record<string, unknown>;
+  return {
+    ...(typeof title === "string" && title.trim().length > 0 ? { title: title.trim() } : {}),
+    ...(typeof featureEpisodeCount === "number" &&
+    Number.isInteger(featureEpisodeCount) &&
+    featureEpisodeCount >= 0
+      ? { episode_count: featureEpisodeCount }
+      : {}),
+  };
 }
 
 function toIsoString(value: Date | string): string {
@@ -429,23 +442,23 @@ async function resolveExistingMediaByTarget(
 
   if (isExternalIdNamespace(target.namespace)) {
     const ext = await db
-      .selectFrom("external_ids")
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
       .select("media_id")
       .where("namespace", "=", target.namespace)
       .where("native_id", "=", target.nativeId)
       .executeTakeFirst();
 
-    if (!ext) {
-      return null;
+    if (ext) {
+      const media = await resolveCanonicalMediaById(db, ext.media_id);
+      return media ? { media, matchedAssociationIds: [] } : null;
     }
-
-    const media = await resolveCanonicalMediaById(db, ext.media_id);
-    return media ? { media, matchedAssociationIds: [] } : null;
   }
 
   if (isAssociationNamespace(target.namespace)) {
     const rows = await db
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["id", "media_id"])
       .where("namespace", "=", target.namespace)
       .where("native_id", "=", target.nativeId)
@@ -489,6 +502,7 @@ async function loadActiveAssociationsWithSegments(
 ): Promise<Array<{ id: string; mediaId: string; segments: NormalizedSegment[] }>> {
   let query = db
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select(["id", "media_id"])
     .where("status", "!=", "delisted");
 
@@ -715,6 +729,7 @@ export async function createChangeRequest(
     }
     const foundReplaced = await dbWrite
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["id", "media_id", "namespace", "native_id", "variant_id", "status", "locked"])
       .where("id", "=", rawReplacesAssociationId)
       .where("media_id", "=", existingMedia.id)
@@ -877,6 +892,15 @@ export async function createChangeRequest(
   }
 
   const normalizedSegments = normalizeSegments(preparedInputs);
+  const { allowHierarchicalScopes, verificationMode } = getNamespaceCapabilities(namespace);
+
+  if (verificationMode === "sync" && normalizedSegments.length === 0) {
+    throw new MediaServiceError(
+      "INVALID_NAMESPACE",
+      400,
+      `Whole-media ${namespace} IDs are External IDs maintained by sync; submit season or episode entries with segments`,
+    );
+  }
 
   // Intra-submission validation (and baseline requirement check)
   const selfCheck = validateVariantSegments([normalizedSegments], { baseline: effectiveBaseline });
@@ -900,6 +924,7 @@ export async function createChangeRequest(
     existingSameCollection =
       (await dbWrite
         .selectFrom("associations")
+        .where("is_external_id", "=", false)
         .select(["id", "native_id", "locked"])
         .where("media_id", "=", existingMedia.id)
         .where("namespace", "=", namespace)
@@ -926,7 +951,7 @@ export async function createChangeRequest(
             segments: normalizedSegments,
           },
         ],
-        { baseline: existingMedia.baseline },
+        { baseline: existingMedia.baseline, allowHierarchicalScopes },
       );
       if (!variantCheck.valid) {
         const classified = classifyValidationErrorStatus(variantCheck.errors, 400);
@@ -951,7 +976,7 @@ export async function createChangeRequest(
             segments: normalizedSegments,
           },
         ],
-        { baseline: existingMedia.baseline },
+        { baseline: existingMedia.baseline, allowHierarchicalScopes },
       );
       if (!catalogCheck.valid) {
         const classified = classifyValidationErrorStatus(catalogCheck.errors, 400);
@@ -1366,8 +1391,10 @@ export async function approveChangeRequestInTransaction(
 
       if (primaryExternalNamespace && prefetchedCatalog.externalIds[primaryExternalNamespace]) {
         await trx
-          .insertInto("external_ids")
+          .insertInto("associations")
           .values({
+            status: "confirmed",
+            is_external_id: true,
             media_id: createdMedia.id,
             namespace: primaryExternalNamespace,
             native_id: prefetchedCatalog.externalIds[primaryExternalNamespace]!,
@@ -1385,8 +1412,10 @@ export async function approveChangeRequestInTransaction(
           continue;
         }
         await trx
-          .insertInto("external_ids")
+          .insertInto("associations")
           .values({
+            status: "confirmed",
+            is_external_id: true,
             media_id: createdMedia.id,
             namespace: extNs,
             native_id: extNativeId,
@@ -1644,6 +1673,7 @@ export async function approveChangeRequestInTransaction(
 
   const existingAssociation = await trx
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select(["id", "variant_id", "status", "locked", "native_id"])
     .where("media_id", "=", mediaId)
     .where("namespace", "=", namespace)
@@ -1657,6 +1687,7 @@ export async function approveChangeRequestInTransaction(
     isUuid(effectiveReplacesAssociationId)
       ? await trx
           .selectFrom("associations")
+          .where("is_external_id", "=", false)
           .select(["id", "variant_id", "status", "locked", "native_id", "namespace"])
           .where("id", "=", effectiveReplacesAssociationId)
           .where("media_id", "=", mediaId)
@@ -1705,7 +1736,10 @@ export async function approveChangeRequestInTransaction(
         segments: normalizedSegments,
       },
     ],
-    { baseline: media.baseline },
+    {
+      baseline: media.baseline,
+      allowHierarchicalScopes: getNamespaceCapabilities(namespace).allowHierarchicalScopes,
+    },
   );
 
   if (!variantValidation.valid) {
@@ -1819,6 +1853,9 @@ export async function approveChangeRequestInTransaction(
   }
 
   // 6. Upsert association, replace segments, insert new revision, and mark change request approved
+  const collectionDisplay = extractCollectionDisplay(
+    input.evidence !== undefined ? input.evidence : cr.evidence,
+  );
   let associationId: string;
   let nextRevisionNumber: number;
 
@@ -1830,6 +1867,7 @@ export async function approveChangeRequestInTransaction(
         variant_id: resolvedVariantId,
         status: "confirmed",
         needs_review: false,
+        ...collectionDisplay,
         updated_at: now,
       })
       .where("id", "=", associationId)
@@ -1855,6 +1893,7 @@ export async function approveChangeRequestInTransaction(
         status: "confirmed",
         needs_review: false,
         locked: false,
+        ...collectionDisplay,
       })
       .returning("id")
       .executeTakeFirstOrThrow();

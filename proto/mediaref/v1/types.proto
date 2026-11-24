@@ -117,6 +117,8 @@ message MediaRef {
   }
 }
 
+// Convenience view of the media's External IDs: the whole-media associations on authority
+// catalogs (tmdb, imdb, tvdb, trakt). The same records also appear in MediaDocument.associations.
 message ExternalId {
   string namespace = 1;
   string native_id = 2;
@@ -206,6 +208,10 @@ message Association {
   optional UnconfirmedAssociationSource unconfirmed_source = 11;
   optional string change_request_id = 12;
   optional ChangeRequestStatus change_request_status = 13;
+  // Native title of the collection/entry (e.g. "进击的巨人 最终季 Part.2"), snapshotted from
+  // evidence check or upstream sync. Display only; never reviewed.
+  optional string title = 14;
+  optional int32 episode_count = 15;
 }
 
 message MediaDocument {

@@ -3,6 +3,7 @@ import {
   createDomainConnectError,
   fromProtoMediaRef,
   fromProtoNamespaceGroup,
+  isExternalIdNamespace,
   parseExternalKey,
   proto,
   toProtoBatchItemResult,
@@ -128,7 +129,11 @@ export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
 
     if (result.kind === "not_found") {
       const parsedMissingKey = parseExternalKey(rawKey);
-      if (parsedMissingKey && isAssociationNamespace(parsedMissingKey.namespace)) {
+      if (
+        parsedMissingKey &&
+        isAssociationNamespace(parsedMissingKey.namespace) &&
+        !isExternalIdNamespace(parsedMissingKey.namespace)
+      ) {
         const missingNamespace = parsedMissingKey.namespace;
         const missingNativeId = parsedMissingKey.nativeId;
         const dbWrite = runtime.dbWrite;
@@ -240,7 +245,11 @@ export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
             }
           } else if (entry.error === "NOT_FOUND") {
             const parsedKey = parseExternalKey(entry.key.trim());
-            if (parsedKey && isAssociationNamespace(parsedKey.namespace)) {
+            if (
+              parsedKey &&
+              isAssociationNamespace(parsedKey.namespace) &&
+              !isExternalIdNamespace(parsedKey.namespace)
+            ) {
               unmatchedBatchAssocKeys.push({
                 namespace: parsedKey.namespace,
                 nativeId: parsedKey.nativeId,

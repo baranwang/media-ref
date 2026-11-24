@@ -138,8 +138,10 @@ describe("API Worker extended read API (#18)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: media.id,
         namespace: "tmdb",
         native_id: "tv:95479",
@@ -337,11 +339,29 @@ describe("API Worker extended read API (#18)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values([
-        { media_id: mediaA.id, namespace: "tmdb", native_id: "tv:1001" },
-        { media_id: mediaB.id, namespace: "tmdb", native_id: "tv:1002" },
-        { media_id: mergedIntoA.id, namespace: "imdb", native_id: "tt9991001" },
+        {
+          status: "confirmed",
+          is_external_id: true,
+          media_id: mediaA.id,
+          namespace: "tmdb",
+          native_id: "tv:1001",
+        },
+        {
+          status: "confirmed",
+          is_external_id: true,
+          media_id: mediaB.id,
+          namespace: "tmdb",
+          native_id: "tv:1002",
+        },
+        {
+          status: "confirmed",
+          is_external_id: true,
+          media_id: mergedIntoA.id,
+          namespace: "imdb",
+          native_id: "tt9991001",
+        },
       ])
       .execute();
 
@@ -515,8 +535,10 @@ describe("API Worker extended read API (#18)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values({
+        status: "confirmed",
+        is_external_id: true,
         media_id: media.id,
         namespace: "tmdb",
         native_id: "tv:95479",
@@ -929,10 +951,22 @@ describe("API Worker extended read API (#18)", () => {
       .executeTakeFirstOrThrow();
 
     await testDb.writeDb
-      .insertInto("external_ids")
+      .insertInto("associations")
       .values([
-        { media_id: media1.id, namespace: "tmdb", native_id: "tv:2001" },
-        { media_id: media2.id, namespace: "tmdb", native_id: "tv:2002" },
+        {
+          status: "confirmed",
+          is_external_id: true,
+          media_id: media1.id,
+          namespace: "tmdb",
+          native_id: "tv:2001",
+        },
+        {
+          status: "confirmed",
+          is_external_id: true,
+          media_id: media2.id,
+          namespace: "tmdb",
+          native_id: "tv:2002",
+        },
       ])
       .execute();
 

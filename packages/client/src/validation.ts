@@ -39,6 +39,11 @@ export type VariantAssociationSegmentsInput = readonly SegmentInput[] | VariantA
 
 export interface ValidateVariantSegmentsOptions {
   baseline?: BaselineSource | null;
+  /**
+   * Hierarchical scopes (e.g. IMDb show + season + episode IDs): associations may nest, so only
+   * each association's own segments must not overlap. See `NamespaceCapabilities`.
+   */
+  allowHierarchicalScopes?: boolean;
 }
 
 export interface SharedCollectionEntry {
@@ -163,6 +168,14 @@ export function validateVariantSegments(
 ): SegmentValidationResult {
   if (associationsSegments.length === 0) {
     return { valid: true };
+  }
+
+  if (options?.allowHierarchicalScopes && associationsSegments.length > 1) {
+    const nestedErrors = associationsSegments.flatMap((item, associationIndex) => {
+      const result = validateVariantSegments([item], { baseline: options.baseline });
+      return result.valid ? [] : result.errors.map((err) => ({ ...err, associationIndex }));
+    });
+    return nestedErrors.length === 0 ? { valid: true } : { valid: false, errors: nestedErrors };
   }
 
   const entries = associationsSegments.map(normalizeVariantAssociationInput);

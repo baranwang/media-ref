@@ -5,7 +5,14 @@ import {
   type NormalizedSegment,
   type SeasonSnapshot,
 } from "@media-ref/client";
-import type { Database, Db, JsonObject, SeasonSnapshotRow, StoredSegmentJson } from "@media-ref/db";
+import type {
+  Database,
+  Db,
+  ExternalIdNamespaceRow,
+  JsonObject,
+  SeasonSnapshotRow,
+  StoredSegmentJson,
+} from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import {
   createDefaultAdapterRegistry,
@@ -16,7 +23,7 @@ import {
 import { evaluateEvidenceGateStep1, type CatalogEvidence } from "./evidence-gate.ts";
 import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
-import { isUuid } from "./media-service.ts";
+import { extractCollectionDisplay, isUuid } from "./media-service.ts";
 
 export const INVALIDATION_RECHECK_JOB_TYPE = "invalidation_recheck";
 export const DEFAULT_ANONYMOUS_INVALIDATION_THRESHOLD = 3;
@@ -128,6 +135,7 @@ export async function reportInvalidAssociation(
 
     const association = await trx
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["id", "status"])
       .where("id", "=", associationId)
       .executeTakeFirst();
@@ -415,9 +423,11 @@ async function loadCatalogEvidenceForMedia(
   }
 
   const externalIdRows = await db
-    .selectFrom("external_ids")
+    .selectFrom("associations")
+    .where("is_external_id", "=", true)
     .select(["namespace", "native_id"])
     .where("media_id", "=", mediaRow.id)
+    .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
     .execute();
 
   const externalIds: Partial<Record<Namespace, string>> = {};
@@ -473,6 +483,7 @@ async function handleConfirmedNotFoundInTx(
 
   const currentAssoc = await trx
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select(["id", "media_id", "namespace", "native_id", "variant_id", "status", "locked"])
     .where("id", "=", input.associationId)
     .forUpdate()
@@ -565,6 +576,7 @@ async function handleConfirmedNotFoundInTx(
   if (isPlatformNamespace(currentAssoc.namespace)) {
     const remainingRow = await trx
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(sql<string>`count(*)`.as("count"))
       .where("media_id", "=", currentAssoc.media_id)
       .where("namespace", "=", currentAssoc.namespace)
@@ -609,6 +621,7 @@ async function flagAssociationContentMismatchInTx(
 ): Promise<boolean> {
   const currentAssoc = await trx
     .selectFrom("associations")
+    .where("is_external_id", "=", false)
     .select(["id", "media_id", "status"])
     .where("id", "=", input.associationId)
     .forUpdate()
@@ -653,6 +666,7 @@ export function createInvalidationRecheckJobHandler(
 
     const association = await ctx.db
       .selectFrom("associations")
+      .where("is_external_id", "=", false)
       .select(["id", "media_id", "namespace", "native_id", "status", "locked"])
       .where("id", "=", rawAssociationId)
       .executeTakeFirst();
@@ -779,6 +793,14 @@ export function createInvalidationRecheckJobHandler(
 
     const step1 = evaluateEvidenceGateStep1(catalogEvidence, collectionResult.info, { segments });
     if (step1.decision === "pass") {
+      const display = extractCollectionDisplay({ collection: collectionResult.info });
+      if (Object.keys(display).length > 0) {
+        await ctx.db
+          .updateTable("associations")
+          .set(display)
+          .where("id", "=", association.id)
+          .execute();
+      }
       return {
         status: "completed",
         result: {
