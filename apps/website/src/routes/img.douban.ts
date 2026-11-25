@@ -20,10 +20,11 @@ export const Route = createFileRoute("/img/douban")({
         if (target.protocol !== "https:" || !ALLOWED_HOST.test(target.hostname)) {
           return new Response("host not allowed", { status: 400 });
         }
-        // Per-colo Workers cache, keyed on the upstream URL; absent outside workerd (vite dev).
-        const cache = (globalThis as { caches?: { default?: Cache } }).caches?.default;
+        // Per-colo Workers cache, keyed on the upstream URL. A named cache rather than
+        // `caches.default`: the DOM lib's CacheStorage type has no `default`.
+        const cache = await caches.open("douban-img");
         const cacheKey = new Request(target.toString());
-        const hit = await cache?.match(cacheKey);
+        const hit = await cache.match(cacheKey);
         if (hit) {
           return hit;
         }
@@ -45,11 +46,9 @@ export const Route = createFileRoute("/img/douban")({
             "cache-control": `public, max-age=${ONE_DAY}, immutable`,
           },
         });
-        if (cache) {
-          // Imported lazily so `cloudflare:workers` never reaches the browser bundle.
-          const { waitUntil } = await import("cloudflare:workers");
-          waitUntil(cache.put(cacheKey, response.clone()));
-        }
+        // Imported lazily so `cloudflare:workers` never reaches the browser bundle.
+        const { waitUntil } = await import("cloudflare:workers");
+        waitUntil(cache.put(cacheKey, response.clone()));
         return response;
       },
     },
