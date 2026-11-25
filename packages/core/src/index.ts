@@ -442,3 +442,15 @@ export {
   type CatalogCredit,
   type CatalogDetail,
 } from "./catalog-browse.ts";
+export {
+  DEFAULT_DISCOVERY_TIMEOUT_MS,
+  discoverCandidates,
+  type DiscoverCandidatesOptions,
+  type DiscoveryCandidate,
+  type DiscoveryCandidateSource,
+  type DiscoveryMediaInput,
+  type DiscoveryResult,
+  type DiscoverySourceId,
+  type DiscoverySourceReport,
+  type DroppedDiscoveryLink,
+} from "./discovery/candidates.ts";

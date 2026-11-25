@@ -1,0 +1,48 @@
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "longData": {
+      "rows": [
+        {
+          "cat_id": "2",
+          "id": "221944",
+          "cat_name": "电视剧",
+          "titleTxt": "狂飙",
+          "title": "<b>狂飙</b>",
+          "year": "2023",
+          "playlinks": {
+            "qiyi": "http://www.iqiyi.com/v_2bql2y1p4qs.html?vfm=f_191_360y&fv=p_09_01"
+          }
+        },
+        {
+          "cat_id": "2",
+          "id": "47766",
+          "cat_name": "电视剧",
+          "titleTxt": "狂飙支队",
+          "title": "<b>狂飙</b>支队",
+          "year": "2012",
+          "playlinks": {
+            "youku": "http://v.youku.com/v_show/id_XNTA4NTg0Nzc2.html?tpa=dW5pb25faWQ9MTAyMjEzXzEwMDAwNl8wMV8wMQ&from=360sousuo&refer=TPA_market.qrwang_00002949_000000_rqqQRb_18111600",
+            "douyin": "https://www.douyin.com/lvdetail/6807636759304733198",
+            "qq": "https://v.qq.com/x/cover/yybogyx55xohps6/z0011yn15xk.html?traceid=12_360&no_refer=1"
+          }
+        },
+        {
+          "cat_id": "1",
+          "id": "267845",
+          "cat_name": "电影",
+          "titleTxt": "GT赛车：极速狂飙",
+          "title": "GT赛车：极速<b>狂飙</b>",
+          "year": "2023",
+          "playlinks": {
+            "bilibili1": "https://www.bilibili.com/bangumi/play/ep789331?theme=movie?bsource=360ogvys",
+            "youku": "https://v.youku.com/video?vid=XNjExOTQ5NTkwMA==&refer=360_pc_operation.jessica.cj_00009536_000000_iumIJv_25082800&tpa=dW5pb25faWQ9MTAyMjEzXzEwMDAwN18wMV8wMQ",
+            "qiyi": "http://www.iqiyi.com/v_1dool84mlws.html?vfm=f_191_360y&fv=p_09_01",
+            "qq": "https://v.qq.com/x/cover/mzc00200n9jg80j/o00478q6rnv.html?traceid=12_360&no_refer=1"
+          }
+        }
+      ]
+    }
+  }
+}
