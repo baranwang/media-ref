@@ -6,23 +6,16 @@ import { createLiveOutboundClient, parseOutboundProxyConfig } from "./outbound.t
 import {
   createSeedLeadsReporter,
   importBangumiDataSeeds,
-  importDoubanBridgeMovieSeeds,
   importDoubanMovieSeeds,
   importWikidataMovieSeeds,
   type BangumiDataInput,
-  type DoubanBridgeInput,
   type DoubanMovieSeedInput,
   type SeedImportSummary,
   type SeedSource,
   type WikidataMovieSeedInput,
 } from "./seeds.ts";
 
-const VALID_SOURCES = new Set<SeedSource>([
-  "wikidata",
-  "douban-movies",
-  "bangumi-data",
-  "douban-bridge",
-]);
+const VALID_SOURCES = new Set<SeedSource>(["wikidata", "douban-movies", "bangumi-data"]);
 
 export type ParsedSeedCliArgs =
   | { kind: "help" }
@@ -44,7 +37,6 @@ export const SEED_CLI_USAGE = [
   "  wikidata       Wikidata SPARQL JSON or normalized rows with P4947 + P4529",
   "  douban-movies  Douban movie records ({ doubanId, imdbId }) resolved via TMDB /3/find",
   "  bangumi-data   bangumi-data JSON ({ items: [...] } or items array)",
-  "  douban-bridge  douban-bridge douban_mapping rows JSON/NDJSON",
   "",
   "Options:",
   "  --database-url <url>         PostgreSQL connection string (default: $DATABASE_URL)",
@@ -78,7 +70,7 @@ export function parseSeedCliArgs(argv: readonly string[]): ParsedSeedCliArgs {
     if (arg === "--source" || arg === "-s") {
       if (!next || !VALID_SOURCES.has(next as SeedSource)) {
         throw new Error(
-          `Invalid --source value "${next ?? ""}". Expected one of: wikidata, douban-movies, bangumi-data, douban-bridge`,
+          `Invalid --source value "${next ?? ""}". Expected one of: wikidata, douban-movies, bangumi-data`,
         );
       }
       source = next as SeedSource;
@@ -216,13 +208,6 @@ export async function runSeedCli(argv: readonly string[]): Promise<SeedImportSum
       case "bangumi-data":
         summary = await importBangumiDataSeeds(db, payload as BangumiDataInput, {
           outbound,
-          leadsReporter: createSeedLeadsReporter(db),
-        });
-        break;
-      case "douban-bridge":
-        summary = await importDoubanBridgeMovieSeeds(db, payload as DoubanBridgeInput, {
-          outbound,
-          tmdbConfig,
           leadsReporter: createSeedLeadsReporter(db),
         });
         break;
