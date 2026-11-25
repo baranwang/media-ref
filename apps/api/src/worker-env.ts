@@ -1,4 +1,5 @@
 import type { Hyperdrive, SendEmail } from "@cloudflare/workers-types";
+import type { EgressFetcher } from "@media-ref/core";
 import type { RateLimitBinding } from "./rate-limit.ts";
 
 export interface ApiWorkerEnv {
@@ -15,6 +16,8 @@ export interface ApiWorkerEnv {
   TRAKT_CLIENT_ID?: string;
   TRAKT_CLIENT_SECRET?: string;
   OUTBOUND_PROXY_CONFIG?: string;
+  // Workers VPC service: the greencloud-hk egress relay.
+  EGRESS?: EgressFetcher;
   ENABLE_HEALTH_OUTBOUND_PROBE?: string;
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
