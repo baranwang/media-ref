@@ -2,17 +2,37 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "media-ref-api",
   "main": "src/index.ts",
-  "compatibility_date": "2025-09-02",
+  "compatibility_date": "2026-11-24",
   "compatibility_flags": ["nodejs_compat"],
+  "placement": { "mode": "smart" },
+  "observability": { "enabled": true },
+  "routes": [
+    {
+      "pattern": "api.mediaref.org",
+      "custom_domain": true,
+    },
+  ],
+  "vars": {
+    "API_BASE_URL": "https://api.mediaref.org",
+    "COOKIE_DOMAIN": "mediaref.org",
+    "TRUSTED_ORIGINS": "https://mediaref.org,https://www.mediaref.org",
+    "EMAIL_FROM": "noreply@mediaref.org",
+  },
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "allowed_sender_addresses": ["noreply@mediaref.org"],
+    },
+  ],
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE_READ",
-      "id": "00000000000000000000000000000000",
+      "id": "a41d601604184b8cacfad0efa39920c6",
       "localConnectionString": "postgres://postgres:postgres@127.0.0.1:54329/media_ref_dev",
     },
     {
       "binding": "HYPERDRIVE_WRITE",
-      "id": "00000000000000000000000000000000",
+      "id": "ec209a2e573947d0bffa6ee0e5b7f4cc",
       "localConnectionString": "postgres://postgres:postgres@127.0.0.1:54329/media_ref_dev",
     },
   ],

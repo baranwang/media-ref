@@ -10,7 +10,7 @@
     "generate-routes": "vp build",
     "build": "vp build",
     "preview": "vp preview",
-    "deploy": "bun run build && wrangler deploy"
+    "deploy": "VITE_API_BASE_URL=${VITE_API_BASE_URL:-https://api.mediaref.org} bun run build && wrangler deploy"
   },
   "dependencies": {
     "@connectrpc/connect": "catalog:",
