@@ -4,7 +4,19 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-24",
   "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true },
+  "upload_source_maps": true,
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+    },
+    "traces": {
+      "enabled": true,
+    },
+    "issues": {
+      "enabled": true,
+    },
+  },
   "vars": {
     "EXPLORATION_DAILY_BUDGET": "0",
     "ENABLE_DAILY_TMDB_EXPORTS_SYNC": "false",
