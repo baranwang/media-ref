@@ -277,6 +277,8 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
           tokenCalls += 1;
           expect(req.kind).toBe("catalog");
           expect(req.namespace).toBe("trakt");
+          // Trakt's edge returns 403 to requests without a User-Agent
+          expect(req.headers?.["user-agent"]).toBe("media-ref");
           const payload = JSON.parse(req.body ?? "{}") as Record<string, string>;
           expect(payload).toEqual({
             code: `trakt-code-${tokenCalls}`,
@@ -300,6 +302,7 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
           expect(req.headers?.authorization).toBe(`Bearer trakt_access_${tokenCalls}`);
           expect(req.headers?.["trakt-api-version"]).toBe("2");
           expect(req.headers?.["trakt-api-key"]).toBe(TEST_TRAKT_CREDS.clientId);
+          expect(req.headers?.["user-agent"]).toBe("media-ref");
           return jsonResponse(req.url, {
             user: {
               username: "cinephile",
