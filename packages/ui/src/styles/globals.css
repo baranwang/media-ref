@@ -166,13 +166,20 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  /* sans-serif uses Tailwind's built-in system font stack */
+  /* sans-serif headings inherit the customized --font-sans stack */
   --font-heading: var(--font-sans);
   /* serif only for display titles (film titles, taglines) at 36px and up */
   --font-display: var(--font-serif);
 }
 
 @theme {
+  /* system sans-serif: native Latin/digits first, then TC CJK strokes with SC fallback, plus Emoji fallback;
+     -apple-system is placed after PingFang TC/SC so Safari doesn't intercept CJK with PingFang SC */
+  --font-sans:
+    BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang TC", "PingFang SC",
+    "Microsoft JhengHei", "Microsoft YaHei", "Noto Sans TC", "Noto Sans SC", "Noto Sans CJK TC",
+    "Noto Sans CJK SC", "Noto Sans", -apple-system, Arial, sans-serif, "Apple Color Emoji",
+    "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
   /* serif fonts are loaded via Google Fonts <link> in the app's root head;
      TC first for preferred serif strokes, falling back to SC for simplified-only glyphs, then built-in serif */
   --font-serif:
@@ -185,6 +192,8 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* keep <html lang="zh-CN"> semantics while preventing PingFang.ttc locl from overriding TC glyphs to SC */
+    font-language-override: "ZHT";
   }
 }
 
