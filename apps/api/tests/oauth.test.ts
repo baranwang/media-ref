@@ -304,7 +304,7 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
           expect(req.headers?.["user-agent"]).toBe("media-ref");
           return jsonResponse(req.url, {
             sub: "trakt-uuid-001",
-            email_verified: true,
+            email_verified: false,
             name: "Cine Phile",
             email: "cinephile@example.com",
           });
@@ -445,6 +445,71 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
       emailVerified: true,
     });
     expect(outbound.sentEmails).toHaveLength(1);
+  });
+
+  test("Trakt OAuth with email_verified=true signs in verified and sends no verification email", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal: async (req: ExternalHttpRequest): Promise<ExternalHttpResponse> => {
+        if (req.url === "https://auth.trakt.tv/oauth/token") {
+          return jsonResponse(req.url, {
+            access_token: "trakt_verified_token",
+            token_type: "bearer",
+            expires_in: 7776000,
+          });
+        }
+        if (req.url === "https://auth.trakt.tv/api/auth/oauth2/userinfo") {
+          return jsonResponse(req.url, {
+            sub: "trakt-uuid-verified",
+            name: "Verified Trakt",
+            email: "verified-trakt@example.com",
+            email_verified: true,
+          });
+        }
+        throw new Error(`Unexpected outbound request: ${req.method} ${req.url}`);
+      },
+    });
+
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        trustedOrigins: [TEST_WEBSITE_URL],
+        oauth: { trakt: TEST_TRAKT_CREDS },
+      },
+    });
+
+    const initRes = await app.fetch(
+      new Request(`${TEST_BASE_URL}/api/auth/sign-in/social`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "trakt", callbackURL: `${TEST_WEBSITE_URL}/dashboard` }),
+      }),
+    );
+    const state = new URL(((await initRes.json()) as { url: string }).url).searchParams.get(
+      "state",
+    )!;
+    const stateCookie = extractCookieHeader(initRes);
+
+    const callbackRes = await app.fetch(
+      new Request(
+        `${TEST_BASE_URL}/api/auth/callback/trakt?code=trakt-verified&state=${encodeURIComponent(state)}`,
+        { method: "GET", headers: { cookie: stateCookie } },
+      ),
+    );
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.get("location")).toBe(`${TEST_WEBSITE_URL}/dashboard`);
+    const sessionCookie = mergeCookies(stateCookie, extractCookieHeader(callbackRes));
+
+    const me = (await createRpcClients(app, { cookie: sessionCookie }).account.getCurrentUser({}))
+      .user!;
+    expect(me).toMatchObject({ email: "verified-trakt@example.com", emailVerified: true });
+    expect(outbound.sentEmails).toHaveLength(0);
   });
 
   test("Trakt OAuth rejects missing or empty user.email cleanly without creating a broken account", async () => {
@@ -647,12 +712,11 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
           });
         }
         if (req.url === "https://auth.trakt.tv/api/auth/oauth2/userinfo") {
-          // email_verified is claimed but must not enable linking to the verified local account
           return jsonResponse(req.url, {
             sub: "trakt-uuid-attacker",
             name: "Attacker Trakt",
             email: "protected@example.com",
-            email_verified: true,
+            email_verified: false,
           });
         }
         if (req.url === "https://github.com/login/oauth/access_token") {
