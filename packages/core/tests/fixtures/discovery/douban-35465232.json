@@ -1,0 +1,49 @@
+{
+  "id": "35465232",
+  "title": "狂飙",
+  "original_title": "",
+  "year": "2023",
+  "type": "tv",
+  "subtype": "tv",
+  "vendors": [
+    {
+      "accessible": true,
+      "app_bundle_id": "com.qiyi.video",
+      "app_uri": "iqiyi://skynet.douban.com",
+      "bg_image": "",
+      "book_type": "",
+      "book_type_cn": "",
+      "click_tracking": "",
+      "click_trackings": [
+        "https://frodo.douban.com/rohirrim/video_tracking/click?subject_id=35465232&video_type=movie&video_id=939261&source=iqiyi&user_id=None&douban_udid=&platform=&location=vendor_section"
+      ],
+      "episodes_info": "39集全",
+      "grey_icon": "https://img2.doubanio.com/f/frodo/6961bd6fe7052dbfc947a9dd47b84955b323ff13/pics/vendors/iqiyi_grey.png",
+      "icon": "https://img9.doubanio.com/f/frodo/6c7b857e6b2255201e73bf83732d95d572f3f9f7/pics/vendors/iqiyi.png",
+      "id": "iqiyi",
+      "impression_tracking": "",
+      "impression_trackings": [
+        "https://frodo.douban.com/rohirrim/video_tracking/impression?subject_id=35465232&video_type=movie&video_id=939261&source=iqiyi&user_id=None&douban_udid=&platform=&location=vendor_section"
+      ],
+      "is_ad": false,
+      "is_in_whitelist": false,
+      "is_paid": true,
+      "labels": [],
+      "payment_desc": "VIP免费观看",
+      "payments": [
+        {
+          "description": "",
+          "method": "VIP免费观看",
+          "price": ""
+        }
+      ],
+      "pre_release_desc": "",
+      "promote_desc": "",
+      "style": "large",
+      "subject_id": "35465232",
+      "title": "爱奇艺",
+      "uri": "iqiyi://mobile/player?aid=5328486914190101&tvid=3493131456125200&ftype=27&subtype=333",
+      "url": "http://www.iqiyi.com/v_xkt6z3z798.html?vfm=m_331_dbdy&fv=4904d94982104144a1548dd9040df241"
+    }
+  ]
+}
