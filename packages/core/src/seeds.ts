@@ -77,6 +77,10 @@ export interface SeedImportSummary {
   skippedUnresolvable: number;
   skippedConflict: number;
   leadsRecorded: number;
+  /** douban-bridge: rows classified as importable movies (counted even in dry-run). */
+  classifiedMovies: number;
+  /** douban-bridge: rows classified as single-season TV, imported as season 1 (counted even in dry-run). */
+  classifiedSingleSeasonTv: number;
 }
 
 export interface SeedAmbiguousLead {
@@ -243,7 +247,7 @@ export type DoubanBridgeRowClassifier = (row: {
   imdbId: string | null;
 }) => Promise<DoubanBridgeRowClassification> | DoubanBridgeRowClassification;
 
-export interface ImportDoubanBridgeMovieSeedsOptions {
+export interface ImportDoubanBridgeSeedsOptions {
   outbound?: OutboundClient;
   tmdbConfig?: TmdbGatewayConfig;
   movieTmdbIds?: ReadonlySet<string>;
@@ -251,6 +255,8 @@ export interface ImportDoubanBridgeMovieSeedsOptions {
   useTmdbDailyExportIds?: boolean;
   classifyRow?: DoubanBridgeRowClassifier;
   leadsReporter?: SeedLeadReporter;
+  /** Classify and count rows without writing media, associations or leads. */
+  dryRun?: boolean;
   now?: Date;
 }
 
@@ -327,6 +333,8 @@ function createEmptySummary(source: SeedSource): SeedImportSummary {
     skippedUnresolvable: 0,
     skippedConflict: 0,
     leadsRecorded: 0,
+    classifiedMovies: 0,
+    classifiedSingleSeasonTv: 0,
   };
 }
 
@@ -1696,6 +1704,19 @@ interface TmdbDirectProbeResult {
   originalTitle: string | null;
   year: number | null;
   imdbId: string | null;
+  numberOfSeasons: number | null;
+}
+
+function failedTmdbProbe(transientError: boolean): TmdbDirectProbeResult {
+  return {
+    exists: false,
+    transientError,
+    title: null,
+    originalTitle: null,
+    year: null,
+    imdbId: null,
+    numberOfSeasons: null,
+  };
 }
 
 async function probeTmdbMediaEndpoint(
@@ -1722,61 +1743,26 @@ async function probeTmdbMediaEndpoint(
       timeoutMs: tmdbConfig?.timeoutMs,
     });
   } catch {
-    return {
-      exists: false,
-      transientError: true,
-      title: null,
-      originalTitle: null,
-      year: null,
-      imdbId: null,
-    };
+    return failedTmdbProbe(true);
   }
 
   if (response.status === 404) {
-    return {
-      exists: false,
-      transientError: false,
-      title: null,
-      originalTitle: null,
-      year: null,
-      imdbId: null,
-    };
+    return failedTmdbProbe(false);
   }
   if (response.status < 200 || response.status >= 300) {
-    return {
-      exists: false,
-      transientError: true,
-      title: null,
-      originalTitle: null,
-      year: null,
-      imdbId: null,
-    };
+    return failedTmdbProbe(true);
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(response.body);
   } catch {
-    return {
-      exists: false,
-      transientError: true,
-      title: null,
-      originalTitle: null,
-      year: null,
-      imdbId: null,
-    };
+    return failedTmdbProbe(true);
   }
 
   const data = asRecord(parsed);
   if (!data) {
-    return {
-      exists: false,
-      transientError: true,
-      title: null,
-      originalTitle: null,
-      year: null,
-      imdbId: null,
-    };
+    return failedTmdbProbe(true);
   }
 
   const extBlock = asRecord(data.external_ids);
@@ -1788,6 +1774,10 @@ async function probeTmdbMediaEndpoint(
     tmdbType === "movie" ? nonEmptyString(data.original_title) : nonEmptyString(data.original_name);
   const year = tmdbType === "movie" ? parseYear(data.release_date) : parseYear(data.first_air_date);
   const imdbId = normalizeImdbId(extBlock?.imdb_id ?? data.imdb_id);
+  const numberOfSeasons =
+    typeof data.number_of_seasons === "number" && Number.isInteger(data.number_of_seasons)
+      ? data.number_of_seasons
+      : null;
 
   return {
     exists: true,
@@ -1796,6 +1786,7 @@ async function probeTmdbMediaEndpoint(
     originalTitle,
     year,
     imdbId,
+    numberOfSeasons,
   };
 }
 
@@ -1857,10 +1848,10 @@ function isSoftDeleted(value: unknown): boolean {
   return true;
 }
 
-export async function importDoubanBridgeMovieSeeds(
+export async function importDoubanBridgeSeeds(
   dbWrite: Db,
   input: DoubanBridgeInput,
-  options: ImportDoubanBridgeMovieSeedsOptions = {},
+  options: ImportDoubanBridgeSeedsOptions = {},
 ): Promise<SeedImportSummary> {
   const now = options.now ?? new Date();
   const inputObj = Array.isArray(input) ? null : asRecord(input);
@@ -1905,8 +1896,7 @@ export async function importDoubanBridgeMovieSeeds(
     }
 
     const imdbId = normalizeImdbId(rec.imdb_id ?? rec.imdbId);
-    const rawTrakt = parsePositiveIntString(rec.trakt_id ?? rec.traktId);
-    const traktId = rawTrakt ? `movie:${rawTrakt}` : null;
+    const traktId = parsePositiveIntString(rec.trakt_id ?? rec.traktId);
 
     candidateRows.push({ doubanId, tmdbId, imdbId, traktId });
     tmdbIdsToCheck.add(tmdbId);
@@ -1917,17 +1907,19 @@ export async function importDoubanBridgeMovieSeeds(
 
   if (options.useTmdbDailyExportIds !== false && tmdbIdsToCheck.size > 0) {
     const idList = [...tmdbIdsToCheck];
-    const exportRows = await dbWrite
-      .selectFrom("tmdb_daily_export_ids")
-      .select(["media_type", "tmdb_id"])
-      .where("tmdb_id", "in", idList)
-      .execute();
+    for (let offset = 0; offset < idList.length; offset += 5000) {
+      const exportRows = await dbWrite
+        .selectFrom("tmdb_daily_export_ids")
+        .select(["media_type", "tmdb_id"])
+        .where("tmdb_id", "in", idList.slice(offset, offset + 5000))
+        .execute();
 
-    for (const exportRow of exportRows) {
-      if (exportRow.media_type === "movie") {
-        movieIdSet.add(exportRow.tmdb_id);
-      } else if (exportRow.media_type === "tv") {
-        tvIdSet.add(exportRow.tmdb_id);
+      for (const exportRow of exportRows) {
+        if (exportRow.media_type === "movie") {
+          movieIdSet.add(exportRow.tmdb_id);
+        } else if (exportRow.media_type === "tv") {
+          tvIdSet.add(exportRow.tmdb_id);
+        }
       }
     }
   }
@@ -2037,14 +2029,70 @@ export async function importDoubanBridgeMovieSeeds(
     }
 
     if (classification.kind === "tv") {
+      let tvProbe: TmdbDirectProbeResult | undefined;
+      if (options.outbound) {
+        tvProbe = tmdbTvProbeCache.get(row.tmdbId);
+        if (!tvProbe) {
+          tvProbe = await probeTmdbMediaEndpoint(
+            "tv",
+            row.tmdbId,
+            options.outbound,
+            options.tmdbConfig,
+          );
+          tmdbTvProbeCache.set(row.tmdbId, tvProbe);
+        }
+      }
+
+      if (tvProbe && !tvProbe.exists) {
+        summary.skippedUnresolvable += 1;
+        continue;
+      }
+
+      // douban-bridge maps a Douban subject to a whole TMDB show; only a single-season show pins it to a season.
+      if (tvProbe?.exists && tvProbe.numberOfSeasons === 1) {
+        summary.classifiedSingleSeasonTv += 1;
+        if (options.dryRun) {
+          continue;
+        }
+        const upsertResult = await upsertSeedAssociation(dbWrite, {
+          source: "douban-bridge",
+          tmdbType: "tv",
+          tmdbId: row.tmdbId,
+          imdbId: row.imdbId ?? tvProbe.imdbId,
+          traktId: row.traktId ? `show:${row.traktId}` : null,
+          title: tvProbe.title,
+          originalTitle: tvProbe.originalTitle,
+          year: tvProbe.year,
+          namespace: "douban",
+          nativeId: row.doubanId,
+          segments: [
+            {
+              season: 1,
+              episodeStart: 1,
+              episodeEnd: null,
+              targetEpisodeStart: 1,
+              baseline: "tmdb",
+              nonLinear: false,
+              needsReview: false,
+            },
+          ],
+          now,
+        });
+        recordUpsertOutcome(summary, upsertResult, seenMediaIds);
+        continue;
+      }
+
       summary.skippedNonMovie += 1;
-      if (options.leadsReporter) {
+      if (options.leadsReporter && !options.dryRun) {
         await options.leadsReporter({
           source: "douban-bridge",
           targetExternalKey: `tmdb:tv:${row.tmdbId}`,
           namespace: "douban",
           nativeId: row.doubanId,
-          notes: "Seasonless douban-bridge TV mapping skipped as seed",
+          notes:
+            tvProbe?.exists && tvProbe.numberOfSeasons !== null && tvProbe.numberOfSeasons > 1
+              ? `Multi-season (${tvProbe.numberOfSeasons} seasons) douban-bridge TV mapping skipped as seed`
+              : "Seasonless douban-bridge TV mapping skipped as seed",
         });
         summary.leadsRecorded += 1;
       }
@@ -2061,12 +2109,16 @@ export async function importDoubanBridgeMovieSeeds(
       continue;
     }
 
+    summary.classifiedMovies += 1;
+    if (options.dryRun) {
+      continue;
+    }
     const upsertResult = await upsertSeedAssociation(dbWrite, {
       source: "douban-bridge",
       tmdbType: "movie",
       tmdbId: row.tmdbId,
       imdbId: row.imdbId ?? classification.imdbId ?? null,
-      traktId: row.traktId,
+      traktId: row.traktId ? `movie:${row.traktId}` : null,
       title: classification.title ?? null,
       originalTitle: classification.originalTitle ?? null,
       year: classification.year ?? null,

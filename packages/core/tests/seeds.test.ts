@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   createFakeOutboundClient,
   importBangumiDataSeeds,
-  importDoubanBridgeMovieSeeds,
+  importDoubanBridgeSeeds,
   importDoubanMovieSeeds,
   importWikidataMovieSeeds,
   seedTmdbExportIds,
@@ -576,7 +576,7 @@ describe("seed importers (#32)", () => {
     });
   });
 
-  describe("Source 4: douban-bridge seeds (importDoubanBridgeMovieSeeds)", () => {
+  describe("Source 4: douban-bridge seeds (importDoubanBridgeSeeds)", () => {
     test("imports BOTH calibrated and uncalibrated movie rows, classifies via tmdb_daily_export_ids and outbound disambiguation, skips TV and soft-deleted rows, and is idempotent", async () => {
       const testDb = await setupDb();
       const now = new Date("2026-11-24T03:00:00.000Z");
@@ -672,6 +672,32 @@ describe("seed importers (#32)", () => {
               url: req.url,
             };
           }
+          if (req.namespace === "tmdb" && req.url.includes("/tv/95479")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: 95479,
+                name: "咒术回战",
+                first_air_date: "2020-10-03",
+                number_of_seasons: 2,
+              }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "tmdb" && req.url.includes("/tv/1000")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: 1000,
+                name: "某部剧集",
+                first_air_date: "2022-01-01",
+                number_of_seasons: 2,
+              }),
+              url: req.url,
+            };
+          }
           return {
             status: 404,
             headers: { "content-type": "application/json" },
@@ -752,7 +778,7 @@ describe("seed importers (#32)", () => {
         },
       ];
 
-      const firstRun = await importDoubanBridgeMovieSeeds(testDb.writeDb, rows, {
+      const firstRun = await importDoubanBridgeSeeds(testDb.writeDb, rows, {
         outbound,
         now,
       });
@@ -796,13 +822,384 @@ describe("seed importers (#32)", () => {
       expect(traktExt).toHaveLength(1);
 
       // Re-run -> 100% idempotent
-      const secondRun = await importDoubanBridgeMovieSeeds(testDb.writeDb, rows, {
+      const secondRun = await importDoubanBridgeSeeds(testDb.writeDb, rows, {
         outbound,
         now,
       });
       expect(secondRun.mediaCreated).toBe(0);
       expect(secondRun.associationsCreated).toBe(0);
       expect(secondRun.associationsAlreadyPresent).toBe(4);
+    });
+
+    test("imports single-season TV as season 1, keeps multi-season TV as leads, and dry-run writes nothing", async () => {
+      const testDb = await setupDb();
+      const now = new Date("2026-11-25T03:00:00.000Z");
+
+      await seedTmdbExportIds(testDb.writeDb, [
+        { mediaType: "movie", tmdbId: "278", exportedDate: "2026-11-24" },
+        { mediaType: "tv", tmdbId: "2001", exportedDate: "2026-11-24" },
+        { mediaType: "tv", tmdbId: "2002", exportedDate: "2026-11-24" },
+        { mediaType: "tv", tmdbId: "2003", exportedDate: "2026-11-24" },
+      ]);
+
+      const tvShows: Record<string, object> = {
+        "2001": {
+          id: 2001,
+          name: "单季剧",
+          original_name: "Single Season Show",
+          first_air_date: "2023-04-01",
+          number_of_seasons: 1,
+          external_ids: { imdb_id: "tt2001001" },
+        },
+        "2002": {
+          id: 2002,
+          name: "多季剧",
+          first_air_date: "2019-01-01",
+          number_of_seasons: 3,
+        },
+        "2003": {
+          id: 2003,
+          name: "无季剧",
+          first_air_date: "2024-01-01",
+          number_of_seasons: 0,
+        },
+      };
+      const outbound = createFakeOutboundClient({
+        fetchExternal: async (req: ExternalHttpRequest) => {
+          const match = req.namespace === "tmdb" ? req.url.match(/\/tv\/(\d+)\?/) : null;
+          const show = match ? tvShows[match[1]!] : undefined;
+          return {
+            status: show ? 200 : 404,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(show ?? { status_code: 34 }),
+            url: req.url,
+          };
+        },
+      });
+
+      const rows = [
+        { douban_id: 1292052, tmdb_id: 278, imdb_id: "tt0111161", trakt_id: 2780 },
+        { douban_id: 36000001, tmdb_id: 2001, trakt_id: 9001 },
+        { douban_id: 36000002, tmdb_id: 2002 },
+        { douban_id: 36000003, tmdb_id: 2003 },
+      ];
+
+      const leads: SeedAmbiguousLead[] = [];
+      const options = {
+        outbound,
+        now,
+        leadsReporter: (lead: SeedAmbiguousLead) => void leads.push(lead),
+      };
+
+      const dryRun = await importDoubanBridgeSeeds(testDb.writeDb, rows, {
+        ...options,
+        dryRun: true,
+      });
+      expect(dryRun.classifiedMovies).toBe(1);
+      expect(dryRun.classifiedSingleSeasonTv).toBe(1);
+      expect(dryRun.skippedNonMovie).toBe(2);
+      expect(dryRun.associationsCreated).toBe(0);
+      expect(dryRun.leadsRecorded).toBe(0);
+      expect(leads).toHaveLength(0);
+      expect(await testDb.writeDb.selectFrom("media").selectAll().execute()).toHaveLength(0);
+
+      const run = await importDoubanBridgeSeeds(testDb.writeDb, rows, options);
+      expect(run.classifiedMovies).toBe(1);
+      expect(run.classifiedSingleSeasonTv).toBe(1);
+      expect(run.mediaCreated).toBe(2);
+      expect(run.associationsCreated).toBe(2);
+      expect(run.skippedNonMovie).toBe(2);
+      expect(run.leadsRecorded).toBe(2);
+      expect(
+        leads.map((lead) => ({
+          key: `${lead.targetExternalKey}<-${lead.nativeId}`,
+          notes: lead.notes,
+        })),
+      ).toEqual([
+        {
+          key: "tmdb:tv:2002<-36000002",
+          notes: "Multi-season (3 seasons) douban-bridge TV mapping skipped as seed",
+        },
+        {
+          key: "tmdb:tv:2003<-36000003",
+          notes: "Seasonless douban-bridge TV mapping skipped as seed",
+        },
+      ]);
+
+      const tvMedia = await testDb.writeDb
+        .selectFrom("media")
+        .selectAll()
+        .where("type", "=", "tv")
+        .executeTakeFirstOrThrow();
+      expect(tvMedia.title).toBe("单季剧");
+      expect(tvMedia.baseline).toBe("tmdb");
+      expect(tvMedia.year).toBe(2023);
+
+      const tvExternalIds = await testDb.writeDb
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
+        .where("media_id", "=", tvMedia.id)
+        .select(["namespace", "native_id"])
+        .execute();
+      expect(tvExternalIds.map((a) => `${a.namespace}:${a.native_id}`).toSorted()).toEqual([
+        "imdb:tt2001001",
+        "tmdb:tv:2001",
+        "trakt:show:9001",
+      ]);
+
+      const tvAssoc = await testDb.writeDb
+        .selectFrom("associations")
+        .where("is_external_id", "=", false)
+        .where("media_id", "=", tvMedia.id)
+        .selectAll()
+        .executeTakeFirstOrThrow();
+      expect(tvAssoc.namespace).toBe("douban");
+      expect(tvAssoc.native_id).toBe("36000001");
+      expect(tvAssoc.status).toBe("seed_unconfirmed");
+      expect(tvAssoc.variant_id).toBeNull();
+
+      const segments = await testDb.writeDb
+        .selectFrom("segments")
+        .selectAll()
+        .where("association_id", "=", tvAssoc.id)
+        .execute();
+      expect(segments).toHaveLength(1);
+      expect(segments[0]).toMatchObject({
+        season: 1,
+        episode_start: 1,
+        episode_end: null,
+        target_episode_start: 1,
+        baseline: "tmdb",
+      });
+
+      const movieTrakt = await testDb.writeDb
+        .selectFrom("associations")
+        .where("namespace", "=", "trakt")
+        .where("native_id", "=", "movie:2780")
+        .selectAll()
+        .execute();
+      expect(movieTrakt).toHaveLength(1);
+
+      const rerun = await importDoubanBridgeSeeds(testDb.writeDb, rows, options);
+      expect(rerun.mediaCreated).toBe(0);
+      expect(rerun.associationsCreated).toBe(0);
+      expect(rerun.associationsAlreadyPresent).toBe(2);
+    });
+
+    test("discovers single-season TV via IMDb /find, unexported /tv fallback (reusing probe cache), and collision /find without duplicate TMDB requests", async () => {
+      const testDb = await setupDb();
+      const now = new Date("2026-11-25T04:00:00.000Z");
+
+      await seedTmdbExportIds(testDb.writeDb, [
+        { mediaType: "movie", tmdbId: "3003", exportedDate: "2026-11-24" },
+        { mediaType: "tv", tmdbId: "3003", exportedDate: "2026-11-24" },
+      ]);
+
+      const requestedUrls: string[] = [];
+      const outbound = createFakeOutboundClient({
+        fetchExternal: async (req: ExternalHttpRequest) => {
+          requestedUrls.push(req.url);
+          if (req.namespace === "tmdb" && req.url.includes("/find/tt3001001")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ movie_results: [], tv_results: [{ id: 3001 }] }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "tmdb" && req.url.includes("/find/tt3003001")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ movie_results: [], tv_results: [{ id: 3003 }] }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "tmdb" && req.url.includes("/tv/3001")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: 3001,
+                name: "IMDb发现的单季剧",
+                first_air_date: "2021-06-01",
+                number_of_seasons: 1,
+              }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "tmdb" && req.url.includes("/tv/3002")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: 3002,
+                name: "直探发现的单季剧",
+                first_air_date: "2022-07-01",
+                number_of_seasons: 1,
+              }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "tmdb" && req.url.includes("/tv/3003")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: 3003,
+                name: "冲突消歧的单季剧",
+                first_air_date: "2020-08-01",
+                number_of_seasons: 1,
+              }),
+              url: req.url,
+            };
+          }
+          return {
+            status: 404,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status_code: 34 }),
+            url: req.url,
+          };
+        },
+      });
+
+      const summary = await importDoubanBridgeSeeds(
+        testDb.writeDb,
+        [
+          { douban_id: 37000001, tmdb_id: 3001, imdb_id: "tt3001001" },
+          { douban_id: 37000002, tmdb_id: 3002 },
+          { douban_id: 37000003, tmdb_id: 3003, imdb_id: "tt3003001" },
+        ],
+        { outbound, now },
+      );
+
+      expect(summary.classifiedSingleSeasonTv).toBe(3);
+      expect(summary.mediaCreated).toBe(3);
+      expect(summary.associationsCreated).toBe(3);
+
+      // /find hit for 3001 must skip /movie/3001; /tv/3002 must only be probed once (cached)
+      expect(requestedUrls.filter((u) => u.includes("/movie/3001"))).toHaveLength(0);
+      expect(requestedUrls.filter((u) => u.includes("/tv/3002"))).toHaveLength(1);
+    });
+
+    test("treats TMDB /tv 404 and transient /movie or /tv errors as skippedUnresolvable without recording leads", async () => {
+      const testDb = await setupDb();
+      const now = new Date("2026-11-25T05:00:00.000Z");
+
+      await seedTmdbExportIds(testDb.writeDb, [
+        { mediaType: "tv", tmdbId: "4001", exportedDate: "2026-11-24" },
+        { mediaType: "tv", tmdbId: "4002", exportedDate: "2026-11-24" },
+      ]);
+
+      const outbound = createFakeOutboundClient({
+        fetchExternal: async (req: ExternalHttpRequest) => {
+          if (req.namespace === "tmdb" && req.url.includes("/tv/4001")) {
+            return {
+              status: 404,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ status_code: 34 }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "tmdb" && req.url.includes("/tv/4002")) {
+            return {
+              status: 503,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ error: "unavailable" }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "tmdb" && req.url.includes("/movie/4003")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id: 4003, title: "Ambiguous Movie" }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "tmdb" && req.url.includes("/tv/4003")) {
+            return {
+              status: 429,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ error: "rate_limited" }),
+              url: req.url,
+            };
+          }
+          return {
+            status: 404,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status_code: 34 }),
+            url: req.url,
+          };
+        },
+      });
+
+      const leads: SeedAmbiguousLead[] = [];
+      const summary = await importDoubanBridgeSeeds(
+        testDb.writeDb,
+        [
+          { douban_id: 38000001, tmdb_id: 4001 },
+          { douban_id: 38000002, tmdb_id: 4002 },
+          { douban_id: 38000003, tmdb_id: 4003 },
+        ],
+        {
+          outbound,
+          now,
+          leadsReporter: (lead) => void leads.push(lead),
+        },
+      );
+
+      expect(summary.skippedUnresolvable).toBe(3);
+      expect(summary.skippedNonMovie).toBe(0);
+      expect(summary.classifiedMovies).toBe(0);
+      expect(summary.classifiedSingleSeasonTv).toBe(0);
+      expect(summary.leadsRecorded).toBe(0);
+      expect(leads).toHaveLength(0);
+      expect(await testDb.writeDb.selectFrom("media").selectAll().execute()).toHaveLength(0);
+    });
+
+    test("handles --no-outbound mode by importing export movies, recording seasonless TV leads, and skipping collisions/unexported rows", async () => {
+      const testDb = await setupDb();
+      const now = new Date("2026-11-25T06:00:00.000Z");
+
+      await seedTmdbExportIds(testDb.writeDb, [
+        { mediaType: "movie", tmdbId: "5001", exportedDate: "2026-11-24" },
+        { mediaType: "tv", tmdbId: "5002", exportedDate: "2026-11-24" },
+        { mediaType: "movie", tmdbId: "5003", exportedDate: "2026-11-24" },
+        { mediaType: "tv", tmdbId: "5003", exportedDate: "2026-11-24" },
+      ]);
+
+      const leads: SeedAmbiguousLead[] = [];
+      const summary = await importDoubanBridgeSeeds(
+        testDb.writeDb,
+        [
+          { douban_id: 39000001, tmdb_id: 5001 },
+          { douban_id: 39000002, tmdb_id: 5002 },
+          { douban_id: 39000003, tmdb_id: 5003 },
+          { douban_id: 39000004, tmdb_id: 5004 },
+        ],
+        {
+          now,
+          leadsReporter: (lead) => void leads.push(lead),
+        },
+      );
+
+      expect(summary.classifiedMovies).toBe(1);
+      expect(summary.mediaCreated).toBe(1);
+      expect(summary.associationsCreated).toBe(1);
+      expect(summary.skippedNonMovie).toBe(1);
+      expect(summary.skippedAmbiguous).toBe(1);
+      expect(summary.skippedUnresolvable).toBe(1);
+      expect(summary.leadsRecorded).toBe(1);
+      expect(leads).toEqual([
+        {
+          source: "douban-bridge",
+          targetExternalKey: "tmdb:tv:5002",
+          namespace: "douban",
+          nativeId: "39000002",
+          notes: "Seasonless douban-bridge TV mapping skipped as seed",
+        },
+      ]);
     });
   });
 
@@ -821,7 +1218,26 @@ describe("seed importers (#32)", () => {
         expect(parsed.source).toBe("wikidata");
         expect(parsed.file).toBe("/tmp/wikidata.json");
         expect(parsed.noOutbound).toBe(true);
+        expect(parsed.dryRun).toBe(false);
       }
+
+      const dryRunParsed = cli.parseSeedCliArgs([
+        "--source",
+        "douban-bridge",
+        "--file",
+        "/tmp/bridge.ndjson",
+        "--dry-run",
+      ]);
+      expect(dryRunParsed).toMatchObject({
+        kind: "run",
+        source: "douban-bridge",
+        file: "/tmp/bridge.ndjson",
+        dryRun: true,
+      });
+
+      expect(() =>
+        cli.parseSeedCliArgs(["--source", "wikidata", "--file", "/tmp/w.json", "--dry-run"]),
+      ).toThrow("--dry-run is only supported for --source douban-bridge");
 
       const ndjson = cli.parseSeedFileText(
         '{"douban_id":1292052,"tmdb_id":278}\n{"douban_id":1292000,"tmdb_id":550}\n',

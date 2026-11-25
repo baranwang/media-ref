@@ -6,7 +6,7 @@ import { createLiveOutboundClient, parseOutboundProxyConfig } from "./outbound.t
 import {
   createSeedLeadsReporter,
   importBangumiDataSeeds,
-  importDoubanBridgeMovieSeeds,
+  importDoubanBridgeSeeds,
   importDoubanMovieSeeds,
   importWikidataMovieSeeds,
   type BangumiDataInput,
@@ -35,6 +35,7 @@ export type ParsedSeedCliArgs =
       tmdbApiKey?: string;
       tmdbApiBaseUrl?: string;
       noOutbound: boolean;
+      dryRun: boolean;
     };
 
 export const SEED_CLI_USAGE = [
@@ -52,6 +53,7 @@ export const SEED_CLI_USAGE = [
   "  --tmdb-api-key <key>         TMDB v3 API key (default: $TMDB_API_KEY)",
   "  --tmdb-api-base-url <url>    TMDB v3 API base URL (default: $TMDB_API_BASE_URL)",
   "  --no-outbound                Disable outbound HTTP lookups during import",
+  "  --dry-run                    douban-bridge only: classify and count rows without writing",
   "  --help                       Show this help message",
 ].join("\n");
 
@@ -63,6 +65,7 @@ export function parseSeedCliArgs(argv: readonly string[]): ParsedSeedCliArgs {
   let tmdbApiKey: string | undefined;
   let tmdbApiBaseUrl: string | undefined;
   let noOutbound = false;
+  let dryRun = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
@@ -71,6 +74,10 @@ export function parseSeedCliArgs(argv: readonly string[]): ParsedSeedCliArgs {
     }
     if (arg === "--no-outbound") {
       noOutbound = true;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
       continue;
     }
 
@@ -135,6 +142,9 @@ export function parseSeedCliArgs(argv: readonly string[]): ParsedSeedCliArgs {
   if (!file) {
     throw new Error("Missing required --file argument");
   }
+  if (dryRun && source !== "douban-bridge") {
+    throw new Error("--dry-run is only supported for --source douban-bridge");
+  }
 
   return {
     kind: "run",
@@ -145,6 +155,7 @@ export function parseSeedCliArgs(argv: readonly string[]): ParsedSeedCliArgs {
     tmdbApiKey,
     tmdbApiBaseUrl,
     noOutbound,
+    dryRun,
   };
 }
 
@@ -220,10 +231,11 @@ export async function runSeedCli(argv: readonly string[]): Promise<SeedImportSum
         });
         break;
       case "douban-bridge":
-        summary = await importDoubanBridgeMovieSeeds(db, payload as DoubanBridgeInput, {
+        summary = await importDoubanBridgeSeeds(db, payload as DoubanBridgeInput, {
           outbound,
           tmdbConfig,
           leadsReporter: createSeedLeadsReporter(db),
+          dryRun: parsed.dryRun,
         });
         break;
     }
