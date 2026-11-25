@@ -20,13 +20,16 @@ function json(url: string, body: unknown, status = 200): ExternalHttpResponse {
   };
 }
 
-function memoryCache(): BrowseCache & { store: Map<string, unknown> } {
+function memoryCache(): BrowseCache & { store: Map<string, unknown>; ttls: Map<string, number> } {
   const store = new Map<string, unknown>();
+  const ttls = new Map<string, number>();
   return {
     store,
+    ttls,
     get: async (key) => store.get(key) ?? null,
-    put: async (key, value) => {
+    put: async (key, value, ttl) => {
       store.set(key, value);
+      ttls.set(key, ttl);
     },
   };
 }
@@ -181,13 +184,34 @@ describe("listTrending", () => {
     ]);
   });
 
-  test("an upstream failure yields an empty shelf and is not cached", async () => {
+  test("an upstream failure yields an empty shelf, remembered briefly so it is not retried", async () => {
     const cache = memoryCache();
+    let calls = 0;
     const outbound = createFakeOutboundClient({
-      fetchExternal: (req: ExternalHttpRequest) => json(req.url, {}, 503),
+      fetchExternal: (req: ExternalHttpRequest) => {
+        calls += 1;
+        return json(req.url, {}, 429);
+      },
     });
     expect(await listTrending("tmdb", "all", 10, { outbound, cache })).toEqual([]);
-    expect(cache.store.size).toBe(0);
+    expect(await listTrending("tmdb", "all", 10, { outbound, cache })).toEqual([]);
+    expect(calls).toBe(1);
+    expect(cache.ttls.get("trending:tmdb:all")).toBe(600);
+  });
+
+  test('the Trakt shelf makes a single Trakt request (shows) for "all"', async () => {
+    const traktUrls: string[] = [];
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (req: ExternalHttpRequest) => {
+        if (req.namespace === "trakt") {
+          traktUrls.push(req.url);
+          return json(req.url, []);
+        }
+        return json(req.url, {}, 404);
+      },
+    });
+    await listTrending("trakt", "all", 10, { outbound, config: { traktClientId: "cid" } });
+    expect(traktUrls).toEqual(["https://api.trakt.tv/shows/trending?limit=20"]);
   });
 
   test("results are served from the cache on the second call", async () => {

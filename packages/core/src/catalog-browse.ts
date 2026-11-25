@@ -60,6 +60,8 @@ export interface CatalogBrowseOptions {
 }
 
 export const TRENDING_CACHE_TTL_SECONDS = 3600;
+/** An empty or failed shelf is remembered this long so a blocked upstream is not retried per page view. */
+export const TRENDING_FAILURE_TTL_SECONDS = 600;
 export const DETAIL_CACHE_TTL_SECONDS = 6 * 3600;
 export const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w500";
 export const TMDB_BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280";
@@ -500,26 +502,20 @@ async function traktTrending(opts: CatalogBrowseOptions, type: BrowseType): Prom
     // Trakt's edge returns 403 to requests without a User-Agent
     "user-agent": "media-ref",
   };
-  const kinds: Array<"show" | "movie"> =
-    type === "movie" ? ["movie"] : type === "tv" ? ["show"] : ["show", "movie"];
-  const lists = await Promise.all(
-    kinds.map(async (kind) => {
-      const data = await fetchJson(
-        opts.outbound,
-        "trakt",
-        `${base}/${kind}s/trending?limit=20`,
-        headers,
-      );
-      return (Array.isArray(data) ? data : [])
-        .map((entry) => asRecord(asRecord(entry)?.[kind]))
-        .filter((item): item is Json => item !== null)
-        .map((item) => ({ kind, item }));
-    }),
+  // One request per shelf: Trakt's edge rate-limits Workers, and the shelf is about shows anyway.
+  const kind: "show" | "movie" = type === "movie" ? "movie" : "show";
+  const data = await fetchJson(
+    opts.outbound,
+    "trakt",
+    `${base}/${kind}s/trending?limit=20`,
+    headers,
   );
+  const items = (Array.isArray(data) ? data : [])
+    .map((entry) => asRecord(asRecord(entry)?.[kind]))
+    .filter((item): item is Json => item !== null);
   // Trakt carries no artwork; enrich through the TMDB id (cached per title).
-  const entries = kinds.length === 2 ? interleave(lists[0]!, lists[1]!) : lists[0]!;
   const cards = await Promise.all(
-    entries.map(async ({ kind, item }): Promise<CatalogCard | null> => {
+    items.map(async (item): Promise<CatalogCard | null> => {
       const ids = asRecord(item.ids);
       const tmdbId = typeof ids?.tmdb === "number" ? String(ids.tmdb) : null;
       if (!tmdbId) {
@@ -576,16 +572,16 @@ export async function listTrending(
   limit: number,
   opts: CatalogBrowseOptions,
 ): Promise<CatalogCard[]> {
-  const cards =
-    (await cached(
-      opts.cache,
-      `trending:${namespace}:${type}`,
-      TRENDING_CACHE_TTL_SECONDS,
-      async () => {
-        const list = await TRENDING_LOADERS[namespace](opts, type);
-        return list.length > 0 ? list : null;
-      },
-    )) ?? [];
+  const key = `trending:${namespace}:${type}`;
+  const hit = opts.cache ? await opts.cache.get(key).catch(() => null) : null;
+  let cards: CatalogCard[];
+  if (Array.isArray(hit)) {
+    cards = hit as CatalogCard[];
+  } else {
+    cards = await TRENDING_LOADERS[namespace](opts, type);
+    const ttl = cards.length > 0 ? TRENDING_CACHE_TTL_SECONDS : TRENDING_FAILURE_TTL_SECONDS;
+    await opts.cache?.put(key, cards, ttl).catch(() => undefined);
+  }
   return cards.slice(0, Math.min(Math.max(limit, 1), MAX_TRENDING_LIMIT));
 }
 
