@@ -273,7 +273,7 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     let tokenCalls = 0;
     const outbound = createFakeOutboundClient({
       fetchExternal: async (req: ExternalHttpRequest): Promise<ExternalHttpResponse> => {
-        if (req.url === "https://api.trakt.tv/oauth/token" && req.method === "POST") {
+        if (req.url === "https://auth.trakt.tv/oauth/token" && req.method === "POST") {
           tokenCalls += 1;
           expect(req.kind).toBe("catalog");
           expect(req.namespace).toBe("trakt");
@@ -286,6 +286,7 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
             client_secret: TEST_TRAKT_CREDS.clientSecret,
             redirect_uri: `${TEST_BASE_URL}/api/auth/callback/trakt`,
             grant_type: "authorization_code",
+            code_verifier: expect.any(String),
           });
           return jsonResponse(req.url, {
             access_token: `trakt_access_${tokenCalls}`,
@@ -296,28 +297,16 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
             created_at: 1700000000,
           });
         }
-        if (req.url === "https://api.trakt.tv/users/settings" && req.method === "GET") {
+        if (req.url === "https://auth.trakt.tv/api/auth/oauth2/userinfo" && req.method === "GET") {
           expect(req.kind).toBe("catalog");
           expect(req.namespace).toBe("trakt");
           expect(req.headers?.authorization).toBe(`Bearer trakt_access_${tokenCalls}`);
-          expect(req.headers?.["trakt-api-version"]).toBe("2");
-          expect(req.headers?.["trakt-api-key"]).toBe(TEST_TRAKT_CREDS.clientId);
           expect(req.headers?.["user-agent"]).toBe("media-ref");
           return jsonResponse(req.url, {
-            user: {
-              username: "cinephile",
-              name: "Cine Phile",
-              email: "cinephile@example.com",
-              ids: {
-                slug: "cinephile",
-                uuid: "trakt-uuid-001",
-              },
-              images: {
-                avatar: {
-                  full: "https://walter.trakt.tv/images/users/cinephile.jpg",
-                },
-              },
-            },
+            sub: "trakt-uuid-001",
+            email_verified: true,
+            name: "Cine Phile",
+            email: "cinephile@example.com",
           });
         }
         throw new Error(`Unexpected outbound request: ${req.method} ${req.url}`);
@@ -353,13 +342,14 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     expect(initRes.status).toBe(200);
     const initBody = (await initRes.json()) as { url: string };
     const authUrl = new URL(initBody.url);
-    expect(authUrl.origin).toBe("https://trakt.tv");
-    expect(authUrl.pathname).toBe("/oauth/authorize");
+    expect(authUrl.origin).toBe("https://auth.trakt.tv");
+    expect(authUrl.pathname).toBe("/api/auth/oauth2/authorize");
+    expect(authUrl.searchParams.get("scope")).toBe("public openid profile email");
     expect(authUrl.searchParams.get("client_id")).toBe(TEST_TRAKT_CREDS.clientId);
     expect(authUrl.searchParams.get("redirect_uri")).toBe(
       `${TEST_BASE_URL}/api/auth/callback/trakt`,
     );
-    expect(authUrl.searchParams.get("code_challenge")).toBeNull();
+    expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
     const state = authUrl.searchParams.get("state")!;
     const stateCookie = extractCookieHeader(initRes);
 
@@ -463,21 +453,18 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
 
     const outbound = createFakeOutboundClient({
       fetchExternal: async (req: ExternalHttpRequest): Promise<ExternalHttpResponse> => {
-        if (req.url === "https://api.trakt.tv/oauth/token") {
+        if (req.url === "https://auth.trakt.tv/oauth/token") {
           return jsonResponse(req.url, {
             access_token: "trakt_no_email_token",
             token_type: "bearer",
             expires_in: 7776000,
           });
         }
-        if (req.url === "https://api.trakt.tv/users/settings") {
+        if (req.url === "https://auth.trakt.tv/api/auth/oauth2/userinfo") {
           return jsonResponse(req.url, {
-            user: {
-              username: "private-trakt",
-              name: "Private Trakt",
-              email: "   ",
-              ids: { slug: "private-trakt", uuid: "trakt-uuid-no-email" },
-            },
+            sub: "trakt-uuid-no-email",
+            name: "Private Trakt",
+            email: "   ",
           });
         }
         throw new Error(`Unexpected outbound request: ${req.method} ${req.url}`);
@@ -652,21 +639,20 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
 
     const outbound = createFakeOutboundClient({
       fetchExternal: async (req: ExternalHttpRequest): Promise<ExternalHttpResponse> => {
-        if (req.url === "https://api.trakt.tv/oauth/token") {
+        if (req.url === "https://auth.trakt.tv/oauth/token") {
           return jsonResponse(req.url, {
             access_token: "trakt_takeover_attempt",
             token_type: "bearer",
             expires_in: 7776000,
           });
         }
-        if (req.url === "https://api.trakt.tv/users/settings") {
+        if (req.url === "https://auth.trakt.tv/api/auth/oauth2/userinfo") {
+          // email_verified is claimed but must not enable linking to the verified local account
           return jsonResponse(req.url, {
-            user: {
-              username: "attacker-trakt",
-              name: "Attacker Trakt",
-              email: "protected@example.com",
-              ids: { slug: "attacker-trakt", uuid: "trakt-uuid-attacker" },
-            },
+            sub: "trakt-uuid-attacker",
+            name: "Attacker Trakt",
+            email: "protected@example.com",
+            email_verified: true,
           });
         }
         if (req.url === "https://github.com/login/oauth/access_token") {
@@ -829,25 +815,19 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
             scenario === "gh-first" ? "gh-first@example.com" : "trakt-first@example.com";
           return jsonResponse(req.url, [{ email, primary: true, verified: true }]);
         }
-        if (req.url === "https://api.trakt.tv/oauth/token") {
+        if (req.url === "https://auth.trakt.tv/oauth/token") {
           return jsonResponse(req.url, {
             access_token: `trakt_${scenario}`,
             token_type: "bearer",
             expires_in: 7776000,
           });
         }
-        if (req.url === "https://api.trakt.tv/users/settings") {
+        if (req.url === "https://auth.trakt.tv/api/auth/oauth2/userinfo") {
           const isGhFirst = scenario === "gh-first";
           return jsonResponse(req.url, {
-            user: {
-              username: isGhFirst ? "trakt-intruder" : "trakt-owner",
-              name: isGhFirst ? "Trakt Intruder" : "Trakt Owner",
-              email: isGhFirst ? "gh-first@example.com" : "trakt-first@example.com",
-              ids: {
-                slug: isGhFirst ? "trakt-intruder" : "trakt-owner",
-                uuid: isGhFirst ? "trakt-uuid-intruder" : "trakt-uuid-owner",
-              },
-            },
+            sub: isGhFirst ? "trakt-uuid-intruder" : "trakt-uuid-owner",
+            name: isGhFirst ? "Trakt Intruder" : "Trakt Owner",
+            email: isGhFirst ? "gh-first@example.com" : "trakt-first@example.com",
           });
         }
         throw new Error(`Unexpected outbound request: ${req.method} ${req.url}`);
@@ -1146,7 +1126,7 @@ describe("API Worker OAuth HTTP entrypoint (GitHub & Trakt)", () => {
     );
     expect(traktInit.status).toBe(200);
     const traktUrl = new URL(((await traktInit.json()) as { url: string }).url);
-    expect(traktUrl.origin).toBe("https://trakt.tv");
+    expect(traktUrl.origin).toBe("https://auth.trakt.tv");
     expect(traktUrl.searchParams.get("client_id")).toBe(TEST_TRAKT_CREDS.clientId);
 
     // Half-configured provider (missing secret) is not enabled.
