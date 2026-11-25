@@ -44,6 +44,7 @@ import {
 import {
   fulfillCoveredDemandsForAssociationInTx,
   mergeExternalKeyDemandsIntoMedia,
+  reopenDemandAfterRejectionInTx,
 } from "./demands.ts";
 import { enqueueJob } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
@@ -134,6 +135,8 @@ export interface CreateChangeRequestInput {
   submitterKeyId?: string | null;
   submitterType?: "human" | "agent";
   taskId?: string | null;
+  /** The demand an exploration submitted this for; approval fulfills it, rejection reopens it. */
+  demandId?: string | null;
   targetExternalKey: string;
   namespace: string;
   nativeId: string;
@@ -1092,6 +1095,7 @@ export async function createChangeRequest(
         submitter_key_id: input.submitterKeyId ?? null,
         submitter_type: submitterType,
         task_id: input.taskId ?? null,
+        demand_id: input.demandId ?? null,
         media_id: existingMedia?.id ?? null,
         target_external_key: canonicalTargetKey,
         namespace,
@@ -2028,6 +2032,10 @@ export async function rejectChangeRequest(
       .where("id", "=", cr.id)
       .returningAll()
       .executeTakeFirstOrThrow();
+
+    if (cr.demand_id) {
+      await reopenDemandAfterRejectionInTx(trx, { demandId: cr.demand_id, now });
+    }
 
     return toChangeRequestRecord(updated);
   });

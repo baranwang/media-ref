@@ -123,7 +123,13 @@ export type AssociationStatusRow = "confirmed" | "seed_unconfirmed" | "delisted"
 export type ChangeRequestStatusRow = "pending_evidence" | "approved" | "needs_review" | "rejected";
 export type SubmitterTypeRow = "human" | "agent";
 export type DemandNamespaceGroupRow = "platform" | "catalog";
-export type DemandStatusRow = "open" | "leased" | "fulfilled" | "not_found" | "invalid_key";
+export type DemandStatusRow =
+  | "open"
+  | "leased"
+  | "awaiting_review"
+  | "fulfilled"
+  | "not_found"
+  | "invalid_key";
 
 export interface SeasonSnapshotRow {
   season: number;
@@ -237,6 +243,7 @@ export interface ChangeRequestsTable {
   submitter_key_id: string | null;
   submitter_type: Generated<SubmitterTypeRow>;
   task_id: string | null;
+  demand_id: string | null;
   media_id: string | null;
   target_external_key: string;
   namespace: AssociationNamespaceRow;

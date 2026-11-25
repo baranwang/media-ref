@@ -495,9 +495,22 @@ const STATUS_MERGE_PRIORITY: Record<DemandStatus, number> = {
   open: 0,
   not_found: 1,
   leased: 2,
-  fulfilled: 3,
-  invalid_key: 4,
+  awaiting_review: 3,
+  fulfilled: 4,
+  invalid_key: 5,
 };
+
+export const DEFAULT_NOT_FOUND_BACKOFF_SECONDS = [86_400, 259_200, 604_800, 2_592_000] as const;
+
+export function computeNotFoundBackoffSeconds(
+  attemptNumber: number,
+  schedule: readonly number[] = DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
+): number {
+  const effective = schedule.length > 0 ? schedule : DEFAULT_NOT_FOUND_BACKOFF_SECONDS;
+  const normalizedAttempt = Number.isFinite(attemptNumber) ? Math.floor(attemptNumber) : 1;
+  const index = Math.min(Math.max(normalizedAttempt - 1, 0), effective.length - 1);
+  return effective[index]!;
+}
 
 function toDate(value: Date | string): Date {
   return value instanceof Date ? value : new Date(value);
@@ -705,7 +718,51 @@ export interface FulfillCoveredDemandsInput {
 }
 
 /**
- * Marks open or not_found demands for `(mediaId, season, namespaceGroup)` as `fulfilled`
+ * After a rejection, reopens the demand a change request was submitted for, unless another
+ * request for that demand is still pending or already approved. The rejection counts as a
+ * not-found round, so the demand backs off before it is explored again.
+ * shortcut: uses the default backoff schedule, not the worker's EXPLORATION_BACKOFF_SECONDS; pass it in if that diverges.
+ */
+export async function reopenDemandAfterRejectionInTx(
+  executor: DbExecutor,
+  input: { demandId: string; now: Date },
+): Promise<boolean> {
+  const demand = await executor
+    .selectFrom("demands")
+    .select(["id", "status", "not_found_count"])
+    .where("id", "=", input.demandId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (!demand || demand.status !== "awaiting_review") {
+    return false;
+  }
+  const live = await executor
+    .selectFrom("change_requests")
+    .select("id")
+    .where("demand_id", "=", input.demandId)
+    .where("status", "in", ["pending_evidence", "needs_review", "approved"])
+    .executeTakeFirst();
+  if (live) {
+    return false;
+  }
+  const notFoundCount = demand.not_found_count + 1;
+  await executor
+    .updateTable("demands")
+    .set({
+      status: "open",
+      not_found_count: notFoundCount,
+      next_eligible_at: new Date(
+        input.now.getTime() + computeNotFoundBackoffSeconds(notFoundCount) * 1000,
+      ),
+      updated_at: input.now,
+    })
+    .where("id", "=", demand.id)
+    .execute();
+  return true;
+}
+
+/**
+ * Marks open, not_found or awaiting_review demands for `(mediaId, season, namespaceGroup)` as `fulfilled`
  * once a confirmed association covers them. Whole-media associations (`segments: []`)
  * fulfill all seasons in that namespace group.
  */
@@ -725,7 +782,7 @@ export async function fulfillCoveredDemandsForAssociationInTx(
     })
     .where("media_id", "=", input.mediaId)
     .where("namespace_group", "=", namespaceGroup)
-    .where("status", "in", ["open", "not_found"]);
+    .where("status", "in", ["open", "not_found", "awaiting_review"]);
 
   if (input.segments.length > 0) {
     const coveredSeasons = [...new Set(input.segments.map((seg) => seg.season))];
