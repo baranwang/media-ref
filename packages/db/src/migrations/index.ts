@@ -12,6 +12,7 @@ import * as m0010Demands from "./0010_demands.ts";
 import * as m0011InvalidationReports from "./0011_invalidation_reports.ts";
 import * as m0012ExplorationBudget from "./0012_exploration_budget.ts";
 import * as m0013UnifiedAssociations from "./0013_unified_associations.ts";
+import * as m0014DemandReview from "./0014_demand_review.ts";
 
 export const migrations: Record<string, Migration> = {
   "0001_initial": m0001Initial,
@@ -27,6 +28,7 @@ export const migrations: Record<string, Migration> = {
   "0011_invalidation_reports": m0011InvalidationReports,
   "0012_exploration_budget": m0012ExplorationBudget,
   "0013_unified_associations": m0013UnifiedAssociations,
+  "0014_demand_review": m0014DemandReview,
 };
 
 export const staticMigrationProvider: MigrationProvider = {

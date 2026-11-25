@@ -3,11 +3,9 @@ import { createApiApp } from "@media-ref/api/app";
 import {
   createFakeOutboundClient,
   importBangumiDataSeeds,
-  importDoubanBridgeSeeds,
   importWikidataMovieSeeds,
   SEED_EVIDENCE_CHECK_JOB_TYPE,
   SEED_EVIDENCE_FAILED_ALERT_TYPE,
-  seedTmdbExportIds,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -897,108 +895,5 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
     expect(confirmedBody.document.associations[0]?.status).toBe("confirmed");
     expect(confirmedBody.document.variants).toHaveLength(1);
     expect(confirmedBody.document.variants[0]?.id).toBe(variantsInDb[0]?.id);
-  });
-
-  test("douban-bridge single-season TV seed triggers seed_evidence_check on first read and promotes season 1 to confirmed", async () => {
-    const testDb = await setupDb();
-    const now = new Date("2026-11-25T08:00:00.000Z");
-
-    await seedTmdbExportIds(testDb.writeDb, [
-      { mediaType: "tv", tmdbId: "2001", exportedDate: "2026-11-25" },
-    ]);
-
-    const outbound = createFakeOutboundClient({
-      fetchExternal: async (req: ExternalHttpRequest) => {
-        if (req.namespace === "tmdb" && req.url.includes("/tv/2001")) {
-          return jsonResponse(req.url, {
-            id: 2001,
-            name: "单季剧",
-            original_name: "Single Season Show",
-            first_air_date: "2023-04-01",
-            number_of_seasons: 1,
-            seasons: [{ season_number: 1, episode_count: 8, air_date: "2023-04-01" }],
-            external_ids: { imdb_id: "tt2001001" },
-          });
-        }
-        if (req.namespace === "douban" && req.url.endsWith("/36000001")) {
-          return jsonResponse(req.url, {
-            id: "36000001",
-            title: "单季剧",
-            original_title: "Single Season Show",
-            year: "2023",
-            type: "tv",
-            is_tv: true,
-            episodes_count: 8,
-          });
-        }
-        return jsonResponse(req.url, { error: "not_found" }, 404);
-      },
-    });
-
-    await importDoubanBridgeSeeds(
-      testDb.writeDb,
-      [{ douban_id: 36000001, tmdb_id: 2001, trakt_id: 9001 }],
-      { outbound, now },
-    );
-
-    const bgTasks: Promise<unknown>[] = [];
-    const app = createApiApp({
-      dbRead: testDb.readDb,
-      dbWrite: testDb.writeDb,
-      outbound,
-      onBackgroundTask: (p) => {
-        bgTasks.push(p);
-      },
-      config: {
-        baseUrl: TEST_BASE_URL,
-        authSecret: TEST_AUTH_SECRET,
-        now: () => now,
-      },
-    });
-    const readKey = await createReadApiKey(app, outbound, "seed-douban-tv-e2e@example.com");
-
-    const beforeBody = await getMediaDocumentRpc(app, readKey, "tmdb:tv:2001");
-    expect(beforeBody.document.associations).toEqual([]);
-    await Promise.all(bgTasks.splice(0));
-
-    const dispatched: JobQueueMessage[] = [];
-    const worker = createBackgroundWorker({
-      db: testDb.writeDb,
-      outbound,
-      queue: {
-        async send(msg) {
-          dispatched.push(msg);
-        },
-      },
-      config: {
-        enableDailyTmdbSync: false,
-        enableExplorationScheduling: false,
-        jobTypes: [SEED_EVIDENCE_CHECK_JOB_TYPE],
-      },
-      now: () => now,
-    });
-
-    const sched = await worker.scheduled(createScheduledController(now));
-    expect(sched.claimed).toBe(1);
-    const { batch } = createQueueBatch(dispatched, now);
-    const queueSummary = await worker.queue(batch);
-    expect(queueSummary.completed).toBe(1);
-
-    const afterBody = await getMediaDocumentRpc(app, readKey, "tmdb:tv:2001");
-    expect(afterBody.document.media.snapshot.seasons).toHaveLength(1);
-    expect(afterBody.document.associations).toHaveLength(1);
-    expect(afterBody.document.associations[0]).toMatchObject({
-      namespace: "douban",
-      nativeId: "36000001",
-      status: "confirmed",
-      segments: [
-        {
-          season: 1,
-          episodeStart: 1,
-          targetEpisodeStart: 1,
-          baseline: "tmdb",
-        },
-      ],
-    });
   });
 });

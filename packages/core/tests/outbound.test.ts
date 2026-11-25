@@ -109,6 +109,74 @@ describe("OutboundClient live HTTP routing", () => {
     expect(captured[1]?.url).toBe("https://api.themoviedb.org/3/tv/95479");
   });
 
+  test("routes egress namespace through the EGRESS binding with the target host in x-egress-host, following redirects", async () => {
+    const sent: { url: string; host: string | null; ua: string | null; method?: string }[] = [];
+    const egressFetcher = {
+      async fetch(input: string, init?: RequestInit) {
+        const headers = new Headers(init?.headers);
+        sent.push({
+          url: input,
+          host: headers.get("x-egress-host"),
+          ua: headers.get("user-agent"),
+          method: init?.method,
+        });
+        if (sent.length === 1) {
+          return new Response(null, {
+            status: 302,
+            headers: { location: "https://www.bilibili.com/bangumi/play/ss34430?from=api" },
+          });
+        }
+        return new Response("season-body", { status: 200 });
+      },
+    };
+    const fetchImpl: typeof fetch = async () => {
+      throw new Error("direct fetch must not be used for egress namespaces");
+    };
+
+    const outbound = createLiveOutboundClient({
+      fetchImpl,
+      egressFetcher,
+      proxyConfig: { bilibili: { mode: "egress" } },
+    });
+    const res = await outbound.fetchExternal({
+      kind: "platform",
+      namespace: "bilibili",
+      url: "https://api.bilibili.com/pgc/view/web/season?season_id=34430",
+      headers: { "user-agent": "media-ref-bot" },
+    });
+
+    expect(res.body).toBe("season-body");
+    expect(res.url).toBe("https://www.bilibili.com/bangumi/play/ss34430?from=api");
+    expect(sent).toEqual([
+      {
+        url: "http://egress/pgc/view/web/season?season_id=34430",
+        host: "api.bilibili.com",
+        ua: "media-ref-bot",
+        method: "GET",
+      },
+      {
+        url: "http://egress/bangumi/play/ss34430?from=api",
+        host: "www.bilibili.com",
+        ua: "media-ref-bot",
+        method: "GET",
+      },
+    ]);
+  });
+
+  test("egress namespace without an EGRESS binding fails loudly instead of going direct", async () => {
+    const outbound = createLiveOutboundClient({
+      fetchImpl: async () => new Response("direct"),
+      proxyConfig: { bilibili: { mode: "egress" } },
+    });
+    await expect(
+      outbound.fetchExternal({
+        kind: "platform",
+        namespace: "bilibili",
+        url: "https://api.bilibili.com/x",
+      }),
+    ).rejects.toThrow(/EGRESS binding/);
+  });
+
   test("sends email via Cloudflare Email Service binding when emailBinding is configured", async () => {
     const sentPayloads: unknown[] = [];
     const emailBinding = {

@@ -35,6 +35,17 @@ export const Route = createFileRoute("/discover/$catalog")({
     await queryClient.prefetchQuery(trendingQuery(params.catalog, "all", PAGE_SIZE));
     return { slug: params.catalog };
   },
+  head: ({ loaderData }) => {
+    const catalog = loaderData && DISCOVERY_CATALOGS[loaderData.slug];
+    return catalog
+      ? {
+          meta: [
+            { title: `${catalog.title} 热门 · MediaRef` },
+            { name: "description", content: catalog.pageSubtitle },
+          ],
+        }
+      : {};
+  },
   component: DiscoverCatalogPage,
 });
 

@@ -28,7 +28,18 @@ export type NamespaceRouteConfig =
       mode: "proxy";
       proxyBaseUrl: string;
       headers?: Record<string, string>;
-    };
+    }
+  // Through the `egressFetcher` binding (Workers VPC → greencloud-hk egress relay).
+  | { mode: "egress" };
+
+/** Header the egress relay reads to pick the HTTPS host it re-sends the request to. */
+const EGRESS_HOST_HEADER = "x-egress-host";
+const MAX_EGRESS_REDIRECTS = 5;
+
+/** Minimal shape of a Workers VPC service binding. */
+export interface EgressFetcher {
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+}
 
 export type OutboundProxyConfig = Partial<Record<string, NamespaceRouteConfig>>;
 
@@ -141,6 +152,7 @@ export interface OutboundClient {
 export interface LiveOutboundClientOptions {
   fetchImpl?: typeof fetch;
   proxyConfig?: OutboundProxyConfig;
+  egressFetcher?: EgressFetcher;
   sendEmail?: (message: EmailMessage) => Promise<void>;
   emailBinding?: CloudflareSendEmailBinding;
   defaultEmailFrom?: string;
@@ -160,12 +172,64 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return result;
 }
 
+/**
+ * Send through the egress relay: the binding routes by its service config, so the URL host is a
+ * placeholder and the real host travels in `x-egress-host`. Redirects are followed here, because a
+ * `Location` points at the real host and must go back through the relay too.
+ */
+async function fetchViaEgress(
+  egress: EgressFetcher,
+  request: ExternalHttpRequest,
+  signal: AbortSignal | undefined,
+): Promise<{ response: Response; url: string }> {
+  let target = new URL(request.url);
+  let method = request.method ?? "GET";
+  let body = request.body;
+  for (let hop = 0; ; hop += 1) {
+    if (target.protocol !== "https:") {
+      throw new Error(`Egress relay only forwards https URLs, got ${target.protocol}`);
+    }
+    const response = await egress.fetch(`http://egress${target.pathname}${target.search}`, {
+      method,
+      headers: { ...request.headers, [EGRESS_HOST_HEADER]: target.hostname },
+      body,
+      redirect: "manual",
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    const location = response.headers.get("location");
+    const follow = request.redirect === undefined || request.redirect === "follow";
+    if (!follow || !location || response.status < 300 || response.status >= 400) {
+      if (
+        request.redirect === "error" &&
+        location &&
+        response.status >= 300 &&
+        response.status < 400
+      ) {
+        throw new Error(`Redirect from ${target} with redirect: "error"`);
+      }
+      return { response, url: target.toString() };
+    }
+    if (hop >= MAX_EGRESS_REDIRECTS) {
+      throw new Error(`Too many redirects through egress relay (${request.url})`);
+    }
+    await response.body?.cancel();
+    target = new URL(location, target);
+    if (
+      response.status === 303 ||
+      ((response.status === 301 || response.status === 302) && method === "POST")
+    ) {
+      method = "GET";
+      body = undefined;
+    }
+  }
+}
+
 function resolveExternalRequest(
   request: ExternalHttpRequest,
   proxyConfig?: OutboundProxyConfig,
 ): { url: string; headers?: Record<string, string> } {
   const route = proxyConfig?.[request.namespace];
-  if (!route || route.mode === "direct") {
+  if (!route || route.mode === "direct" || route.mode === "egress") {
     return {
       url: request.url,
       headers: request.headers,
@@ -721,15 +785,28 @@ export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}
 
   return {
     async fetchExternal(request) {
-      const resolved = resolveExternalRequest(request, options.proxyConfig);
       const signal = combineAbortSignals(request.signal, request.timeoutMs);
-      const response = await fetchImpl(resolved.url, {
-        method: request.method ?? "GET",
-        headers: resolved.headers,
-        body: request.body,
-        ...(request.redirect !== undefined ? { redirect: request.redirect } : {}),
-        ...(signal !== undefined ? { signal } : {}),
-      });
+      let resolved: { url: string; headers?: Record<string, string> };
+      let response: Response;
+      if (options.proxyConfig?.[request.namespace]?.mode === "egress") {
+        if (!options.egressFetcher) {
+          throw new Error(
+            `Namespace "${request.namespace}" routes via egress but no EGRESS binding is configured`,
+          );
+        }
+        const sent = await fetchViaEgress(options.egressFetcher, request, signal);
+        response = sent.response;
+        resolved = { url: sent.url };
+      } else {
+        resolved = resolveExternalRequest(request, options.proxyConfig);
+        response = await fetchImpl(resolved.url, {
+          method: request.method ?? "GET",
+          headers: resolved.headers,
+          body: request.body,
+          ...(request.redirect !== undefined ? { redirect: request.redirect } : {}),
+          ...(signal !== undefined ? { signal } : {}),
+        });
+      }
 
       const headers = headersToRecord(response.headers);
       const contentType = headers["content-type"] ?? "";

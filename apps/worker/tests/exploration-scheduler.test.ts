@@ -14,6 +14,7 @@ import {
   listDemands,
   queryMediaByKey,
   recordDemandForRead,
+  rejectChangeRequest,
   seedTmdbExportIds,
   syncTmdbDailyExports,
   TMDB_DAILY_EXPORTS_JOB_TYPE,
@@ -439,13 +440,13 @@ describe("Exploration scheduler (#28)", () => {
     const readByImdb = await queryMediaByKey(testDb.readDb, "imdb:tt12343534");
     expect(readByImdb.kind).toBe("ok");
 
-    // External-key demand was merged into media-scoped season demands: S1 fulfilled, S2 open
+    // External-key demand was merged into media-scoped season demands: S1 awaits its change request, S2 open
     const extDemands = await listDemands(testDb.readDb, { externalKey: "tmdb:tv:95479" });
     expect(extDemands).toHaveLength(0);
 
     const mediaDemands = await listDemands(testDb.readDb, { mediaId: execCtx.media.id });
     const bySeason = new Map(mediaDemands.map((d) => [d.season, d]));
-    expect(bySeason.get(1)?.status).toBe("fulfilled");
+    expect(bySeason.get(1)?.status).toBe("awaiting_review");
     expect(bySeason.get(1)?.lastExploredAt).toBe(t0.toISOString());
     expect(bySeason.get(2)?.status).toBe("open");
     expect(bySeason.get(2)?.leaseExpiresAt).toBeNull();
@@ -1754,5 +1755,98 @@ describe("Exploration scheduler (#28)", () => {
       .selectAll()
       .execute();
     expect(budgetRows.reduce((sum, row) => sum + row.consumed, 0)).toBe(0);
+  });
+
+  test("an awaiting_review demand reopens only after all its change requests are rejected, and is fulfilled on approval", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const t0 = new Date("2026-11-23T12:00:00.000Z");
+
+    const media = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "tmdb",
+        title: "Review Lifecycle Movie",
+        year: 2024,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const demand = await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: media.id,
+        season: null,
+        namespace_group: "platform",
+        status: "awaiting_review",
+        next_eligible_at: t0,
+        last_demanded_at: t0,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const userId = "review-lifecycle-user";
+    await testDb.writeDb
+      .insertInto("user")
+      .values({
+        id: userId,
+        name: "Reviewer",
+        email: "review-lifecycle@example.com",
+        emailVerified: true,
+        role: "reviewer",
+        createdAt: t0,
+        updatedAt: t0,
+      })
+      .execute();
+
+    const submit = (nativeId: string) =>
+      createChangeRequest(testDb.writeDb, {
+        submitterUserId: userId,
+        submitterType: "agent",
+        demandId: demand.id,
+        targetExternalKey: media.id,
+        namespace: "bilibili",
+        nativeId,
+        variantDescription: "原声",
+        segments: [],
+        now: t0,
+      });
+    const reject = (changeRequestId: string) =>
+      rejectChangeRequest(testDb.writeDb, {
+        changeRequestId,
+        reviewerUserId: userId,
+        allowedStatuses: ["pending_evidence", "needs_review"],
+      });
+    const demandRow = async () => (await listDemands(testDb.readDb, { mediaId: media.id }))[0]!;
+
+    const first = await submit("ss1001");
+    const second = await submit("ss1002");
+
+    // One rejected, one still pending: the demand keeps waiting.
+    await reject(first.id);
+    expect((await demandRow()).status).toBe("awaiting_review");
+
+    // All rejected: reopened, counted as a not-found round, and backed off.
+    const before = Date.now();
+    await reject(second.id);
+    const reopened = await demandRow();
+    expect(reopened.status).toBe("open");
+    expect(reopened.notFoundCount).toBe(1);
+    expect(new Date(reopened.nextEligibleAt).getTime()).toBeGreaterThanOrEqual(before + 86_400_000);
+
+    // Explored again and submitted: approval takes effect and fulfills it.
+    await testDb.writeDb
+      .updateTable("demands")
+      .set({ status: "awaiting_review" })
+      .where("id", "=", demand.id)
+      .execute();
+    const third = await submit("ss1003");
+    await approveChangeRequest(testDb.writeDb, createFakeOutboundClient(), {
+      changeRequestId: third.id,
+      reviewerUserId: userId,
+      allowedStatuses: ["pending_evidence", "needs_review"],
+      now: t0,
+    });
+    expect((await demandRow()).status).toBe("fulfilled");
   });
 });

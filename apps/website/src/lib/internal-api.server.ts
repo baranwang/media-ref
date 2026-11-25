@@ -9,16 +9,12 @@ import { env } from "cloudflare:workers";
 /** Must match `INTERNAL_VISITOR_IP_HEADER` in apps/api/src/app.ts. */
 const VISITOR_IP_HEADER = "x-media-ref-visitor-ip";
 
-interface ServiceBinding {
-  fetch(request: Request): Promise<Response>;
-}
-
 /**
  * Clients for the API Worker's `InternalApi` entrypoint (service binding `API`). Public reads
  * need no API key there; the visitor IP is forwarded so the API still rate-limits per visitor.
  */
 export function internalApiClients() {
-  const binding = (env as { API?: ServiceBinding }).API;
+  const binding = env.API;
   if (!binding) {
     throw new Error("The API service binding is not configured for this Worker");
   }

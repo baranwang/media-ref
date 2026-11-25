@@ -27,7 +27,14 @@ import {
   type CatalogGatewayConfig,
   type CatalogTargetInitialAssociation,
 } from "./catalog-gateway.ts";
-import { isMediaDemandCoveredInTx, mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
+import {
+  computeNotFoundBackoffSeconds,
+  DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
+  isMediaDemandCoveredInTx,
+  mergeExternalKeyDemandsIntoMedia,
+} from "./demands.ts";
+
+export { computeNotFoundBackoffSeconds, DEFAULT_NOT_FOUND_BACKOFF_SECONDS } from "./demands.ts";
 import {
   enqueueJob,
   type BackgroundJob,
@@ -52,7 +59,6 @@ export const DEFAULT_TMDB_EXPORTS_BASE_URL = "https://files.tmdb.org/p/exports";
 export const DEFAULT_EXPLORATION_DAILY_BUDGET = 100;
 export const DEFAULT_EXPLORATION_BATCH_SIZE = 10;
 export const DEFAULT_EXPLORATION_LEASE_DURATION_MS = 15 * 60 * 1000;
-export const DEFAULT_NOT_FOUND_BACKOFF_SECONDS = [86_400, 259_200, 604_800, 2_592_000] as const;
 export const DEFAULT_EXPLORATION_JOB_MAX_ATTEMPTS = 3;
 
 const UTC_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -409,16 +415,6 @@ export function resolveExplorationSchedulerConfig(
     transientRetryDelayMs,
     jobMaxAttempts,
   };
-}
-
-export function computeNotFoundBackoffSeconds(
-  attemptNumber: number,
-  schedule: readonly number[] = DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
-): number {
-  const effective = schedule.length > 0 ? schedule : DEFAULT_NOT_FOUND_BACKOFF_SECONDS;
-  const normalizedAttempt = Number.isFinite(attemptNumber) ? Math.floor(attemptNumber) : 1;
-  const index = Math.min(Math.max(normalizedAttempt - 1, 0), effective.length - 1);
-  return effective[index]!;
 }
 
 export function getTier3TargetNamespaces(
@@ -1847,9 +1843,9 @@ export function createExplorationJobHandler(
     const hasTransientError = outcomes.some((o) => o.status === "transient_error");
     const hasNotFound = outcomes.some((o) => o.status === "not_found");
 
-    let demandOutcome: "fulfilled" | "not_found" | "transient_error";
+    let demandOutcome: "submitted" | "not_found" | "transient_error";
     if (hasSubmitted && !hasTransientError) {
-      demandOutcome = "fulfilled";
+      demandOutcome = "submitted";
     } else if (hasNotFound && !hasSubmitted && !hasTransientError) {
       demandOutcome = "not_found";
     } else {
@@ -1933,11 +1929,18 @@ export function createExplorationJobHandler(
           }
         }
 
-        if (demandOutcome === "fulfilled") {
+        if (demandOutcome === "submitted") {
+          // Submitted is not satisfied: the demand waits for its change requests to take effect.
+          // If one was already applied (fast evidence check), coverage is there and it is fulfilled.
+          const covered = await isMediaDemandCoveredInTx(trx, {
+            mediaId: targetMedia.id,
+            season: activeSeason,
+            namespaceGroup: payload.namespaceGroup,
+          });
           await trx
             .updateTable("demands")
             .set({
-              status: "fulfilled",
+              status: covered ? "fulfilled" : "awaiting_review",
               last_explored_at: ctx.now,
               lease_expires_at: null,
               updated_at: ctx.now,

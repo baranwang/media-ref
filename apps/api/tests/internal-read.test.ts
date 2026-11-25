@@ -1,4 +1,5 @@
-import { createFakeOutboundClient } from "@media-ref/core";
+import { proto } from "@media-ref/client";
+import { createFakeOutboundClient, listDemands } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createApiApp } from "../src/lib.ts";
@@ -16,16 +17,19 @@ describe("internal (service-binding) public reads", () => {
     }
   });
 
-  async function setup() {
+  async function setup(bgTasks: Promise<unknown>[] = []) {
     const testDb = await createTestDb();
     handles.push(testDb);
     const app = createApiApp({
+      onBackgroundTask: (task) => {
+        bgTasks.push(task);
+      },
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound: createFakeOutboundClient(),
       config: { baseUrl: TEST_BASE_URL, authSecret: TEST_AUTH_SECRET, readIpLimit: 1 },
     });
-    return app;
+    return Object.assign(app, { testDb });
   }
 
   test("public entry still requires an API key for GetMedia", async () => {
@@ -69,5 +73,41 @@ describe("internal (service-binding) public reads", () => {
       }).media.getMedia({ ref: mediaRef("tmdb:tv:1") }),
     );
     expect(err.code).toBe("API_KEY_REQUIRED");
+  });
+
+  test("internal reads do not record demand for uncovered seasons", async () => {
+    const bgTasks: Promise<unknown>[] = [];
+    const app = await setup(bgTasks);
+    const media = await app.testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "咒术回战",
+        year: 2020,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 24, airYear: 2020 }]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await app.testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        is_external_id: true,
+        media_id: media.id,
+        namespace: "tmdb",
+        native_id: "tv:95479",
+      })
+      .execute();
+
+    // Season 1 has no platform association: an API caller would create a demand here.
+    await createRpcClients((req: Request) => app.fetchInternal(req)).media.getMedia({
+      ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      season: 1,
+      namespaceGroup: proto.NamespaceGroup.PLATFORM,
+    });
+    await Promise.all(bgTasks);
+
+    expect(await listDemands(app.testDb.readDb, { mediaId: media.id })).toEqual([]);
   });
 });
