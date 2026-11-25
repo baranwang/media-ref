@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /api-keys
+Disallow: /review
+Disallow: /login
+Disallow: /signup
+Disallow: /verify-email
+Disallow: /img/

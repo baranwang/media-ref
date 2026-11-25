@@ -65,6 +65,18 @@ export const Route = createFileRoute("/media/$mediaId")({
   }),
   loader: ({ context, params }) =>
     context.queryClient.ensureQueryData(mediaDetailQuery(params.mediaId)),
+  head: ({ loaderData: media }) =>
+    media
+      ? {
+          meta: [
+            { title: `${media.title}${media.year ? ` (${media.year})` : ""} 在哪儿看 · MediaRef` },
+            {
+              name: "description",
+              content: `${media.title} 在各视频平台的播放链接与分集覆盖情况。`,
+            },
+          ],
+        }
+      : {},
   component: MediaDetailPage,
 });
 
