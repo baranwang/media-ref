@@ -1,7 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "media-ref-api",
-  "main": "src/index.ts",
+  "main": "src/worker.ts",
   "compatibility_date": "2026-11-24",
   "compatibility_flags": ["nodejs_compat"],
   "placement": { "mode": "smart" },
@@ -29,7 +29,15 @@
     "COOKIE_DOMAIN": "mediaref.org",
     "TRUSTED_ORIGINS": "https://mediaref.org,https://www.mediaref.org",
     "EMAIL_FROM": "noreply@mediaref.org",
+    // Account that owns the API_USAGE dataset; queried with the ANALYTICS_API_TOKEN secret.
+    "CF_ACCOUNT_ID": "9c578ed9cad837fb4a2564db7b36b483",
   },
+  "analytics_engine_datasets": [
+    {
+      "binding": "API_USAGE",
+      "dataset": "media_ref_api_usage",
+    },
+  ],
   "send_email": [
     {
       "name": "EMAIL",

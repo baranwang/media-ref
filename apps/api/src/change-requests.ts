@@ -6,10 +6,16 @@ import {
   proto,
   type SegmentInput,
 } from "@media-ref/client";
-import { createChangeRequest, getChangeRequestById, isUuid } from "@media-ref/core";
+import {
+  createChangeRequest,
+  getChangeRequestById,
+  isUuid,
+  listChangeRequests,
+} from "@media-ref/core";
 import type { ServiceImpl } from "@connectrpc/connect";
 import {
   getRuntime,
+  requireSessionAuth,
   resolveChangeRequestReaderAuth,
   resolveSubmitterAuth,
   rethrowDomainError,
@@ -70,6 +76,14 @@ export const changeRequestServiceImpl: ServiceImpl<typeof proto.ChangeRequestSer
         },
       );
 
+      if (submitter.keyId !== null) {
+        runtime.usageRecorder?.record({
+          userId: submitter.userId,
+          keyId: submitter.keyId,
+          event: "submitted",
+        });
+      }
+
       return create(proto.CreateChangeRequestResponseSchema, {
         changeRequest: toProtoChangeRequest(changeRequest),
       });
@@ -102,6 +116,20 @@ export const changeRequestServiceImpl: ServiceImpl<typeof proto.ChangeRequestSer
 
     return create(proto.GetChangeRequestResponseSchema, {
       changeRequest: toProtoChangeRequest(changeRequest),
+    });
+  },
+
+  async listMyChangeRequests(req, ctx) {
+    const session = await requireSessionAuth(ctx);
+    const runtime = getRuntime(ctx);
+    const listed = await listChangeRequests(runtime.dbWrite, {
+      submitterUserId: session.user.id,
+      limit: req.limit,
+      offset: req.offset,
+    });
+    return create(proto.ListMyChangeRequestsResponseSchema, {
+      changeRequests: listed.changeRequests.map(toProtoChangeRequest),
+      total: listed.total,
     });
   },
 };

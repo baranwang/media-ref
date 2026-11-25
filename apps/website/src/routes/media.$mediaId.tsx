@@ -22,6 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@media-ref/ui/components/select";
+import { Skeleton } from "@media-ref/ui/components/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@media-ref/ui/components/tabs";
 import { cn } from "@media-ref/ui/lib/utils";
 import {
@@ -30,6 +31,7 @@ import {
   RiArrowRightSLine,
   RiArrowRightUpLine,
 } from "@remixicon/react";
+import { useQueries, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { NAMESPACE_LABELS, NamespaceLogo } from "#/components/brand-logos";
@@ -37,8 +39,12 @@ import { ContributeDrawer } from "#/components/contribute-drawer";
 import { CoverageLegend, CoverageRuler, CoverageTrack } from "#/components/coverage-bar";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
-import type { CoverageSegment, PlatformVariantRow } from "#/lib/catalog-data";
-import { buildExternalUrl } from "#/lib/url-parser";
+import { PLATFORM_COUNT } from "#/lib/catalogs";
+import { formatDate, formatEpisodeRange } from "#/lib/format";
+import { LONG_SERIES_SEASONS } from "#/lib/mappers";
+import { associationRevisionsQuery, mediaDetailQuery } from "#/lib/queries";
+import type { CoverageSegment, PlatformVariantRow } from "#/lib/types";
+import { buildExternalUrl, parseExternalInput } from "#/lib/url-parser";
 
 interface MediaDetailSearch {
   season?: number;
@@ -57,34 +63,36 @@ export const Route = createFileRoute("/media/$mediaId")({
     view: search.view === "all" ? "all" : undefined,
     contribute: search.contribute === 1 || search.contribute === "1" ? 1 : undefined,
   }),
+  loader: ({ context, params }) =>
+    context.queryClient.ensureQueryData(mediaDetailQuery(params.mediaId)),
   component: MediaDetailPage,
 });
 
 function MediaDetailPage() {
   const { mediaId } = Route.useParams();
   const search = Route.useSearch();
-  const { getMediaById } = useAppStore();
 
-  const media = getMediaById(mediaId);
+  const { data: media } = useSuspenseQuery(mediaDetailQuery(mediaId));
   const initialSeason = search.season ?? media?.defaultSeason ?? media?.seasons[0]?.season ?? 1;
 
   const [selectedSeason, setSelectedSeason] = useState(initialSeason);
   const [viewMode, setViewMode] = useState<"season" | "all">(search.view ?? "season");
-  const [expandedRowId, setExpandedRowId] = useState<string | null>(
-    media?.id === "aot" ? "aot-bili-jp" : null,
-  );
+  const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(search.contribute === 1);
   const [drawerPrefill, setDrawerPrefill] = useState<{
     url?: string;
     variant?: string;
   }>({});
-  const [historyRow, setHistoryRow] = useState<PlatformVariantRow | null>(null);
+  const [history, setHistory] = useState<{
+    row: PlatformVariantRow;
+    segments: CoverageSegment[];
+  } | null>(null);
 
   useEffect(() => {
     if (!media) return;
     setSelectedSeason(search.season ?? media.defaultSeason ?? media.seasons[0]?.season ?? 1);
     setViewMode(search.view ?? "season");
-    setExpandedRowId(media.id === "aot" ? "aot-bili-jp" : null);
+    setExpandedRowId(null);
     if (search.contribute === 1) {
       setDrawerOpen(true);
     }
@@ -113,7 +121,7 @@ function MediaDetailPage() {
   }
 
   const isMovie = media.type === "movie" || media.seasons.length === 0;
-  const isLongSeries = media.seasons.length > 6;
+  const isLongSeries = media.seasons.length > LONG_SERIES_SEASONS;
   const isAllSeasons = !isMovie && isLongSeries && viewMode === "all";
   const seasonCount = media.seasons.length;
   const totalEpisodesForAxis = isMovie
@@ -123,7 +131,7 @@ function MediaDetailPage() {
       : (currentSeasonInfo?.episodeCount ?? 1);
 
   const availablePlatformCount = new Set(media.platformRows.map((r) => r.namespace)).size;
-  const tmdbUrl = buildExternalUrl("tmdb", `${media.type}:${media.tmdbId}`, media.type);
+  const catalogLink = parseExternalInput(media.catalogKey);
 
   const showCatalogRuler =
     !isMovie &&
@@ -147,11 +155,14 @@ function MediaDetailPage() {
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 top-0 h-126 overflow-hidden"
       >
-        <img
-          src={media.backdropUrl}
-          alt=""
-          className="h-full w-full scale-105 object-cover object-center opacity-30 blur-xs"
-        />
+        {media.backdropUrl && (
+          <img
+            src={media.backdropUrl}
+            alt=""
+            referrerPolicy="no-referrer"
+            className="h-full w-full scale-105 object-cover object-center opacity-30 blur-xs"
+          />
+        )}
         <div className="absolute inset-0 bg-linear-to-b from-background/0 from-30% to-background" />
         <div className="absolute inset-0 bg-linear-to-r from-background via-background/85 via-30% to-background/15" />
       </div>
@@ -161,8 +172,15 @@ function MediaDetailPage() {
       {/* Hero Section (02A / 02B / 02E) */}
       <section className="relative z-10 container flex flex-col gap-8 pt-12 pb-10 md:flex-row md:gap-10">
         {/* 240x360 Poster */}
-        <div className="w-50 shrink-0 overflow-hidden rounded-xl bg-card shadow-2xl ring-1 ring-white/10 md:h-90 md:w-60">
-          <img src={media.posterUrl} alt={media.title} className="h-full w-full object-cover" />
+        <div className="aspect-2/3 w-50 shrink-0 overflow-hidden rounded-xl bg-card shadow-2xl ring-1 ring-white/10 md:aspect-auto md:h-90 md:w-60">
+          {media.posterUrl && (
+            <img
+              src={media.posterUrl}
+              alt={media.title}
+              referrerPolicy="no-referrer"
+              className="h-full w-full object-cover"
+            />
+          )}
         </div>
 
         {/* Right Info Column aligned with bottom of poster */}
@@ -170,21 +188,20 @@ function MediaDetailPage() {
           <div className="flex flex-col gap-3.5">
             {/* Metadata line */}
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
-              <span>{media.type === "movie" ? "电影" : "剧集"}</span>
-              <span>·</span>
-              <span>{media.yearRange}</span>
-              <span>·</span>
-              <span>{media.region}</span>
-              {!isMovie && (
-                <>
-                  <span>·</span>
-                  <span>
-                    {seasonCount} 季 · {media.totalEpisodes ?? totalEpisodesForAxis} 集
-                  </span>
-                </>
-              )}
-              <span>·</span>
-              <span>{media.statusLabel}</span>
+              {[
+                media.type === "movie" ? "电影" : "剧集",
+                media.yearRange,
+                media.region,
+                isMovie
+                  ? ""
+                  : `${seasonCount} 季 · ${media.totalEpisodes ?? totalEpisodesForAxis} 集`,
+                media.statusLabel,
+              ]
+                .filter(Boolean)
+                .flatMap((part, i) => [
+                  ...(i > 0 ? [<span key={`sep-${i}`}>·</span>] : []),
+                  <span key={part}>{part}</span>,
+                ])}
             </div>
 
             {/* Display Serif Title (44px) + Original Title */}
@@ -192,7 +209,9 @@ function MediaDetailPage() {
               <h1 className="font-display text-4xl leading-tight font-bold tracking-tight text-foreground md:text-display">
                 {media.title}
               </h1>
-              <p className="text-base leading-5 text-muted-foreground">{media.originalTitle}</p>
+              {media.originalTitle && (
+                <p className="text-base leading-5 text-muted-foreground">{media.originalTitle}</p>
+              )}
             </div>
 
             {/* Genres */}
@@ -220,7 +239,7 @@ function MediaDetailPage() {
               <div className="flex flex-col gap-0.5">
                 <span className="text-2xs text-muted-foreground">可看平台</span>
                 <span className="font-mono text-sm font-medium text-foreground">
-                  {availablePlatformCount} / 5
+                  {availablePlatformCount} / {PLATFORM_COUNT}
                 </span>
               </div>
             </div>
@@ -232,16 +251,18 @@ function MediaDetailPage() {
               <RiAddLine />
               补充关联
             </Button>
-            <Button
-              variant="outline"
-              size="lg"
-              nativeButton={false}
-              render={<a href={tmdbUrl} target="_blank" rel="noreferrer" />}
-              className="px-3.5"
-            >
-              在 TMDB 查看
-              <RiArrowRightUpLine />
-            </Button>
+            {catalogLink && (
+              <Button
+                variant="outline"
+                size="lg"
+                nativeButton={false}
+                render={<a href={catalogLink.url} target="_blank" rel="noreferrer" />}
+                className="px-3.5"
+              >
+                在 {NAMESPACE_LABELS[catalogLink.namespace]} 查看
+                <RiArrowRightUpLine />
+              </Button>
+            )}
           </div>
         </div>
       </section>
@@ -490,7 +511,7 @@ function MediaDetailPage() {
                                         {seg.nativeId}
                                       </span>
                                       <span className="w-24 shrink-0 text-xs text-muted-foreground">
-                                        {!isMovie ? `第 ${seg.start}–${seg.end} 集` : "正片"}
+                                        {!isMovie ? formatEpisodeRange(seg.start, seg.end) : "正片"}
                                       </span>
                                       <div className="min-w-0 flex-1">
                                         {seg.status === "pending" ? (
@@ -533,7 +554,7 @@ function MediaDetailPage() {
                               <div className="mt-1 flex items-center gap-5 border-t border-border/40 pt-2.5 pb-1 text-xs text-muted-foreground">
                                 <button
                                   type="button"
-                                  onClick={() => setHistoryRow(row)}
+                                  onClick={() => setHistory({ row, segments })}
                                   className="transition-colors hover:text-foreground"
                                 >
                                   版本历史
@@ -680,43 +701,103 @@ function MediaDetailPage() {
       />
 
       {/* Revision History Dialog */}
-      <Dialog open={Boolean(historyRow)} onOpenChange={(v) => !v && setHistoryRow(null)}>
+      <Dialog open={Boolean(history)} onOpenChange={(v) => !v && setHistory(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
-              版本历史 · {historyRow ? NAMESPACE_LABELS[historyRow.namespace] : ""}
+              版本历史 · {history ? NAMESPACE_LABELS[history.row.namespace] : ""}
             </DialogTitle>
             <DialogDescription>
-              {media.title} · {historyRow?.label}
+              {media.title} · {history?.row.label}
             </DialogDescription>
           </DialogHeader>
-          <div className="flex flex-col divide-y divide-border/70 text-xs">
-            <div className="flex items-start justify-between gap-3 py-2.5">
-              <div>
-                <div className="font-medium text-foreground">修订 #3 · 补充第 17–28 集</div>
-                <div className="mt-0.5 text-muted-foreground">
-                  由 linhai 审核通过 · 对应 Part.2 播放页
-                </div>
-              </div>
-              <span className="shrink-0 text-muted-foreground">11 月 24 日</span>
-            </div>
-            <div className="flex items-start justify-between gap-3 py-2.5">
-              <div>
-                <div className="font-medium text-foreground">修订 #2 · 核对第 1–16 集偏移</div>
-                <div className="mt-0.5 text-muted-foreground">自动取证核对通过</div>
-              </div>
-              <span className="shrink-0 text-muted-foreground">10 月 12 日</span>
-            </div>
-            <div className="flex items-start justify-between gap-3 py-2.5">
-              <div>
-                <div className="font-medium text-foreground">修订 #1 · 初始录入</div>
-                <div className="mt-0.5 text-muted-foreground">社区贡献录入</div>
-              </div>
-              <span className="shrink-0 text-muted-foreground">09 月 01 日</span>
-            </div>
-          </div>
+          {history && <RevisionHistory segments={history.segments} />}
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+/** Revisions of every association behind a platform row's bars, newest first. */
+function RevisionHistory({ segments }: { segments: CoverageSegment[] }) {
+  const { user, sessionChecked } = useAppStore();
+  const titles = new Map(
+    segments.flatMap((s) => (s.associationId ? [[s.associationId, s.title] as const] : [])),
+  );
+  const results = useQueries({
+    queries: [...titles.keys()].map((id) => ({
+      ...associationRevisionsQuery(id),
+      enabled: Boolean(user),
+    })),
+  });
+
+  if (!user) {
+    return sessionChecked ? (
+      <p className="py-2.5 text-xs text-muted-foreground">
+        <Link to="/login" className="text-foreground underline underline-offset-4">
+          登录
+        </Link>
+        后可以查看版本历史
+      </p>
+    ) : (
+      <Skeleton className="h-12 w-full" />
+    );
+  }
+  if (results.some((r) => r.isPending)) {
+    return (
+      <div className="flex flex-col gap-2 py-2.5">
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-9 w-full" />
+      </div>
+    );
+  }
+  if (results.some((r) => r.isError)) {
+    return <p className="py-2.5 text-xs text-destructive">版本历史加载失败，请稍后再试</p>;
+  }
+
+  const revisions = results
+    .flatMap((r) => r.data ?? [])
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  if (revisions.length === 0) {
+    return <p className="py-2.5 text-xs text-muted-foreground">还没有修订记录</p>;
+  }
+
+  return (
+    <div className="flex flex-col divide-y divide-border/70 text-xs">
+      {revisions.map((rev) => (
+        <div key={rev.id} className="flex items-start justify-between gap-3 py-2.5">
+          <div>
+            <div className="font-medium text-foreground">
+              修订 #{rev.revisionNumber} ·{" "}
+              {rev.segments.length === 0
+                ? "整部"
+                : rev.segments
+                    .map((s) =>
+                      s.season > 0
+                        ? `第 ${s.season} 季 ${formatEpisodeRange(s.episodeStart, s.episodeEnd ?? null)}`
+                        : formatEpisodeRange(s.episodeStart, s.episodeEnd ?? null),
+                    )
+                    .join("、")}
+            </div>
+            <div className="mt-0.5 text-muted-foreground">
+              {[titles.get(rev.associationId), rev.reason].filter(Boolean).join(" · ")}
+              {rev.changeRequestId && (
+                <>
+                  {" · "}
+                  <Link
+                    to="/change-requests/$id"
+                    params={{ id: rev.changeRequestId }}
+                    className="underline-offset-4 hover:underline"
+                  >
+                    变更单 #{rev.changeRequestId}
+                  </Link>
+                </>
+              )}
+            </div>
+          </div>
+          <span className="shrink-0 text-muted-foreground">{formatDate(rev.createdAt)}</span>
+        </div>
+      ))}
     </div>
   );
 }

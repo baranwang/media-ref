@@ -26,11 +26,23 @@ export const Route = createFileRoute("/verify-email")({
 
 function VerifyEmailPage() {
   const search = Route.useSearch();
-  const { user } = useAppStore();
-  const targetEmail = search.email ?? user?.email ?? "lin.xiao@example.com";
+  const { user, resendVerificationEmail } = useAppStore();
+  const targetEmail = search.email ?? user?.email ?? "";
   const webmail = detectWebmailProvider(targetEmail);
 
-  const [countdown, setCountdown] = useState(52);
+  // The email was just sent on sign-up, so start with the resend cooldown running.
+  const [countdown, setCountdown] = useState(60);
+  const [resendError, setResendError] = useState<string | null>(null);
+
+  const handleResend = async () => {
+    setResendError(null);
+    const result = await resendVerificationEmail(targetEmail);
+    if (result.ok) {
+      setCountdown(60);
+    } else {
+      setResendError(result.error ?? "发送失败，请稍后重试");
+    }
+  };
 
   useEffect(() => {
     if (countdown <= 0) return;
@@ -79,8 +91,8 @@ function VerifyEmailPage() {
             type="button"
             variant="outline"
             size="lg"
-            disabled={countdown > 0}
-            onClick={() => setCountdown(60)}
+            disabled={countdown > 0 || !targetEmail}
+            onClick={() => void handleResend()}
             className="w-full"
           >
             {countdown > 0 ? `重新发送（${countdown} 秒后）` : "重新发送验证邮件"}
@@ -88,7 +100,9 @@ function VerifyEmailPage() {
         </div>
 
         <div className="flex flex-col gap-2 text-xs text-muted-foreground">
-          <p>没收到的话，先看看垃圾邮件</p>
+          <p className={resendError ? "text-destructive" : undefined}>
+            {resendError ?? "没收到的话，先看看垃圾邮件"}
+          </p>
           <p>
             邮箱填错了？{" "}
             <Link

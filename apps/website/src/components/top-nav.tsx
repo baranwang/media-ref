@@ -78,7 +78,7 @@ export function TopNav({ hideSearch = false, transparent = false }: TopNavProps)
             >
               待贡献
             </Link>
-            {user && (user.role === "reviewer" || user.role === "admin") && (
+            {user && (user.role === "reviewer" || user.role === "owner") && (
               <Link
                 to="/review"
                 className={cn(
@@ -131,7 +131,7 @@ export function TopNav({ hideSearch = false, transparent = false }: TopNavProps)
                   <RiFileList3Line />
                   我的变更单
                 </DropdownMenuItem>
-                {(user.role === "reviewer" || user.role === "admin") && (
+                {(user.role === "reviewer" || user.role === "owner") && (
                   <DropdownMenuItem onClick={() => void navigate({ to: "/review" })}>
                     <RiShieldCheckLine />
                     审核队列

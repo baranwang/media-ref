@@ -18,6 +18,14 @@
     },
   },
   "main": "@tanstack/react-start/server-entry",
+  // Public reads go to the API Worker's InternalApi entrypoint (no API key; visitor IP forwarded).
+  "services": [
+    {
+      "binding": "API",
+      "service": "media-ref-api",
+      "entrypoint": "InternalApi",
+    },
+  ],
   "routes": [
     {
       "pattern": "mediaref.org",

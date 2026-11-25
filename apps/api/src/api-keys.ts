@@ -9,6 +9,7 @@ import {
   requireVerifiedUserAuth,
 } from "./context.ts";
 import { toProtoApiKeySummary } from "./proto-records.ts";
+import { DEFAULT_USAGE_DAYS, MAX_USAGE_DAYS, readApiUsage } from "./usage.ts";
 
 export const DEFAULT_API_KEY_PREFIX = "mref_";
 export const DEFAULT_API_KEY_CONFIG_ID = "default";
@@ -428,6 +429,83 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
     return create(proto.ListApiKeysResponseSchema, {
       apiKeys,
       total: listed.total,
+    });
+  },
+
+  async updateApiKey(req, ctx) {
+    const session = await requireSessionAuth(ctx);
+    const runtime = getRuntime(ctx);
+    const keyId = req.id.trim();
+    if (keyId.length === 0) {
+      throw createDomainConnectError({
+        status: 400,
+        code: "INVALID_KEY_ID",
+        message: "API key ID is required",
+      });
+    }
+
+    let name: string | undefined;
+    if (req.name !== undefined) {
+      name = req.name.trim();
+      if (name.length === 0 || name.length > MAX_API_KEY_NAME_LENGTH) {
+        throw createDomainConnectError({
+          status: 400,
+          code: "INVALID_NAME",
+          message: `API key name must be between 1 and ${MAX_API_KEY_NAME_LENGTH} characters`,
+        });
+      }
+    }
+    // Granting submit needs the same verified email as creating a submit key.
+    if (req.canSubmit === true && !session.user.emailVerified) {
+      throw createDomainConnectError({
+        status: 403,
+        code: "EMAIL_NOT_VERIFIED",
+        message: "Email verification is required",
+      });
+    }
+
+    // Ownership check through the user's own session before the server-side update below.
+    const owned = await runtime.getAuth().api.listApiKeys({ headers: ctx.requestHeader });
+    if (!owned.apiKeys.some((item) => item.id === keyId)) {
+      throw createDomainConnectError({
+        status: 404,
+        code: "API_KEY_NOT_FOUND",
+        message: "API key not found",
+      });
+    }
+
+    // Server-side call WITHOUT `headers` so Better Auth permits server-only `permissions`.
+    const updated = await runtime.getAuth().api.updateApiKey({
+      body: {
+        keyId,
+        userId: session.user.id,
+        ...(name !== undefined ? { name } : {}),
+        ...(req.canSubmit !== undefined
+          ? { permissions: buildApiKeyPermissions(req.canSubmit) }
+          : {}),
+      },
+    });
+
+    return create(proto.UpdateApiKeyResponseSchema, {
+      apiKey: toProtoApiKeySummary(toApiKeySummary(updated)),
+    });
+  },
+
+  async getApiUsage(req, ctx) {
+    const session = await requireSessionAuth(ctx);
+    const runtime = getRuntime(ctx);
+    const days = Math.min(Math.max(Math.floor(req.days ?? DEFAULT_USAGE_DAYS), 1), MAX_USAGE_DAYS);
+    const owned = await runtime.getAuth().api.listApiKeys({ headers: ctx.requestHeader });
+    const keyIds = owned.apiKeys.map((item) => item.id);
+    const usage = await readApiUsage(runtime.usageReader, {
+      userId: session.user.id,
+      keyIds,
+      days,
+      now: runtime.now(),
+    });
+    return create(proto.GetApiUsageResponseSchema, {
+      days: usage.days.map((day) => create(proto.ApiUsageDaySchema, day)),
+      lastUsed: usage.lastUsed.map((entry) => create(proto.ApiKeyLastUsedSchema, entry)),
     });
   },
 

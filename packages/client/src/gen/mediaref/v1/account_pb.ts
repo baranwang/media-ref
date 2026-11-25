@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
 export const file_mediaref_v1_account: GenFile =
   /*@__PURE__*/
   fileDesc(
-    "ChltZWRpYXJlZi92MS9hY2NvdW50LnByb3RvEgttZWRpYXJlZi52MSJVCgRVc2VyEgoKAmlkGAEgASgJEg0KBWVtYWlsGAIgASgJEgwKBG5hbWUYAyABKAkSFgoOZW1haWxfdmVyaWZpZWQYBCABKAgSDAoEcm9sZRgFIAEoCSI9ChFBcGlLZXlQZXJtaXNzaW9ucxIoCgVtZWRpYRgBIAMoDjIZLm1lZGlhcmVmLnYxLkFwaUtleUFjdGlvbiKLAgoNQXBpS2V5U3VtbWFyeRIKCgJpZBgBIAEoCRIRCgRuYW1lGAIgASgJSACIAQESEwoGcHJlZml4GAMgASgJSAGIAQESEgoFc3RhcnQYBCABKAlIAogBARIPCgdlbmFibGVkGAUgASgIEjMKC3Blcm1pc3Npb25zGAYgASgLMh4ubWVkaWFyZWYudjEuQXBpS2V5UGVybWlzc2lvbnMSEgoKY2FuX3N1Ym1pdBgHIAEoCBISCgpjcmVhdGVkX2F0GAggASgJEhcKCmV4cGlyZXNfYXQYCSABKAlIA4gBAUIHCgVfbmFtZUIJCgdfcHJlZml4QggKBl9zdGFydEINCgtfZXhwaXJlc19hdCIXChVHZXRDdXJyZW50VXNlclJlcXVlc3QiOQoWR2V0Q3VycmVudFVzZXJSZXNwb25zZRIfCgR1c2VyGAEgASgLMhEubWVkaWFyZWYudjEuVXNlciIZChdHZXRDdXJyZW50QXBpS2V5UmVxdWVzdCKsAgoYR2V0Q3VycmVudEFwaUtleVJlc3BvbnNlEg4KBmtleV9pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhEKBG5hbWUYAyABKAlIAIgBARITCgZwcmVmaXgYBCABKAlIAYgBARISCgVzdGFydBgFIAEoCUgCiAEBEjMKC3Blcm1pc3Npb25zGAYgASgLMh4ubWVkaWFyZWYudjEuQXBpS2V5UGVybWlzc2lvbnMSEgoKY2FuX3N1Ym1pdBgHIAEoCBIWCg5lbWFpbF92ZXJpZmllZBgIIAEoCBIMCgRyb2xlGAkgASgJEhcKCmV4cGlyZXNfYXQYCiABKAlIA4gBAUIHCgVfbmFtZUIJCgdfcHJlZml4QggKBl9zdGFydEINCgtfZXhwaXJlc19hdCKrAQoTQ3JlYXRlQXBpS2V5UmVxdWVzdBIRCgRuYW1lGAEgASgJSACIAQESFwoKY2FuX3N1Ym1pdBgCIAEoCEgBiAEBEigKBnNjb3BlcxgDIAMoDjIYLm1lZGlhcmVmLnYxLkFwaUtleVNjb3BlEhcKCmV4cGlyZXNfaW4YBCABKAVIAogBAUIHCgVfbmFtZUINCgtfY2FuX3N1Ym1pdEINCgtfZXhwaXJlc19pbiJQChRDcmVhdGVBcGlLZXlSZXNwb25zZRIrCgdhcGlfa2V5GAEgASgLMhoubWVkaWFyZWYudjEuQXBpS2V5U3VtbWFyeRILCgNrZXkYAiABKAkiFAoSTGlzdEFwaUtleXNSZXF1ZXN0IlIKE0xpc3RBcGlLZXlzUmVzcG9uc2USLAoIYXBpX2tleXMYASADKAsyGi5tZWRpYXJlZi52MS5BcGlLZXlTdW1tYXJ5Eg0KBXRvdGFsGAIgASgFIiEKE0RlbGV0ZUFwaUtleVJlcXVlc3QSCgoCaWQYASABKAkiMwoURGVsZXRlQXBpS2V5UmVzcG9uc2USDwoHc3VjY2VzcxgBIAEoCBIKCgJpZBgCIAEoCTLXAwoOQWNjb3VudFNlcnZpY2USXgoOR2V0Q3VycmVudFVzZXISIi5tZWRpYXJlZi52MS5HZXRDdXJyZW50VXNlclJlcXVlc3QaIy5tZWRpYXJlZi52MS5HZXRDdXJyZW50VXNlclJlc3BvbnNlIgOQAgESZAoQR2V0Q3VycmVudEFwaUtleRIkLm1lZGlhcmVmLnYxLkdldEN1cnJlbnRBcGlLZXlSZXF1ZXN0GiUubWVkaWFyZWYudjEuR2V0Q3VycmVudEFwaUtleVJlc3BvbnNlIgOQAgESUwoMQ3JlYXRlQXBpS2V5EiAubWVkaWFyZWYudjEuQ3JlYXRlQXBpS2V5UmVxdWVzdBohLm1lZGlhcmVmLnYxLkNyZWF0ZUFwaUtleVJlc3BvbnNlElUKC0xpc3RBcGlLZXlzEh8ubWVkaWFyZWYudjEuTGlzdEFwaUtleXNSZXF1ZXN0GiAubWVkaWFyZWYudjEuTGlzdEFwaUtleXNSZXNwb25zZSIDkAIBElMKDERlbGV0ZUFwaUtleRIgLm1lZGlhcmVmLnYxLkRlbGV0ZUFwaUtleVJlcXVlc3QaIS5tZWRpYXJlZi52MS5EZWxldGVBcGlLZXlSZXNwb25zZWIGcHJvdG8z",
+    "ChltZWRpYXJlZi92MS9hY2NvdW50LnByb3RvEgttZWRpYXJlZi52MSJVCgRVc2VyEgoKAmlkGAEgASgJEg0KBWVtYWlsGAIgASgJEgwKBG5hbWUYAyABKAkSFgoOZW1haWxfdmVyaWZpZWQYBCABKAgSDAoEcm9sZRgFIAEoCSI9ChFBcGlLZXlQZXJtaXNzaW9ucxIoCgVtZWRpYRgBIAMoDjIZLm1lZGlhcmVmLnYxLkFwaUtleUFjdGlvbiKLAgoNQXBpS2V5U3VtbWFyeRIKCgJpZBgBIAEoCRIRCgRuYW1lGAIgASgJSACIAQESEwoGcHJlZml4GAMgASgJSAGIAQESEgoFc3RhcnQYBCABKAlIAogBARIPCgdlbmFibGVkGAUgASgIEjMKC3Blcm1pc3Npb25zGAYgASgLMh4ubWVkaWFyZWYudjEuQXBpS2V5UGVybWlzc2lvbnMSEgoKY2FuX3N1Ym1pdBgHIAEoCBISCgpjcmVhdGVkX2F0GAggASgJEhcKCmV4cGlyZXNfYXQYCSABKAlIA4gBAUIHCgVfbmFtZUIJCgdfcHJlZml4QggKBl9zdGFydEINCgtfZXhwaXJlc19hdCIXChVHZXRDdXJyZW50VXNlclJlcXVlc3QiOQoWR2V0Q3VycmVudFVzZXJSZXNwb25zZRIfCgR1c2VyGAEgASgLMhEubWVkaWFyZWYudjEuVXNlciIZChdHZXRDdXJyZW50QXBpS2V5UmVxdWVzdCKsAgoYR2V0Q3VycmVudEFwaUtleVJlc3BvbnNlEg4KBmtleV9pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhEKBG5hbWUYAyABKAlIAIgBARITCgZwcmVmaXgYBCABKAlIAYgBARISCgVzdGFydBgFIAEoCUgCiAEBEjMKC3Blcm1pc3Npb25zGAYgASgLMh4ubWVkaWFyZWYudjEuQXBpS2V5UGVybWlzc2lvbnMSEgoKY2FuX3N1Ym1pdBgHIAEoCBIWCg5lbWFpbF92ZXJpZmllZBgIIAEoCBIMCgRyb2xlGAkgASgJEhcKCmV4cGlyZXNfYXQYCiABKAlIA4gBAUIHCgVfbmFtZUIJCgdfcHJlZml4QggKBl9zdGFydEINCgtfZXhwaXJlc19hdCKrAQoTQ3JlYXRlQXBpS2V5UmVxdWVzdBIRCgRuYW1lGAEgASgJSACIAQESFwoKY2FuX3N1Ym1pdBgCIAEoCEgBiAEBEigKBnNjb3BlcxgDIAMoDjIYLm1lZGlhcmVmLnYxLkFwaUtleVNjb3BlEhcKCmV4cGlyZXNfaW4YBCABKAVIAogBAUIHCgVfbmFtZUINCgtfY2FuX3N1Ym1pdEINCgtfZXhwaXJlc19pbiJQChRDcmVhdGVBcGlLZXlSZXNwb25zZRIrCgdhcGlfa2V5GAEgASgLMhoubWVkaWFyZWYudjEuQXBpS2V5U3VtbWFyeRILCgNrZXkYAiABKAkiFAoSTGlzdEFwaUtleXNSZXF1ZXN0IlIKE0xpc3RBcGlLZXlzUmVzcG9uc2USLAoIYXBpX2tleXMYASADKAsyGi5tZWRpYXJlZi52MS5BcGlLZXlTdW1tYXJ5Eg0KBXRvdGFsGAIgASgFIiEKE0RlbGV0ZUFwaUtleVJlcXVlc3QSCgoCaWQYASABKAkiMwoURGVsZXRlQXBpS2V5UmVzcG9uc2USDwoHc3VjY2VzcxgBIAEoCBIKCgJpZBgCIAEoCSJlChNVcGRhdGVBcGlLZXlSZXF1ZXN0EgoKAmlkGAEgASgJEhEKBG5hbWUYAiABKAlIAIgBARIXCgpjYW5fc3VibWl0GAMgASgISAGIAQFCBwoFX25hbWVCDQoLX2Nhbl9zdWJtaXQiQwoUVXBkYXRlQXBpS2V5UmVzcG9uc2USKwoHYXBpX2tleRgBIAEoCzIaLm1lZGlhcmVmLnYxLkFwaUtleVN1bW1hcnkiUAoLQXBpVXNhZ2VEYXkSDAoEZGF0ZRgBIAEoCRINCgVmb3VuZBgCIAEoAxIRCglub3RfZm91bmQYAyABKAMSEQoJc3VibWl0dGVkGAQgASgDIjYKDkFwaUtleUxhc3RVc2VkEg4KBmtleV9pZBgBIAEoCRIUCgxsYXN0X3VzZWRfYXQYAiABKAkiMAoSR2V0QXBpVXNhZ2VSZXF1ZXN0EhEKBGRheXMYASABKAVIAIgBAUIHCgVfZGF5cyJtChNHZXRBcGlVc2FnZVJlc3BvbnNlEiYKBGRheXMYASADKAsyGC5tZWRpYXJlZi52MS5BcGlVc2FnZURheRIuCglsYXN0X3VzZWQYAiADKAsyGy5tZWRpYXJlZi52MS5BcGlLZXlMYXN0VXNlZDKDBQoOQWNjb3VudFNlcnZpY2USXgoOR2V0Q3VycmVudFVzZXISIi5tZWRpYXJlZi52MS5HZXRDdXJyZW50VXNlclJlcXVlc3QaIy5tZWRpYXJlZi52MS5HZXRDdXJyZW50VXNlclJlc3BvbnNlIgOQAgESZAoQR2V0Q3VycmVudEFwaUtleRIkLm1lZGlhcmVmLnYxLkdldEN1cnJlbnRBcGlLZXlSZXF1ZXN0GiUubWVkaWFyZWYudjEuR2V0Q3VycmVudEFwaUtleVJlc3BvbnNlIgOQAgESUwoMQ3JlYXRlQXBpS2V5EiAubWVkaWFyZWYudjEuQ3JlYXRlQXBpS2V5UmVxdWVzdBohLm1lZGlhcmVmLnYxLkNyZWF0ZUFwaUtleVJlc3BvbnNlElUKC0xpc3RBcGlLZXlzEh8ubWVkaWFyZWYudjEuTGlzdEFwaUtleXNSZXF1ZXN0GiAubWVkaWFyZWYudjEuTGlzdEFwaUtleXNSZXNwb25zZSIDkAIBElMKDERlbGV0ZUFwaUtleRIgLm1lZGlhcmVmLnYxLkRlbGV0ZUFwaUtleVJlcXVlc3QaIS5tZWRpYXJlZi52MS5EZWxldGVBcGlLZXlSZXNwb25zZRJTCgxVcGRhdGVBcGlLZXkSIC5tZWRpYXJlZi52MS5VcGRhdGVBcGlLZXlSZXF1ZXN0GiEubWVkaWFyZWYudjEuVXBkYXRlQXBpS2V5UmVzcG9uc2USVQoLR2V0QXBpVXNhZ2USHy5tZWRpYXJlZi52MS5HZXRBcGlVc2FnZVJlcXVlc3QaIC5tZWRpYXJlZi52MS5HZXRBcGlVc2FnZVJlc3BvbnNlIgOQAgFiBnByb3RvMw",
     [file_mediaref_v1_types],
   );
 
@@ -371,6 +371,153 @@ export const DeleteApiKeyResponseSchema: GenMessage<DeleteApiKeyResponse> =
   messageDesc(file_mediaref_v1_account, 12);
 
 /**
+ * @generated from message mediaref.v1.UpdateApiKeyRequest
+ */
+export type UpdateApiKeyRequest = Message<"mediaref.v1.UpdateApiKeyRequest"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: optional string name = 2;
+   */
+  name?: string | undefined;
+
+  /**
+   * @generated from field: optional bool can_submit = 3;
+   */
+  canSubmit?: boolean | undefined;
+};
+
+/**
+ * Describes the message mediaref.v1.UpdateApiKeyRequest.
+ * Use `create(UpdateApiKeyRequestSchema)` to create a new message.
+ */
+export const UpdateApiKeyRequestSchema: GenMessage<UpdateApiKeyRequest> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_account, 13);
+
+/**
+ * @generated from message mediaref.v1.UpdateApiKeyResponse
+ */
+export type UpdateApiKeyResponse = Message<"mediaref.v1.UpdateApiKeyResponse"> & {
+  /**
+   * @generated from field: mediaref.v1.ApiKeySummary api_key = 1;
+   */
+  apiKey?: ApiKeySummary | undefined;
+};
+
+/**
+ * Describes the message mediaref.v1.UpdateApiKeyResponse.
+ * Use `create(UpdateApiKeyResponseSchema)` to create a new message.
+ */
+export const UpdateApiKeyResponseSchema: GenMessage<UpdateApiKeyResponse> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_account, 14);
+
+/**
+ * @generated from message mediaref.v1.ApiUsageDay
+ */
+export type ApiUsageDay = Message<"mediaref.v1.ApiUsageDay"> & {
+  /**
+   * UTC date, YYYY-MM-DD.
+   *
+   * @generated from field: string date = 1;
+   */
+  date: string;
+
+  /**
+   * @generated from field: int64 found = 2;
+   */
+  found: bigint;
+
+  /**
+   * @generated from field: int64 not_found = 3;
+   */
+  notFound: bigint;
+
+  /**
+   * @generated from field: int64 submitted = 4;
+   */
+  submitted: bigint;
+};
+
+/**
+ * Describes the message mediaref.v1.ApiUsageDay.
+ * Use `create(ApiUsageDaySchema)` to create a new message.
+ */
+export const ApiUsageDaySchema: GenMessage<ApiUsageDay> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_account, 15);
+
+/**
+ * @generated from message mediaref.v1.ApiKeyLastUsed
+ */
+export type ApiKeyLastUsed = Message<"mediaref.v1.ApiKeyLastUsed"> & {
+  /**
+   * @generated from field: string key_id = 1;
+   */
+  keyId: string;
+
+  /**
+   * @generated from field: string last_used_at = 2;
+   */
+  lastUsedAt: string;
+};
+
+/**
+ * Describes the message mediaref.v1.ApiKeyLastUsed.
+ * Use `create(ApiKeyLastUsedSchema)` to create a new message.
+ */
+export const ApiKeyLastUsedSchema: GenMessage<ApiKeyLastUsed> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_account, 16);
+
+/**
+ * @generated from message mediaref.v1.GetApiUsageRequest
+ */
+export type GetApiUsageRequest = Message<"mediaref.v1.GetApiUsageRequest"> & {
+  /**
+   * Days to cover, ending today (UTC). Defaults to 14, at most 90.
+   *
+   * @generated from field: optional int32 days = 1;
+   */
+  days?: number | undefined;
+};
+
+/**
+ * Describes the message mediaref.v1.GetApiUsageRequest.
+ * Use `create(GetApiUsageRequestSchema)` to create a new message.
+ */
+export const GetApiUsageRequestSchema: GenMessage<GetApiUsageRequest> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_account, 17);
+
+/**
+ * @generated from message mediaref.v1.GetApiUsageResponse
+ */
+export type GetApiUsageResponse = Message<"mediaref.v1.GetApiUsageResponse"> & {
+  /**
+   * @generated from field: repeated mediaref.v1.ApiUsageDay days = 1;
+   */
+  days: ApiUsageDay[];
+
+  /**
+   * @generated from field: repeated mediaref.v1.ApiKeyLastUsed last_used = 2;
+   */
+  lastUsed: ApiKeyLastUsed[];
+};
+
+/**
+ * Describes the message mediaref.v1.GetApiUsageResponse.
+ * Use `create(GetApiUsageResponseSchema)` to create a new message.
+ */
+export const GetApiUsageResponseSchema: GenMessage<GetApiUsageResponse> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_account, 18);
+
+/**
  * @generated from service mediaref.v1.AccountService
  */
 export const AccountService: GenService<{
@@ -413,5 +560,23 @@ export const AccountService: GenService<{
     methodKind: "unary";
     input: typeof DeleteApiKeyRequestSchema;
     output: typeof DeleteApiKeyResponseSchema;
+  };
+  /**
+   * @generated from rpc mediaref.v1.AccountService.UpdateApiKey
+   */
+  updateApiKey: {
+    methodKind: "unary";
+    input: typeof UpdateApiKeyRequestSchema;
+    output: typeof UpdateApiKeyResponseSchema;
+  };
+  /**
+   * Daily usage across all of the signed-in user's API keys.
+   *
+   * @generated from rpc mediaref.v1.AccountService.GetApiUsage
+   */
+  getApiUsage: {
+    methodKind: "unary";
+    input: typeof GetApiUsageRequestSchema;
+    output: typeof GetApiUsageResponseSchema;
   };
 }> = /*@__PURE__*/ serviceDesc(file_mediaref_v1_account, 0);

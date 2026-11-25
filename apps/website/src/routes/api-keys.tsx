@@ -1,5 +1,4 @@
 import { Alert, AlertDescription, AlertTitle } from "@media-ref/ui/components/alert";
-import { Badge } from "@media-ref/ui/components/badge";
 import { Button } from "@media-ref/ui/components/button";
 import {
   Card,
@@ -24,7 +23,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@media-ref/ui/components/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@media-ref/ui/components/empty";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@media-ref/ui/components/empty";
 import {
   Field,
   FieldContent,
@@ -67,26 +72,27 @@ import {
   RiMoreLine,
   RiShieldKeyholeLine,
 } from "@remixicon/react";
-import { createFileRoute } from "@tanstack/react-router";
+import { Skeleton } from "@media-ref/ui/components/skeleton";
+import { ConnectError } from "@connectrpc/connect";
+import { extractConnectErrorInfo } from "@media-ref/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
-import { API_USAGE_TREND, type ApiKeyItem } from "#/lib/catalog-data";
-
-interface ApiKeysSearch {
-  unverified?: number;
-}
+import { formatCount, formatDate, formatRelativeTime } from "#/lib/format";
+import { apiKeysQuery, apiUsageQuery, browserClients } from "#/lib/queries";
+import type { ApiKeyItem } from "#/lib/types";
 
 export const Route = createFileRoute("/api-keys")({
-  validateSearch: (search: Record<string, unknown>): ApiKeysSearch => ({
-    unverified: search.unverified === 1 || search.unverified === "1" ? 1 : undefined,
-  }),
   component: ApiKeysPage,
 });
 
 const apiKeysTableFeatures = tableFeatures({});
 const columnHelper = createColumnHelper<typeof apiKeysTableFeatures, ApiKeyItem>();
+const NO_KEYS: ApiKeyItem[] = [];
+const DAY_SECONDS = 86_400;
 
 function maskEmail(email: string): string {
   const [local, domain] = email.split("@");
@@ -95,29 +101,46 @@ function maskEmail(email: string): string {
   return `${visible}***@${domain}`;
 }
 
-function ApiKeysPage() {
-  const search = Route.useSearch();
-  const {
-    user,
-    apiKeys,
-    newlyCreatedKey,
-    createApiKey,
-    dismissNewlyCreatedKey,
-    renameApiKey,
-    toggleApiKeySubmitScope,
-    revokeApiKey,
-  } = useAppStore();
+function errorMessage(error: unknown): string {
+  return extractConnectErrorInfo(ConnectError.from(error)).message || "操作失败，请稍后重试";
+}
 
-  const isEmailVerified = search.unverified === 1 ? false : (user?.emailVerified ?? true);
+/** Rounds the chart ceiling up to 1/2/5 × 10ⁿ (at least 10) so the half-way gridline stays round. */
+function niceCeiling(n: number): number {
+  if (n <= 10) return 10;
+  const magnitude = 10 ** Math.floor(Math.log10(n));
+  return [1, 2, 5].map((m) => m * magnitude).find((v) => v >= n) ?? 10 * magnitude;
+}
+
+function formatAxis(n: number): string {
+  return n >= 1000 ? `${n / 1000}k` : String(n);
+}
+
+function ApiKeysPage() {
+  const { user, sessionChecked, resendVerificationEmail } = useAppStore();
+  const queryClient = useQueryClient();
+
+  const isEmailVerified = user?.emailVerified ?? false;
+  const keysQuery = useQuery({ ...apiKeysQuery(), enabled: isEmailVerified });
+  const usageQuery = useQuery({ ...apiUsageQuery(), enabled: isEmailVerified });
+  const apiKeys = keysQuery.data ?? NO_KEYS;
+  const usage = usageQuery.data ?? [];
 
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [canSubmit, setCanSubmit] = useState(false);
   const [expiresOption, setExpiresOption] = useState("90");
+  const [creating, setCreating] = useState(false);
+  const [newlyCreatedKey, setNewlyCreatedKey] = useState<{ name: string; secret: string } | null>(
+    null,
+  );
+  const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
+  const [resendError, setResendError] = useState<string | null>(null);
 
   const [renamingKey, setRenamingKey] = useState<ApiKeyItem | null>(null);
+  const [revokingKey, setRevokingKey] = useState<ApiKeyItem | null>(null);
   const [renameInput, setRenameInput] = useState("");
 
   useEffect(() => {
@@ -128,10 +151,39 @@ function ApiKeysPage() {
     return () => window.clearInterval(timer);
   }, [resendCooldown]);
 
-  const totalFound = API_USAGE_TREND.reduce((s, d) => s + d.found, 0);
-  const totalNotFound = API_USAGE_TREND.reduce((s, d) => s + d.notFound, 0);
-  const totalSubmitted = API_USAGE_TREND.reduce((s, d) => s + d.submitted, 0);
-  const maxDayTotal = 2000;
+  const handleResend = async () => {
+    if (!user) return;
+    setResendError(null);
+    const result = await resendVerificationEmail(user.email);
+    if (result.ok) {
+      setResendCooldown(60);
+    } else {
+      setResendError(result.error ?? "发送失败，请稍后重试");
+    }
+  };
+
+  /** Runs a key mutation, then refetches the list; errors land in `actionError`. */
+  const runAction = useCallback(
+    async (action: () => Promise<unknown>) => {
+      setActionError(null);
+      try {
+        await action();
+        await queryClient.invalidateQueries({ queryKey: apiKeysQuery().queryKey });
+        return true;
+      } catch (error) {
+        setActionError(errorMessage(error));
+        return false;
+      }
+    },
+    [queryClient],
+  );
+
+  const totalFound = usage.reduce((s, d) => s + d.found, 0);
+  const totalNotFound = usage.reduce((s, d) => s + d.notFound, 0);
+  const totalSubmitted = usage.reduce((s, d) => s + d.submitted, 0);
+  const maxDayTotal = niceCeiling(
+    Math.max(0, ...usage.map((d) => d.found + d.notFound + d.submitted)),
+  );
 
   const columns = useMemo(
     () =>
@@ -157,12 +209,21 @@ function ApiKeysPage() {
         columnHelper.accessor("createdAt", {
           header: "创建时间",
           cell: (info) => (
-            <span className="font-mono text-xs text-muted-foreground">{info.getValue()}</span>
+            <span className="font-mono text-xs text-muted-foreground">
+              {formatDate(info.getValue())}
+            </span>
           ),
         }),
-        columnHelper.accessor("lastUsed", {
+        columnHelper.accessor("lastUsedAt", {
           header: "最后使用",
-          cell: (info) => <span className="text-xs text-muted-foreground">{info.getValue()}</span>,
+          cell: (info) => {
+            const lastUsedAt = info.getValue();
+            return (
+              <span className="text-xs text-muted-foreground">
+                {lastUsedAt ? formatRelativeTime(lastUsedAt) : "尚未使用"}
+              </span>
+            );
+          },
         }),
         columnHelper.display({
           id: "actions",
@@ -188,12 +249,21 @@ function ApiKeysPage() {
                     <RiEditLine />
                     重命名
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => toggleApiKeySubmitScope(item.id)}>
+                  <DropdownMenuItem
+                    onClick={() =>
+                      void runAction(() =>
+                        browserClients().account.updateApiKey({
+                          id: item.id,
+                          canSubmit: !item.canSubmit,
+                        }),
+                      )
+                    }
+                  >
                     <RiShieldKeyholeLine />
                     {item.canSubmit ? "仅保留查询权限" : "开启提交变更单"}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" onClick={() => revokeApiKey(item.id)}>
+                  <DropdownMenuItem variant="destructive" onClick={() => setRevokingKey(item)}>
                     <RiDeleteBinLine />
                     吊销密钥
                   </DropdownMenuItem>
@@ -203,7 +273,7 @@ function ApiKeysPage() {
           },
         }),
       ]),
-    [revokeApiKey, toggleApiKeySubmitScope],
+    [runAction],
   );
 
   const table = useTable({
@@ -212,18 +282,30 @@ function ApiKeysPage() {
     columns,
   });
 
-  const handleCreate = () => {
-    const days = expiresOption === "never" ? null : Number(expiresOption);
-    createApiKey({
-      name: newName.trim() || "播放器本地客户端",
-      canRead: true,
-      canSubmit,
-      expiresInDays: days,
+  const handleCreate = async () => {
+    const name = newName.trim() || "播放器本地客户端";
+    setCreating(true);
+    const ok = await runAction(async () => {
+      const res = await browserClients().account.createApiKey({
+        name,
+        canSubmit,
+        ...(expiresOption === "never" ? {} : { expiresIn: Number(expiresOption) * DAY_SECONDS }),
+      });
+      setNewlyCreatedKey({ name: res.apiKey?.name ?? name, secret: res.key });
     });
+    setCreating(false);
+    if (!ok) return;
     setNewName("");
     setCanSubmit(false);
     setExpiresOption("90");
     setCreateOpen(false);
+  };
+
+  const handleRename = () => {
+    if (!renamingKey) return;
+    const id = renamingKey.id;
+    setRenamingKey(null);
+    void runAction(() => browserClients().account.updateApiKey({ id, name: renameInput.trim() }));
   };
 
   const handleCopySecret = async () => {
@@ -257,7 +339,10 @@ function ApiKeysPage() {
             variant={isEmailVerified ? "default" : "secondary"}
             size="default"
             disabled={!isEmailVerified}
-            onClick={() => setCreateOpen(true)}
+            onClick={() => {
+              setActionError(null);
+              setCreateOpen(true);
+            }}
             className="px-3.5"
           >
             <RiAddLine />
@@ -265,14 +350,28 @@ function ApiKeysPage() {
           </Button>
         </section>
 
-        {/* 05B: Unverified Email Warning */}
-        {!isEmailVerified ? (
+        {!sessionChecked ? (
+          <Skeleton className="h-45 rounded-xl" />
+        ) : !user ? (
+          <Empty className="rounded-xl border border-border bg-card py-14">
+            <EmptyHeader>
+              <EmptyTitle>登录后管理 API 密钥</EmptyTitle>
+              <EmptyDescription>登录后可以创建、重命名和吊销你的 API 密钥。</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button variant="default" nativeButton={false} render={<Link to="/login" />}>
+                登录
+              </Button>
+            </EmptyContent>
+          </Empty>
+        ) : !isEmailVerified ? (
+          /* 05B: Unverified Email Warning */
           <Alert variant="warning" className="p-4">
             <RiErrorWarningLine className="size-4" />
             <AlertTitle className="text-sm font-medium">邮箱还没验证，暂时不能创建密钥</AlertTitle>
             <AlertDescription className="mt-1 flex flex-col gap-3 text-xs">
               <span>
-                验证邮件已经发到 {maskEmail(user?.email ?? "lin.xiao@example.com")}
+                验证邮件已经发到 {maskEmail(user.email)}
                 ，点开邮件里的链接就完成了。验证之前，所有媒体页面照常可以浏览。
               </span>
               <div className="flex flex-wrap items-center gap-3">
@@ -280,7 +379,7 @@ function ApiKeysPage() {
                   variant="default"
                   size="default"
                   disabled={resendCooldown > 0}
-                  onClick={() => setResendCooldown(60)}
+                  onClick={() => void handleResend()}
                 >
                   <RiMailSendLine />
                   {resendCooldown > 0
@@ -288,13 +387,20 @@ function ApiKeysPage() {
                     : "重新发送验证邮件"}
                 </Button>
                 <span className="text-xs text-status-warning-fg/75">
-                  链接 24 小时内有效。没收到的话，先看看垃圾邮件。
+                  {resendError ?? "链接 24 小时内有效。没收到的话，先看看垃圾邮件。"}
                 </span>
               </div>
             </AlertDescription>
           </Alert>
         ) : (
           <>
+            {actionError && (
+              <Alert variant="destructive">
+                <RiErrorWarningLine className="size-4" />
+                <AlertTitle>{actionError}</AlertTitle>
+              </Alert>
+            )}
+
             {/* Newly Created Key Banner (05A) */}
             {newlyCreatedKey && (
               <Alert variant="confirmed" className="p-4">
@@ -333,7 +439,11 @@ function ApiKeysPage() {
                         </InputGroupButton>
                       </InputGroupAddon>
                     </InputGroup>
-                    <Button variant="outline" size="default" onClick={dismissNewlyCreatedKey}>
+                    <Button
+                      variant="outline"
+                      size="default"
+                      onClick={() => setNewlyCreatedKey(null)}
+                    >
                       我已保存
                     </Button>
                   </div>
@@ -345,10 +455,7 @@ function ApiKeysPage() {
             <Card>
               <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
                 <div>
-                  <div className="flex items-center gap-2">
-                    <CardTitle>API 调用趋势</CardTitle>
-                    <Badge variant="outline">二期</Badge>
-                  </div>
+                  <CardTitle>API 调用趋势</CardTitle>
                   <CardDescription className="mt-0.5">最近 14 天，所有密钥合计</CardDescription>
                 </div>
 
@@ -357,99 +464,113 @@ function ApiKeysPage() {
                     <span className="size-2 rounded-2xs bg-coverage" />
                     <span className="text-muted-foreground">查到媒体</span>
                     <span className="font-mono font-medium text-foreground">
-                      {totalFound.toLocaleString("en-US")}
+                      {formatCount(totalFound)}
                     </span>
                   </span>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="size-2 rounded-2xs bg-coverage-muted" />
                     <span className="text-muted-foreground">没查到</span>
                     <span className="font-mono font-medium text-foreground">
-                      {totalNotFound.toLocaleString("en-US")}
+                      {formatCount(totalNotFound)}
                     </span>
                   </span>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="size-2 rounded-2xs bg-muted-foreground/60" />
                     <span className="text-muted-foreground">提交变更单</span>
                     <span className="font-mono font-medium text-foreground">
-                      {totalSubmitted.toLocaleString("en-US")}
+                      {formatCount(totalSubmitted)}
                     </span>
                   </span>
                 </div>
               </CardHeader>
 
               <CardContent className="pt-2">
-                <div className="relative flex gap-3">
-                  {/* Y axis labels */}
-                  <div className="flex h-45 w-7 shrink-0 flex-col justify-between pb-6 text-right font-mono text-2xs text-muted-foreground/70">
-                    <span>2k</span>
-                    <span>1k</span>
-                    <span>0</span>
-                  </div>
-
-                  {/* Chart plot */}
-                  <div className="relative flex-1">
-                    {/* Horizontal gridlines */}
-                    <div
-                      aria-hidden="true"
-                      className="pointer-events-none absolute inset-x-0 top-0 bottom-6 flex flex-col justify-between"
-                    >
-                      <div className="border-t border-border/50" />
-                      <div className="border-t border-border/50" />
-                      <div className="border-t border-border/70" />
+                {usageQuery.isPending ? (
+                  <Skeleton className="h-45 w-full" />
+                ) : usageQuery.isError ? (
+                  <Alert variant="destructive">
+                    <RiErrorWarningLine className="size-4" />
+                    <AlertTitle>调用统计加载失败</AlertTitle>
+                    <AlertDescription>{errorMessage(usageQuery.error)}</AlertDescription>
+                  </Alert>
+                ) : (
+                  <div className="relative flex gap-3">
+                    {/* Y axis labels */}
+                    <div className="flex h-45 w-7 shrink-0 flex-col justify-between pb-6 text-right font-mono text-2xs text-muted-foreground/70">
+                      <span>{formatAxis(maxDayTotal)}</span>
+                      <span>{formatAxis(maxDayTotal / 2)}</span>
+                      <span>0</span>
                     </div>
 
-                    {/* Bars */}
-                    <div className="relative grid h-45 grid-cols-14 items-end gap-2 sm:gap-3">
-                      {API_USAGE_TREND.map((day) => {
-                        const foundPct = (day.found / maxDayTotal) * 100;
-                        const notFoundPct = (day.notFound / maxDayTotal) * 100;
-                        const submitPct = Math.max((day.submitted / maxDayTotal) * 100, 1.5);
-                        return (
-                          <div
-                            key={day.date}
-                            className="flex h-full flex-col items-center justify-end gap-2"
-                          >
-                            <Tooltip>
-                              <TooltipTrigger
-                                render={
-                                  <button
-                                    type="button"
-                                    aria-label={`${day.date} API 调用统计`}
-                                    className="flex h-39 w-full max-w-8 flex-col justify-end overflow-hidden rounded-t-xs transition-opacity hover:opacity-85 focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+                    {/* Chart plot */}
+                    <div className="relative flex-1">
+                      {/* Horizontal gridlines */}
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-x-0 top-0 bottom-6 flex flex-col justify-between"
+                      >
+                        <div className="border-t border-border/50" />
+                        <div className="border-t border-border/50" />
+                        <div className="border-t border-border/70" />
+                      </div>
+
+                      {/* Bars */}
+                      <div className="relative grid h-45 grid-cols-14 items-end gap-2 sm:gap-3">
+                        {usage.map((day) => {
+                          const foundPct = (day.found / maxDayTotal) * 100;
+                          const notFoundPct = (day.notFound / maxDayTotal) * 100;
+                          // Keep a visible sliver for small non-zero counts; zero stays empty.
+                          const submitPct =
+                            day.submitted > 0
+                              ? Math.max((day.submitted / maxDayTotal) * 100, 1.5)
+                              : 0;
+                          return (
+                            <div
+                              key={day.date}
+                              className="flex h-full flex-col items-center justify-end gap-2"
+                            >
+                              <Tooltip>
+                                <TooltipTrigger
+                                  render={
+                                    <button
+                                      type="button"
+                                      aria-label={`${day.date} API 调用统计`}
+                                      className="flex h-39 w-full max-w-8 flex-col justify-end overflow-hidden rounded-t-xs transition-opacity hover:opacity-85 focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+                                    />
+                                  }
+                                >
+                                  <span
+                                    style={{ height: `${submitPct}%` }}
+                                    className="block w-full bg-muted-foreground/60"
                                   />
-                                }
-                              >
-                                <span
-                                  style={{ height: `${submitPct}%` }}
-                                  className="block w-full bg-muted-foreground/60"
-                                />
-                                <span
-                                  style={{ height: `${notFoundPct}%` }}
-                                  className="block w-full bg-coverage-muted"
-                                />
-                                <span
-                                  style={{ height: `${foundPct}%` }}
-                                  className="block w-full bg-coverage"
-                                />
-                              </TooltipTrigger>
-                              <TooltipContent side="top">
-                                <div className="flex flex-col gap-0.5 text-xs">
-                                  <div className="font-mono font-medium">{day.date}</div>
-                                  <div>查到媒体：{day.found.toLocaleString("en-US")}</div>
-                                  <div>没查到：{day.notFound.toLocaleString("en-US")}</div>
-                                  <div>提交变更单：{day.submitted}</div>
-                                </div>
-                              </TooltipContent>
-                            </Tooltip>
-                            <span className="font-mono text-2xs text-muted-foreground/80">
-                              {day.date}
-                            </span>
-                          </div>
-                        );
-                      })}
+                                  <span
+                                    style={{ height: `${notFoundPct}%` }}
+                                    className="block w-full bg-coverage-muted"
+                                  />
+                                  <span
+                                    style={{ height: `${foundPct}%` }}
+                                    className="block w-full bg-coverage"
+                                  />
+                                </TooltipTrigger>
+                                <TooltipContent side="top">
+                                  <div className="flex flex-col gap-0.5 text-xs">
+                                    <div className="font-mono font-medium">{day.date}</div>
+                                    <div>查到媒体：{formatCount(day.found)}</div>
+                                    <div>没查到：{formatCount(day.notFound)}</div>
+                                    <div>提交变更单：{formatCount(day.submitted)}</div>
+                                  </div>
+                                </TooltipContent>
+                              </Tooltip>
+                              <span className="font-mono text-2xs text-muted-foreground/80">
+                                {day.date}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
-                </div>
+                )}
               </CardContent>
             </Card>
 
@@ -464,7 +585,15 @@ function ApiKeysPage() {
                 </p>
               </div>
 
-              {apiKeys.length === 0 ? (
+              {keysQuery.isPending ? (
+                <Skeleton className="h-40 w-full rounded-xl" />
+              ) : keysQuery.isError ? (
+                <Alert variant="destructive">
+                  <RiErrorWarningLine className="size-4" />
+                  <AlertTitle>密钥列表加载失败</AlertTitle>
+                  <AlertDescription>{errorMessage(keysQuery.error)}</AlertDescription>
+                </Alert>
+              ) : apiKeys.length === 0 ? (
                 <Empty className="rounded-xl border border-border bg-card py-14">
                   <EmptyHeader>
                     <EmptyTitle>还没有创建 API 密钥</EmptyTitle>
@@ -588,12 +717,19 @@ function ApiKeysPage() {
             </Field>
           </div>
 
+          {actionError && (
+            <Alert variant="destructive">
+              <RiErrorWarningLine className="size-4" />
+              <AlertTitle>{actionError}</AlertTitle>
+            </Alert>
+          )}
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               取消
             </Button>
-            <Button variant="default" onClick={handleCreate}>
-              创建
+            <Button variant="default" disabled={creating} onClick={() => void handleCreate()}>
+              {creating ? "创建中…" : "创建"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -610,26 +746,44 @@ function ApiKeysPage() {
             value={renameInput}
             onChange={(e) => setRenameInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && renamingKey) {
-                renameApiKey(renamingKey.id, renameInput);
-                setRenamingKey(null);
-              }
+              if (e.key === "Enter") handleRename();
             }}
           />
           <DialogFooter>
             <Button variant="outline" onClick={() => setRenamingKey(null)}>
               取消
             </Button>
+            <Button variant="default" onClick={handleRename}>
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Revoke confirmation: revoking is immediate and cannot be undone */}
+      <Dialog open={Boolean(revokingKey)} onOpenChange={(open) => !open && setRevokingKey(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>吊销密钥「{revokingKey?.name}」？</DialogTitle>
+            <DialogDescription>
+              吊销后最多 75 秒内失效，用这把密钥的播放器或脚本会立即无法调用，且无法恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRevokingKey(null)}>
+              取消
+            </Button>
             <Button
-              variant="default"
+              variant="destructive"
               onClick={() => {
-                if (renamingKey) {
-                  renameApiKey(renamingKey.id, renameInput);
+                const target = revokingKey;
+                setRevokingKey(null);
+                if (target) {
+                  void runAction(() => browserClients().account.deleteApiKey({ id: target.id }));
                 }
-                setRenamingKey(null);
               }}
             >
-              保存
+              吊销
             </Button>
           </DialogFooter>
         </DialogContent>

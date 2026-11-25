@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
 export const file_mediaref_v1_change_request: GenFile =
   /*@__PURE__*/
   fileDesc(
-    "CiBtZWRpYXJlZi92MS9jaGFuZ2VfcmVxdWVzdC5wcm90bxILbWVkaWFyZWYudjEipwMKGkNyZWF0ZUNoYW5nZVJlcXVlc3RSZXF1ZXN0EiUKBnRhcmdldBgBIAEoCzIVLm1lZGlhcmVmLnYxLk1lZGlhUmVmEhEKCW5hbWVzcGFjZRgCIAEoCRIRCgluYXRpdmVfaWQYAyABKAkSGgoNcmF3X25hdGl2ZV9pZBgEIAEoCUgAiAEBEhcKCnZhcmlhbnRfaWQYBSABKAlIAYgBARIgChN2YXJpYW50X2Rlc2NyaXB0aW9uGAYgASgJSAKIAQESGwoTc2V0X2RlZmF1bHRfdmFyaWFudBgHIAEoCBIUCgd0YXNrX2lkGAggASgJSAOIAQESJAoXcmVwbGFjZXNfYXNzb2NpYXRpb25faWQYCSABKAlIBIgBARIrCghzZWdtZW50cxgKIAMoCzIZLm1lZGlhcmVmLnYxLlNlZ21lbnRJbnB1dEIQCg5fcmF3X25hdGl2ZV9pZEINCgtfdmFyaWFudF9pZEIWChRfdmFyaWFudF9kZXNjcmlwdGlvbkIKCghfdGFza19pZEIaChhfcmVwbGFjZXNfYXNzb2NpYXRpb25faWQiUQobQ3JlYXRlQ2hhbmdlUmVxdWVzdFJlc3BvbnNlEjIKDmNoYW5nZV9yZXF1ZXN0GAEgASgLMhoubWVkaWFyZWYudjEuQ2hhbmdlUmVxdWVzdCIlChdHZXRDaGFuZ2VSZXF1ZXN0UmVxdWVzdBIKCgJpZBgBIAEoCSJOChhHZXRDaGFuZ2VSZXF1ZXN0UmVzcG9uc2USMgoOY2hhbmdlX3JlcXVlc3QYASABKAsyGi5tZWRpYXJlZi52MS5DaGFuZ2VSZXF1ZXN0MuYBChRDaGFuZ2VSZXF1ZXN0U2VydmljZRJoChNDcmVhdGVDaGFuZ2VSZXF1ZXN0EicubWVkaWFyZWYudjEuQ3JlYXRlQ2hhbmdlUmVxdWVzdFJlcXVlc3QaKC5tZWRpYXJlZi52MS5DcmVhdGVDaGFuZ2VSZXF1ZXN0UmVzcG9uc2USZAoQR2V0Q2hhbmdlUmVxdWVzdBIkLm1lZGlhcmVmLnYxLkdldENoYW5nZVJlcXVlc3RSZXF1ZXN0GiUubWVkaWFyZWYudjEuR2V0Q2hhbmdlUmVxdWVzdFJlc3BvbnNlIgOQAgFiBnByb3RvMw",
+    "CiBtZWRpYXJlZi92MS9jaGFuZ2VfcmVxdWVzdC5wcm90bxILbWVkaWFyZWYudjEipwMKGkNyZWF0ZUNoYW5nZVJlcXVlc3RSZXF1ZXN0EiUKBnRhcmdldBgBIAEoCzIVLm1lZGlhcmVmLnYxLk1lZGlhUmVmEhEKCW5hbWVzcGFjZRgCIAEoCRIRCgluYXRpdmVfaWQYAyABKAkSGgoNcmF3X25hdGl2ZV9pZBgEIAEoCUgAiAEBEhcKCnZhcmlhbnRfaWQYBSABKAlIAYgBARIgChN2YXJpYW50X2Rlc2NyaXB0aW9uGAYgASgJSAKIAQESGwoTc2V0X2RlZmF1bHRfdmFyaWFudBgHIAEoCBIUCgd0YXNrX2lkGAggASgJSAOIAQESJAoXcmVwbGFjZXNfYXNzb2NpYXRpb25faWQYCSABKAlIBIgBARIrCghzZWdtZW50cxgKIAMoCzIZLm1lZGlhcmVmLnYxLlNlZ21lbnRJbnB1dEIQCg5fcmF3X25hdGl2ZV9pZEINCgtfdmFyaWFudF9pZEIWChRfdmFyaWFudF9kZXNjcmlwdGlvbkIKCghfdGFza19pZEIaChhfcmVwbGFjZXNfYXNzb2NpYXRpb25faWQiUQobQ3JlYXRlQ2hhbmdlUmVxdWVzdFJlc3BvbnNlEjIKDmNoYW5nZV9yZXF1ZXN0GAEgASgLMhoubWVkaWFyZWYudjEuQ2hhbmdlUmVxdWVzdCIlChdHZXRDaGFuZ2VSZXF1ZXN0UmVxdWVzdBIKCgJpZBgBIAEoCSJOChhHZXRDaGFuZ2VSZXF1ZXN0UmVzcG9uc2USMgoOY2hhbmdlX3JlcXVlc3QYASABKAsyGi5tZWRpYXJlZi52MS5DaGFuZ2VSZXF1ZXN0IlsKG0xpc3RNeUNoYW5nZVJlcXVlc3RzUmVxdWVzdBISCgVsaW1pdBgBIAEoBUgAiAEBEhMKBm9mZnNldBgCIAEoBUgBiAEBQggKBl9saW1pdEIJCgdfb2Zmc2V0ImIKHExpc3RNeUNoYW5nZVJlcXVlc3RzUmVzcG9uc2USMwoPY2hhbmdlX3JlcXVlc3RzGAEgAygLMhoubWVkaWFyZWYudjEuQ2hhbmdlUmVxdWVzdBINCgV0b3RhbBgCIAEoBTLYAgoUQ2hhbmdlUmVxdWVzdFNlcnZpY2USaAoTQ3JlYXRlQ2hhbmdlUmVxdWVzdBInLm1lZGlhcmVmLnYxLkNyZWF0ZUNoYW5nZVJlcXVlc3RSZXF1ZXN0GigubWVkaWFyZWYudjEuQ3JlYXRlQ2hhbmdlUmVxdWVzdFJlc3BvbnNlEmQKEEdldENoYW5nZVJlcXVlc3QSJC5tZWRpYXJlZi52MS5HZXRDaGFuZ2VSZXF1ZXN0UmVxdWVzdBolLm1lZGlhcmVmLnYxLkdldENoYW5nZVJlcXVlc3RSZXNwb25zZSIDkAIBEnAKFExpc3RNeUNoYW5nZVJlcXVlc3RzEigubWVkaWFyZWYudjEuTGlzdE15Q2hhbmdlUmVxdWVzdHNSZXF1ZXN0GikubWVkaWFyZWYudjEuTGlzdE15Q2hhbmdlUmVxdWVzdHNSZXNwb25zZSIDkAIBYgZwcm90bzM",
     [file_mediaref_v1_types],
   );
 
@@ -136,6 +136,52 @@ export const GetChangeRequestResponseSchema: GenMessage<GetChangeRequestResponse
   messageDesc(file_mediaref_v1_change_request, 3);
 
 /**
+ * @generated from message mediaref.v1.ListMyChangeRequestsRequest
+ */
+export type ListMyChangeRequestsRequest = Message<"mediaref.v1.ListMyChangeRequestsRequest"> & {
+  /**
+   * @generated from field: optional int32 limit = 1;
+   */
+  limit?: number | undefined;
+
+  /**
+   * @generated from field: optional int32 offset = 2;
+   */
+  offset?: number | undefined;
+};
+
+/**
+ * Describes the message mediaref.v1.ListMyChangeRequestsRequest.
+ * Use `create(ListMyChangeRequestsRequestSchema)` to create a new message.
+ */
+export const ListMyChangeRequestsRequestSchema: GenMessage<ListMyChangeRequestsRequest> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_change_request, 4);
+
+/**
+ * @generated from message mediaref.v1.ListMyChangeRequestsResponse
+ */
+export type ListMyChangeRequestsResponse = Message<"mediaref.v1.ListMyChangeRequestsResponse"> & {
+  /**
+   * @generated from field: repeated mediaref.v1.ChangeRequest change_requests = 1;
+   */
+  changeRequests: ChangeRequest[];
+
+  /**
+   * @generated from field: int32 total = 2;
+   */
+  total: number;
+};
+
+/**
+ * Describes the message mediaref.v1.ListMyChangeRequestsResponse.
+ * Use `create(ListMyChangeRequestsResponseSchema)` to create a new message.
+ */
+export const ListMyChangeRequestsResponseSchema: GenMessage<ListMyChangeRequestsResponse> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_change_request, 5);
+
+/**
  * @generated from service mediaref.v1.ChangeRequestService
  */
 export const ChangeRequestService: GenService<{
@@ -154,5 +200,15 @@ export const ChangeRequestService: GenService<{
     methodKind: "unary";
     input: typeof GetChangeRequestRequestSchema;
     output: typeof GetChangeRequestResponseSchema;
+  };
+  /**
+   * Change requests submitted by the signed-in user (session only), newest first.
+   *
+   * @generated from rpc mediaref.v1.ChangeRequestService.ListMyChangeRequests
+   */
+  listMyChangeRequests: {
+    methodKind: "unary";
+    input: typeof ListMyChangeRequestsRequestSchema;
+    output: typeof ListMyChangeRequestsResponseSchema;
   };
 }> = /*@__PURE__*/ serviceDesc(file_mediaref_v1_change_request, 0);

@@ -4,6 +4,7 @@ import {
   createDefaultAdapterRegistry,
   resolveAnonymousInvalidationThreshold,
   type AdapterRegistry,
+  type BrowseCache,
   type CatalogGatewayConfig,
   type ExternalTargetKind,
   type OutboundClient,
@@ -20,6 +21,7 @@ import {
 } from "@connectrpc/connect/protocol";
 import { accountServiceImpl } from "./api-keys.ts";
 import { associationServiceImpl } from "./associations.ts";
+import { browseServiceImpl } from "./browse.ts";
 import {
   AUTH_BASE_PATH,
   createAuth,
@@ -38,6 +40,7 @@ import {
   type ReadRateLimitRuntime,
 } from "./rate-limit.ts";
 import { reviewerServiceImpl } from "./reviewer.ts";
+import type { UsageReader, UsageRecorder } from "./usage.ts";
 
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
@@ -61,6 +64,9 @@ export interface ApiDeps {
   dbWrite: Db;
   outbound: OutboundClient;
   adapterRegistry?: AdapterRegistry;
+  browseCache?: BrowseCache;
+  usageRecorder?: UsageRecorder;
+  usageReader?: UsageReader;
   tmdbGateway?: TmdbGateway;
   onBackgroundTask?: (promise: Promise<unknown>) => void;
   onBackgroundTaskError?: (error: unknown) => void;
@@ -72,7 +78,15 @@ export interface ApiDeps {
 
 export interface ApiApp {
   fetch(request: Request, env?: unknown, ctx?: ExecutionContext): Promise<Response>;
+  /**
+   * Entry for trusted callers reaching the API over a service binding (the website server).
+   * Public read RPCs skip the API key; the caller forwards the visitor IP in
+   * `INTERNAL_VISITOR_IP_HEADER` so per-IP read limits still apply.
+   */
+  fetchInternal(request: Request, ctx?: ExecutionContext): Promise<Response>;
 }
+
+export const INTERNAL_VISITOR_IP_HEADER = "x-media-ref-visitor-ip";
 
 const VALID_KINDS = new Set<ExternalTargetKind>(["platform", "catalog"]);
 
@@ -100,6 +114,7 @@ connectRouter.service(proto.ChangeRequestService, changeRequestServiceImpl);
 connectRouter.service(proto.AssociationService, associationServiceImpl);
 connectRouter.service(proto.AccountService, accountServiceImpl);
 connectRouter.service(proto.ReviewerService, reviewerServiceImpl);
+connectRouter.service(proto.BrowseService, browseServiceImpl);
 
 const connectHandlerMap = new Map<string, UniversalHandler>(
   connectRouter.handlers.map((handler) => [handler.requestPath, handler]),
@@ -211,6 +226,9 @@ export function createApiApp(deps: ApiDeps): ApiApp {
     outbound: deps.outbound,
     adapterRegistry,
     catalogConfig: deps.config.catalog,
+    browseCache: deps.browseCache,
+    usageRecorder: deps.usageRecorder,
+    usageReader: deps.usageReader,
     tmdbConfig: deps.config.tmdb,
     tmdbGateway: deps.tmdbGateway,
     now,
@@ -223,110 +241,123 @@ export function createApiApp(deps: ApiDeps): ApiApp {
     onBackgroundTaskError: deps.onBackgroundTaskError,
   };
 
+  const handle = async (
+    request: Request,
+    ctx: ExecutionContext | undefined,
+    internal: boolean,
+  ): Promise<Response> => {
+    if (request.method === "OPTIONS") {
+      return buildPreflightResponse(request, deps.config);
+    }
+
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+
+    if (pathname === "/health" && request.method === "GET") {
+      try {
+        const row = await deps.dbRead
+          .selectFrom("schema_meta")
+          .select("value")
+          .where("key", "=", "bootstrap_version")
+          .executeTakeFirst();
+
+        const res = row
+          ? Response.json({ ok: true, database: "ok" }, { status: 200 })
+          : Response.json({ ok: false, database: "uninitialized" }, { status: 503 });
+        return applyCorsHeaders(request, res, deps.config);
+      } catch {
+        return applyCorsHeaders(
+          request,
+          Response.json({ ok: false, database: "error" }, { status: 503 }),
+          deps.config,
+        );
+      }
+    }
+
+    if (
+      deps.config.enableHealthOutboundProbe &&
+      pathname === "/health/outbound" &&
+      request.method === "GET"
+    ) {
+      const kindParam = (url.searchParams.get("kind") ?? "platform") as ExternalTargetKind;
+      const namespace = url.searchParams.get("namespace")?.trim();
+      const targetUrl = url.searchParams.get("url")?.trim();
+
+      if (!VALID_KINDS.has(kindParam) || !namespace || !targetUrl || !isValidHttpUrl(targetUrl)) {
+        return applyCorsHeaders(
+          request,
+          Response.json({ ok: false, error: "invalid_probe_parameters" }, { status: 400 }),
+          deps.config,
+        );
+      }
+
+      try {
+        const upstream = await deps.outbound.fetchExternal({
+          kind: kindParam,
+          namespace,
+          url: targetUrl,
+          method: "GET",
+        });
+
+        return applyCorsHeaders(
+          request,
+          Response.json(
+            {
+              ok: true,
+              kind: kindParam,
+              namespace,
+              upstreamStatus: upstream.status,
+              bodyPreview: upstream.body.slice(0, 512),
+            },
+            { status: 200 },
+          ),
+          deps.config,
+        );
+      } catch {
+        return applyCorsHeaders(
+          request,
+          Response.json({ ok: false, error: "upstream_error" }, { status: 502 }),
+          deps.config,
+        );
+      }
+    }
+
+    if (
+      (pathname === AUTH_BASE_PATH || pathname.startsWith(`${AUTH_BASE_PATH}/`)) &&
+      (request.method === "GET" || request.method === "POST")
+    ) {
+      const authRes = await getAuth().handler(request);
+      return applyCorsHeaders(request, authRes, deps.config);
+    }
+
+    const connectHandler = connectHandlerMap.get(pathname);
+    if (connectHandler) {
+      const runtime: ApiRequestRuntime = {
+        ...baseRuntime,
+        internal,
+        executionCtx: ctx,
+      };
+      const uReq = universalServerRequestFromFetch(request, {});
+      uReq.contextValues = createContextValues().set(kApiRequestRuntime, runtime);
+      const uRes = await connectHandler(uReq);
+      const fetchRes = universalServerResponseToFetch(uRes);
+      return applyCorsHeaders(request, fetchRes, deps.config);
+    }
+
+    return applyCorsHeaders(
+      request,
+      Response.json({ error: "NOT_FOUND", message: "Not found" }, { status: 404 }),
+      deps.config,
+    );
+  };
+
   return {
-    async fetch(request: Request, _env?: unknown, ctx?: ExecutionContext): Promise<Response> {
-      if (request.method === "OPTIONS") {
-        return buildPreflightResponse(request, deps.config);
-      }
-
-      const url = new URL(request.url);
-      const pathname = url.pathname;
-
-      if (pathname === "/health" && request.method === "GET") {
-        try {
-          const row = await deps.dbRead
-            .selectFrom("schema_meta")
-            .select("value")
-            .where("key", "=", "bootstrap_version")
-            .executeTakeFirst();
-
-          const res = row
-            ? Response.json({ ok: true, database: "ok" }, { status: 200 })
-            : Response.json({ ok: false, database: "uninitialized" }, { status: 503 });
-          return applyCorsHeaders(request, res, deps.config);
-        } catch {
-          return applyCorsHeaders(
-            request,
-            Response.json({ ok: false, database: "error" }, { status: 503 }),
-            deps.config,
-          );
-        }
-      }
-
-      if (
-        deps.config.enableHealthOutboundProbe &&
-        pathname === "/health/outbound" &&
-        request.method === "GET"
-      ) {
-        const kindParam = (url.searchParams.get("kind") ?? "platform") as ExternalTargetKind;
-        const namespace = url.searchParams.get("namespace")?.trim();
-        const targetUrl = url.searchParams.get("url")?.trim();
-
-        if (!VALID_KINDS.has(kindParam) || !namespace || !targetUrl || !isValidHttpUrl(targetUrl)) {
-          return applyCorsHeaders(
-            request,
-            Response.json({ ok: false, error: "invalid_probe_parameters" }, { status: 400 }),
-            deps.config,
-          );
-        }
-
-        try {
-          const upstream = await deps.outbound.fetchExternal({
-            kind: kindParam,
-            namespace,
-            url: targetUrl,
-            method: "GET",
-          });
-
-          return applyCorsHeaders(
-            request,
-            Response.json(
-              {
-                ok: true,
-                kind: kindParam,
-                namespace,
-                upstreamStatus: upstream.status,
-                bodyPreview: upstream.body.slice(0, 512),
-              },
-              { status: 200 },
-            ),
-            deps.config,
-          );
-        } catch {
-          return applyCorsHeaders(
-            request,
-            Response.json({ ok: false, error: "upstream_error" }, { status: 502 }),
-            deps.config,
-          );
-        }
-      }
-
-      if (
-        (pathname === AUTH_BASE_PATH || pathname.startsWith(`${AUTH_BASE_PATH}/`)) &&
-        (request.method === "GET" || request.method === "POST")
-      ) {
-        const authRes = await getAuth().handler(request);
-        return applyCorsHeaders(request, authRes, deps.config);
-      }
-
-      const connectHandler = connectHandlerMap.get(pathname);
-      if (connectHandler) {
-        const runtime: ApiRequestRuntime = {
-          ...baseRuntime,
-          executionCtx: ctx,
-        };
-        const uReq = universalServerRequestFromFetch(request, {});
-        uReq.contextValues = createContextValues().set(kApiRequestRuntime, runtime);
-        const uRes = await connectHandler(uReq);
-        const fetchRes = universalServerResponseToFetch(uRes);
-        return applyCorsHeaders(request, fetchRes, deps.config);
-      }
-
-      return applyCorsHeaders(
-        request,
-        Response.json({ error: "NOT_FOUND", message: "Not found" }, { status: 404 }),
-        deps.config,
-      );
+    fetch: (request, _env, ctx) => handle(request, ctx, false),
+    fetchInternal: (request, ctx) => {
+      // Service-binding requests carry no Cloudflare client IP; use the forwarded visitor IP.
+      const headers = new Headers(request.headers);
+      headers.set("cf-connecting-ip", headers.get(INTERNAL_VISITOR_IP_HEADER) ?? "internal");
+      return handle(new Request(request, { headers }), ctx, true);
     },
   };
 }

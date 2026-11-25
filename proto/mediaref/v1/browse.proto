@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package mediaref.v1;
+
+import "mediaref/v1/types.proto";
+
+// Website-facing discovery reads. Titles here may or may not exist in MediaRef yet:
+// `media_id` and `platforms` are filled in only for titles that do.
+
+enum BrowseType {
+  BROWSE_TYPE_UNSPECIFIED = 0; // all
+  BROWSE_TYPE_MOVIE = 1;
+  BROWSE_TYPE_TV = 2;
+  BROWSE_TYPE_ANIME = 3;
+}
+
+message CatalogCard {
+  // Catalog target key, usable as a change-request target: "tmdb:tv:1429", "douban:123",
+  // "bangumi:456", "trakt:show:slug".
+  string key = 1;
+  string namespace = 2;
+  MediaType type = 3;
+  bool is_anime = 4;
+  string title = 5;
+  optional string original_title = 6;
+  optional int32 year = 7;
+  optional string poster_url = 8;
+  // Set when the title already exists in MediaRef.
+  optional string media_id = 9;
+  // Platform namespaces with a confirmed association (empty when not in MediaRef).
+  repeated string platforms = 10;
+}
+
+message CatalogCredit {
+  string role = 1;
+  string name = 2;
+}
+
+message CatalogSeason {
+  int32 season = 1;
+  int32 episode_count = 2;
+}
+
+message CatalogDetail {
+  CatalogCard card = 1;
+  optional string backdrop_url = 2;
+  optional string overview = 3;
+  repeated string genres = 4;
+  repeated string regions = 5;
+  repeated CatalogCredit credits = 6;
+  // "ongoing" or "ended" when the catalog says so.
+  optional string status = 7;
+  optional int32 year_end = 8;
+  repeated CatalogSeason seasons = 9;
+}
+
+message ListTrendingRequest {
+  // "tmdb", "douban", "bangumi" or "trakt".
+  string namespace = 1;
+  BrowseType type = 2;
+  optional int32 limit = 3;
+}
+
+message ListTrendingResponse {
+  repeated CatalogCard items = 1;
+}
+
+message GetCatalogDetailRequest {
+  string key = 1;
+}
+
+message GetCatalogDetailResponse {
+  CatalogDetail detail = 1;
+}
+
+message SearchRequest {
+  // A title, a catalog/platform URL, or a "namespace:id" key.
+  string query = 1;
+  optional int32 limit = 2;
+}
+
+message SearchResponse {
+  repeated CatalogCard items = 1;
+  // True when the query was read as a URL/key rather than a title.
+  bool matched_as_link = 2;
+}
+
+message DemandEntry {
+  string id = 1;
+  int32 demand_count = 2;
+  optional int32 season = 3;
+  string last_demanded_at = 4;
+  CatalogCard card = 5;
+}
+
+message ListDemandsRequest {
+  optional int32 limit = 1;
+  optional int32 offset = 2;
+}
+
+message ListDemandsResponse {
+  repeated DemandEntry demands = 1;
+}
+
+service BrowseService {
+  rpc ListTrending(ListTrendingRequest) returns (ListTrendingResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc GetCatalogDetail(GetCatalogDetailRequest) returns (GetCatalogDetailResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc Search(SearchRequest) returns (SearchResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ListDemands(ListDemandsRequest) returns (ListDemandsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}

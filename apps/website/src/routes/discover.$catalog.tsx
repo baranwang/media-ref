@@ -1,3 +1,4 @@
+import { Alert, AlertDescription } from "@media-ref/ui/components/alert";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -6,6 +7,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@media-ref/ui/components/breadcrumb";
+import { Empty, EmptyHeader, EmptyTitle } from "@media-ref/ui/components/empty";
 import {
   Select,
   SelectContent,
@@ -14,66 +16,57 @@ import {
   SelectValue,
 } from "@media-ref/ui/components/select";
 import { Tabs, TabsList, TabsTrigger } from "@media-ref/ui/components/tabs";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { NamespaceLogo } from "#/components/brand-logos";
-import { MediaCard } from "#/components/media-card";
+import { MediaCard, MediaCardSkeleton } from "#/components/media-card";
 import { TopNav } from "#/components/top-nav";
-import { useAppStore } from "#/lib/app-store";
-import {
-  DISCOVERY_CATALOGS,
-  DOUBAN_CATALOG_MEDIA_IDS,
-  HOME_SHELF_MEDIA_IDS,
-} from "#/lib/catalog-data";
+import { DISCOVERY_CATALOGS, isBrowseSlug } from "#/lib/catalogs";
+import { trendingQuery } from "#/lib/queries";
+import type { MediaCategory } from "#/lib/types";
+
+const PAGE_SIZE = 40;
 
 export const Route = createFileRoute("/discover/$catalog")({
+  loader: async ({ params, context: { queryClient } }) => {
+    if (!isBrowseSlug(params.catalog)) throw notFound();
+    // prefetchQuery never throws: a failed load shows an in-page error instead.
+    await queryClient.prefetchQuery(trendingQuery(params.catalog, "all", PAGE_SIZE));
+    return { slug: params.catalog };
+  },
   component: DiscoverCatalogPage,
 });
 
-type CategoryFilter = "all" | "tv" | "movie" | "anime";
-type SortOption = "popular" | "newest" | "missing";
+type CategoryFilter = "all" | MediaCategory;
+type SortOption = "popular" | "missing";
+
+const CATEGORY_TABS: Array<{ value: CategoryFilter; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "tv", label: "剧集" },
+  { value: "movie", label: "电影" },
+  { value: "anime", label: "动画" },
+];
 
 function DiscoverCatalogPage() {
-  const { catalog } = Route.useParams();
-  const { mediaList, getMediaById } = useAppStore();
+  const { slug: catalogKey } = Route.useLoaderData();
   const [category, setCategory] = useState<CategoryFilter>("all");
   const [sortBy, setSortBy] = useState<SortOption>("popular");
-
-  const catalogKey =
-    catalog === "tmdb" || catalog === "douban" || catalog === "bangumi" || catalog === "trakt"
-      ? catalog
-      : "douban";
   const config = DISCOVERY_CATALOGS[catalogKey];
+  const { data: items, isPending, isError } = useQuery(trendingQuery(catalogKey, "all", PAGE_SIZE));
 
-  const baseItems = useMemo(() => {
-    const preferredIds =
-      catalogKey === "douban" ? DOUBAN_CATALOG_MEDIA_IDS : HOME_SHELF_MEDIA_IDS[catalogKey];
-    const preferred = preferredIds
-      .map((id) => getMediaById(id))
-      .filter((item): item is NonNullable<typeof item> => Boolean(item));
-    const seen = new Set(preferred.map((i) => i.id));
-    const extras = mediaList.filter((m) => !seen.has(m.id));
-    return [...preferred, ...extras].slice(0, 18);
-  }, [catalogKey, getMediaById, mediaList]);
+  const countOf = (value: CategoryFilter) =>
+    value === "all"
+      ? (items?.length ?? 0)
+      : (items?.filter((item) => item.category === value).length ?? 0);
 
   const filteredItems = useMemo(() => {
     const list =
-      category === "all"
-        ? baseItems
-        : baseItems.filter((item) => {
-            if (category === "movie") return item.type === "movie";
-            if (category === "anime") return item.category === "anime";
-            return item.category === "tv";
-          });
-
-    if (sortBy === "newest") {
-      return [...list].sort((a, b) => b.year - a.year);
-    }
-    if (sortBy === "missing") {
-      return [...list].sort((a, b) => a.platformRows.length - b.platformRows.length);
-    }
-    return list;
-  }, [baseItems, category, sortBy]);
+      category === "all" ? (items ?? []) : (items ?? []).filter((i) => i.category === category);
+    return sortBy === "missing"
+      ? [...list].sort((a, b) => a.platforms.length - b.platforms.length)
+      : list;
+  }, [items, category, sortBy]);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -108,57 +101,48 @@ function DiscoverCatalogPage() {
         <section className="flex flex-wrap items-center justify-between gap-3 pt-7">
           <Tabs value={category} onValueChange={(v) => setCategory(v as CategoryFilter)}>
             <TabsList>
-              <TabsTrigger value="all" className="gap-1.5 px-3">
-                <span>全部</span>
-                <span className="font-mono text-2xs text-muted-foreground">
-                  {config.counts.all.toLocaleString("en-US")}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger value="tv" className="gap-1.5 px-3">
-                <span>剧集</span>
-                <span className="font-mono text-2xs text-muted-foreground">
-                  {config.counts.tv.toLocaleString("en-US")}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger value="movie" className="gap-1.5 px-3">
-                <span>电影</span>
-                <span className="font-mono text-2xs text-muted-foreground">
-                  {config.counts.movie.toLocaleString("en-US")}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger value="anime" className="gap-1.5 px-3">
-                <span>动画</span>
-                <span className="font-mono text-2xs text-muted-foreground">
-                  {config.counts.anime.toLocaleString("en-US")}
-                </span>
-              </TabsTrigger>
+              {CATEGORY_TABS.map((tab) => (
+                <TabsTrigger key={tab.value} value={tab.value} className="gap-1.5 px-3">
+                  <span>{tab.label}</span>
+                  {items && (
+                    <span className="font-mono text-2xs text-muted-foreground">
+                      {countOf(tab.value)}
+                    </span>
+                  )}
+                </TabsTrigger>
+              ))}
             </TabsList>
           </Tabs>
 
           <Select value={sortBy} onValueChange={(v) => v && setSortBy(v as SortOption)}>
             <SelectTrigger className="w-40">
-              <SelectValue>
-                {sortBy === "popular"
-                  ? config.sortLabel
-                  : sortBy === "newest"
-                    ? "按年份最新"
-                    : "按缺平台优先"}
-              </SelectValue>
+              <SelectValue>{sortBy === "popular" ? config.sortLabel : "按缺平台优先"}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="popular">{config.sortLabel}</SelectItem>
-              <SelectItem value="newest">按年份最新</SelectItem>
               <SelectItem value="missing">按缺平台优先</SelectItem>
             </SelectContent>
           </Select>
         </section>
 
         {/* 6-column Grid */}
-        <section className="grid grid-cols-2 gap-x-5 gap-y-8 pt-6 sm:grid-cols-3 md:grid-cols-6">
-          {filteredItems.map((item) => (
-            <MediaCard key={item.id} item={item} />
-          ))}
-        </section>
+        {isError ? (
+          <Alert variant="destructive" className="mt-6">
+            <AlertDescription>{config.title} 的热门内容暂时加载不出来，请稍后刷新</AlertDescription>
+          </Alert>
+        ) : !isPending && filteredItems.length === 0 ? (
+          <Empty className="mt-6 border border-border">
+            <EmptyHeader>
+              <EmptyTitle>这个分类下暂时没有内容</EmptyTitle>
+            </EmptyHeader>
+          </Empty>
+        ) : (
+          <section className="grid grid-cols-2 gap-x-5 gap-y-8 pt-6 sm:grid-cols-3 md:grid-cols-6">
+            {isPending
+              ? Array.from({ length: 12 }, (_, i) => <MediaCardSkeleton key={i} />)
+              : filteredItems.map((item) => <MediaCard key={item.key} item={item} />)}
+          </section>
+        )}
       </main>
     </div>
   );
