@@ -920,6 +920,7 @@ async function exploreSinglePlatform(
                 submitterKeyId: null,
                 submitterType: "agent",
                 taskId,
+                demandId: ctx.demandId,
                 targetExternalKey,
                 namespace,
                 nativeId: rawNativeId,

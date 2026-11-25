@@ -114,7 +114,8 @@ export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
       season,
       namespaceGroup,
     };
-    if (computeDemandTargetsForRead(demandInput).length > 0) {
+    // Only API callers create demand; the website's internal reads (browsing) do not.
+    if (!runtime.internal && computeDemandTargetsForRead(demandInput).length > 0) {
       const dbWrite = runtime.dbWrite;
       const now = runtime.now();
       scheduleBackgroundTask(runtime, () =>
@@ -238,7 +239,7 @@ export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
           season,
           namespaceGroup,
         };
-        if (computeDemandTargetsForBatchRead(batchDemandInput).length > 0) {
+        if (!runtime.internal && computeDemandTargetsForBatchRead(batchDemandInput).length > 0) {
           const dbWrite = runtime.dbWrite;
           const now = runtime.now();
           scheduleBackgroundTask(runtime, () =>
