@@ -20,6 +20,13 @@ export const Route = createFileRoute("/img/douban")({
         if (target.protocol !== "https:" || !ALLOWED_HOST.test(target.hostname)) {
           return new Response("host not allowed", { status: 400 });
         }
+        // Per-colo Workers cache, keyed on the upstream URL; absent outside workerd (vite dev).
+        const cache = (globalThis as { caches?: { default?: Cache } }).caches?.default;
+        const cacheKey = new Request(target.toString());
+        const hit = await cache?.match(cacheKey);
+        if (hit) {
+          return hit;
+        }
         const upstream = await fetch(target.toString(), {
           headers: {
             referer: "https://movie.douban.com/",
@@ -32,12 +39,18 @@ export const Route = createFileRoute("/img/douban")({
         if (!upstream.ok || !contentType.startsWith("image/")) {
           return new Response("image unavailable", { status: 502 });
         }
-        return new Response(upstream.body, {
+        const response = new Response(upstream.body, {
           headers: {
             "content-type": contentType,
             "cache-control": `public, max-age=${ONE_DAY}, immutable`,
           },
         });
+        if (cache) {
+          // Imported lazily so `cloudflare:workers` never reaches the browser bundle.
+          const { waitUntil } = await import("cloudflare:workers");
+          waitUntil(cache.put(cacheKey, response.clone()));
+        }
+        return response;
       },
     },
   },
