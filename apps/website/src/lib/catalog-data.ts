@@ -40,6 +40,8 @@ export interface CatalogDirectoryRow {
   id: string;
   namespace: CatalogNamespace;
   roleLabel: string;
+  /** Replaces roleLabel when the all-seasons overview is shown */
+  allSeasonsRoleLabel?: string;
   isBaseline?: boolean;
   wholeMediaNativeId?: string;
   wholeMediaLabel?: string;
@@ -716,6 +718,7 @@ export const INITIAL_MEDIA_CATALOG: MediaItem[] = [
         id: "op-douban",
         namespace: "douban",
         roleLabel: "本季 3 个条目",
+        allSeasonsRoleLabel: "24 个条目",
         segmentsBySeason: {
           22: [
             {
@@ -747,19 +750,11 @@ export const INITIAL_MEDIA_CATALOG: MediaItem[] = [
         allSeasonSegments: [
           {
             id: "op-db-all-1",
-            title: "第 1–21 季",
+            title: "第 1–22 季",
             nativeId: "1453238",
             start: 1,
-            end: 21,
-            status: "confirmed",
-          },
-          {
-            id: "op-db-all-2",
-            title: "第 22 季",
-            nativeId: "36108842",
-            start: 22,
             end: 22,
-            status: "pending",
+            status: "confirmed",
           },
         ],
       },
@@ -767,6 +762,7 @@ export const INITIAL_MEDIA_CATALOG: MediaItem[] = [
         id: "op-bangumi",
         namespace: "bangumi",
         roleLabel: "本季 1 个条目",
+        allSeasonsRoleLabel: "1 个条目",
         segmentsBySeason: {
           22: [
             {
