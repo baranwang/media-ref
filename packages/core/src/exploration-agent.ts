@@ -743,7 +743,15 @@ async function explorePlatform(
     }
 
     const baseSegments = defaultSegments(ctx.media, ctx.season);
+    const segmentMisfit = (info: CollectionInfo, segments: readonly SegmentInput[]) =>
+      checkSegmentsFitCollection(segments, info, (season) => {
+        const count = ctx.media.snapshot.seasons.find((s) => s.season === season)?.episodeCount;
+        return count && count > 0 ? count : null;
+      });
+    // Step 1 alone accepts year and episode counts from any season, so the fetched-range check
+    // also has to hold before a candidate counts as passing.
     const passesStep1 = (info: CollectionInfo, segments: readonly SegmentInput[]) =>
+      segmentMisfit(info, segments) === null &&
       evaluateEvidenceGateStep1(catalog, info, { segments: normalizeSegments(segments) })
         .decision === "pass";
 
@@ -886,10 +894,7 @@ async function explorePlatform(
             continue;
           }
           const segments = parseModelSegments(args.segments, ctx.media, ctx.season);
-          const misfit = checkSegmentsFitCollection(segments, candidate.info, (season) => {
-            const count = ctx.media.snapshot.seasons.find((s) => s.season === season)?.episodeCount;
-            return count && count > 0 ? count : null;
-          });
+          const misfit = segmentMisfit(candidate.info, segments);
           if (misfit) {
             reply(call.id, call.name, {
               ok: false,
@@ -907,8 +912,9 @@ async function explorePlatform(
         }
 
         if (call.name === "mark_not_found") {
-          if (transient) {
-            return transientOutcome("transient_error");
+          // A failed source may hold the real match: "none of these" is not "none exists".
+          if (transient || discoveryErrored) {
+            return transientOutcome("discovery_source_error");
           }
           return {
             namespace,
@@ -924,8 +930,8 @@ async function explorePlatform(
       }
     }
 
-    return transient
-      ? transientOutcome("transient_error")
+    return transient || discoveryErrored
+      ? transientOutcome("discovery_source_error")
       : { namespace, status: "not_found", reason: "max_steps_exhausted" };
   } finally {
     budget.dispose();
