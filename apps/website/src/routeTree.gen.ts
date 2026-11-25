@@ -10,33 +10,167 @@
 
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
+import { Route as ApiKeysRouteImport } from "./routes/api-keys";
+import { Route as ContributeRouteImport } from "./routes/contribute";
+import { Route as LoginRouteImport } from "./routes/login";
+import { Route as ReviewRouteImport } from "./routes/review";
+import { Route as SignupRouteImport } from "./routes/signup";
+import { Route as VerifyEmailRouteImport } from "./routes/verify-email";
+import { Route as ChangeRequestsIndexRouteImport } from "./routes/change-requests.index";
+import { Route as ChangeRequestsIdRouteImport } from "./routes/change-requests.$id";
+import { Route as DiscoverCatalogRouteImport } from "./routes/discover.$catalog";
+import { Route as MediaMediaIdRouteImport } from "./routes/media.$mediaId";
 
 const IndexRoute = IndexRouteImport.update({
   id: "/",
   path: "/",
   getParentRoute: () => rootRouteImport,
 } as any);
+const ApiKeysRoute = ApiKeysRouteImport.update({
+  id: "/api-keys",
+  path: "/api-keys",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const ContributeRoute = ContributeRouteImport.update({
+  id: "/contribute",
+  path: "/contribute",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const LoginRoute = LoginRouteImport.update({
+  id: "/login",
+  path: "/login",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const ReviewRoute = ReviewRouteImport.update({
+  id: "/review",
+  path: "/review",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const SignupRoute = SignupRouteImport.update({
+  id: "/signup",
+  path: "/signup",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const VerifyEmailRoute = VerifyEmailRouteImport.update({
+  id: "/verify-email",
+  path: "/verify-email",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const ChangeRequestsIndexRoute = ChangeRequestsIndexRouteImport.update({
+  id: "/change-requests/",
+  path: "/change-requests/",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const ChangeRequestsIdRoute = ChangeRequestsIdRouteImport.update({
+  id: "/change-requests/$id",
+  path: "/change-requests/$id",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const DiscoverCatalogRoute = DiscoverCatalogRouteImport.update({
+  id: "/discover/$catalog",
+  path: "/discover/$catalog",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const MediaMediaIdRoute = MediaMediaIdRouteImport.update({
+  id: "/media/$mediaId",
+  path: "/media/$mediaId",
+  getParentRoute: () => rootRouteImport,
+} as any);
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
+  "/api-keys": typeof ApiKeysRoute;
+  "/contribute": typeof ContributeRoute;
+  "/login": typeof LoginRoute;
+  "/review": typeof ReviewRoute;
+  "/signup": typeof SignupRoute;
+  "/verify-email": typeof VerifyEmailRoute;
+  "/change-requests/$id": typeof ChangeRequestsIdRoute;
+  "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/media/$mediaId": typeof MediaMediaIdRoute;
+  "/change-requests/": typeof ChangeRequestsIndexRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
+  "/api-keys": typeof ApiKeysRoute;
+  "/contribute": typeof ContributeRoute;
+  "/login": typeof LoginRoute;
+  "/review": typeof ReviewRoute;
+  "/signup": typeof SignupRoute;
+  "/verify-email": typeof VerifyEmailRoute;
+  "/change-requests/$id": typeof ChangeRequestsIdRoute;
+  "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/media/$mediaId": typeof MediaMediaIdRoute;
+  "/change-requests": typeof ChangeRequestsIndexRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
+  "/api-keys": typeof ApiKeysRoute;
+  "/contribute": typeof ContributeRoute;
+  "/login": typeof LoginRoute;
+  "/review": typeof ReviewRoute;
+  "/signup": typeof SignupRoute;
+  "/verify-email": typeof VerifyEmailRoute;
+  "/change-requests/$id": typeof ChangeRequestsIdRoute;
+  "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/media/$mediaId": typeof MediaMediaIdRoute;
+  "/change-requests/": typeof ChangeRequestsIndexRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/";
+  fullPaths:
+    | "/"
+    | "/api-keys"
+    | "/contribute"
+    | "/login"
+    | "/review"
+    | "/signup"
+    | "/verify-email"
+    | "/change-requests/$id"
+    | "/discover/$catalog"
+    | "/media/$mediaId"
+    | "/change-requests/";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/";
-  id: "__root__" | "/";
+  to:
+    | "/"
+    | "/api-keys"
+    | "/contribute"
+    | "/login"
+    | "/review"
+    | "/signup"
+    | "/verify-email"
+    | "/change-requests/$id"
+    | "/discover/$catalog"
+    | "/media/$mediaId"
+    | "/change-requests";
+  id:
+    | "__root__"
+    | "/"
+    | "/api-keys"
+    | "/contribute"
+    | "/login"
+    | "/review"
+    | "/signup"
+    | "/verify-email"
+    | "/change-requests/$id"
+    | "/discover/$catalog"
+    | "/media/$mediaId"
+    | "/change-requests/";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
+  ApiKeysRoute: typeof ApiKeysRoute;
+  ContributeRoute: typeof ContributeRoute;
+  LoginRoute: typeof LoginRoute;
+  ReviewRoute: typeof ReviewRoute;
+  SignupRoute: typeof SignupRoute;
+  VerifyEmailRoute: typeof VerifyEmailRoute;
+  ChangeRequestsIdRoute: typeof ChangeRequestsIdRoute;
+  DiscoverCatalogRoute: typeof DiscoverCatalogRoute;
+  MediaMediaIdRoute: typeof MediaMediaIdRoute;
+  ChangeRequestsIndexRoute: typeof ChangeRequestsIndexRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -48,11 +182,91 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof IndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/api-keys": {
+      id: "/api-keys";
+      path: "/api-keys";
+      fullPath: "/api-keys";
+      preLoaderRoute: typeof ApiKeysRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/contribute": {
+      id: "/contribute";
+      path: "/contribute";
+      fullPath: "/contribute";
+      preLoaderRoute: typeof ContributeRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/login": {
+      id: "/login";
+      path: "/login";
+      fullPath: "/login";
+      preLoaderRoute: typeof LoginRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/review": {
+      id: "/review";
+      path: "/review";
+      fullPath: "/review";
+      preLoaderRoute: typeof ReviewRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/signup": {
+      id: "/signup";
+      path: "/signup";
+      fullPath: "/signup";
+      preLoaderRoute: typeof SignupRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/verify-email": {
+      id: "/verify-email";
+      path: "/verify-email";
+      fullPath: "/verify-email";
+      preLoaderRoute: typeof VerifyEmailRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/change-requests/": {
+      id: "/change-requests/";
+      path: "/change-requests";
+      fullPath: "/change-requests/";
+      preLoaderRoute: typeof ChangeRequestsIndexRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/change-requests/$id": {
+      id: "/change-requests/$id";
+      path: "/change-requests/$id";
+      fullPath: "/change-requests/$id";
+      preLoaderRoute: typeof ChangeRequestsIdRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/discover/$catalog": {
+      id: "/discover/$catalog";
+      path: "/discover/$catalog";
+      fullPath: "/discover/$catalog";
+      preLoaderRoute: typeof DiscoverCatalogRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/media/$mediaId": {
+      id: "/media/$mediaId";
+      path: "/media/$mediaId";
+      fullPath: "/media/$mediaId";
+      preLoaderRoute: typeof MediaMediaIdRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiKeysRoute: ApiKeysRoute,
+  ContributeRoute: ContributeRoute,
+  LoginRoute: LoginRoute,
+  ReviewRoute: ReviewRoute,
+  SignupRoute: SignupRoute,
+  VerifyEmailRoute: VerifyEmailRoute,
+  ChangeRequestsIdRoute: ChangeRequestsIdRoute,
+  DiscoverCatalogRoute: DiscoverCatalogRoute,
+  MediaMediaIdRoute: MediaMediaIdRoute,
+  ChangeRequestsIndexRoute: ChangeRequestsIndexRoute,
 };
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
