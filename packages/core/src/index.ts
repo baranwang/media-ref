@@ -427,3 +427,17 @@ export {
   type OutboundClient,
   type OutboundProxyConfig,
 } from "./outbound.ts";
+export {
+  getCatalogDetail,
+  isBrowseNamespace,
+  listTrending,
+  resolveLookupKeys,
+  searchCatalogTitles,
+  type BrowseCache,
+  type BrowseNamespace,
+  type BrowseType,
+  type CatalogBrowseOptions,
+  type CatalogCard,
+  type CatalogCredit,
+  type CatalogDetail,
+} from "./catalog-browse.ts";
