@@ -409,6 +409,7 @@ export {
   type CloudflareAiGatewayResponse,
   type CloudflareSendEmailBinding,
   type CloudflareSendEmailPayload,
+  type EgressFetcher,
   type EmailMessage,
   type ExternalHttpMethod,
   type ExternalHttpRequest,

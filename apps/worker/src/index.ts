@@ -19,6 +19,7 @@ import {
   parseExplorationBackoffSeconds,
   parseOutboundProxyConfig,
   type CloudflareAiBinding,
+  type EgressFetcher,
   type JobQueueMessage,
 } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
@@ -49,6 +50,8 @@ export interface BackgroundWorkerEnv {
   AI_PROVIDER?: string;
   AI_MODEL?: string;
   OUTBOUND_PROXY_CONFIG?: string;
+  // Workers VPC service: the greencloud-hk egress relay.
+  EGRESS?: EgressFetcher;
   JOB_BATCH_SIZE?: string;
   JOB_LEASE_DURATION_MS?: string;
   EXPLORATION_DAILY_BUDGET?: string;
@@ -179,6 +182,7 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
 function createWorkerOutboundClient(env: BackgroundWorkerEnv) {
   return createLiveOutboundClient({
     proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
+    egressFetcher: env.EGRESS,
     aiBinding: adaptCloudflareAiBinding(env.AI),
     aiGatewayId: parseOptionalString(env.AI_GATEWAY_ID),
     aiProvider: parseOptionalString(env.AI_PROVIDER) ?? DEFAULT_AI_PROVIDER,
