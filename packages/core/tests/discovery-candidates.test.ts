@@ -83,7 +83,8 @@ describe("discoverCandidates", () => {
     );
 
     expect(result.sources).toEqual([
-      { source: "360kan", status: "ok", links: 8 },
+      // 狂飙支队 (2012) and GT赛车：极速狂飙 are filtered out: wrong year / title prefix.
+      { source: "360kan", status: "ok", links: 1 },
       { source: "douban", status: "ok", links: 1 },
       { source: "iqiyi_search", status: "ok", links: 1 },
     ]);
@@ -94,11 +95,7 @@ describe("discoverCandidates", () => {
     const byKey = Object.fromEntries(
       result.candidates.map((c) => [`${c.namespace}:${c.canonicalId}`, c]),
     );
-    expect(Object.keys(byKey).sort()).toEqual([
-      "iqiyi:5328486914190101",
-      "tencent:mzc00200n9jg80j",
-      "tencent:yybogyx55xohps6",
-    ]);
+    expect(Object.keys(byKey).sort()).toEqual(["iqiyi:5328486914190101"]);
 
     const kuangbiao = byKey["iqiyi:5328486914190101"]!;
     expect(kuangbiao.title).toBe("狂飙");
@@ -111,15 +108,9 @@ describe("discoverCandidates", () => {
     expect(kuangbiao.sources.find((s) => s.source === "360kan")?.rawUrl).toBe(
       "http://www.iqiyi.com/v_2bql2y1p4qs.html?vfm=f_191_360y&fv=p_09_01",
     );
-    expect(byKey["tencent:yybogyx55xohps6"]).toMatchObject({ title: "狂飙支队", year: 2012 });
 
-    const droppedReasons = result.dropped.map((d) => [d.platformKey, d.namespace, d.reason]);
-    expect(droppedReasons).toContainEqual(["douyin", null, "unsupported_platform:douyin"]);
-    expect(droppedReasons.filter(([, ns]) => ns === "youku")).toHaveLength(2);
-    expect(result.dropped.find((d) => d.namespace === "bilibili")?.reason).toMatch(
-      /^canonicalize_transient:/,
-    );
-    expect(result.dropped).toHaveLength(5);
+    // Only the matching row's links are resolved, so nothing is dropped.
+    expect(result.dropped).toEqual([]);
   });
 
   test("resolves Douban ID via IMDb and reads platform IDs from vendor app URIs; source failures stay isolated", async () => {

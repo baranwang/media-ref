@@ -190,7 +190,7 @@ export {
   enqueueTmdbDailyExportsIfDue,
   EXPLORATION_JOB_TYPE,
   formatTmdbExportDate,
-  getTier3TargetNamespaces,
+  getExplorationTargetNamespaces,
   parseExplorationBackoffSeconds,
   resolveExplorationSchedulerConfig,
   scheduleExplorationJobs,

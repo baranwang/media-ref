@@ -9,6 +9,7 @@ import {
   type Tier3Adapter,
 } from "../adapters/types.ts";
 import { youkuAdapter } from "../adapters/youku.ts";
+import { normalizeTitleForComparison } from "../evidence-gate.ts";
 import type { ExternalHttpRequest, ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 
 /**
@@ -88,6 +89,8 @@ const DOUBAN_IMDB_API = "https://api.douban.com/v2/movie/imdb";
 const DOUBAN_API_KEY = "0ac44ae016490db2204ce0a042db2916";
 const MOBILE_UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+
+const MAX_360KAN_ROWS = 6;
 
 // Workers keep at most 6 connections open; timeouts start at call time, so queue here instead.
 const MAX_CONCURRENT_RESOLVES = 4;
@@ -308,12 +311,25 @@ async function fetch360kan(
   }
   const rows = asRecord(asRecord(root.data)?.longData)?.rows;
   const links: RawLink[] = [];
+  // A keyword search returns loosely related titles too; only rows that start with the title and
+  // are not older than the media keep their links, so canonicalization requests stay bounded.
+  const wanted = normalizeTitleForComparison(media.title);
+  let keptRows = 0;
   for (const rawRow of Array.isArray(rows) ? rows : []) {
     const row = asRecord(rawRow);
     const playlinks = asRecord(row?.playlinks);
-    if (!row || !playlinks) {
+    if (!row || !playlinks || keptRows >= MAX_360KAN_ROWS) {
       continue;
     }
+    const rowTitle = stringOrNull(row.titleTxt);
+    const rowYear = parseYear(row.year);
+    if (
+      (wanted.length > 0 && !normalizeTitleForComparison(rowTitle ?? "").startsWith(wanted)) ||
+      (media.year != null && rowYear !== null && rowYear < media.year - 1)
+    ) {
+      continue;
+    }
+    keptRows += 1;
     for (const [platformKey, link] of Object.entries(playlinks)) {
       if (typeof link === "string" && link.length > 0) {
         links.push({

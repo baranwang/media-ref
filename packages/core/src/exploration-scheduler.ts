@@ -18,6 +18,7 @@ import type { Database, Db, ExternalIdNamespaceRow, SeasonSnapshotRow } from "@m
 import { sql, type Transaction } from "kysely";
 import {
   createDefaultAdapterRegistry,
+  isTier2Adapter,
   isTier3Adapter,
   type AdapterRegistry,
 } from "./adapters/index.ts";
@@ -417,13 +418,19 @@ export function resolveExplorationSchedulerConfig(
   };
 }
 
-export function getTier3TargetNamespaces(
+/**
+ * Namespaces exploration can target. Platforms only need `fetchCollection` (Tier 2+): candidates
+ * come from the discovery sources, not platform search. Catalog exploration still needs search.
+ */
+export function getExplorationTargetNamespaces(
   adapterRegistry: AdapterRegistry,
   namespaceGroup: NamespaceGroup,
 ): Namespace[] {
   const targets = new Set<Namespace>();
   for (const adapter of adapterRegistry.list()) {
-    if (isTier3Adapter(adapter) && getNamespaceGroup(adapter.namespace) === namespaceGroup) {
+    const explorable =
+      namespaceGroup === "platform" ? isTier2Adapter(adapter) : isTier3Adapter(adapter);
+    if (explorable && getNamespaceGroup(adapter.namespace) === namespaceGroup) {
       targets.add(adapter.namespace);
     }
   }
@@ -792,8 +799,8 @@ export async function scheduleExplorationJobs(
   const budgetDate = formatUtcDate(now);
 
   const tier3ByGroup: Record<NamespaceGroup, Namespace[]> = {
-    platform: getTier3TargetNamespaces(adapterRegistry, "platform"),
-    catalog: getTier3TargetNamespaces(adapterRegistry, "catalog"),
+    platform: getExplorationTargetNamespaces(adapterRegistry, "platform"),
+    catalog: getExplorationTargetNamespaces(adapterRegistry, "catalog"),
   };
 
   const eligibleGroups: NamespaceGroup[] = [];
@@ -1344,7 +1351,9 @@ export function createExplorationJobHandler(
       };
     }
 
-    const tier3Allowed = new Set(getTier3TargetNamespaces(adapterRegistry, payload.namespaceGroup));
+    const tier3Allowed = new Set(
+      getExplorationTargetNamespaces(adapterRegistry, payload.namespaceGroup),
+    );
     const effectiveTargetNamespaces = payload.targetNamespaces.filter((ns) => tier3Allowed.has(ns));
     if (effectiveTargetNamespaces.length === 0) {
       return {

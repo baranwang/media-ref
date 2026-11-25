@@ -1111,7 +1111,7 @@ describe("Exploration scheduler (#28)", () => {
     expect(expectedNext3.getTime() - t2.getTime()).toBeGreaterThan(interval2Ms);
   });
 
-  test("targets ONLY Tier 3 platforms (never Tier 1 or Tier 2) and parses worker exploration env config", async () => {
+  test("targets platforms that can fetch collections (Tier 2+, never Tier 1) and parses worker exploration env config", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -1142,7 +1142,11 @@ describe("Exploration scheduler (#28)", () => {
       })
       .execute();
 
-    // 1. Registry with ONLY Tier 2 adapters -> zero Tier 3 platforms -> no exploration scheduled, zero budget used
+    // 1. Registry with ONLY a Tier 1 adapter -> nothing to explore -> no exploration scheduled, zero budget used
+    const tier1Youku = createTier1Adapter({
+      namespace: "youku",
+      parseInput: (raw) => ({ kind: "show", id: raw, canonicalId: raw }),
+    });
     const tier2Bilibili: Tier2Adapter<"bilibili"> = {
       namespace: "bilibili",
       tier: 2,
@@ -1159,7 +1163,7 @@ describe("Exploration scheduler (#28)", () => {
           defaultEmitted.push(message);
         },
       },
-      adapterRegistry: createAdapterRegistry([tier2Bilibili]),
+      adapterRegistry: createAdapterRegistry([tier1Youku]),
       config: {
         enableDailyTmdbSync: false,
         exploration: { dailyBudget: 10 },
@@ -1175,11 +1179,7 @@ describe("Exploration scheduler (#28)", () => {
       .execute();
     expect(budgetWhenNoTier3).toHaveLength(0);
 
-    // 2. Mixed registry: Tier 1 (youku), Tier 2 (bilibili stub, tencent), Tier 3 (iqiyi) -> ONLY iqiyi targeted!
-    const tier1Youku = createTier1Adapter({
-      namespace: "youku",
-      parseInput: (raw) => ({ kind: "show", id: raw, canonicalId: raw }),
-    });
+    // 2. Mixed registry: Tier 1 (youku), Tier 2 (bilibili stub, tencent), Tier 3 (iqiyi) -> all but youku
     const tier2Tencent: Tier2Adapter<"tencent"> = {
       namespace: "tencent",
       tier: 2,
@@ -1229,10 +1229,10 @@ describe("Exploration scheduler (#28)", () => {
 
     await workerMixed.scheduled(createScheduledController(t0));
     expect(emitted).toHaveLength(1);
-    expect(emitted[0]?.payload.targetNamespaces).toEqual(["iqiyi"]);
+    expect(emitted[0]?.payload.targetNamespaces).toEqual(["bilibili", "iqiyi", "tencent"]);
 
     await workerMixed.queue(createQueueBatch(emitted, t0).batch);
-    expect(seenTargetNamespaces).toEqual([["iqiyi"]]);
+    expect(seenTargetNamespaces).toEqual([["bilibili", "iqiyi", "tencent"]]);
 
     // 3. Verify worker env var parsing for EXPLORATION_DAILY_BUDGET & EXPLORATION_BACKOFF_SECONDS
     const parsedConfig = parseWorkerConfig({

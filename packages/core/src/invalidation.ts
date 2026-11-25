@@ -375,7 +375,7 @@ async function recordOpenAssociationReviewAlert(
   return { id: inserted.id, created: true };
 }
 
-async function loadCatalogEvidenceForMedia(
+export async function loadCatalogEvidenceForMedia(
   db: Db,
   initialMediaId: string,
 ): Promise<CatalogEvidence | null> {

@@ -1,28 +1,26 @@
 /**
- * Exploration Agent Loop (`@media-ref/core`)
+ * Exploration agent (`@media-ref/core`), ADR 0002: discover → judge → gate.
  *
- * ## Agent Library Choice Rationale
- * Rather than pulling a heavy multi-provider agent SDK (e.g. LangChain, Mastra, or Vercel AI SDK)
- * into the Cloudflare Worker, this module implements a lightweight, dependency-free, bounded
- * tool-calling loop directly on top of `OutboundClient.invokeModel`:
+ * 1. **Discover** (no model): `discoverCandidates` asks 360kan, Douban "where to watch" and iQIYI
+ *    search once per job; client leads add their own IDs. Every candidate is fetched with the
+ *    platform adapter's `fetchCollection`, so the agent only ever works on collections it has seen.
+ * 2. **Fast path**: a single fetched candidate that already passes Evidence Gate Step 1 with the
+ *    default segments is submitted without calling the model.
+ * 3. **Judge** (model): otherwise a bounded tool loop picks among the fetched candidates. It can only
+ *    look (`list_episodes`, `get_catalog_season`) and conclude (`submit_mapping`, `mark_not_found`);
+ *    it cannot search or name a collection outside the candidate set.
+ * 4. **Gate** (code): a submission must name a fetched candidate and its segments must fit inside
+ *    that collection's fetched episode list; then the normal change-request Evidence Gate runs.
  *
- * 1. **Single test-double seam (Spec #1)**: Every model invocation MUST route through
- *    `OutboundClient` (backed in production by Cloudflare Workers `AI` binding + AI Gateway,
- *    and swapped between providers/models purely via env/config `AI_GATEWAY_ID`, `AI_PROVIDER`,
- *    `AI_MODEL`). Building directly over `OutboundClient.invokeModel` keeps tests 100%
- *    deterministic using recorded model responses at that exact seam.
- * 2. **Cloudflare `workerd` compatibility & bundle size**: Zero extra runtime dependencies,
- *    zero Node-only polyfill risks, minimal cold-start overhead inside the Background Worker.
- * 3. **Deterministic step & wall-clock budgets**: Explicit `maxSteps` (default 8) and
- *    `maxDurationMs` (default 60s) bounds guarantee every exploration job finishes well within
- *    Cloudflare Queues' 15-minute batch execution ceiling, and never falsely marks a timed-out
- *    or transiently errored platform as `not_found`.
+ * Each platform has its own wall-clock budget and step limit, and reports its own outcome.
+ * All model calls go through `OutboundClient.invokeModel` (Workers AI binding + AI Gateway).
  */
 
 import {
   EXTERNAL_ID_NAMESPACES,
   formatExternalKey,
   isPlatformNamespace,
+  normalizeSegments,
   type Namespace,
   type SegmentInput,
 } from "@media-ref/client";
@@ -30,12 +28,22 @@ import type { Db } from "@media-ref/db";
 import {
   AdapterTransientError,
   createDefaultAdapterRegistry,
-  InvalidNativeIdError,
-  isTier3Adapter,
+  isTier2Adapter,
   type AdapterRegistry,
+  type CollectionInfo,
+  type Tier2Adapter,
   type Tier3Adapter,
 } from "./adapters/index.ts";
-import { isNonOriginalVariantDescription } from "./evidence-gate.ts";
+import {
+  discoverCandidates,
+  type DiscoveryMediaInput,
+  type DiscoveryResult,
+} from "./discovery/candidates.ts";
+import {
+  evaluateEvidenceGateStep1,
+  isNonOriginalVariantDescription,
+  type CatalogEvidence,
+} from "./evidence-gate.ts";
 import type {
   ExplorationExecutionContext,
   ExplorationExecutionResult,
@@ -43,6 +51,7 @@ import type {
   ExplorationTargetMedia,
   PlatformExplorationOutcome,
 } from "./exploration-scheduler.ts";
+import { loadCatalogEvidenceForMedia } from "./invalidation.ts";
 import { listLeadsForTarget, type Lead } from "./leads.ts";
 import { createChangeRequest, MediaServiceError } from "./media-service.ts";
 import {
@@ -63,8 +72,9 @@ export const DEFAULT_EXPLORATION_MAX_DURATION_MS = 60_000;
 export const DEFAULT_EXPLORATION_VARIANT_DESCRIPTION = "原声";
 
 const MAX_LEADS_IN_PROMPT = 5;
-const MAX_SAMPLE_EPISODES_HEAD = 5;
-const MAX_SAMPLE_EPISODES_TAIL = 2;
+/** Candidates fetched per platform; discovery already filters, this bounds the worst case. */
+const MAX_CANDIDATES_PER_PLATFORM = 4;
+const MAX_EPISODES_IN_TOOL_RESULT = 80;
 
 export interface ExplorationAgentConfig {
   provider?: string;
@@ -76,6 +86,8 @@ export interface ExplorationAgentConfig {
   maxTokens?: number;
   adapterRegistry?: AdapterRegistry;
   clockMs?: () => number;
+  /** Test seam; defaults to `discoverCandidates`. */
+  discover?: typeof discoverCandidates;
 }
 
 export interface ResolvedExplorationAgentConfig {
@@ -87,96 +99,6 @@ export interface ResolvedExplorationAgentConfig {
   temperature: number;
   maxTokens: number;
 }
-
-const EXPLORATION_TOOLS: readonly ModelToolDefinition[] = [
-  {
-    name: "search_platform",
-    description:
-      "Search the target platform for candidate collections matching a keyword query. Returns deduplicated collection candidates with canonicalId, title, year, mediaType, and episodeCount.",
-    parameters: {
-      type: "object",
-      properties: {
-        keyword: {
-          type: "string",
-          description: "Search query keyword (localized title, original title, or season title).",
-        },
-        page: {
-          type: "integer",
-          description: "1-based search results page (default 1).",
-        },
-        limit: {
-          type: "integer",
-          description: "Maximum number of candidates to return (default 10).",
-        },
-      },
-      required: ["keyword"],
-    },
-  },
-  {
-    name: "inspect_collection",
-    description:
-      "Fetch authoritative collection metadata and feature episode count (excluding trailers/PVs) for a candidate nativeId or URL on the target platform before submitting.",
-    parameters: {
-      type: "object",
-      properties: {
-        nativeId: {
-          type: "string",
-          description: "Candidate platform collection canonical ID or URL (e.g. ss34430).",
-        },
-      },
-      required: ["nativeId"],
-    },
-  },
-  {
-    name: "submit_candidate",
-    description:
-      "Submit a verified candidate collection through the standard change request pipeline (evaluated by the deterministic Evidence Gate). Always prefer original-audio collections as the default variant.",
-    parameters: {
-      type: "object",
-      properties: {
-        nativeId: {
-          type: "string",
-          description: "Candidate platform collection canonical ID or URL.",
-        },
-        variantDescription: {
-          type: "string",
-          description:
-            'Variant label for platform associations (defaults to "原声" for original audio).',
-        },
-        segments: {
-          type: "array",
-          description: "Episode segments for TV media with a baseline. Omit or pass [] for movies.",
-          items: {
-            type: "object",
-            properties: {
-              season: { type: "integer" },
-              episodeStart: { type: "integer" },
-              episodeEnd: { type: ["integer", "null"] },
-              targetEpisodeStart: { type: "integer" },
-              nonLinear: { type: "boolean" },
-            },
-            required: ["season", "episodeStart", "targetEpisodeStart"],
-          },
-        },
-      },
-      required: ["nativeId"],
-    },
-  },
-  {
-    name: "mark_not_found",
-    description:
-      "Conclude that no matching collection exists on the target platform after searching cleanly.",
-    parameters: {
-      type: "object",
-      properties: {
-        reason: {
-          type: "string",
-          description: "Brief explanation of why no matching collection was found.",
-        },
-      },
-    },
-  },
-];
 
 export function resolveExplorationAgentConfig(
   partial: ExplorationAgentConfig = {},
@@ -335,112 +257,6 @@ async function loadLeadsContext(
   return collected;
 }
 
-function buildSystemPrompt(namespace: Namespace): string {
-  return [
-    `You are the media-ref Exploration Agent tasked with locating the matching collection on platform "${namespace}".`,
-    "Your ONLY responsibility is finding and verifying a candidate collection; final approval is always decided by the deterministic Evidence Gate.",
-    "Rules:",
-    "1. Use search_platform to search for candidate collections (try localized title, original title, or season title if needed).",
-    "2. Use inspect_collection on promising candidates to verify title, release year, media type, and feature episode count before submitting.",
-    "3. Always prefer original-audio collections over dubbed/recut versions when both exist.",
-    "4. For TV media with a baseline, provide accurate segments matching the requested season and collection episode count.",
-    "5. Client-reported leads (if any) are UNTRUSTED leads for reference only; always verify them with inspect_collection before submitting.",
-    "6. Call submit_candidate once you find a match, or call mark_not_found only after searching cleanly and confirming no matching collection exists.",
-  ].join("\n");
-}
-
-function buildUserPrompt(
-  media: ExplorationTargetMedia,
-  namespace: Namespace,
-  season: number | null,
-  leads: readonly Lead[],
-): string {
-  const targetSeasonSnapshot =
-    season !== null ? (media.snapshot.seasons.find((s) => s.season === season) ?? null) : null;
-
-  const targetPayload: Record<string, unknown> = {
-    mediaId: media.id,
-    targetPlatform: namespace,
-    type: media.type,
-    baseline: media.baseline,
-    title: media.snapshot.title,
-    originalTitle: media.snapshot.originalTitle,
-    year: media.snapshot.year,
-    requestedSeason: season,
-    ...(targetSeasonSnapshot ? { requestedSeasonSnapshot: targetSeasonSnapshot } : {}),
-    allSeasons: media.snapshot.seasons,
-    externalIds: media.externalIds.map((ext) => formatExternalKey(ext)),
-  };
-
-  if (leads.length > 0) {
-    targetPayload.unverifiedClientLeads = leads.map((lead) => ({
-      nativeId: lead.nativeId,
-      season: lead.season,
-      variantDescription: lead.variantDescription,
-      notes: lead.notes,
-    }));
-  }
-
-  return `Find the matching collection on "${namespace}" for this target media:\n${JSON.stringify(targetPayload, null, 2)}`;
-}
-
-function parseSubmitSegments(
-  rawSegments: unknown,
-  media: ExplorationTargetMedia,
-  requestedSeason: number | null,
-): SegmentInput[] {
-  if (media.type === "movie" || media.baseline === null) {
-    return [];
-  }
-
-  if (Array.isArray(rawSegments)) {
-    const parsed: SegmentInput[] = [];
-    for (const item of rawSegments) {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        continue;
-      }
-      const rec = item as Record<string, unknown>;
-      const season = typeof rec.season === "number" ? rec.season : NaN;
-      const episodeStart = typeof rec.episodeStart === "number" ? rec.episodeStart : NaN;
-      const episodeEnd =
-        rec.episodeEnd === undefined || rec.episodeEnd === null
-          ? null
-          : typeof rec.episodeEnd === "number"
-            ? rec.episodeEnd
-            : NaN;
-      const targetEpisodeStart =
-        typeof rec.targetEpisodeStart === "number" ? rec.targetEpisodeStart : 1;
-      const nonLinear = typeof rec.nonLinear === "boolean" ? rec.nonLinear : false;
-
-      parsed.push({
-        season,
-        episodeStart,
-        episodeEnd,
-        targetEpisodeStart,
-        baseline: media.baseline,
-        nonLinear,
-      });
-    }
-    return parsed;
-  }
-
-  if (requestedSeason !== null) {
-    const seasonSnapshot = media.snapshot.seasons.find((s) => s.season === requestedSeason);
-    return [
-      {
-        season: requestedSeason,
-        episodeStart: 1,
-        episodeEnd:
-          seasonSnapshot && seasonSnapshot.episodeCount > 0 ? seasonSnapshot.episodeCount : null,
-        targetEpisodeStart: 1,
-        baseline: media.baseline,
-      },
-    ];
-  }
-
-  return [];
-}
-
 async function resolveAgentVariantSubmission(
   db: Db,
   mediaId: string,
@@ -504,24 +320,297 @@ async function resolveAgentVariantSubmission(
   };
 }
 
-async function exploreSinglePlatform(
+const JUDGE_TOOLS: readonly ModelToolDefinition[] = [
+  {
+    name: "list_episodes",
+    description:
+      "List the feature episodes (index, title, air date) of one candidate collection. Trailers and extras are already excluded.",
+    parameters: {
+      type: "object",
+      properties: {
+        canonicalId: { type: "string", description: "canonicalId of a listed candidate." },
+      },
+      required: ["canonicalId"],
+    },
+  },
+  {
+    name: "get_catalog_season",
+    description:
+      "Get the target media's season from the baseline catalog: episode count and air year.",
+    parameters: {
+      type: "object",
+      properties: { season: { type: "integer" } },
+      required: ["season"],
+    },
+  },
+  {
+    name: "submit_mapping",
+    description:
+      "Submit one listed candidate as the match. For TV, segments map baseline episodes to the collection's episode indexes: baseline episodes episodeStart..episodeEnd of `season` play as collection episodes targetEpisodeStart onward. Omit segments to map the requested season 1:1.",
+    parameters: {
+      type: "object",
+      properties: {
+        canonicalId: { type: "string", description: "canonicalId of a listed candidate." },
+        variantDescription: {
+          type: "string",
+          description: 'Variant label, "原声" for original audio (default).',
+        },
+        segments: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              season: { type: "integer" },
+              episodeStart: { type: "integer" },
+              episodeEnd: { type: ["integer", "null"] },
+              targetEpisodeStart: { type: "integer" },
+              nonLinear: { type: "boolean" },
+            },
+            required: ["season", "episodeStart", "targetEpisodeStart"],
+          },
+        },
+      },
+      required: ["canonicalId"],
+    },
+  },
+  {
+    name: "mark_not_found",
+    description: "Conclude that none of the listed candidates is the target media.",
+    parameters: {
+      type: "object",
+      properties: { reason: { type: "string" } },
+    },
+  },
+];
+
+type CollectionAdapter = Tier2Adapter | Tier3Adapter;
+
+interface FetchedCandidate {
+  info: CollectionInfo;
+  sources: string[];
+}
+
+function toDiscoveryInput(
+  media: ExplorationTargetMedia,
+  season: number | null,
+): DiscoveryMediaInput {
+  const externalIds: Partial<Record<Namespace, string>> = {};
+  for (const ext of media.externalIds) {
+    externalIds[ext.namespace] ??= ext.nativeId;
+  }
+  return {
+    title: media.snapshot.title,
+    originalTitle: media.snapshot.originalTitle,
+    year: media.snapshot.year,
+    mediaType: media.type,
+    season,
+    externalIds,
+  };
+}
+
+/** Segments used when nobody says otherwise: the requested season mapped 1:1. */
+function defaultSegments(media: ExplorationTargetMedia, season: number | null): SegmentInput[] {
+  if (media.type === "movie" || media.baseline === null || season === null) {
+    return [];
+  }
+  const snap = media.snapshot.seasons.find((s) => s.season === season);
+  return [
+    {
+      season,
+      episodeStart: 1,
+      episodeEnd: snap && snap.episodeCount > 0 ? snap.episodeCount : null,
+      targetEpisodeStart: 1,
+      baseline: media.baseline,
+    },
+  ];
+}
+
+function parseModelSegments(
+  raw: unknown,
+  media: ExplorationTargetMedia,
+  season: number | null,
+): SegmentInput[] {
+  if (media.type === "movie" || media.baseline === null) {
+    return [];
+  }
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return defaultSegments(media, season);
+  }
+  const num = (v: unknown, fallback: number) => (typeof v === "number" ? v : fallback);
+  return raw.flatMap((item): SegmentInput[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const rec = item as Record<string, unknown>;
+    return [
+      {
+        season: num(rec.season, NaN),
+        episodeStart: num(rec.episodeStart, NaN),
+        episodeEnd:
+          rec.episodeEnd === undefined || rec.episodeEnd === null ? null : num(rec.episodeEnd, NaN),
+        targetEpisodeStart: num(rec.targetEpisodeStart, 1),
+        baseline: media.baseline!,
+        nonLinear: rec.nonLinear === true,
+      },
+    ];
+  });
+}
+
+/**
+ * Evidence door: every segment must land inside the collection's fetched feature episodes.
+ * Returns a reason when it does not.
+ */
+export function checkSegmentsFitCollection(
+  segments: readonly SegmentInput[],
+  info: CollectionInfo,
+): string | null {
+  const available = info.featureEpisodes.length;
+  for (const seg of segments) {
+    const targetStart = seg.targetEpisodeStart ?? 1;
+    if (!Number.isInteger(targetStart) || targetStart < 1) {
+      return "targetEpisodeStart must be a positive integer";
+    }
+    const span =
+      seg.episodeEnd === null || seg.episodeEnd === undefined
+        ? 0
+        : seg.episodeEnd - seg.episodeStart;
+    if (!Number.isInteger(span) || span < 0) {
+      return "episodeEnd must not be before episodeStart";
+    }
+    const lastTarget = targetStart + span;
+    if (available === 0 || lastTarget > available) {
+      return `segment reaches collection episode ${lastTarget}, but ${info.canonicalId} has ${available} fetched feature episodes`;
+    }
+  }
+  return null;
+}
+
+function summarizeCandidate(candidate: FetchedCandidate, step1Pass: boolean) {
+  const { info } = candidate;
+  return {
+    canonicalId: info.canonicalId,
+    title: info.title,
+    originalTitle: info.originalTitle ?? null,
+    year: info.year,
+    mediaType: info.mediaType,
+    featureEpisodeCount: info.featureEpisodes.length,
+    sources: candidate.sources,
+    passesAutomaticCheckWithDefaultMapping: step1Pass,
+  };
+}
+
+function buildJudgeSystemPrompt(namespace: Namespace): string {
+  return [
+    `You decide which candidate collection on "${namespace}" is the target media, or that none is.`,
+    "Rules:",
+    "1. Only the listed candidates exist for you; you cannot search. Submit only a listed canonicalId.",
+    "2. Check title, year, media type and episode count. Use list_episodes when counts or seasons are unclear.",
+    "3. Prefer the original-audio collection over dubbed or recut versions.",
+    "4. A collection may hold several seasons, or a season may be split; express that with segments.",
+    "5. passesAutomaticCheckWithDefaultMapping is a hint from a deterministic check, not a decision.",
+    "6. Finish with exactly one submit_mapping or mark_not_found.",
+  ].join("\n");
+}
+
+function buildJudgeUserPrompt(
+  media: ExplorationTargetMedia,
+  namespace: Namespace,
+  season: number | null,
+  candidates: ReturnType<typeof summarizeCandidate>[],
+): string {
+  const payload = {
+    target: {
+      type: media.type,
+      title: media.snapshot.title,
+      originalTitle: media.snapshot.originalTitle,
+      year: media.snapshot.year,
+      requestedSeason: season,
+      seasons: media.snapshot.seasons,
+    },
+    platform: namespace,
+    candidates,
+  };
+  return `Pick the matching collection:\n${JSON.stringify(payload, null, 2)}`;
+}
+
+interface PlatformBudget {
+  outbound: OutboundClient;
+  signal: AbortSignal;
+  expired(): boolean;
+  dispose(): void;
+}
+
+const BUDGET_EXCEEDED = "exploration_time_budget_exceeded";
+
+function createPlatformBudget(
+  outbound: OutboundClient,
+  deadlineMs: number,
+  clockMs: () => number,
+): PlatformBudget {
+  const controller = new AbortController();
+  const remainingMs = Math.max(0, deadlineMs - clockMs());
+  const timer =
+    remainingMs > 0
+      ? setTimeout(() => controller.abort(new Error(BUDGET_EXCEEDED)), remainingMs)
+      : undefined;
+  if (remainingMs <= 0) {
+    controller.abort(new Error(BUDGET_EXCEEDED));
+  }
+  const signal = controller.signal;
+  return {
+    signal,
+    expired: () => signal.aborted || clockMs() >= deadlineMs,
+    dispose: () => clearTimeout(timer),
+    outbound: {
+      fetchExternal: (request) =>
+        raceWithAbortSignal(
+          outbound.fetchExternal({
+            ...request,
+            signal: combineAbortSignals(signal, request.timeoutMs),
+          }),
+          signal,
+          BUDGET_EXCEEDED,
+        ),
+      sendEmail: (message) => outbound.sendEmail(message),
+      invokeModel: (request) =>
+        raceWithAbortSignal(
+          outbound.invokeModel({
+            ...request,
+            signal: combineAbortSignals(signal, request.timeoutMs),
+          }),
+          signal,
+          BUDGET_EXCEEDED,
+        ),
+    },
+  };
+}
+
+class PlatformTransient extends Error {
+  constructor(
+    readonly reason: string,
+    readonly retryAfterMs?: number,
+  ) {
+    super(reason);
+  }
+}
+
+async function explorePlatform(
   ctx: ExplorationExecutionContext,
-  adapter: Tier3Adapter,
+  adapter: CollectionAdapter,
+  discovery: DiscoveryResult,
+  catalog: CatalogEvidence,
   config: ResolvedExplorationAgentConfig,
   clockMs: () => number,
-  deadlineMs: number,
 ): Promise<PlatformExplorationOutcome> {
   const namespace = adapter.namespace;
   const taskId = await deriveExplorationTaskId(ctx.jobId, namespace, ctx.targetNamespaces.length);
 
-  // Fast-path idempotency: if a prior attempt or concurrent delivery of this exact task already
-  // created a change request for this task_id, return it without burning redundant model/platform calls.
+  // A redelivered job must not submit twice for the same platform.
   const existingCr = await ctx.db
     .selectFrom("change_requests")
     .select(["id", "native_id"])
     .where("task_id", "=", taskId)
     .executeTakeFirst();
-
   if (existingCr) {
     return {
       namespace,
@@ -531,515 +620,260 @@ async function exploreSinglePlatform(
     };
   }
 
-  const leads = await loadLeadsContext(ctx.db, ctx.media, namespace, ctx.season);
-  const messages: ModelMessage[] = [
-    { role: "system", content: buildSystemPrompt(namespace) },
-    { role: "user", content: buildUserPrompt(ctx.media, namespace, ctx.season, leads) },
-  ];
-
-  const targetSeasonSnap =
-    ctx.season !== null
-      ? (ctx.media.snapshot.seasons.find((s) => s.season === ctx.season) ?? null)
-      : null;
-  const targetYear = targetSeasonSnap?.airYear ?? ctx.media.snapshot.year;
-
-  let searchSucceededCount = 0;
-  let hadTransientError = false;
-  let lastTransientReason = "transient_error";
-  let lastTransientRetryAfterMs: number | undefined;
-
-  const isBudgetExceeded = (): boolean => clockMs() >= deadlineMs;
-
-  const createBudgetSignal = (): { signal: AbortSignal; dispose: () => void } => {
-    const controller = new AbortController();
-    const remainingMs = Math.max(0, deadlineMs - clockMs());
-    if (remainingMs <= 0) {
-      controller.abort(new Error("exploration_time_budget_exceeded"));
-      return { signal: controller.signal, dispose: () => {} };
-    }
-    const timer = setTimeout(() => {
-      controller.abort(new Error("exploration_time_budget_exceeded"));
-    }, remainingMs);
+  const budget = createPlatformBudget(ctx.outbound, clockMs() + config.maxDurationMs, clockMs);
+  let transient: PlatformTransient | null = null;
+  const noteTransient = (error: PlatformTransient) => {
+    transient = error;
+  };
+  const transientOutcome = (fallback: string): PlatformExplorationOutcome => {
+    const t = transient as PlatformTransient | null;
     return {
-      signal: controller.signal,
-      dispose: () => clearTimeout(timer),
+      namespace,
+      status: "transient_error",
+      reason: budget.expired() ? BUDGET_EXCEEDED : (t?.reason ?? fallback),
+      ...(t?.retryAfterMs !== undefined ? { retryAfterMs: t.retryAfterMs } : {}),
     };
   };
 
-  const withBudgetOutbound = (signal: AbortSignal): OutboundClient => ({
-    fetchExternal: (request) =>
-      raceWithAbortSignal(
-        ctx.outbound.fetchExternal({
-          ...request,
-          signal: combineAbortSignals(signal, request.timeoutMs),
-        }),
-        signal,
-        "exploration_time_budget_exceeded",
-      ),
-    sendEmail: (message) => ctx.outbound.sendEmail(message),
-    invokeModel: (request) =>
-      raceWithAbortSignal(
-        ctx.outbound.invokeModel({
-          ...request,
-          signal: combineAbortSignals(signal, request.timeoutMs),
-        }),
-        signal,
-        "exploration_time_budget_exceeded",
-      ),
-  });
-
-  const budget = createBudgetSignal();
-  const budgetedOutbound = withBudgetOutbound(budget.signal);
-
   try {
-    for (let step = 0; step < config.maxSteps; step += 1) {
-      if (isBudgetExceeded() || budget.signal.aborted) {
-        return {
-          namespace,
-          status: "transient_error",
-          reason: "exploration_time_budget_exceeded",
-        };
+    // 1. Candidate IDs: discovery plus client leads (untrusted, but they still go through fetch).
+    const sourcesById = new Map<string, string[]>();
+    for (const c of discovery.candidates) {
+      if (c.namespace === namespace) {
+        sourcesById.set(
+          c.canonicalId,
+          c.sources.map((s) => s.source),
+        );
       }
-
-      let modelResponse;
+    }
+    const leads = await loadLeadsContext(ctx.db, ctx.media, namespace, ctx.season);
+    for (const lead of leads) {
       try {
-        modelResponse = await budgetedOutbound.invokeModel({
+        const id = await adapter.canonicalize(lead.nativeId, budget.outbound);
+        sourcesById.set(id, [...(sourcesById.get(id) ?? []), "client_lead"]);
+      } catch {
+        // An unusable lead is just skipped.
+      }
+    }
+    const discoveryErrored = discovery.sources.some((s) => s.status === "error");
+    if (sourcesById.size === 0) {
+      return discoveryErrored
+        ? { namespace, status: "transient_error", reason: "discovery_source_error" }
+        : { namespace, status: "not_found", reason: "no_discovery_candidates" };
+    }
+
+    // 2. Fetch every candidate; only fetched collections can be submitted.
+    const fetched = new Map<string, FetchedCandidate>();
+    for (const [id, sources] of [...sourcesById].slice(0, MAX_CANDIDATES_PER_PLATFORM)) {
+      if (budget.expired()) {
+        return transientOutcome(BUDGET_EXCEEDED);
+      }
+      try {
+        const evidence = await adapter.fetchCollection(id, budget.outbound);
+        if (evidence.status === "found") {
+          fetched.set(evidence.info.canonicalId, { info: evidence.info, sources });
+        } else if (evidence.status === "transient_error") {
+          noteTransient(new PlatformTransient(evidence.reason, evidence.retryAfterMs));
+        }
+      } catch (error) {
+        if (budget.expired()) {
+          return transientOutcome(BUDGET_EXCEEDED);
+        }
+        if (error instanceof AdapterTransientError) {
+          noteTransient(new PlatformTransient(error.reason, error.retryAfterMs));
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (fetched.size === 0) {
+      return transient || discoveryErrored
+        ? transientOutcome("discovery_source_error")
+        : { namespace, status: "not_found", reason: "candidates_not_on_platform" };
+    }
+
+    const baseSegments = defaultSegments(ctx.media, ctx.season);
+    const passesStep1 = (info: CollectionInfo, segments: readonly SegmentInput[]) =>
+      evaluateEvidenceGateStep1(catalog, info, { segments: normalizeSegments(segments) })
+        .decision === "pass";
+
+    const submit = async (
+      info: CollectionInfo,
+      segments: SegmentInput[],
+      rawVariantDescription: unknown,
+    ): Promise<PlatformExplorationOutcome | { error: string; message: string }> => {
+      await ensureExplorationAgentUser(ctx.db);
+      const variant = await resolveAgentVariantSubmission(
+        ctx.db,
+        ctx.media.id,
+        namespace,
+        rawVariantDescription,
+      );
+      try {
+        const cr = await createChangeRequest(
+          ctx.db,
+          {
+            submitterUserId: EXPLORATION_AGENT_USER_ID,
+            submitterKeyId: null,
+            submitterType: "agent",
+            taskId,
+            demandId: ctx.demandId,
+            targetExternalKey: selectTargetExternalKeyForMedia(ctx.media),
+            namespace,
+            nativeId: info.canonicalId,
+            variantId: variant.variantId,
+            variantDescription: variant.variantDescription,
+            setDefaultVariant: variant.setDefaultVariant,
+            segments,
+            now: ctx.now,
+          },
+          { adapterRegistry: ctx.adapterRegistry, outbound: ctx.outbound, now: ctx.now },
+        );
+        return { namespace, status: "submitted", changeRequestId: cr.id, nativeId: cr.nativeId };
+      } catch (error) {
+        if (error instanceof MediaServiceError) {
+          if (error.code === "PLATFORM_UPSTREAM_ERROR") {
+            noteTransient(new PlatformTransient(error.message));
+          }
+          return { error: error.code, message: error.message };
+        }
+        throw error;
+      }
+    };
+
+    // 3. Fast path: one fetched candidate that the gate would already accept.
+    const only = fetched.size === 1 ? [...fetched.values()][0]! : null;
+    if (only && passesStep1(only.info, baseSegments)) {
+      const result = await submit(only.info, baseSegments, undefined);
+      if ("status" in result) {
+        return result;
+      }
+    }
+
+    // 4. Judge with the model, closed over the fetched candidates.
+    const summaries = [...fetched.values()].map((c) =>
+      summarizeCandidate(c, passesStep1(c.info, baseSegments)),
+    );
+    const messages: ModelMessage[] = [
+      { role: "system", content: buildJudgeSystemPrompt(namespace) },
+      { role: "user", content: buildJudgeUserPrompt(ctx.media, namespace, ctx.season, summaries) },
+    ];
+    const reply = (id: string, name: string, body: unknown) =>
+      messages.push({ role: "tool", toolCallId: id, name, content: JSON.stringify(body) });
+
+    for (let step = 0; step < config.maxSteps; step += 1) {
+      if (budget.expired()) {
+        return transientOutcome(BUDGET_EXCEEDED);
+      }
+      let response;
+      try {
+        response = await budget.outbound.invokeModel({
           provider: config.provider,
           model: config.model,
           ...(config.gatewayId ? { gatewayId: config.gatewayId } : {}),
           messages: [...messages],
-          tools: [...EXPLORATION_TOOLS],
+          tools: [...JUDGE_TOOLS],
           temperature: config.temperature,
           maxTokens: config.maxTokens,
         });
       } catch (error) {
-        return {
-          namespace,
-          status: "transient_error",
-          reason:
-            budget.signal.aborted || isBudgetExceeded()
-              ? "exploration_time_budget_exceeded"
-              : error instanceof Error
-                ? error.message
-                : "model_invocation_failed",
-        };
+        return transientOutcome(error instanceof Error ? error.message : "model_invocation_failed");
       }
 
-      const assistantText = modelResponse.text ?? modelResponse.content ?? "";
-      const toolCalls = modelResponse.toolCalls ?? [];
-
+      const toolCalls = response.toolCalls ?? [];
       messages.push({
         role: "assistant",
-        content: assistantText,
+        content: response.text ?? response.content ?? "",
         ...(toolCalls.length > 0 ? { toolCalls } : {}),
       });
-
       if (toolCalls.length === 0) {
-        if (hadTransientError) {
-          return {
-            namespace,
-            status: "transient_error",
-            reason: lastTransientReason,
-            ...(lastTransientRetryAfterMs !== undefined
-              ? { retryAfterMs: lastTransientRetryAfterMs }
-              : {}),
-          };
-        }
-        if (searchSucceededCount > 0) {
-          return {
-            namespace,
-            status: "not_found",
-            reason: assistantText.trim() || "model_finished_without_candidate",
-          };
-        }
-        return {
-          namespace,
-          status: "transient_error",
-          reason: "model_stopped_without_searching",
-        };
+        // A model that stops without deciding is a failed run, not evidence of absence.
+        return transientOutcome("model_finished_without_decision");
       }
 
-      for (const toolCall of toolCalls) {
-        if (isBudgetExceeded() || budget.signal.aborted) {
-          return {
-            namespace,
-            status: "transient_error",
-            reason: "exploration_time_budget_exceeded",
-          };
-        }
+      for (const call of toolCalls) {
+        const args = call.arguments ?? {};
+        const candidate =
+          typeof args.canonicalId === "string" ? fetched.get(args.canonicalId.trim()) : undefined;
 
-        const args = toolCall.arguments ?? {};
-
-        if (toolCall.name === "search_platform") {
-          const keyword =
-            typeof args.keyword === "string" && args.keyword.trim().length > 0
-              ? args.keyword.trim()
-              : ctx.media.snapshot.title;
-          const page =
-            typeof args.page === "number" && Number.isInteger(args.page) && args.page > 0
-              ? args.page
-              : 1;
-          const limit =
-            typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit > 0
-              ? Math.min(args.limit, 20)
-              : 10;
-
-          let searchResult;
-          try {
-            searchResult = await raceWithAbortSignal(
-              adapter.search(
-                {
-                  title: keyword,
-                  originalTitle: ctx.media.snapshot.originalTitle,
-                  year: targetYear,
-                  mediaType: ctx.media.type,
-                  season: ctx.season,
-                  page,
-                  limit,
+        if (call.name === "list_episodes") {
+          reply(
+            call.id,
+            call.name,
+            candidate
+              ? {
+                  canonicalId: candidate.info.canonicalId,
+                  episodes: candidate.info.featureEpisodes
+                    .slice(0, MAX_EPISODES_IN_TOOL_RESULT)
+                    .map((ep) => ({
+                      index: ep.index,
+                      title: ep.longTitle ?? ep.title ?? null,
+                      airDate: ep.airDate ?? null,
+                    })),
+                  total: candidate.info.featureEpisodes.length,
+                }
+              : {
+                  error: "UNKNOWN_CANDIDATE",
+                  message: "Use a canonicalId from the candidate list.",
                 },
-                budgetedOutbound,
-              ),
-              budget.signal,
-              "exploration_time_budget_exceeded",
-            );
-          } catch (error) {
-            if (budget.signal.aborted || isBudgetExceeded()) {
-              return {
-                namespace,
-                status: "transient_error",
-                reason: "exploration_time_budget_exceeded",
-              };
-            }
-            throw error;
-          }
-
-          if (searchResult.status === "transient_error") {
-            hadTransientError = true;
-            lastTransientReason = searchResult.reason;
-            if (searchResult.retryAfterMs !== undefined) {
-              lastTransientRetryAfterMs = searchResult.retryAfterMs;
-            }
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                status: "transient_error",
-                reason: searchResult.reason,
-              }),
-            });
-          } else {
-            searchSucceededCount += 1;
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                status: "ok",
-                candidates: searchResult.candidates,
-              }),
-            });
-          }
-          continue;
-        }
-
-        if (toolCall.name === "inspect_collection") {
-          const rawNativeId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
-          if (rawNativeId.length === 0) {
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                status: "error",
-                reason: "nativeId must be a non-empty string",
-              }),
-            });
-            continue;
-          }
-
-          let canonicalId: string;
-          try {
-            canonicalId = await raceWithAbortSignal(
-              adapter.canonicalize(rawNativeId, budgetedOutbound),
-              budget.signal,
-              "exploration_time_budget_exceeded",
-            );
-          } catch (error) {
-            if (budget.signal.aborted || isBudgetExceeded()) {
-              return {
-                namespace,
-                status: "transient_error",
-                reason: "exploration_time_budget_exceeded",
-              };
-            }
-            if (error instanceof InvalidNativeIdError) {
-              messages.push({
-                role: "tool",
-                toolCallId: toolCall.id,
-                name: toolCall.name,
-                content: JSON.stringify({
-                  status: "invalid_id",
-                  reason: error.reason,
-                }),
-              });
-              continue;
-            }
-            if (error instanceof AdapterTransientError) {
-              hadTransientError = true;
-              lastTransientReason = error.reason;
-              if (error.retryAfterMs !== undefined) {
-                lastTransientRetryAfterMs = error.retryAfterMs;
-              }
-              messages.push({
-                role: "tool",
-                toolCallId: toolCall.id,
-                name: toolCall.name,
-                content: JSON.stringify({
-                  status: "transient_error",
-                  reason: error.reason,
-                }),
-              });
-              continue;
-            }
-            throw error;
-          }
-
-          let evidence;
-          try {
-            evidence = await raceWithAbortSignal(
-              adapter.fetchCollection(canonicalId, budgetedOutbound),
-              budget.signal,
-              "exploration_time_budget_exceeded",
-            );
-          } catch (error) {
-            if (budget.signal.aborted || isBudgetExceeded()) {
-              return {
-                namespace,
-                status: "transient_error",
-                reason: "exploration_time_budget_exceeded",
-              };
-            }
-            throw error;
-          }
-          if (evidence.status === "transient_error") {
-            hadTransientError = true;
-            lastTransientReason = evidence.reason;
-            if (evidence.retryAfterMs !== undefined) {
-              lastTransientRetryAfterMs = evidence.retryAfterMs;
-            }
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                status: "transient_error",
-                reason: evidence.reason,
-              }),
-            });
-            continue;
-          }
-
-          if (evidence.status === "not_found") {
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                status: "not_found",
-                canonicalId,
-                reason: evidence.reason ?? "collection_not_found",
-              }),
-            });
-            continue;
-          }
-
-          const info = evidence.info;
-          const eps = info.featureEpisodes;
-          const sampleEpisodes =
-            eps.length <= MAX_SAMPLE_EPISODES_HEAD + MAX_SAMPLE_EPISODES_TAIL
-              ? eps
-              : [
-                  ...eps.slice(0, MAX_SAMPLE_EPISODES_HEAD),
-                  ...eps.slice(-MAX_SAMPLE_EPISODES_TAIL),
-                ];
-
-          messages.push({
-            role: "tool",
-            toolCallId: toolCall.id,
-            name: toolCall.name,
-            content: JSON.stringify({
-              status: "found",
-              info: {
-                namespace: info.namespace,
-                canonicalId: info.canonicalId,
-                title: info.title,
-                originalTitle: info.originalTitle ?? null,
-                aliases: info.aliases ?? [],
-                year: info.year,
-                mediaType: info.mediaType,
-                featureEpisodeCount: info.featureEpisodeCount,
-                sampleEpisodes,
-              },
-            }),
-          });
-          continue;
-        }
-
-        if (toolCall.name === "submit_candidate") {
-          const rawNativeId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
-          if (rawNativeId.length === 0) {
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                ok: false,
-                error: "INVALID_NATIVE_ID",
-                message: "nativeId must be a non-empty string",
-              }),
-            });
-            continue;
-          }
-
-          await ensureExplorationAgentUser(ctx.db);
-          const variant = await resolveAgentVariantSubmission(
-            ctx.db,
-            ctx.media.id,
-            namespace,
-            args.variantDescription,
           );
-          const segments = parseSubmitSegments(args.segments, ctx.media, ctx.season);
-          const targetExternalKey = selectTargetExternalKeyForMedia(ctx.media);
-
-          try {
-            const changeRequest = await createChangeRequest(
-              ctx.db,
-              {
-                submitterUserId: EXPLORATION_AGENT_USER_ID,
-                submitterKeyId: null,
-                submitterType: "agent",
-                taskId,
-                demandId: ctx.demandId,
-                targetExternalKey,
-                namespace,
-                nativeId: rawNativeId,
-                variantId: variant.variantId,
-                variantDescription: variant.variantDescription,
-                setDefaultVariant: variant.setDefaultVariant,
-                segments,
-                now: ctx.now,
-              },
-              {
-                adapterRegistry: ctx.adapterRegistry,
-                outbound: ctx.outbound,
-                now: ctx.now,
-              },
-            );
-
-            return {
-              namespace,
-              status: "submitted",
-              changeRequestId: changeRequest.id,
-              nativeId: changeRequest.nativeId,
-            };
-          } catch (error) {
-            if (error instanceof MediaServiceError) {
-              if (error.code === "PLATFORM_UPSTREAM_ERROR") {
-                hadTransientError = true;
-                lastTransientReason = error.message;
-              }
-              messages.push({
-                role: "tool",
-                toolCallId: toolCall.id,
-                name: toolCall.name,
-                content: JSON.stringify({
-                  ok: false,
-                  error: error.code,
-                  message: error.message,
-                }),
-              });
-              continue;
-            }
-            throw error;
-          }
+          continue;
         }
 
-        if (toolCall.name === "mark_not_found") {
-          const reason =
-            typeof args.reason === "string" && args.reason.trim().length > 0
-              ? args.reason.trim()
-              : "no_matching_collection";
+        if (call.name === "get_catalog_season") {
+          const season = ctx.media.snapshot.seasons.find((s) => s.season === args.season);
+          reply(call.id, call.name, season ?? { error: "UNKNOWN_SEASON" });
+          continue;
+        }
 
-          if (hadTransientError) {
-            return {
-              namespace,
-              status: "transient_error",
-              reason: lastTransientReason,
-              ...(lastTransientRetryAfterMs !== undefined
-                ? { retryAfterMs: lastTransientRetryAfterMs }
-                : {}),
-            };
-          }
-
-          if (searchSucceededCount === 0) {
-            messages.push({
-              role: "tool",
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              content: JSON.stringify({
-                ok: false,
-                error: "SEARCH_REQUIRED_BEFORE_NOT_FOUND",
-                message: "Call search_platform at least once before marking not_found.",
-              }),
+        if (call.name === "submit_mapping") {
+          if (!candidate) {
+            reply(call.id, call.name, {
+              ok: false,
+              error: "UNKNOWN_CANDIDATE",
+              message: "Only canonicalIds from the candidate list can be submitted.",
             });
             continue;
           }
+          const segments = parseModelSegments(args.segments, ctx.media, ctx.season);
+          const misfit = checkSegmentsFitCollection(segments, candidate.info);
+          if (misfit) {
+            reply(call.id, call.name, {
+              ok: false,
+              error: "SEGMENTS_OUTSIDE_COLLECTION",
+              message: misfit,
+            });
+            continue;
+          }
+          const result = await submit(candidate.info, segments, args.variantDescription);
+          if ("status" in result) {
+            return result;
+          }
+          reply(call.id, call.name, { ok: false, ...result });
+          continue;
+        }
 
+        if (call.name === "mark_not_found") {
+          if (transient) {
+            return transientOutcome("transient_error");
+          }
           return {
             namespace,
             status: "not_found",
-            reason,
+            reason:
+              typeof args.reason === "string" && args.reason.trim()
+                ? args.reason.trim()
+                : "no_matching_candidate",
           };
         }
 
-        messages.push({
-          role: "tool",
-          toolCallId: toolCall.id,
-          name: toolCall.name,
-          content: JSON.stringify({
-            ok: false,
-            error: "UNKNOWN_TOOL",
-            message: `Unknown tool "${toolCall.name}"`,
-          }),
-        });
+        reply(call.id, call.name, { ok: false, error: "UNKNOWN_TOOL" });
       }
     }
 
-    if (hadTransientError) {
-      return {
-        namespace,
-        status: "transient_error",
-        reason: lastTransientReason,
-        ...(lastTransientRetryAfterMs !== undefined
-          ? { retryAfterMs: lastTransientRetryAfterMs }
-          : {}),
-      };
-    }
-
-    if (searchSucceededCount > 0) {
-      return {
-        namespace,
-        status: "not_found",
-        reason: "max_steps_exhausted",
-      };
-    }
-
-    return {
-      namespace,
-      status: "transient_error",
-      reason: "max_steps_exhausted_without_search",
-    };
+    return transient
+      ? transientOutcome("transient_error")
+      : { namespace, status: "not_found", reason: "max_steps_exhausted" };
   } finally {
     budget.dispose();
   }
@@ -1050,33 +884,41 @@ export function createExplorationAgentExecutor(
 ): ExplorationExecutor {
   const config = resolveExplorationAgentConfig(options);
   const clockMs = options.clockMs ?? (() => Date.now());
+  const discover = options.discover ?? discoverCandidates;
   const defaultRegistry = options.adapterRegistry ?? createDefaultAdapterRegistry();
 
   return async (ctx: ExplorationExecutionContext): Promise<ExplorationExecutionResult> => {
     const startMs = clockMs();
-    const deadlineMs = startMs + config.maxDurationMs;
     const registry: AdapterRegistry = ctx.adapterRegistry ?? defaultRegistry;
-    const platformOutcomes: PlatformExplorationOutcome[] = [];
-
-    for (const namespace of ctx.targetNamespaces) {
+    const targets = ctx.targetNamespaces.flatMap((namespace) => {
       const adapter = registry.get(namespace);
-      if (!adapter || !isTier3Adapter(adapter)) {
-        continue;
-      }
-
-      const platformStartMs = clockMs();
-      const outcome = await exploreSinglePlatform(ctx, adapter, config, clockMs, deadlineMs);
-      const platformDurationMs = Math.max(0, clockMs() - platformStartMs);
-      platformOutcomes.push({
-        ...outcome,
-        durationMs: platformDurationMs,
-      });
+      return adapter && isPlatformNamespace(namespace) && isTier2Adapter(adapter) ? [adapter] : [];
+    });
+    if (targets.length === 0) {
+      return { platformOutcomes: [], durationMs: 0 };
     }
 
-    const durationMs = Math.max(0, clockMs() - startMs);
-    return {
-      platformOutcomes,
-      durationMs,
-    };
+    const catalog = await loadCatalogEvidenceForMedia(ctx.db, ctx.media.id);
+    if (!catalog) {
+      return {
+        platformOutcomes: targets.map((a) => ({
+          namespace: a.namespace,
+          status: "transient_error" as const,
+          reason: "media_snapshot_unavailable",
+        })),
+        durationMs: Math.max(0, clockMs() - startMs),
+      };
+    }
+    const discovery = await discover(toDiscoveryInput(ctx.media, ctx.season), {
+      outbound: ctx.outbound,
+    });
+
+    const platformOutcomes: PlatformExplorationOutcome[] = [];
+    for (const adapter of targets) {
+      const platformStartMs = clockMs();
+      const outcome = await explorePlatform(ctx, adapter, discovery, catalog, config, clockMs);
+      platformOutcomes.push({ ...outcome, durationMs: Math.max(0, clockMs() - platformStartMs) });
+    }
+    return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
   };
 }
