@@ -156,6 +156,8 @@ export interface CreateChangeRequestOptions {
 
 export interface ListChangeRequestsOptions {
   status?: ChangeRequestStatus;
+  /** List one submitter's requests across every status, newest first (`status` is ignored). */
+  submitterUserId?: string;
   limit?: number;
   offset?: number;
 }
@@ -1168,20 +1170,23 @@ export async function listChangeRequests(
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
   const offset = Math.max(options.offset ?? 0, 0);
 
+  const mine = options.submitterUserId;
   const [rows, countRow] = await Promise.all([
     dbWrite
       .selectFrom("change_requests")
       .selectAll()
-      .where("status", "=", status)
-      .orderBy("created_at", "asc")
-      .orderBy("id", "asc")
+      .$if(mine === undefined, (qb) => qb.where("status", "=", status))
+      .$if(mine !== undefined, (qb) => qb.where("submitter_user_id", "=", mine!))
+      .orderBy("created_at", mine === undefined ? "asc" : "desc")
+      .orderBy("id", mine === undefined ? "asc" : "desc")
       .limit(limit)
       .offset(offset)
       .execute(),
     dbWrite
       .selectFrom("change_requests")
       .select(sql<string>`count(*)`.as("count"))
-      .where("status", "=", status)
+      .$if(mine === undefined, (qb) => qb.where("status", "=", status))
+      .$if(mine !== undefined, (qb) => qb.where("submitter_user_id", "=", mine!))
       .executeTakeFirstOrThrow(),
   ]);
 

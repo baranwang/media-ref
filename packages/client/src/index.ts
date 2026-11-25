@@ -152,6 +152,7 @@ export type { DecodedMediaRefResult, ExtractedConnectErrorInfo } from "./proto-m
 export * as proto from "./proto.ts";
 export { AccountService } from "./gen/mediaref/v1/account_pb.ts";
 export { AssociationService } from "./gen/mediaref/v1/association_pb.ts";
+export { BrowseService } from "./gen/mediaref/v1/browse_pb.ts";
 export { ChangeRequestService } from "./gen/mediaref/v1/change_request_pb.ts";
 export { MediaService } from "./gen/mediaref/v1/media_pb.ts";
 export { ReviewerService } from "./gen/mediaref/v1/reviewer_pb.ts";

@@ -81,7 +81,7 @@ function resolveNamespaceGroupParam(group: proto.NamespaceGroup): NamespaceGroup
 
 export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
   async getMedia(req, ctx) {
-    await authorizePublicRead(ctx);
+    const apiKey = await authorizePublicRead(ctx);
 
     const runtime = getRuntime(ctx);
     const season = validateSeasonParam(req.season);
@@ -123,6 +123,14 @@ export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
           now,
         }),
       );
+    }
+
+    if (apiKey) {
+      runtime.usageRecorder?.record({
+        userId: apiKey.userId,
+        keyId: apiKey.keyId,
+        event: result.kind === "not_found" ? "not_found" : "found",
+      });
     }
 
     if (result.kind === "not_found") {
@@ -176,7 +184,7 @@ export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
   },
 
   async batchGetMedia(req, ctx) {
-    await authorizePublicRead(ctx);
+    const apiKey = await authorizePublicRead(ctx);
 
     const runtime = getRuntime(ctx);
     if (req.refs.length === 0 || req.refs.length > MAX_BATCH_MEDIA_KEYS) {
@@ -215,6 +223,14 @@ export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
               includeUnconfirmed: req.includeUnconfirmed,
             })
           : [];
+
+      if (apiKey && queryResults.length > 0) {
+        const found = queryResults.filter((entry) => entry.ok).length;
+        const notFound = queryResults.filter((e) => !e.ok && e.error === "NOT_FOUND").length;
+        const usage = { userId: apiKey.userId, keyId: apiKey.keyId };
+        runtime.usageRecorder?.record({ ...usage, event: "found", count: found });
+        runtime.usageRecorder?.record({ ...usage, event: "not_found", count: notFound });
+      }
 
       if (queryResults.length > 0) {
         const batchDemandInput = {

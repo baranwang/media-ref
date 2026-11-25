@@ -522,18 +522,19 @@ async function traktTrending(opts: CatalogBrowseOptions, type: BrowseType): Prom
     entries.map(async ({ kind, item }): Promise<CatalogCard | null> => {
       const ids = asRecord(item.ids);
       const tmdbId = typeof ids?.tmdb === "number" ? String(ids.tmdb) : null;
-      const slug = str(ids?.slug);
-      if (!tmdbId || !slug) {
+      if (!tmdbId) {
         return null;
       }
       const mediaType: MediaType = kind === "movie" ? "movie" : "tv";
       const detail = await getCatalogDetail(`tmdb:${mediaType}:${tmdbId}`, opts);
+      // Keyed by TMDB: MediaRef stores Trakt ids numerically, never by slug, and TMDB keys
+      // resolve everywhere (detail page, change-request target).
       return {
-        key: `trakt:${kind}:${slug}`,
+        key: `tmdb:${mediaType}:${tmdbId}`,
         namespace: "trakt" as const,
         type: mediaType,
         isAnime: detail?.isAnime ?? false,
-        title: detail?.title ?? str(item.title) ?? slug,
+        title: detail?.title ?? str(item.title) ?? tmdbId,
         originalTitle: str(item.title),
         year: typeof item.year === "number" ? item.year : (detail?.year ?? null),
         posterUrl: detail?.posterUrl ?? null,

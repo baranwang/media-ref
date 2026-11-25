@@ -77,6 +77,39 @@ message DeleteApiKeyResponse {
   string id = 2;
 }
 
+message UpdateApiKeyRequest {
+  string id = 1;
+  optional string name = 2;
+  optional bool can_submit = 3;
+}
+
+message UpdateApiKeyResponse {
+  ApiKeySummary api_key = 1;
+}
+
+message ApiUsageDay {
+  // UTC date, YYYY-MM-DD.
+  string date = 1;
+  int64 found = 2;
+  int64 not_found = 3;
+  int64 submitted = 4;
+}
+
+message ApiKeyLastUsed {
+  string key_id = 1;
+  string last_used_at = 2;
+}
+
+message GetApiUsageRequest {
+  // Days to cover, ending today (UTC). Defaults to 14, at most 90.
+  optional int32 days = 1;
+}
+
+message GetApiUsageResponse {
+  repeated ApiUsageDay days = 1;
+  repeated ApiKeyLastUsed last_used = 2;
+}
+
 service AccountService {
   rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -89,4 +122,9 @@ service AccountService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   rpc DeleteApiKey(DeleteApiKeyRequest) returns (DeleteApiKeyResponse);
+  rpc UpdateApiKey(UpdateApiKeyRequest) returns (UpdateApiKeyResponse);
+  // Daily usage across all of the signed-in user's API keys.
+  rpc GetApiUsage(GetApiUsageRequest) returns (GetApiUsageResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 }

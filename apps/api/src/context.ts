@@ -8,6 +8,7 @@ import {
   MediaSyncError,
   SubmissionQuotaExceededError,
   type AdapterRegistry,
+  type BrowseCache,
   type CatalogGatewayConfig,
   type InvalidationReporterInput,
   type OutboundClient,
@@ -25,6 +26,7 @@ import {
 } from "./api-keys.ts";
 import { getAuthenticatedSession, type AuthenticatedSession, type AuthInstance } from "./auth.ts";
 import { checkReadRateLimit, type ReadRateLimitRuntime } from "./rate-limit.ts";
+import type { UsageReader, UsageRecorder } from "./usage.ts";
 
 export interface ApiRequestRuntime {
   dbRead: Db;
@@ -32,6 +34,9 @@ export interface ApiRequestRuntime {
   outbound: OutboundClient;
   adapterRegistry: AdapterRegistry;
   catalogConfig: CatalogGatewayConfig | undefined;
+  browseCache?: BrowseCache;
+  usageRecorder?: UsageRecorder;
+  usageReader?: UsageReader;
   tmdbConfig: TmdbGatewayConfig | undefined;
   tmdbGateway: TmdbGateway | undefined;
   now: () => Date;

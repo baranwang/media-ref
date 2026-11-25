@@ -106,6 +106,7 @@ export function createRpcClients(
     association: createClient(proto.AssociationService, transport),
     account: createClient(proto.AccountService, transport),
     reviewer: createClient(proto.ReviewerService, transport),
+    browse: createClient(proto.BrowseService, transport),
   };
 }
 

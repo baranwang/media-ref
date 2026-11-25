@@ -2,6 +2,8 @@ import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createLiveOutboundClient, parseOutboundProxyConfig } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import { createApiApp } from "./app.ts";
+import { createWorkersBrowseCache } from "./browse-cache.ts";
+import { createAnalyticsUsageReader, createAnalyticsUsageRecorder } from "./usage.ts";
 import { DEFAULT_EMAIL_FROM } from "./auth.ts";
 import { parseAnonymousInvalidationThresholdFromEnv } from "./invalidation.ts";
 import { parseOAuthConfigFromEnv } from "./oauth.ts";
@@ -52,6 +54,12 @@ export async function handleWorkerRequest(
       proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
       emailBinding: env.EMAIL,
       defaultEmailFrom: env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM,
+    }),
+    browseCache: createWorkersBrowseCache(),
+    usageRecorder: createAnalyticsUsageRecorder(env.API_USAGE),
+    usageReader: createAnalyticsUsageReader({
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: env.ANALYTICS_API_TOKEN,
     }),
     onBackgroundTask: (promise) => {
       backgroundTasks.push(promise);

@@ -4,6 +4,7 @@ import {
   createDefaultAdapterRegistry,
   resolveAnonymousInvalidationThreshold,
   type AdapterRegistry,
+  type BrowseCache,
   type CatalogGatewayConfig,
   type ExternalTargetKind,
   type OutboundClient,
@@ -20,6 +21,7 @@ import {
 } from "@connectrpc/connect/protocol";
 import { accountServiceImpl } from "./api-keys.ts";
 import { associationServiceImpl } from "./associations.ts";
+import { browseServiceImpl } from "./browse.ts";
 import {
   AUTH_BASE_PATH,
   createAuth,
@@ -38,6 +40,7 @@ import {
   type ReadRateLimitRuntime,
 } from "./rate-limit.ts";
 import { reviewerServiceImpl } from "./reviewer.ts";
+import type { UsageReader, UsageRecorder } from "./usage.ts";
 
 export interface ApiConfig extends AuthConfig {
   enableHealthOutboundProbe?: boolean;
@@ -61,6 +64,9 @@ export interface ApiDeps {
   dbWrite: Db;
   outbound: OutboundClient;
   adapterRegistry?: AdapterRegistry;
+  browseCache?: BrowseCache;
+  usageRecorder?: UsageRecorder;
+  usageReader?: UsageReader;
   tmdbGateway?: TmdbGateway;
   onBackgroundTask?: (promise: Promise<unknown>) => void;
   onBackgroundTaskError?: (error: unknown) => void;
@@ -108,6 +114,7 @@ connectRouter.service(proto.ChangeRequestService, changeRequestServiceImpl);
 connectRouter.service(proto.AssociationService, associationServiceImpl);
 connectRouter.service(proto.AccountService, accountServiceImpl);
 connectRouter.service(proto.ReviewerService, reviewerServiceImpl);
+connectRouter.service(proto.BrowseService, browseServiceImpl);
 
 const connectHandlerMap = new Map<string, UniversalHandler>(
   connectRouter.handlers.map((handler) => [handler.requestPath, handler]),
@@ -219,6 +226,9 @@ export function createApiApp(deps: ApiDeps): ApiApp {
     outbound: deps.outbound,
     adapterRegistry,
     catalogConfig: deps.config.catalog,
+    browseCache: deps.browseCache,
+    usageRecorder: deps.usageRecorder,
+    usageReader: deps.usageReader,
     tmdbConfig: deps.config.tmdb,
     tmdbGateway: deps.tmdbGateway,
     now,

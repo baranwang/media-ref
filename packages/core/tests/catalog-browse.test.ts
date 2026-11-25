@@ -142,7 +142,7 @@ describe("listTrending", () => {
     expect(await listTrending("bangumi", "movie", 10, { outbound })).toEqual([]);
   });
 
-  test("Trakt trending is enriched with TMDB artwork and keyed by slug", async () => {
+  test("Trakt trending is enriched with TMDB artwork and keyed by its TMDB id", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal: (req: ExternalHttpRequest) => {
         if (req.namespace === "trakt") {
@@ -169,7 +169,7 @@ describe("listTrending", () => {
     });
     expect(cards).toEqual([
       {
-        key: "trakt:show:shogun-2024",
+        key: "tmdb:tv:126308",
         namespace: "trakt",
         type: "tv",
         isAnime: false,
