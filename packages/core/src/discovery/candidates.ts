@@ -362,29 +362,11 @@ async function fetchDoubanVendors(
     if (!/^tt\d+$/.test(imdbId)) {
       return errorOutcome(source, "invalid_imdb_id");
     }
-    const lookup = asRecord(
-      await fetchJson(
-        outbound,
-        {
-          kind: "platform",
-          namespace: "douban",
-          url: `${DOUBAN_IMDB_API}/${imdbId}`,
-          method: "POST",
-          headers: { "content-type": "application/json", "user-agent": MOBILE_UA },
-          body: JSON.stringify({ apikey: DOUBAN_API_KEY }),
-        },
-        [404],
-      ),
-    );
-    // Unknown IMDb IDs come back as HTTP 200 `{"msg":"movie_not_found","code":5000}` (or a 404).
-    const idMatch = stringOrNull(lookup?.id)?.match(/\/(\d+)\/?$/);
-    if (!idMatch) {
-      if (lookup === null || lookup.code === 5000 || lookup.msg === "movie_not_found") {
-        return { report: { source, status: "not_found", reason: "imdb_not_on_douban" }, links: [] };
-      }
-      return errorOutcome(source, "unexpected_imdb_lookup_payload");
+    const found = await lookupDoubanSubjectByImdb(imdbId, outbound);
+    if (found === null) {
+      return { report: { source, status: "not_found", reason: "imdb_not_on_douban" }, links: [] };
     }
-    doubanId = idMatch[1]!;
+    doubanId = found;
   }
 
   // `/movie/<id>` works for both subtypes (TV subjects 301 to `/tv/<id>`, and redirects are followed).
@@ -421,6 +403,39 @@ async function fetchDoubanVendors(
     }
   }
   return { report: { source, status: "ok", links: links.length }, links };
+}
+
+/**
+ * Douban subject ID for an IMDb ID (`tt…`), or null when Douban does not know it.
+ * Throws on request failures and unexpected payloads, which mean "unknown", not "absent".
+ */
+export async function lookupDoubanSubjectByImdb(
+  imdbId: string,
+  outbound: OutboundClient,
+): Promise<string | null> {
+  const lookup = asRecord(
+    await fetchJson(
+      outbound,
+      {
+        kind: "platform",
+        namespace: "douban",
+        url: `${DOUBAN_IMDB_API}/${imdbId}`,
+        method: "POST",
+        headers: { "content-type": "application/json", "user-agent": MOBILE_UA },
+        body: JSON.stringify({ apikey: DOUBAN_API_KEY }),
+      },
+      [404],
+    ),
+  );
+  // Unknown IMDb IDs come back as HTTP 200 `{"msg":"movie_not_found","code":5000}` (or a 404).
+  const idMatch = stringOrNull(lookup?.id)?.match(/\/(\d+)\/?$/);
+  if (idMatch) {
+    return idMatch[1]!;
+  }
+  if (lookup === null || lookup.code === 5000 || lookup.msg === "movie_not_found") {
+    return null;
+  }
+  throw new Error("unexpected_imdb_lookup_payload");
 }
 
 async function fetchIqiyiSearch(

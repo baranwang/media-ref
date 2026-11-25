@@ -137,6 +137,13 @@ function isSeasonCoveredInGroup(
   targetSeason: number | null,
   namespaceGroup: NamespaceGroup,
 ): boolean {
+  // The catalog group also needs the TMDB external ID: a media known only from Douban lacks it.
+  if (
+    namespaceGroup === "catalog" &&
+    !document.externalIds.some((ext) => ext.namespace === "tmdb")
+  ) {
+    return false;
+  }
   const confirmedInGroup = document.associations.filter(
     (assoc) =>
       isConfirmedAssociation(assoc) && getNamespaceGroup(assoc.namespace) === namespaceGroup,
@@ -772,6 +779,9 @@ export async function fulfillCoveredDemandsForAssociationInTx(
 ): Promise<number> {
   const namespaceGroup = getNamespaceGroup(input.namespace);
   const now = input.now ?? new Date();
+  if (namespaceGroup === "catalog" && !(await hasTmdbExternalId(executor, input.mediaId))) {
+    return 0;
+  }
 
   let query = executor
     .updateTable("demands")
@@ -795,6 +805,52 @@ export async function fulfillCoveredDemandsForAssociationInTx(
   return updated.length;
 }
 
+async function hasTmdbExternalId(executor: DbExecutor, mediaId: string): Promise<boolean> {
+  const row = await executor
+    .selectFrom("associations")
+    .select("id")
+    .where("media_id", "=", mediaId)
+    .where("namespace", "=", "tmdb")
+    .where("is_external_id", "=", true)
+    .executeTakeFirst();
+  return row !== undefined;
+}
+
+/**
+ * Fulfills the media's open, not_found or awaiting_review catalog demands that are now covered,
+ * e.g. after the agent wrote the missing TMDB external ID.
+ */
+export async function fulfillCoveredCatalogDemandsInTx(
+  executor: DbExecutor,
+  input: { mediaId: string; now: Date },
+): Promise<number> {
+  const demands = await executor
+    .selectFrom("demands")
+    .select(["id", "season"])
+    .where("media_id", "=", input.mediaId)
+    .where("namespace_group", "=", "catalog")
+    .where("status", "in", ["open", "not_found", "awaiting_review"])
+    .execute();
+  let fulfilled = 0;
+  for (const demand of demands) {
+    if (
+      await isMediaDemandCoveredInTx(executor, {
+        mediaId: input.mediaId,
+        season: demand.season,
+        namespaceGroup: "catalog",
+      })
+    ) {
+      await executor
+        .updateTable("demands")
+        .set({ status: "fulfilled", lease_expires_at: null, updated_at: input.now })
+        .where("id", "=", demand.id)
+        .execute();
+      fulfilled += 1;
+    }
+  }
+  return fulfilled;
+}
+
 export interface CheckMediaDemandCoveredInput {
   mediaId: string;
   season: number | null;
@@ -806,6 +862,17 @@ export interface CheckMediaDemandCoveredInput {
  * confirmed association (matching `isSeasonCoveredInGroup` semantics).
  */
 export async function isMediaDemandCoveredInTx(
+  executor: DbExecutor,
+  input: CheckMediaDemandCoveredInput,
+): Promise<boolean> {
+  if (input.namespaceGroup === "catalog" && !(await hasTmdbExternalId(executor, input.mediaId))) {
+    return false;
+  }
+  return isCoveredByAssociationsInTx(executor, input);
+}
+
+/** The association half of demand coverage: a confirmed association in the group covers the season. */
+export async function isCoveredByAssociationsInTx(
   executor: DbExecutor,
   input: CheckMediaDemandCoveredInput,
 ): Promise<boolean> {

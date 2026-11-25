@@ -56,6 +56,8 @@ export {
   computeDemandTargetsForRead,
   DEFAULT_DEMAND_NAMESPACE_GROUP,
   fulfillCoveredDemandsForAssociationInTx,
+  fulfillCoveredCatalogDemandsInTx,
+  isCoveredByAssociationsInTx,
   isMediaDemandCoveredInTx,
   listDemands,
   mergeExternalKeyDemandsIntoMedia,

@@ -36,6 +36,7 @@ import {
 } from "./adapters/index.ts";
 import {
   discoverCandidates,
+  lookupDoubanSubjectByImdb,
   type DiscoveryMediaInput,
   type DiscoveryResult,
 } from "./discovery/candidates.ts";
@@ -51,8 +52,10 @@ import type {
   ExplorationTargetMedia,
   PlatformExplorationOutcome,
 } from "./exploration-scheduler.ts";
+import { fulfillCoveredCatalogDemandsInTx, isCoveredByAssociationsInTx } from "./demands.ts";
 import { loadCatalogEvidenceForMedia } from "./invalidation.ts";
 import { listLeadsForTarget, type Lead } from "./leads.ts";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { createChangeRequest, MediaServiceError } from "./media-service.ts";
 import {
   combineAbortSignals,
@@ -600,10 +603,59 @@ class PlatformTransient extends Error {
   }
 }
 
+/** Candidate IDs for one namespace, and whether a failing source makes "none" inconclusive. */
+interface NamespaceCandidates {
+  sourcesById: Map<string, string[]>;
+  sourceErrored: boolean;
+}
+
+function platformCandidates(discovery: DiscoveryResult, namespace: Namespace): NamespaceCandidates {
+  const sourcesById = new Map<string, string[]>();
+  for (const c of discovery.candidates) {
+    if (c.namespace === namespace) {
+      sourcesById.set(
+        c.canonicalId,
+        c.sources.map((s) => s.source),
+      );
+    }
+  }
+  return {
+    sourcesById,
+    // A source error, or a link for this platform that could not be resolved for now, means
+    // the absence of candidates is not evidence of absence.
+    sourceErrored:
+      discovery.sources.some((s) => s.status === "error") ||
+      discovery.dropped.some(
+        (d) => d.namespace === namespace && d.reason.startsWith("canonicalize_transient:"),
+      ),
+  };
+}
+
+/** Douban candidates: the subject Douban lists for the media's IMDb ID. */
+async function doubanCandidates(
+  media: ExplorationTargetMedia,
+  outbound: OutboundClient,
+): Promise<NamespaceCandidates> {
+  const imdbId = media.externalIds.find((e) => e.namespace === "imdb")?.nativeId;
+  const sourcesById = new Map<string, string[]>();
+  if (!imdbId) {
+    return { sourcesById, sourceErrored: false };
+  }
+  try {
+    const subjectId = await lookupDoubanSubjectByImdb(imdbId, outbound);
+    if (subjectId) {
+      sourcesById.set(subjectId, ["douban_imdb"]);
+    }
+    return { sourcesById, sourceErrored: false };
+  } catch {
+    return { sourcesById, sourceErrored: true };
+  }
+}
+
 async function explorePlatform(
   ctx: ExplorationExecutionContext,
   adapter: CollectionAdapter,
-  discovery: DiscoveryResult,
+  candidates: NamespaceCandidates,
   catalog: CatalogEvidence,
   config: ResolvedExplorationAgentConfig,
   clockMs: () => number,
@@ -643,15 +695,7 @@ async function explorePlatform(
 
   try {
     // 1. Candidate IDs: discovery plus client leads (untrusted, but they still go through fetch).
-    const sourcesById = new Map<string, string[]>();
-    for (const c of discovery.candidates) {
-      if (c.namespace === namespace) {
-        sourcesById.set(
-          c.canonicalId,
-          c.sources.map((s) => s.source),
-        );
-      }
-    }
+    const sourcesById = new Map(candidates.sourcesById);
     const leads = await loadLeadsContext(ctx.db, ctx.media, namespace, ctx.season);
     for (const lead of leads) {
       try {
@@ -661,13 +705,7 @@ async function explorePlatform(
         // An unusable lead is just skipped.
       }
     }
-    // A source error, or a link for this platform that could not be resolved for now, means
-    // the absence of candidates is not evidence of absence.
-    const discoveryErrored =
-      discovery.sources.some((s) => s.status === "error") ||
-      discovery.dropped.some(
-        (d) => d.namespace === namespace && d.reason.startsWith("canonicalize_transient:"),
-      );
+    const discoveryErrored = candidates.sourceErrored;
     if (sourcesById.size === 0) {
       return discoveryErrored
         ? { namespace, status: "transient_error", reason: "discovery_source_error" }
@@ -894,6 +932,119 @@ async function explorePlatform(
   }
 }
 
+/**
+ * Writes the media's missing TMDB external ID (ADR 0002 §2.1). The identity chain is the IMDb ID:
+ * TMDB `/find` must return exactly one entry of the media's type, and that entry's own IMDb ID must
+ * be the media's. TVDB and Trakt IDs are taken only from that same entry, and only fill empty slots.
+ * An ID already held by another media is not written; a review alert is raised instead.
+ * shortcut: no title/year/director chain for media without an IMDb ID; add one when such demands show up.
+ */
+async function exploreTmdbExternalId(
+  ctx: ExplorationExecutionContext,
+): Promise<PlatformExplorationOutcome> {
+  const namespace = "tmdb";
+  const imdbId = ctx.media.externalIds.find((e) => e.namespace === "imdb")?.nativeId;
+  if (!imdbId) {
+    return { namespace, status: "not_found", reason: "no_imdb_id_for_tmdb_find" };
+  }
+
+  let entry;
+  try {
+    const found = (await ctx.tmdbGateway.findByImdbId(imdbId)).filter(
+      (f) => f.type === ctx.media.type,
+    );
+    if (found.length !== 1) {
+      return {
+        namespace,
+        status: "not_found",
+        reason: found.length === 0 ? "imdb_not_on_tmdb" : "ambiguous_tmdb_find",
+      };
+    }
+    const detail = await ctx.tmdbGateway.fetchMediaSnapshotAndExternalIds(
+      found[0]!.type,
+      found[0]!.id,
+    );
+    if (!detail || detail.externalIds.imdb !== imdbId) {
+      return { namespace, status: "not_found", reason: "tmdb_imdb_mismatch" };
+    }
+    entry = { ...found[0]!, externalIds: detail.externalIds };
+  } catch (error) {
+    return {
+      namespace,
+      status: "transient_error",
+      reason: error instanceof Error ? error.message : "tmdb_lookup_failed",
+    };
+  }
+
+  const nativeIds: Partial<Record<"tmdb" | "tvdb" | "trakt", string>> = {
+    tmdb: `${entry.type}:${entry.id}`,
+    ...(entry.externalIds.tvdb ? { tvdb: entry.externalIds.tvdb } : {}),
+    ...(entry.externalIds.trakt ? { trakt: entry.externalIds.trakt } : {}),
+  };
+
+  const written = await ctx.db.transaction().execute(async (trx) => {
+    const mediaId = ctx.media.id;
+    let tmdbWritten = false;
+    for (const [ns, nativeId] of Object.entries(nativeIds) as Array<
+      ["tmdb" | "tvdb" | "trakt", string]
+    >) {
+      await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE, `${mediaId}:${ns}`);
+      const held = await trx
+        .selectFrom("associations")
+        .select(["media_id", "native_id"])
+        .where("is_external_id", "=", true)
+        .where("namespace", "=", ns)
+        .where((eb) => eb.or([eb("media_id", "=", mediaId), eb("native_id", "=", nativeId)]))
+        .execute();
+      if (held.some((row) => row.media_id === mediaId)) {
+        continue; // Only fill empty slots.
+      }
+      const other = held.find((row) => row.native_id === nativeId);
+      if (other) {
+        await trx
+          .insertInto("review_alerts")
+          .values({
+            alert_type: "agent_external_id_conflict",
+            media_id: mediaId,
+            status: "open",
+            details: JSON.stringify({
+              namespace: ns,
+              nativeId,
+              otherMediaId: other.media_id,
+              matchedBy: { imdb: imdbId },
+              jobId: ctx.jobId,
+            }),
+          })
+          .execute();
+        if (ns === "tmdb") {
+          return false; // Probably the same work twice: a reviewer decides on merging.
+        }
+        continue;
+      }
+      await trx
+        .insertInto("associations")
+        .values({
+          media_id: mediaId,
+          namespace: ns,
+          native_id: nativeId,
+          status: "confirmed",
+          is_external_id: true,
+          source: "agent",
+        })
+        .execute();
+      tmdbWritten ||= ns === "tmdb";
+    }
+    if (tmdbWritten) {
+      await fulfillCoveredCatalogDemandsInTx(trx, { mediaId, now: ctx.now });
+    }
+    return tmdbWritten;
+  });
+
+  return written
+    ? { namespace, status: "submitted", nativeId: nativeIds.tmdb, directWrite: true }
+    : { namespace, status: "not_found", reason: "tmdb_id_on_other_media" };
+}
+
 export function createExplorationAgentExecutor(
   options: ExplorationAgentConfig = {},
 ): ExplorationExecutor {
@@ -905,34 +1056,61 @@ export function createExplorationAgentExecutor(
   return async (ctx: ExplorationExecutionContext): Promise<ExplorationExecutionResult> => {
     const startMs = clockMs();
     const registry: AdapterRegistry = ctx.adapterRegistry ?? defaultRegistry;
-    const targets = ctx.targetNamespaces.flatMap((namespace) => {
-      const adapter = registry.get(namespace);
-      return adapter && isPlatformNamespace(namespace) && isTier2Adapter(adapter) ? [adapter] : [];
-    });
-    if (targets.length === 0) {
-      return { platformOutcomes: [], durationMs: 0 };
+    const timed = async (run: () => Promise<PlatformExplorationOutcome>) => {
+      const platformStartMs = clockMs();
+      const outcome = await run();
+      return { ...outcome, durationMs: Math.max(0, clockMs() - platformStartMs) };
+    };
+    const platformOutcomes: PlatformExplorationOutcome[] = [];
+
+    // The TMDB external ID has no adapter: it is looked up and written directly.
+    const hasTmdb = ctx.media.externalIds.some((e) => e.namespace === "tmdb");
+    if (ctx.targetNamespaces.includes("tmdb") && !hasTmdb) {
+      platformOutcomes.push(await timed(() => exploreTmdbExternalId(ctx)));
     }
 
+    // A season already covered by a Douban/Bangumi association needs no catalog candidate.
+    const catalogAssociationCovered =
+      ctx.namespaceGroup === "catalog" &&
+      (await isCoveredByAssociationsInTx(ctx.db, {
+        mediaId: ctx.media.id,
+        season: ctx.season,
+        namespaceGroup: "catalog",
+      }));
+    const targets = catalogAssociationCovered
+      ? []
+      : ctx.targetNamespaces.flatMap((namespace) => {
+          const adapter = registry.get(namespace);
+          return adapter && isTier2Adapter(adapter) ? [adapter] : [];
+        });
+    if (targets.length === 0) {
+      return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
+    }
+
+    // After a TMDB write the snapshot and external IDs changed, so read them fresh.
     const catalog = await loadCatalogEvidenceForMedia(ctx.db, ctx.media.id);
     if (!catalog) {
-      return {
-        platformOutcomes: targets.map((a) => ({
+      for (const a of targets) {
+        platformOutcomes.push({
           namespace: a.namespace,
-          status: "transient_error" as const,
+          status: "transient_error",
           reason: "media_snapshot_unavailable",
-        })),
-        durationMs: Math.max(0, clockMs() - startMs),
-      };
+        });
+      }
+      return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
     }
-    const discovery = await discover(toDiscoveryInput(ctx.media, ctx.season), {
-      outbound: ctx.outbound,
-    });
+    const discovery = targets.some((a) => isPlatformNamespace(a.namespace))
+      ? await discover(toDiscoveryInput(ctx.media, ctx.season), { outbound: ctx.outbound })
+      : null;
 
-    const platformOutcomes: PlatformExplorationOutcome[] = [];
     for (const adapter of targets) {
-      const platformStartMs = clockMs();
-      const outcome = await explorePlatform(ctx, adapter, discovery, catalog, config, clockMs);
-      platformOutcomes.push({ ...outcome, durationMs: Math.max(0, clockMs() - platformStartMs) });
+      const candidates =
+        adapter.namespace === "douban"
+          ? await doubanCandidates(ctx.media, ctx.outbound)
+          : platformCandidates(discovery!, adapter.namespace);
+      platformOutcomes.push(
+        await timed(() => explorePlatform(ctx, adapter, candidates, catalog, config, clockMs)),
+      );
     }
     return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
   };

@@ -56,6 +56,8 @@ export interface TmdbGateway {
     options?: TmdbFetchMediaOptions,
   ): Promise<TmdbMediaFetchResult | null>;
   fetchChanges(mediaType: MediaType, options: TmdbChangesOptions): Promise<TmdbChangesResult>;
+  /** TMDB entries whose IMDb ID is `imdbId` (`/find`); empty when there are none. */
+  findByImdbId(imdbId: string): Promise<Array<{ type: MediaType; id: string }>>;
 }
 
 export type TmdbGatewayErrorCode =
@@ -329,6 +331,30 @@ export function createTmdbGateway(
   }
 
   return {
+    async findByImdbId(imdbId) {
+      const fetched = await fetchTmdbJson(
+        buildTmdbUrl(`/find/${encodeURIComponent(imdbId)}`, { external_source: "imdb_id" }),
+        `find:${imdbId}`,
+      );
+      if (!fetched.ok) {
+        return [];
+      }
+      const found: Array<{ type: MediaType; id: string }> = [];
+      for (const [key, type] of [
+        ["movie_results", "movie"],
+        ["tv_results", "tv"],
+      ] as const) {
+        const rows = fetched.data[key];
+        for (const row of Array.isArray(rows) ? rows : []) {
+          const id = parsePositiveIdString((row as Record<string, unknown> | null)?.id);
+          if (id) {
+            found.push({ type, id });
+          }
+        }
+      }
+      return found;
+    },
+
     async fetchMediaSnapshotAndExternalIds(tmdbType, tmdbId, options) {
       const detailsUrl = buildTmdbUrl(`/${tmdbType}/${encodeURIComponent(tmdbId)}`, {
         append_to_response: "external_ids",
