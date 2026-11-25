@@ -21,7 +21,6 @@ import { useState } from "react";
 import { AuthLayout } from "#/components/auth-layout";
 import { NamespaceLogo } from "#/components/brand-logos";
 import {
-  getApiBaseUrl,
   requestSocialSignInUrl,
   resolveOAuthErrorMessage,
   type SocialOAuthProvider,
@@ -44,7 +43,7 @@ export const Route = createFileRoute("/signup")({
 
 function SignupPage() {
   const search = Route.useSearch();
-  const { signUp, signIn } = useAppStore();
+  const { signUp } = useAppStore();
   const navigate = useNavigate();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -77,24 +76,17 @@ function SignupPage() {
     setErrorMessage(null);
     setOauthError(null);
 
-    const apiBase = getApiBaseUrl();
-    if (apiBase) {
-      setOauthLoading(provider);
-      const result = await requestSocialSignInUrl(provider, {
-        callbackURL: `${window.location.origin}/`,
-        errorCallbackURL: `${window.location.origin}/signup`,
-      });
-      if (!result.ok) {
-        setOauthError(result.error);
-        setOauthLoading(null);
-        return;
-      }
-      window.location.assign(result.url);
+    setOauthLoading(provider);
+    const result = await requestSocialSignInUrl(provider, {
+      callbackURL: `${window.location.origin}/`,
+      errorCallbackURL: `${window.location.origin}/signup`,
+    });
+    if (!result.ok) {
+      setOauthError(result.error);
+      setOauthLoading(null);
       return;
     }
-
-    await signIn("lin.xiao@example.com", "oauth-demo-pass");
-    void navigate({ to: "/" });
+    window.location.assign(result.url);
   };
 
   const activeError = oauthError ?? errorMessage;

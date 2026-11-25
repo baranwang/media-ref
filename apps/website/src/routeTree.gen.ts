@@ -19,6 +19,7 @@ import { Route as VerifyEmailRouteImport } from "./routes/verify-email";
 import { Route as ChangeRequestsIndexRouteImport } from "./routes/change-requests.index";
 import { Route as ChangeRequestsIdRouteImport } from "./routes/change-requests.$id";
 import { Route as DiscoverCatalogRouteImport } from "./routes/discover.$catalog";
+import { Route as ImgDoubanRouteImport } from "./routes/img.douban";
 import { Route as MediaMediaIdRouteImport } from "./routes/media.$mediaId";
 
 const IndexRoute = IndexRouteImport.update({
@@ -71,6 +72,11 @@ const DiscoverCatalogRoute = DiscoverCatalogRouteImport.update({
   path: "/discover/$catalog",
   getParentRoute: () => rootRouteImport,
 } as any);
+const ImgDoubanRoute = ImgDoubanRouteImport.update({
+  id: "/img/douban",
+  path: "/img/douban",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const MediaMediaIdRoute = MediaMediaIdRouteImport.update({
   id: "/media/$mediaId",
   path: "/media/$mediaId",
@@ -87,6 +93,7 @@ export interface FileRoutesByFullPath {
   "/verify-email": typeof VerifyEmailRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
 }
@@ -100,6 +107,7 @@ export interface FileRoutesByTo {
   "/verify-email": typeof VerifyEmailRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests": typeof ChangeRequestsIndexRoute;
 }
@@ -114,6 +122,7 @@ export interface FileRoutesById {
   "/verify-email": typeof VerifyEmailRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
 }
@@ -129,6 +138,7 @@ export interface FileRouteTypes {
     | "/verify-email"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/img/douban"
     | "/media/$mediaId"
     | "/change-requests/";
   fileRoutesByTo: FileRoutesByTo;
@@ -142,6 +152,7 @@ export interface FileRouteTypes {
     | "/verify-email"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/img/douban"
     | "/media/$mediaId"
     | "/change-requests";
   id:
@@ -155,6 +166,7 @@ export interface FileRouteTypes {
     | "/verify-email"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/img/douban"
     | "/media/$mediaId"
     | "/change-requests/";
   fileRoutesById: FileRoutesById;
@@ -169,6 +181,7 @@ export interface RootRouteChildren {
   VerifyEmailRoute: typeof VerifyEmailRoute;
   ChangeRequestsIdRoute: typeof ChangeRequestsIdRoute;
   DiscoverCatalogRoute: typeof DiscoverCatalogRoute;
+  ImgDoubanRoute: typeof ImgDoubanRoute;
   MediaMediaIdRoute: typeof MediaMediaIdRoute;
   ChangeRequestsIndexRoute: typeof ChangeRequestsIndexRoute;
 }
@@ -245,6 +258,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof DiscoverCatalogRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/img/douban": {
+      id: "/img/douban";
+      path: "/img/douban";
+      fullPath: "/img/douban";
+      preLoaderRoute: typeof ImgDoubanRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/media/$mediaId": {
       id: "/media/$mediaId";
       path: "/media/$mediaId";
@@ -265,6 +285,7 @@ const rootRouteChildren: RootRouteChildren = {
   VerifyEmailRoute: VerifyEmailRoute,
   ChangeRequestsIdRoute: ChangeRequestsIdRoute,
   DiscoverCatalogRoute: DiscoverCatalogRoute,
+  ImgDoubanRoute: ImgDoubanRoute,
   MediaMediaIdRoute: MediaMediaIdRoute,
   ChangeRequestsIndexRoute: ChangeRequestsIndexRoute,
 };

@@ -6,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
 import { createBrowserClients, getApiBaseUrl } from "./api-client";
@@ -180,5 +181,12 @@ export function useAppStore(): AppStoreValue {
     throw new Error("useAppStore must be used inside AppStoreProvider");
   }
   const state = useSelector(ctx.store, (s) => s);
-  return useMemo(() => ({ ...state, ...ctx.actions }), [state, ctx.actions]);
+  // The server never knows the session. Until this component has mounted, report the server's
+  // view so hydration matches even when the session check finished before a lazy route hydrated.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  const visible = mounted ? state : SERVER_STATE;
+  return useMemo(() => ({ ...visible, ...ctx.actions }), [visible, ctx.actions]);
 }
+
+const SERVER_STATE: AppState = { user: null, sessionChecked: false };

@@ -1,6 +1,7 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { AUTH_COLLAGE_POSTERS } from "#/lib/catalog-data";
+import { trendingQuery } from "#/lib/queries";
 import { BrandLogo } from "./brand-logos";
 
 const COLLAGE_COLUMNS = 7;
@@ -19,6 +20,9 @@ export function AuthLayout({
   showcaseDescription,
   showcaseFacts,
 }: AuthLayoutProps) {
+  const { data } = useQuery(trendingQuery("tmdb", "all", 20));
+  const posters = (data ?? []).flatMap((card) => (card.posterUrl ? [card.posterUrl] : []));
+
   return (
     <div className="grid min-h-svh w-full bg-background lg:grid-cols-2">
       {/* Left column: Brand + centered form */}
@@ -44,15 +48,14 @@ export function AuthLayout({
             <div key={col} className={`flex flex-1 flex-col gap-4 ${col % 2 === 0 ? "pt-28" : ""}`}>
               {Array.from({ length: COLLAGE_ROWS }, (_, row) => (
                 <div key={row} className="aspect-2/3 overflow-hidden rounded-lg bg-card">
-                  <img
-                    src={
-                      AUTH_COLLAGE_POSTERS[
-                        (row * COLLAGE_COLUMNS + col) % AUTH_COLLAGE_POSTERS.length
-                      ]
-                    }
-                    alt=""
-                    className="h-full w-full object-cover"
-                  />
+                  {posters.length > 0 && (
+                    <img
+                      src={posters[(row * COLLAGE_COLUMNS + col) % posters.length]}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      className="h-full w-full object-cover"
+                    />
+                  )}
                 </div>
               ))}
             </div>

@@ -1,6 +1,6 @@
 import { Badge } from "@media-ref/ui/components/badge";
 import { RiCheckboxCircleLine, RiCloseCircleLine, RiErrorWarningLine } from "@remixicon/react";
-import type { AutoCheckItem } from "#/lib/catalog-data";
+import type { AutoCheckItem } from "#/lib/types";
 
 export function CheckItemRow({
   item,

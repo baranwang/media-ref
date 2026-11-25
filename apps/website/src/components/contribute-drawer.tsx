@@ -1,4 +1,11 @@
-import { isCatalogNamespace, type Namespace } from "@media-ref/client";
+import { ConnectError } from "@connectrpc/connect";
+import {
+  extractConnectErrorInfo,
+  isCatalogNamespace,
+  toProtoMediaRefFromKey,
+  toProtoSegmentInput,
+} from "@media-ref/client";
+import { Alert, AlertDescription, AlertTitle } from "@media-ref/ui/components/alert";
 import { Button } from "@media-ref/ui/components/button";
 import {
   Drawer,
@@ -21,15 +28,29 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@media-ref/ui/components/tabs";
 import { cn } from "@media-ref/ui/lib/utils";
 import { RiAddLine, RiCheckLine, RiErrorWarningLine } from "@remixicon/react";
-import { useNavigate } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useAppStore } from "#/lib/app-store";
-import type { CoverageSegment, MediaItem } from "#/lib/catalog-data";
+import { browserClients, mediaDetailQuery } from "#/lib/queries";
+import type { CoverageSegment, MediaItem } from "#/lib/types";
 import { parseExternalInput } from "#/lib/url-parser";
 import { NAMESPACE_LABELS, NamespaceLogo } from "./brand-logos";
 import { CoverageRuler, CoverageTrack } from "./coverage-bar";
 
 type ScopeKind = "whole_media" | "whole_season" | "partial" | "single";
+
+const SUBMIT_ERROR_MESSAGES: Record<string, string> = {
+  UNAUTHORIZED: "登录已失效，请重新登录后再提交",
+  EMAIL_NOT_VERIFIED: "邮箱还没验证，验证后才能提交变更单",
+  SUBMISSION_QUOTA_EXCEEDED: "今天的提交次数已用完，明天再来吧",
+};
+
+function submitErrorMessage(error: unknown): string {
+  if (!(error instanceof ConnectError)) return "提交失败，请稍后再试";
+  const info = extractConnectErrorInfo(error);
+  return SUBMIT_ERROR_MESSAGES[info.code] ?? info.message;
+}
 
 interface ContributeDrawerProps {
   open: boolean;
@@ -48,23 +69,20 @@ export function ContributeDrawer({
   prefillUrl,
   prefillVariant,
 }: ContributeDrawerProps) {
-  const { submitContribution } = useAppStore();
+  const { user, sessionChecked } = useAppStore();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const defaultSeason = initialSeason ?? media.defaultSeason ?? media.seasons[0]?.season ?? 1;
-  const defaultUrl =
-    prefillUrl ?? (media.id === "aot" ? "https://v.qq.com/x/cover/mzc002009x8ab2.html" : "");
 
-  const [urlInput, setUrlInput] = useState(defaultUrl);
+  const [urlInput, setUrlInput] = useState(prefillUrl ?? "");
   const [season, setSeason] = useState(defaultSeason);
   const [scope, setScope] = useState<ScopeKind>(
-    media.type === "movie" ? "whole_media" : media.id === "aot" ? "partial" : "whole_season",
+    media.type === "movie" ? "whole_media" : "whole_season",
   );
-  const [episodeStart, setEpisodeStart] = useState(media.id === "aot" ? 17 : 1);
+  const [episodeStart, setEpisodeStart] = useState(1);
   const [episodeEnd, setEpisodeEnd] = useState(
-    media.id === "aot"
-      ? 28
-      : (media.seasons.find((s) => s.season === defaultSeason)?.episodeCount ?? 12),
+    media.seasons.find((s) => s.season === defaultSeason)?.episodeCount ?? 1,
   );
   const [targetStart, setTargetStart] = useState(1);
   const [editingOffset, setEditingOffset] = useState(false);
@@ -118,15 +136,6 @@ export function ContributeDrawer({
   const spanLength = effectiveRange.end - effectiveRange.start + 1;
   const targetEnd = targetStart + spanLength - 1;
 
-  const inferredPageTitle = useMemo(() => {
-    if (!parsed) return "";
-    if (parsed.nativeId === "mzc002009x8ab2" && media.id === "aot") {
-      return "进击的巨人 最终季 Part.2";
-    }
-    if (media.type === "movie") return media.title;
-    return `${media.title} 第 ${season} 季`;
-  }, [media.id, media.title, media.type, parsed, season]);
-
   const cleanVariant = variant.replace("（默认）", "");
   const isCatalog = parsed ? isCatalogNamespace(parsed.namespace) : false;
 
@@ -176,25 +185,47 @@ export function ContributeDrawer({
     setAddingVariant(false);
   };
 
-  const handleSubmit = () => {
-    const ns: Namespace = parsed?.namespace ?? "tencent";
-    const nativeId = parsed?.nativeId ?? "custom";
-    const created = submitContribution({
-      mediaId: media.id,
-      namespace: ns,
-      nativeId,
-      pageUrl: parsed?.url ?? urlInput.trim(),
-      pageTitle: inferredPageTitle || media.title,
-      pageEpisodeCount: spanLength,
-      variantLabel: isCatalog ? null : variant,
-      season: media.type === "movie" ? 0 : season,
-      episodeStart: effectiveRange.start,
-      episodeEnd: effectiveRange.end,
-      targetEpisodeStart: targetStart,
-    });
-    onOpenChange(false);
-    void navigate({ to: "/change-requests/$id", params: { id: created.id } });
-  };
+  const submit = useMutation({
+    mutationFn: async () => {
+      const target = toProtoMediaRefFromKey(media.mediaId ?? media.catalogKey);
+      if (!parsed || !target) throw new Error("invalid submission");
+      // Movies and 整部 are whole-media associations (no segments); the server fills in the
+      // media's baseline when it is left empty.
+      const baseline = media.baseline ?? undefined;
+      const wholeMedia =
+        media.type === "movie" || media.seasons.length === 0 || scope === "whole_media";
+      const segments = wholeMedia
+        ? []
+        : [
+            toProtoSegmentInput(
+              scope === "whole_season" && targetStart === 1
+                ? { season, baseline }
+                : {
+                    season,
+                    episodeStart: effectiveRange.start,
+                    episodeEnd: scope === "whole_season" ? null : effectiveRange.end,
+                    targetEpisodeStart: targetStart,
+                    baseline,
+                  },
+            ),
+          ];
+      const res = await browserClients().changeRequest.createChangeRequest({
+        target,
+        namespace: parsed.namespace,
+        nativeId: parsed.nativeId,
+        rawNativeId: parsed.url,
+        ...(isCatalog ? {} : { variantDescription: cleanVariant }),
+        segments,
+      });
+      if (!res.changeRequest) throw new Error("missing change request");
+      return res.changeRequest.id;
+    },
+    onSuccess: (id) => {
+      void queryClient.invalidateQueries({ queryKey: mediaDetailQuery(media.id).queryKey });
+      onOpenChange(false);
+      void navigate({ to: "/change-requests/$id", params: { id } });
+    },
+  });
 
   return (
     <Drawer open={open} onOpenChange={onOpenChange} swipeDirection="right">
@@ -222,12 +253,10 @@ export function ContributeDrawer({
                 <NamespaceLogo namespace={parsed.namespace} className="size-6 shrink-0" />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-xs font-medium text-foreground">
-                    {inferredPageTitle}
-                  </div>
-                  <div className="truncate text-2xs text-muted-foreground">
                     {NAMESPACE_LABELS[parsed.namespace]}
-                    {media.type === "tv" ? ` · 共 ${spanLength} 集` : ""} ·{" "}
-                    <span className="font-mono">{parsed.nativeId}</span>
+                  </div>
+                  <div className="truncate font-mono text-2xs text-muted-foreground">
+                    {parsed.nativeId}
                   </div>
                 </div>
               </div>
@@ -427,7 +456,7 @@ export function ContributeDrawer({
               {/* Live preview */}
               <div className="mt-1 flex flex-col gap-2 rounded-lg border border-border bg-card p-3">
                 <div className="text-2xs font-medium text-muted-foreground">
-                  预览 · {parsed ? NAMESPACE_LABELS[parsed.namespace] : "腾讯视频"}
+                  预览 · {parsed ? NAMESPACE_LABELS[parsed.namespace] : "平台"}
                   {!isCatalog ? ` · ${cleanVariant}` : ""}
                 </div>
                 <CoverageRuler total={totalEps} />
@@ -461,16 +490,46 @@ export function ContributeDrawer({
         </div>
 
         <DrawerFooter className="border-t border-border/60 pt-3">
-          <p className="text-xs text-muted-foreground">提交后会自动取证核对</p>
+          {sessionChecked && !user ? (
+            <Alert>
+              <AlertTitle>登录后才能提交变更单</AlertTitle>
+              <AlertDescription>
+                <Link to="/login" className="underline underline-offset-4">
+                  去登录
+                </Link>
+              </AlertDescription>
+            </Alert>
+          ) : user && !user.emailVerified ? (
+            <Alert>
+              <AlertTitle>邮箱还没验证</AlertTitle>
+              <AlertDescription>
+                验证邮箱后才能提交变更单。
+                <Link
+                  to="/verify-email"
+                  search={{ email: user.email }}
+                  className="underline underline-offset-4"
+                >
+                  去验证
+                </Link>
+              </AlertDescription>
+            </Alert>
+          ) : submit.error ? (
+            <Alert variant="destructive">
+              <RiErrorWarningLine />
+              <AlertTitle>{submitErrorMessage(submit.error)}</AlertTitle>
+            </Alert>
+          ) : (
+            <p className="text-xs text-muted-foreground">提交后会自动取证核对</p>
+          )}
           <Button
             type="button"
             variant="default"
             size="lg"
             className="w-full"
-            disabled={!parsed}
-            onClick={handleSubmit}
+            disabled={!parsed || !user?.emailVerified || submit.isPending}
+            onClick={() => submit.mutate()}
           >
-            提交变更单
+            {submit.isPending ? "提交中…" : "提交变更单"}
           </Button>
           <DrawerClose
             render={

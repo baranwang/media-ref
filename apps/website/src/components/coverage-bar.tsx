@@ -1,6 +1,6 @@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@media-ref/ui/components/tooltip";
 import { cn } from "@media-ref/ui/lib/utils";
-import type { CoverageSegment } from "#/lib/catalog-data";
+import type { CoverageSegment } from "#/lib/types";
 
 export function computeRulerTicks(
   total: number,

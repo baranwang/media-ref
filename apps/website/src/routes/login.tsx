@@ -15,7 +15,6 @@ import { useState } from "react";
 import { AuthLayout } from "#/components/auth-layout";
 import { NamespaceLogo } from "#/components/brand-logos";
 import {
-  getApiBaseUrl,
   requestSocialSignInUrl,
   resolveOAuthErrorMessage,
   type SocialOAuthProvider,
@@ -54,8 +53,8 @@ function LoginPage() {
 
   const form = useForm({
     defaultValues: {
-      email: search.error === 1 ? "lin.xiao@example.com" : "",
-      password: search.error === 1 ? "wrong" : "",
+      email: "",
+      password: "",
     },
     onSubmit: async ({ value }) => {
       setErrorMessage(null);
@@ -73,24 +72,17 @@ function LoginPage() {
     setErrorMessage(null);
     setOauthError(null);
 
-    const apiBase = getApiBaseUrl();
-    if (apiBase) {
-      setOauthLoading(provider);
-      const result = await requestSocialSignInUrl(provider, {
-        callbackURL: `${window.location.origin}/`,
-        errorCallbackURL: `${window.location.origin}/login`,
-      });
-      if (!result.ok) {
-        setOauthError(result.error);
-        setOauthLoading(null);
-        return;
-      }
-      window.location.assign(result.url);
+    setOauthLoading(provider);
+    const result = await requestSocialSignInUrl(provider, {
+      callbackURL: `${window.location.origin}/`,
+      errorCallbackURL: `${window.location.origin}/login`,
+    });
+    if (!result.ok) {
+      setOauthError(result.error);
+      setOauthLoading(null);
       return;
     }
-
-    await signIn("lin.xiao@example.com", "oauth-demo-pass");
-    void navigate({ to: "/" });
+    window.location.assign(result.url);
   };
 
   const activeError = oauthError ?? errorMessage;
@@ -163,7 +155,7 @@ function LoginPage() {
                     onClick={() =>
                       void navigate({
                         to: "/verify-email",
-                        search: { email: form.state.values.email || "lin.xiao@example.com" },
+                        search: { email: form.state.values.email || undefined },
                       })
                     }
                     className="text-xs text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"

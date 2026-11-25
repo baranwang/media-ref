@@ -28,7 +28,8 @@ export function internalApiClients() {
     baseUrl: "https://api.internal",
     useBinaryFormat: true,
     fetch: (input, init) => {
-      const request = new Request(input, init);
+      // connect-web sends `redirect: "error"`, which the Workers runtime rejects.
+      const request = new Request(input, { ...init, redirect: "manual" });
       request.headers.set(VISITOR_IP_HEADER, visitorIp);
       return binding.fetch(request);
     },

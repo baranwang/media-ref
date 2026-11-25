@@ -36,6 +36,18 @@ function asJson(value: unknown): Json | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : null;
 }
 
+/** Douban images need a Douban referer; send them through the site's `/img/douban` proxy. */
+export function displayImageUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return /(^|\.)doubanio\.com$/i.test(new URL(url).hostname)
+      ? `/img/douban?u=${encodeURIComponent(url)}`
+      : url;
+  } catch {
+    return null;
+  }
+}
+
 // ---------- Cards ----------
 
 export function cardFromProto(card: proto.CatalogCard): CardItem {
@@ -49,7 +61,7 @@ export function cardFromProto(card: proto.CatalogCard): CardItem {
     year: card.year ?? null,
     type,
     category: card.isAnime ? "anime" : type,
-    posterUrl: card.posterUrl ?? null,
+    posterUrl: displayImageUrl(card.posterUrl),
     platforms: card.platforms.filter((p): p is PlatformNamespace => isPlatformNamespace(p)),
   };
 }
@@ -82,21 +94,35 @@ function segmentsBySeason(
   isMovie: boolean,
 ): Record<number, CoverageSegment[]> {
   const out: Record<number, CoverageSegment[]> = {};
+  const bar = (id: string, start: number, end: number, targetStart?: number): CoverageSegment => ({
+    id,
+    title: assoc.title ?? assoc.nativeId,
+    nativeId: assoc.nativeId,
+    start,
+    end,
+    ...(targetStart !== undefined ? { targetStart } : {}),
+    status: associationStatus(assoc),
+    ...(assoc.changeRequestId ? { changeRequestId: assoc.changeRequestId } : {}),
+    associationId: assoc.id,
+  });
+  // No segments = the association covers the whole media: one full bar per season (key 0 for movies).
+  if (assoc.segments.length === 0) {
+    if (isMovie || seasons.length === 0) {
+      out[0] = [bar(`${assoc.id}-whole`, 1, 1)];
+    } else {
+      for (const s of seasons) {
+        out[s.season] = [bar(`${assoc.id}-s${s.season}`, 1, Math.max(s.episodeCount, 1))];
+      }
+    }
+    return out;
+  }
   assoc.segments.forEach((seg, index) => {
     const season = isMovie ? 0 : seg.season;
     const end =
       seg.episodeEnd ?? (isMovie ? 1 : seasonEpisodeCount(seasons, seg.season) || seg.episodeStart);
-    (out[season] ??= []).push({
-      id: `${assoc.id}-${index}`,
-      title: assoc.title ?? assoc.nativeId,
-      nativeId: assoc.nativeId,
-      start: seg.episodeStart,
-      end,
-      targetStart: seg.targetEpisodeStart,
-      status: associationStatus(assoc),
-      ...(assoc.changeRequestId ? { changeRequestId: assoc.changeRequestId } : {}),
-      associationId: assoc.id,
-    });
+    (out[season] ??= []).push(
+      bar(`${assoc.id}-${index}`, seg.episodeStart, end, seg.targetEpisodeStart),
+    );
   });
   for (const list of Object.values(out)) list.sort((a, b) => a.start - b.start);
   return out;
@@ -291,8 +317,8 @@ export function mediaItemFrom(
     genres: detail?.genres ?? [],
     synopsis: detail?.overview ?? "",
     credits: detail?.credits.map((c) => ({ role: c.role, name: c.name })) ?? [],
-    posterUrl: card?.posterUrl ?? null,
-    backdropUrl: detail?.backdropUrl ?? null,
+    posterUrl: displayImageUrl(card?.posterUrl),
+    backdropUrl: displayImageUrl(detail?.backdropUrl),
     baseline: document?.media.baseline ?? null,
     seasons,
     totalEpisodes: seasons.reduce((sum, s) => sum + s.episodeCount, 0) || undefined,
