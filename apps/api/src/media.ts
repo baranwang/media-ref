@@ -31,9 +31,8 @@ import {
 } from "@media-ref/core";
 import type { ServiceImpl } from "@connectrpc/connect";
 import {
-  enforceReadRateLimit,
+  authorizePublicRead,
   getRuntime,
-  requireApiKeyAuth,
   rethrowDomainError,
   scheduleBackgroundTask,
 } from "./context.ts";
@@ -82,8 +81,7 @@ function resolveNamespaceGroupParam(group: proto.NamespaceGroup): NamespaceGroup
 
 export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
   async getMedia(req, ctx) {
-    const apiKey = await requireApiKeyAuth(ctx, { db: "read", permission: "read" });
-    await enforceReadRateLimit(ctx, apiKey);
+    await authorizePublicRead(ctx);
 
     const runtime = getRuntime(ctx);
     const season = validateSeasonParam(req.season);
@@ -178,8 +176,7 @@ export const mediaServiceImpl: ServiceImpl<typeof proto.MediaService> = {
   },
 
   async batchGetMedia(req, ctx) {
-    const apiKey = await requireApiKeyAuth(ctx, { db: "read", permission: "read" });
-    await enforceReadRateLimit(ctx, apiKey);
+    await authorizePublicRead(ctx);
 
     const runtime = getRuntime(ctx);
     if (req.refs.length === 0 || req.refs.length > MAX_BATCH_MEDIA_KEYS) {

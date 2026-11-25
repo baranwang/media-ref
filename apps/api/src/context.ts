@@ -40,6 +40,8 @@ export interface ApiRequestRuntime {
   submissionQuota: SubmissionQuotaConfig | undefined;
   anonymousInvalidationThreshold: number;
   getAuth: () => AuthInstance;
+  /** True only for requests that arrived through the `InternalApi` service-binding entrypoint. */
+  internal?: boolean;
   executionCtx?: ExecutionContext;
   onBackgroundTask?: (promise: Promise<unknown>) => void;
   onBackgroundTaskError?: (error: unknown) => void;
@@ -129,6 +131,35 @@ export async function enforceReadRateLimit(
       message: decision.message,
     });
   }
+}
+
+/**
+ * Auth for public read RPCs. Internal (service-binding) callers without an API key are let
+ * through and limited by the forwarded visitor IP only; everyone else needs a read API key.
+ * Returns the verified key, or null for keyless internal reads.
+ */
+export async function authorizePublicRead(ctx: HandlerContext): Promise<VerifiedApiKey | null> {
+  const runtime = getRuntime(ctx);
+  if (runtime.internal && extractApiKeyFromHeaders(ctx.requestHeader) === null) {
+    const decision = await checkReadRateLimit({
+      runtime: runtime.readRateLimit,
+      headers: ctx.requestHeader,
+    });
+    if (!decision.allowed) {
+      throw createDomainConnectError({
+        status: 429,
+        code: "RATE_LIMITED",
+        scope: decision.scope,
+        retryAfterSeconds: decision.retryAfterSeconds,
+        message: decision.message,
+      });
+    }
+    return null;
+  }
+
+  const apiKey = await requireApiKeyAuth(ctx, { db: "read", permission: "read" });
+  await enforceReadRateLimit(ctx, apiKey);
+  return apiKey;
 }
 
 export async function requireSessionAuth(ctx: HandlerContext): Promise<AuthenticatedSession> {
