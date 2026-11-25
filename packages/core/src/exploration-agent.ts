@@ -458,11 +458,13 @@ function parseModelSegments(
 
 /**
  * Evidence door: every segment must land inside the collection's fetched feature episodes.
- * Returns a reason when it does not.
+ * An open-ended segment runs to the end of its baseline season, so that season's episode count
+ * must be known. Returns a reason when a segment does not fit.
  */
 export function checkSegmentsFitCollection(
   segments: readonly SegmentInput[],
   info: CollectionInfo,
+  seasonEpisodeCount: (season: number) => number | null,
 ): string | null {
   const available = info.featureEpisodes.length;
   for (const seg of segments) {
@@ -470,10 +472,14 @@ export function checkSegmentsFitCollection(
     if (!Number.isInteger(targetStart) || targetStart < 1) {
       return "targetEpisodeStart must be a positive integer";
     }
-    const span =
-      seg.episodeEnd === null || seg.episodeEnd === undefined
-        ? 0
-        : seg.episodeEnd - seg.episodeStart;
+    let end = seg.episodeEnd ?? null;
+    if (end === null) {
+      end = seasonEpisodeCount(seg.season);
+      if (end === null) {
+        return `episodeEnd is required: season ${seg.season} has no known episode count`;
+      }
+    }
+    const span = end - (seg.episodeStart ?? 1);
     if (!Number.isInteger(span) || span < 0) {
       return "episodeEnd must not be before episodeStart";
     }
@@ -655,7 +661,13 @@ async function explorePlatform(
         // An unusable lead is just skipped.
       }
     }
-    const discoveryErrored = discovery.sources.some((s) => s.status === "error");
+    // A source error, or a link for this platform that could not be resolved for now, means
+    // the absence of candidates is not evidence of absence.
+    const discoveryErrored =
+      discovery.sources.some((s) => s.status === "error") ||
+      discovery.dropped.some(
+        (d) => d.namespace === namespace && d.reason.startsWith("canonicalize_transient:"),
+      );
     if (sourcesById.size === 0) {
       return discoveryErrored
         ? { namespace, status: "transient_error", reason: "discovery_source_error" }
@@ -836,7 +848,10 @@ async function explorePlatform(
             continue;
           }
           const segments = parseModelSegments(args.segments, ctx.media, ctx.season);
-          const misfit = checkSegmentsFitCollection(segments, candidate.info);
+          const misfit = checkSegmentsFitCollection(segments, candidate.info, (season) => {
+            const count = ctx.media.snapshot.seasons.find((s) => s.season === season)?.episodeCount;
+            return count && count > 0 ? count : null;
+          });
           if (misfit) {
             reply(call.id, call.name, {
               ok: false,

@@ -71,7 +71,10 @@ const BILIBILI_SEASONS: Record<string, Record<string, unknown>> = {
 };
 
 interface StubOptions {
-  /** 360kan rows as `[titleTxt, year, bilibili season id]`; null = 360kan answers HTTP 500. */
+  /**
+   * 360kan rows as `[titleTxt, year, bilibili id]` (`34430` → `ss34430`, `ep1` → an episode link);
+   * null = 360kan answers HTTP 500.
+   */
   kan360Rows: Array<[string, string, string]> | null;
 }
 
@@ -105,7 +108,9 @@ function createHttpStub({ kan360Rows }: StubOptions) {
             rows: kan360Rows.map(([titleTxt, year, ssid]) => ({
               titleTxt,
               year,
-              playlinks: { bilibili: `https://www.bilibili.com/bangumi/play/ss${ssid}` },
+              playlinks: {
+                bilibili: `https://www.bilibili.com/bangumi/play/${ssid.startsWith("ep") ? ssid : `ss${ssid}`}`,
+              },
             })),
           },
         },
@@ -116,6 +121,9 @@ function createHttpStub({ kan360Rows }: StubOptions) {
     }
     if (url.hostname === "search.video.iqiyi.com") {
       return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
+    }
+    if (request.url.startsWith("https://api.bilibili.com/pgc/view/web/season?ep_id=")) {
+      return jsonResponse(request.url, {}, 503);
     }
     if (request.url.startsWith("https://api.bilibili.com/pgc/view/web/season?season_id=")) {
       const season = BILIBILI_SEASONS[url.searchParams.get("season_id") ?? ""];
@@ -381,5 +389,15 @@ describe("Exploration agent: discover → judge → gate", () => {
     const demand = (await listDemands(testDb.readDb, { mediaId }))[0]!;
     expect(demand.status).toBe("not_found");
     expect(demand.notFoundCount).toBe(1);
+  });
+
+  test("a platform link that fails to resolve for now keeps that platform transient", async () => {
+    const { testDb, explore } = await setup({ kan360Rows: [["咒术回战", "2020", "ep1"]] });
+
+    await explore();
+
+    const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
+    expect(checks.map((c) => c.platform)).not.toContain("bilibili");
+    expect(checks).toHaveLength(platformCount - 1);
   });
 });
