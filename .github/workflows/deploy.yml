@@ -1,0 +1,68 @@
+# Deploys the API and background Workers from main, migrating the production database first.
+# The database is only reachable inside the greencloud-hk machine and over Tailscale, so the runner
+# joins the tailnet as an ephemeral `tag:ci` node for the migration step.
+# The website still deploys through Workers Builds: it never touches the database.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/api/**"
+      - "apps/worker/**"
+      - "packages/core/**"
+      - "packages/db/**"
+      - "packages/client/**"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+# One deploy at a time, in push order; a newer push waits instead of racing the migration.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+      - uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Migrate production database
+        working-directory: packages/db
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: bun run migrate
+
+  deploy:
+    needs: migrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        app: [api, worker]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+      - name: Deploy ${{ matrix.app }}
+        working-directory: apps/${{ matrix.app }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 9c578ed9cad837fb4a2564db7b36b483
+        run: bun run deploy
