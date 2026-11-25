@@ -247,6 +247,12 @@ export type DoubanBridgeRowClassifier = (row: {
   imdbId: string | null;
 }) => Promise<DoubanBridgeRowClassification> | DoubanBridgeRowClassification;
 
+export interface DoubanBridgeProgress {
+  completed: number;
+  total: number;
+  summary: Readonly<SeedImportSummary>;
+}
+
 export interface ImportDoubanBridgeSeedsOptions {
   outbound?: OutboundClient;
   tmdbConfig?: TmdbGatewayConfig;
@@ -257,6 +263,10 @@ export interface ImportDoubanBridgeSeedsOptions {
   leadsReporter?: SeedLeadReporter;
   /** Classify and count rows without writing media, associations or leads. */
   dryRun?: boolean;
+  /** Maximum concurrent row classifications during outbound resolution (default: 1). */
+  concurrency?: number;
+  /** Optional progress callback invoked after each committed batch of candidate rows. */
+  onProgress?: (progress: DoubanBridgeProgress) => void;
   now?: Date;
 }
 
@@ -1790,34 +1800,60 @@ async function probeTmdbMediaEndpoint(
   };
 }
 
+function memoizeAsync<T>(
+  cache: Map<string, Promise<T>>,
+  key: string,
+  load: () => Promise<T>,
+): Promise<T> {
+  const existing = cache.get(key);
+  if (existing) {
+    return existing;
+  }
+  const promise = load();
+  cache.set(key, promise);
+  return promise;
+}
+
+async function classifyRowViaTmdbImdbFind(
+  row: { tmdbId: string; imdbId: string | null },
+  outbound: OutboundClient,
+  tmdbConfig: TmdbGatewayConfig | undefined,
+  findCache: Map<string, Promise<TmdbFindByImdbResult>>,
+): Promise<DoubanBridgeRowClassification | null> {
+  if (!row.imdbId) {
+    return null;
+  }
+  const findRes = await memoizeAsync(findCache, row.imdbId, () =>
+    lookupTmdbByImdbId(row.imdbId!, outbound, tmdbConfig),
+  );
+  if (findRes.status === "unambiguous_movie" && findRes.movie.tmdbId === row.tmdbId) {
+    return {
+      kind: "movie",
+      title: findRes.movie.title,
+      originalTitle: findRes.movie.originalTitle,
+      year: findRes.movie.year,
+      imdbId: row.imdbId,
+    };
+  }
+  if (findRes.status === "tv_only" && findRes.tvIds.includes(row.tmdbId)) {
+    return { kind: "tv" };
+  }
+  return null;
+}
+
 async function disambiguateDoubanBridgeCollision(
   row: { doubanId: string; tmdbId: string; imdbId: string | null },
   outbound: OutboundClient | undefined,
   tmdbConfig: TmdbGatewayConfig | undefined,
-  findCache: Map<string, TmdbFindByImdbResult>,
+  findCache: Map<string, Promise<TmdbFindByImdbResult>>,
 ): Promise<DoubanBridgeRowClassification> {
   if (!outbound) {
     return { kind: "ambiguous" };
   }
 
-  if (row.imdbId) {
-    let findRes = findCache.get(row.imdbId);
-    if (!findRes) {
-      findRes = await lookupTmdbByImdbId(row.imdbId, outbound, tmdbConfig);
-      findCache.set(row.imdbId, findRes);
-    }
-    if (findRes.status === "unambiguous_movie" && findRes.movie.tmdbId === row.tmdbId) {
-      return {
-        kind: "movie",
-        title: findRes.movie.title,
-        originalTitle: findRes.movie.originalTitle,
-        year: findRes.movie.year,
-        imdbId: row.imdbId,
-      };
-    }
-    if (findRes.status === "tv_only" && findRes.tvIds.includes(row.tmdbId)) {
-      return { kind: "tv" };
-    }
+  const fromFind = await classifyRowViaTmdbImdbFind(row, outbound, tmdbConfig, findCache);
+  if (fromFind) {
+    return fromFind;
   }
 
   const doubanRes = await doubanAdapter.fetchCollection(row.doubanId, outbound);
@@ -1828,11 +1864,15 @@ async function disambiguateDoubanBridgeCollision(
         title: doubanRes.info.title,
         originalTitle: doubanRes.info.originalTitle ?? null,
         year: doubanRes.info.year,
+        imdbId: row.imdbId ?? doubanRes.info.externalIds?.imdb ?? null,
       };
     }
     if (doubanRes.info.mediaType === "tv") {
       return { kind: "tv" };
     }
+  }
+  if (doubanRes.status === "transient_error") {
+    return { kind: "unknown" };
   }
 
   return { kind: "ambiguous" };
@@ -1846,6 +1886,52 @@ function isSoftDeleted(value: unknown): boolean {
     return value.trim().length > 0;
   }
   return true;
+}
+
+interface ParsedBridgeRow {
+  doubanId: string;
+  tmdbId: string;
+  imdbId: string | null;
+  traktId: string | null;
+}
+
+interface ResolvedBridgeRow {
+  row: ParsedBridgeRow;
+  classification: DoubanBridgeRowClassification;
+  tvProbe: TmdbDirectProbeResult | undefined;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+  const results = Array.from<R>({ length: items.length });
+  if (concurrency <= 1 || items.length === 1) {
+    for (let i = 0; i < items.length; i += 1) {
+      results[i] = await worker(items[i]!, i);
+    }
+    return results;
+  }
+
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= items.length) {
+          return;
+        }
+        results[index] = await worker(items[index]!, index);
+      }
+    }),
+  );
+  return results;
 }
 
 export async function importDoubanBridgeSeeds(
@@ -1865,13 +1951,6 @@ export async function importDoubanBridgeSeeds(
 
   const summary = createEmptySummary("douban-bridge");
   summary.processed = rawRows.length;
-
-  interface ParsedBridgeRow {
-    doubanId: string;
-    tmdbId: string;
-    imdbId: string | null;
-    traktId: string | null;
-  }
 
   const candidateRows: ParsedBridgeRow[] = [];
   const tmdbIdsToCheck = new Set<string>();
@@ -1924,12 +2003,12 @@ export async function importDoubanBridgeSeeds(
     }
   }
 
-  const findCache = new Map<string, TmdbFindByImdbResult>();
-  const tmdbMovieProbeCache = new Map<string, TmdbDirectProbeResult>();
-  const tmdbTvProbeCache = new Map<string, TmdbDirectProbeResult>();
+  const findCache = new Map<string, Promise<TmdbFindByImdbResult>>();
+  const tmdbMovieProbeCache = new Map<string, Promise<TmdbDirectProbeResult>>();
+  const tmdbTvProbeCache = new Map<string, Promise<TmdbDirectProbeResult>>();
   const seenMediaIds = new Set<string>();
 
-  for (const row of candidateRows) {
+  const resolveCandidateRow = async (row: ParsedBridgeRow): Promise<ResolvedBridgeRow> => {
     let classification: DoubanBridgeRowClassification;
 
     if (options.classifyRow) {
@@ -1954,49 +2033,24 @@ export async function importDoubanBridgeSeeds(
           findCache,
         );
       } else if (options.outbound) {
+        const outbound = options.outbound;
         // Neither export set contained this TMDB ID -> classify via IMDb /find or TMDB /movie + /tv probes
-        let resolved: DoubanBridgeRowClassification | null = null;
-        if (row.imdbId) {
-          let findRes = findCache.get(row.imdbId);
-          if (!findRes) {
-            findRes = await lookupTmdbByImdbId(row.imdbId, options.outbound, options.tmdbConfig);
-            findCache.set(row.imdbId, findRes);
-          }
-          if (findRes.status === "unambiguous_movie" && findRes.movie.tmdbId === row.tmdbId) {
-            resolved = {
-              kind: "movie",
-              title: findRes.movie.title,
-              originalTitle: findRes.movie.originalTitle,
-              year: findRes.movie.year,
-              imdbId: row.imdbId,
-            };
-          } else if (findRes.status === "tv_only" && findRes.tvIds.includes(row.tmdbId)) {
-            resolved = { kind: "tv" };
-          }
-        }
+        let resolved = await classifyRowViaTmdbImdbFind(
+          row,
+          outbound,
+          options.tmdbConfig,
+          findCache,
+        );
 
         if (!resolved) {
-          let movieProbe = tmdbMovieProbeCache.get(row.tmdbId);
-          if (!movieProbe) {
-            movieProbe = await probeTmdbMediaEndpoint(
-              "movie",
-              row.tmdbId,
-              options.outbound,
-              options.tmdbConfig,
-            );
-            tmdbMovieProbeCache.set(row.tmdbId, movieProbe);
-          }
-
-          let tvProbe = tmdbTvProbeCache.get(row.tmdbId);
-          if (!tvProbe) {
-            tvProbe = await probeTmdbMediaEndpoint(
-              "tv",
-              row.tmdbId,
-              options.outbound,
-              options.tmdbConfig,
-            );
-            tmdbTvProbeCache.set(row.tmdbId, tvProbe);
-          }
+          const [movieProbe, tvProbe] = await Promise.all([
+            memoizeAsync(tmdbMovieProbeCache, row.tmdbId, () =>
+              probeTmdbMediaEndpoint("movie", row.tmdbId, outbound, options.tmdbConfig),
+            ),
+            memoizeAsync(tmdbTvProbeCache, row.tmdbId, () =>
+              probeTmdbMediaEndpoint("tv", row.tmdbId, outbound, options.tmdbConfig),
+            ),
+          ]);
 
           if (movieProbe.transientError || tvProbe.transientError) {
             resolved = { kind: "unknown" };
@@ -2013,7 +2067,7 @@ export async function importDoubanBridgeSeeds(
           } else if (movieProbe.exists && tvProbe.exists) {
             resolved = await disambiguateDoubanBridgeCollision(
               row,
-              options.outbound,
+              outbound,
               options.tmdbConfig,
               findCache,
             );
@@ -2028,106 +2082,120 @@ export async function importDoubanBridgeSeeds(
       }
     }
 
-    if (classification.kind === "tv") {
-      let tvProbe: TmdbDirectProbeResult | undefined;
-      if (options.outbound) {
-        tvProbe = tmdbTvProbeCache.get(row.tmdbId);
-        if (!tvProbe) {
-          tvProbe = await probeTmdbMediaEndpoint(
-            "tv",
-            row.tmdbId,
-            options.outbound,
-            options.tmdbConfig,
-          );
-          tmdbTvProbeCache.set(row.tmdbId, tvProbe);
+    let tvProbe: TmdbDirectProbeResult | undefined;
+    if (classification.kind === "tv" && options.outbound) {
+      const outbound = options.outbound;
+      tvProbe = await memoizeAsync(tmdbTvProbeCache, row.tmdbId, () =>
+        probeTmdbMediaEndpoint("tv", row.tmdbId, outbound, options.tmdbConfig),
+      );
+    }
+
+    return { row, classification, tvProbe };
+  };
+
+  const rawConcurrency = options.concurrency ?? 1;
+  const concurrency =
+    Number.isFinite(rawConcurrency) && rawConcurrency >= 1 ? Math.floor(rawConcurrency) : 1;
+  const batchSize = concurrency === 1 ? 1 : Math.min(200, Math.max(50, concurrency * 10));
+
+  for (let offset = 0; offset < candidateRows.length; offset += batchSize) {
+    const batch = candidateRows.slice(offset, offset + batchSize);
+    const resolvedBatch = await mapWithConcurrency(batch, concurrency, resolveCandidateRow);
+
+    for (const { row, classification, tvProbe } of resolvedBatch) {
+      if (classification.kind === "tv") {
+        if (tvProbe && !tvProbe.exists) {
+          summary.skippedUnresolvable += 1;
+          continue;
         }
+
+        // douban-bridge maps a Douban subject to a whole TMDB show; only a single-season show pins it to a season.
+        if (tvProbe?.exists && tvProbe.numberOfSeasons === 1) {
+          summary.classifiedSingleSeasonTv += 1;
+          if (options.dryRun) {
+            continue;
+          }
+          const upsertResult = await upsertSeedAssociation(dbWrite, {
+            source: "douban-bridge",
+            tmdbType: "tv",
+            tmdbId: row.tmdbId,
+            imdbId: row.imdbId ?? tvProbe.imdbId,
+            traktId: row.traktId ? `show:${row.traktId}` : null,
+            title: tvProbe.title,
+            originalTitle: tvProbe.originalTitle,
+            year: tvProbe.year,
+            namespace: "douban",
+            nativeId: row.doubanId,
+            segments: [
+              {
+                season: 1,
+                episodeStart: 1,
+                episodeEnd: null,
+                targetEpisodeStart: 1,
+                baseline: "tmdb",
+                nonLinear: false,
+                needsReview: false,
+              },
+            ],
+            now,
+          });
+          recordUpsertOutcome(summary, upsertResult, seenMediaIds);
+          continue;
+        }
+
+        summary.skippedNonMovie += 1;
+        if (options.leadsReporter && !options.dryRun) {
+          await options.leadsReporter({
+            source: "douban-bridge",
+            targetExternalKey: `tmdb:tv:${row.tmdbId}`,
+            namespace: "douban",
+            nativeId: row.doubanId,
+            notes:
+              tvProbe?.exists && tvProbe.numberOfSeasons !== null && tvProbe.numberOfSeasons > 1
+                ? `Multi-season (${tvProbe.numberOfSeasons} seasons) douban-bridge TV mapping skipped as seed`
+                : "Seasonless douban-bridge TV mapping skipped as seed",
+          });
+          summary.leadsRecorded += 1;
+        }
+        continue;
       }
 
-      if (tvProbe && !tvProbe.exists) {
+      if (classification.kind === "ambiguous") {
+        summary.skippedAmbiguous += 1;
+        continue;
+      }
+
+      if (classification.kind === "unknown") {
         summary.skippedUnresolvable += 1;
         continue;
       }
 
-      // douban-bridge maps a Douban subject to a whole TMDB show; only a single-season show pins it to a season.
-      if (tvProbe?.exists && tvProbe.numberOfSeasons === 1) {
-        summary.classifiedSingleSeasonTv += 1;
-        if (options.dryRun) {
-          continue;
-        }
-        const upsertResult = await upsertSeedAssociation(dbWrite, {
-          source: "douban-bridge",
-          tmdbType: "tv",
-          tmdbId: row.tmdbId,
-          imdbId: row.imdbId ?? tvProbe.imdbId,
-          traktId: row.traktId ? `show:${row.traktId}` : null,
-          title: tvProbe.title,
-          originalTitle: tvProbe.originalTitle,
-          year: tvProbe.year,
-          namespace: "douban",
-          nativeId: row.doubanId,
-          segments: [
-            {
-              season: 1,
-              episodeStart: 1,
-              episodeEnd: null,
-              targetEpisodeStart: 1,
-              baseline: "tmdb",
-              nonLinear: false,
-              needsReview: false,
-            },
-          ],
-          now,
-        });
-        recordUpsertOutcome(summary, upsertResult, seenMediaIds);
+      summary.classifiedMovies += 1;
+      if (options.dryRun) {
         continue;
       }
-
-      summary.skippedNonMovie += 1;
-      if (options.leadsReporter && !options.dryRun) {
-        await options.leadsReporter({
-          source: "douban-bridge",
-          targetExternalKey: `tmdb:tv:${row.tmdbId}`,
-          namespace: "douban",
-          nativeId: row.doubanId,
-          notes:
-            tvProbe?.exists && tvProbe.numberOfSeasons !== null && tvProbe.numberOfSeasons > 1
-              ? `Multi-season (${tvProbe.numberOfSeasons} seasons) douban-bridge TV mapping skipped as seed`
-              : "Seasonless douban-bridge TV mapping skipped as seed",
-        });
-        summary.leadsRecorded += 1;
-      }
-      continue;
+      const upsertResult = await upsertSeedAssociation(dbWrite, {
+        source: "douban-bridge",
+        tmdbType: "movie",
+        tmdbId: row.tmdbId,
+        imdbId: row.imdbId ?? classification.imdbId ?? null,
+        traktId: row.traktId ? `movie:${row.traktId}` : null,
+        title: classification.title ?? null,
+        originalTitle: classification.originalTitle ?? null,
+        year: classification.year ?? null,
+        namespace: "douban",
+        nativeId: row.doubanId,
+        segments: [],
+        now,
+      });
+      recordUpsertOutcome(summary, upsertResult, seenMediaIds);
     }
 
-    if (classification.kind === "ambiguous") {
-      summary.skippedAmbiguous += 1;
-      continue;
-    }
-
-    if (classification.kind === "unknown") {
-      summary.skippedUnresolvable += 1;
-      continue;
-    }
-
-    summary.classifiedMovies += 1;
-    if (options.dryRun) {
-      continue;
-    }
-    const upsertResult = await upsertSeedAssociation(dbWrite, {
-      source: "douban-bridge",
-      tmdbType: "movie",
-      tmdbId: row.tmdbId,
-      imdbId: row.imdbId ?? classification.imdbId ?? null,
-      traktId: row.traktId ? `movie:${row.traktId}` : null,
-      title: classification.title ?? null,
-      originalTitle: classification.originalTitle ?? null,
-      year: classification.year ?? null,
-      namespace: "douban",
-      nativeId: row.doubanId,
-      segments: [],
-      now,
+    options.onProgress?.({
+      completed: offset + batch.length,
+      total: candidateRows.length,
+      summary: { ...summary },
     });
-    recordUpsertOutcome(summary, upsertResult, seenMediaIds);
   }
 
   return summary;

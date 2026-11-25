@@ -8,6 +8,7 @@ import {
   importWikidataMovieSeeds,
   seedTmdbExportIds,
   type ExternalHttpRequest,
+  type ExternalHttpResponse,
   type SeedAmbiguousLead,
 } from "../src/index.ts";
 
@@ -1201,6 +1202,79 @@ describe("seed importers (#32)", () => {
         },
       ]);
     });
+
+    test("supports concurrent resolution with request deduplication, progress callbacks, and Douban transient errors as skippedUnresolvable", async () => {
+      const testDb = await setupDb();
+      const now = new Date("2026-11-25T07:00:00.000Z");
+
+      await seedTmdbExportIds(testDb.writeDb, [
+        { mediaType: "tv", tmdbId: "6001", exportedDate: "2026-11-25" },
+        { mediaType: "movie", tmdbId: "6002", exportedDate: "2026-11-25" },
+        { mediaType: "tv", tmdbId: "6002", exportedDate: "2026-11-25" },
+      ]);
+
+      const requestedUrls: string[] = [];
+      const outbound = createFakeOutboundClient({
+        fetchExternal: async (req: ExternalHttpRequest): Promise<ExternalHttpResponse> => {
+          requestedUrls.push(req.url);
+          if (req.namespace === "tmdb" && req.url.includes("/tv/6001")) {
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: 6001,
+                name: "并发单季剧",
+                first_air_date: "2024-01-01",
+                number_of_seasons: 1,
+              }),
+              url: req.url,
+            };
+          }
+          if (req.namespace === "douban" && req.url.endsWith("/40000003")) {
+            return {
+              status: 429,
+              headers: {},
+              body: "rate limited",
+              url: req.url,
+            };
+          }
+          return {
+            status: 404,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status_code: 34 }),
+            url: req.url,
+          };
+        },
+      });
+
+      const progressSnapshots: Array<{ completed: number; total: number }> = [];
+      const summary = await importDoubanBridgeSeeds(
+        testDb.writeDb,
+        [
+          { douban_id: 40000001, tmdb_id: 6001 },
+          { douban_id: 40000002, tmdb_id: 6001 },
+          { douban_id: 40000003, tmdb_id: 6002 },
+        ],
+        {
+          outbound,
+          concurrency: 4,
+          onProgress: ({ completed, total }) => {
+            progressSnapshots.push({ completed, total });
+          },
+          now,
+        },
+      );
+
+      expect(summary.classifiedSingleSeasonTv).toBe(2);
+      expect(summary.mediaCreated).toBe(1);
+      expect(summary.mediaReused).toBe(0);
+      expect(summary.associationsCreated).toBe(1);
+      expect(summary.skippedConflict).toBe(1);
+      expect(summary.skippedUnresolvable).toBe(1);
+      expect(summary.skippedAmbiguous).toBe(0);
+      expect(requestedUrls.filter((u) => u.includes("/tv/6001"))).toHaveLength(1);
+      expect(progressSnapshots).toEqual([{ completed: 3, total: 3 }]);
+    });
   });
 
   describe("Seed CLI helper (seed-cli.ts)", () => {
@@ -1219,6 +1293,7 @@ describe("seed importers (#32)", () => {
         expect(parsed.file).toBe("/tmp/wikidata.json");
         expect(parsed.noOutbound).toBe(true);
         expect(parsed.dryRun).toBe(false);
+        expect(parsed.concurrency).toBeUndefined();
       }
 
       const dryRunParsed = cli.parseSeedCliArgs([
@@ -1227,23 +1302,111 @@ describe("seed importers (#32)", () => {
         "--file",
         "/tmp/bridge.ndjson",
         "--dry-run",
+        "--concurrency",
+        "8",
       ]);
       expect(dryRunParsed).toMatchObject({
         kind: "run",
         source: "douban-bridge",
         file: "/tmp/bridge.ndjson",
         dryRun: true,
+        concurrency: 8,
       });
 
       expect(() =>
         cli.parseSeedCliArgs(["--source", "wikidata", "--file", "/tmp/w.json", "--dry-run"]),
       ).toThrow("--dry-run is only supported for --source douban-bridge");
+      expect(() =>
+        cli.parseSeedCliArgs([
+          "--source",
+          "douban-bridge",
+          "--file",
+          "/tmp/bridge.ndjson",
+          "--concurrency",
+          "0",
+        ]),
+      ).toThrow("--concurrency requires a positive integer");
 
       const ndjson = cli.parseSeedFileText(
         '{"douban_id":1292052,"tmdb_id":278}\n{"douban_id":1292000,"tmdb_id":550}\n',
       );
       expect(Array.isArray(ndjson)).toBe(true);
       expect(ndjson).toHaveLength(2);
+    });
+
+    test("createSeedCliOutboundClient retries TMDB 429 with Retry-After and serializes Douban calls with User-Agent", async () => {
+      const cli = await import("../src/seed-cli.ts");
+      const sleepDelays: number[] = [];
+      let tmdbAttempts = 0;
+      const doubanHeadersSeen: Array<Record<string, string> | undefined> = [];
+
+      const base = createFakeOutboundClient({
+        fetchExternal: async (req: ExternalHttpRequest): Promise<ExternalHttpResponse> => {
+          if (req.namespace === "tmdb") {
+            tmdbAttempts += 1;
+            if (tmdbAttempts === 1) {
+              return {
+                status: 429,
+                headers: { "retry-after": "2" },
+                body: "rate limited",
+                url: req.url,
+              };
+            }
+            return {
+              status: 200,
+              headers: {},
+              body: JSON.stringify({ ok: true }),
+              url: req.url,
+            };
+          }
+          doubanHeadersSeen.push(req.headers);
+          return {
+            status: 200,
+            headers: {},
+            body: JSON.stringify({ id: "123" }),
+            url: req.url,
+          };
+        },
+      });
+
+      let fakeClock = 1000;
+      const wrapped = cli.createSeedCliOutboundClient(base, {
+        sleepImpl: async (ms) => {
+          sleepDelays.push(ms);
+          fakeClock += ms;
+        },
+        nowImpl: () => fakeClock,
+        doubanMinIntervalMs: 300,
+      });
+
+      const tmdbRes = await wrapped.fetchExternal({
+        kind: "catalog",
+        namespace: "tmdb",
+        url: "https://api.themoviedb.org/3/tv/1",
+      });
+      expect(tmdbRes.status).toBe(200);
+      expect(tmdbAttempts).toBe(2);
+      expect(sleepDelays[0]).toBe(2000);
+
+      await Promise.all([
+        wrapped.fetchExternal({
+          kind: "catalog",
+          namespace: "douban",
+          url: "https://m.douban.com/rexxar/api/v2/movie/1",
+          headers: { referer: "https://m.douban.com/movie/subject/1/" },
+        }),
+        wrapped.fetchExternal({
+          kind: "catalog",
+          namespace: "douban",
+          url: "https://m.douban.com/rexxar/api/v2/movie/2",
+          headers: { referer: "https://m.douban.com/movie/subject/2/" },
+        }),
+      ]);
+
+      expect(doubanHeadersSeen).toHaveLength(2);
+      expect(doubanHeadersSeen[0]?.["user-agent"]).toContain("Mobile/");
+      expect(doubanHeadersSeen[1]?.["user-agent"]).toContain("Mobile/");
+      expect(sleepDelays).toContain(300);
     });
 
     test("createSeedLeadsReporter records ambiguous bangumi-data items into leads under system:seed-importer", async () => {

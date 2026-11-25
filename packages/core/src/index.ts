@@ -371,6 +371,7 @@ export {
   type BangumiDataItem,
   type BangumiDataSite,
   type DoubanBridgeInput,
+  type DoubanBridgeProgress,
   type DoubanBridgeRowClassification,
   type DoubanBridgeRowClassifier,
   type DoubanBridgeRowInput,
