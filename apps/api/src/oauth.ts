@@ -64,6 +64,7 @@ interface RawGithubEmail {
 interface RawTraktUserInfo {
   sub?: string;
   email?: string | null;
+  email_verified?: boolean;
   name?: string | null;
 }
 
@@ -359,8 +360,8 @@ async function fetchTraktUserInfoViaOutbound(
     id: subject,
     name: normalizeNonEmpty(data.name ?? undefined) ?? subject,
     email: normalizeNonEmpty(data.email ?? undefined),
-    // Trakt's email_verified claim is not trusted for account linking; media-ref verifies the email itself.
-    emailVerified: false,
+    // Same trust as GitHub's `verified` flag: only an explicit `true` counts.
+    emailVerified: data.email_verified === true,
   };
 }
 
@@ -448,9 +449,8 @@ function createOAuthOutboundTransportPlugin(
  * - `trustedProviders: []`: Better Auth evaluates `(!isTrustedProvider && !userInfo.emailVerified)`.
  *   Leaving `trustedProviders` empty ensures implicit same-email linking ONLY happens when BOTH
  *   the existing local user has `emailVerified: true` AND the incoming OAuth provider confirms
- *   `emailVerified: true` (e.g. GitHub primary email with `verified: true`). Unverified GitHub
- *   emails (`verified: false`) and Trakt (always `emailVerified: false`) can never hijack an
- *   existing account.
+ *   `emailVerified: true` (GitHub primary email with `verified: true`, or Trakt OIDC
+ *   `email_verified: true`). Unverified GitHub or Trakt emails can never hijack an existing account.
  */
 export function buildOAuthAuthOptions(
   oauthConfig: OAuthConfig | undefined,
