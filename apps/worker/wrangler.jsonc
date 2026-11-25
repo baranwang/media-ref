@@ -2,12 +2,17 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "media-ref-worker",
   "main": "src/index.ts",
-  "compatibility_date": "2025-09-02",
+  "compatibility_date": "2026-11-24",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    "EXPLORATION_DAILY_BUDGET": "0",
+    "ENABLE_DAILY_TMDB_EXPORTS_SYNC": "false",
+  },
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE_WRITE",
-      "id": "00000000000000000000000000000000",
+      "id": "ec209a2e573947d0bffa6ee0e5b7f4cc",
       "localConnectionString": "postgres://postgres:postgres@127.0.0.1:54329/media_ref_dev",
     },
   ],

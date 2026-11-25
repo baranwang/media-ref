@@ -1,7 +1,19 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "media-ref-website",
-  "compatibility_date": "2025-09-02",
+  "compatibility_date": "2026-11-24",
   "compatibility_flags": ["nodejs_compat"],
+  "placement": { "mode": "smart" },
+  "observability": { "enabled": true },
   "main": "@tanstack/react-start/server-entry",
+  "routes": [
+    {
+      "pattern": "mediaref.org",
+      "custom_domain": true,
+    },
+    {
+      "pattern": "www.mediaref.org",
+      "custom_domain": true,
+    },
+  ],
 }

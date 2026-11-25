@@ -20,18 +20,38 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { AuthLayout } from "#/components/auth-layout";
 import { NamespaceLogo } from "#/components/brand-logos";
-import { getApiBaseUrl } from "#/lib/api-client";
+import {
+  getApiBaseUrl,
+  requestSocialSignInUrl,
+  resolveOAuthErrorMessage,
+  type SocialOAuthProvider,
+} from "#/lib/api-client";
 import { useAppStore } from "#/lib/app-store";
 
+interface SignupSearch {
+  error?: string;
+}
+
 export const Route = createFileRoute("/signup")({
+  validateSearch: (search: Record<string, unknown>): SignupSearch => ({
+    error:
+      typeof search.error === "string" && search.error.trim().length > 0
+        ? search.error.trim()
+        : undefined,
+  }),
   component: SignupPage,
 });
 
 function SignupPage() {
+  const search = Route.useSearch();
   const { signUp, signIn } = useAppStore();
   const navigate = useNavigate();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [oauthError, setOauthError] = useState<string | null>(
+    search.error ? resolveOAuthErrorMessage(search.error) : null,
+  );
+  const [oauthLoading, setOauthLoading] = useState<SocialOAuthProvider | null>(null);
 
   const form = useForm({
     defaultValues: {
@@ -52,16 +72,32 @@ function SignupPage() {
     },
   });
 
-  const handleOAuth = (provider: "github" | "trakt") => {
+  const handleOAuth = async (provider: SocialOAuthProvider) => {
+    if (oauthLoading) return;
+    setErrorMessage(null);
+    setOauthError(null);
+
     const apiBase = getApiBaseUrl();
     if (apiBase) {
-      window.location.href = `${apiBase}/api/auth/sign-in/social?provider=${provider}`;
+      setOauthLoading(provider);
+      const result = await requestSocialSignInUrl(provider, {
+        callbackURL: `${window.location.origin}/`,
+        errorCallbackURL: `${window.location.origin}/signup`,
+      });
+      if (!result.ok) {
+        setOauthError(result.error);
+        setOauthLoading(null);
+        return;
+      }
+      window.location.assign(result.url);
       return;
     }
-    void signIn("lin.xiao@example.com", "oauth-demo-pass").then(() => {
-      void navigate({ to: "/" });
-    });
+
+    await signIn("lin.xiao@example.com", "oauth-demo-pass");
+    void navigate({ to: "/" });
   };
+
+  const activeError = oauthError ?? errorMessage;
 
   return (
     <AuthLayout
@@ -77,6 +113,7 @@ function SignupPage() {
         onSubmit={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          setOauthError(null);
           void form.handleSubmit();
         }}
         className="flex flex-col gap-6"
@@ -86,11 +123,15 @@ function SignupPage() {
           <p className="text-sm text-muted-foreground">用邮箱注册，或者直接用 GitHub、Trakt 账号</p>
         </div>
 
-        {errorMessage && (
+        {activeError && (
           <Alert variant="destructive" className="px-3 py-2.5">
             <RiErrorWarningLine className="size-4" />
-            <AlertTitle>{errorMessage}</AlertTitle>
-            <AlertDescription>请检查邮箱格式或密码长度后重试。</AlertDescription>
+            <AlertTitle>{activeError}</AlertTitle>
+            <AlertDescription>
+              {oauthError
+                ? "你可以重新尝试授权，或改用邮箱创建账号。"
+                : "请检查邮箱格式或密码长度后重试。"}
+            </AlertDescription>
           </Alert>
         )}
 
@@ -158,21 +199,23 @@ function SignupPage() {
               type="button"
               variant="outline"
               size="lg"
-              onClick={() => handleOAuth("github")}
+              disabled={oauthLoading !== null}
+              onClick={() => void handleOAuth("github")}
               className="w-full"
             >
               <RiGithubFill />
-              GitHub
+              {oauthLoading === "github" ? "正在跳转…" : "GitHub"}
             </Button>
             <Button
               type="button"
               variant="outline"
               size="lg"
-              onClick={() => handleOAuth("trakt")}
+              disabled={oauthLoading !== null}
+              onClick={() => void handleOAuth("trakt")}
               className="w-full"
             >
               <NamespaceLogo namespace="trakt" className="size-4" />
-              Trakt
+              {oauthLoading === "trakt" ? "正在跳转…" : "Trakt"}
             </Button>
           </div>
         </FieldGroup>

@@ -575,10 +575,9 @@ function MediaDetailPage() {
                 资料目录
               </h2>
               <p className="text-sm text-muted-foreground">
-                {media.catalogNote ??
-                  (isAllSeasons
-                    ? `全部 ${seasonCount} 季`
-                    : "同一部剧在各资料站的条目，权威资料站自动同步")}
+                {isAllSeasons
+                  ? `全部 ${seasonCount} 季`
+                  : (media.catalogNote ?? "同一部剧在各资料站的条目，权威资料站自动同步")}
               </p>
             </div>
 
@@ -624,7 +623,9 @@ function MediaDetailPage() {
                               {NAMESPACE_LABELS[cat.namespace]}
                             </div>
                             <div className="truncate text-xs text-muted-foreground">
-                              {cat.roleLabel}
+                              {isAllSeasons
+                                ? (cat.allSeasonsRoleLabel ?? cat.roleLabel)
+                                : cat.roleLabel}
                             </div>
                           </div>
                         </div>

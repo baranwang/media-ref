@@ -1,6 +1,14 @@
 import { isPlatformNamespace, type Namespace, type PlatformNamespace } from "@media-ref/client";
 import { createStore, useSelector, type Store } from "@tanstack/react-store";
-import { createContext, useCallback, useContext, useMemo, useRef, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 import { createBrowserClients, getApiBaseUrl } from "./api-client";
 import {
   INITIAL_API_KEYS,
@@ -88,7 +96,7 @@ const DEFAULT_USER: CurrentUser = {
 
 function createInitialAppState(): AppState {
   return {
-    user: DEFAULT_USER,
+    user: getApiBaseUrl() ? null : DEFAULT_USER,
     mediaList: INITIAL_MEDIA_CATALOG,
     changeRequests: INITIAL_CHANGE_REQUESTS,
     reviewAlerts: INITIAL_REVIEW_ALERTS,
@@ -110,6 +118,43 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     storeRef.current = createStore<AppState>(createInitialAppState());
   }
   const store = storeRef.current;
+
+  useEffect(() => {
+    const clients = createBrowserClients();
+    if (!clients) {
+      return;
+    }
+
+    let cancelled = false;
+    void clients.account
+      .getCurrentUser({})
+      .then((current) => {
+        if (cancelled) return;
+        const u = current.user;
+        if (!u) {
+          store.setState((prev) => (prev.user === null ? prev : { ...prev, user: null }));
+          return;
+        }
+        store.setState((prev) => ({
+          ...prev,
+          user: {
+            id: u.id,
+            name: u.name || u.email.split("@")[0] || "user",
+            email: u.email,
+            emailVerified: u.emailVerified,
+            role: u.role === "admin" || u.role === "reviewer" ? u.role : "user",
+          },
+        }));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        store.setState((prev) => (prev.user === null ? prev : { ...prev, user: null }));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [store]);
 
   const getMediaById = useCallback(
     (id: string) => {

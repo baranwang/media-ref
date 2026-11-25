@@ -3,6 +3,9 @@ import type { ReactNode } from "react";
 import { AUTH_COLLAGE_POSTERS } from "#/lib/catalog-data";
 import { BrandLogo } from "./brand-logos";
 
+const COLLAGE_COLUMNS = 7;
+const COLLAGE_ROWS = 6;
+
 interface AuthLayoutProps {
   children: ReactNode;
   showcaseTitle: string;
@@ -32,13 +35,26 @@ export function AuthLayout({
 
       {/* Right column: Full-bleed tilted dark poster collage + display headline */}
       <div className="relative hidden overflow-hidden border-l border-border/60 bg-muted lg:flex lg:flex-col">
+        {/* 7 staggered columns x 6 rows, matching the Figma "Poster Wall"; posters repeat to fill it */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute -inset-24 grid scale-110 -rotate-12 grid-cols-4 gap-4 opacity-30 brightness-60"
+          className="pointer-events-none absolute -inset-64 flex scale-110 -rotate-12 gap-4 opacity-30 brightness-60"
         >
-          {AUTH_COLLAGE_POSTERS.map((src, idx) => (
-            <div key={`${src}-${idx}`} className="aspect-2/3 overflow-hidden rounded-lg bg-card">
-              <img src={src} alt="" className="h-full w-full object-cover" />
+          {Array.from({ length: COLLAGE_COLUMNS }, (_, col) => (
+            <div key={col} className={`flex flex-1 flex-col gap-4 ${col % 2 === 0 ? "pt-28" : ""}`}>
+              {Array.from({ length: COLLAGE_ROWS }, (_, row) => (
+                <div key={row} className="aspect-2/3 overflow-hidden rounded-lg bg-card">
+                  <img
+                    src={
+                      AUTH_COLLAGE_POSTERS[
+                        (row * COLLAGE_COLUMNS + col) % AUTH_COLLAGE_POSTERS.length
+                      ]
+                    }
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+              ))}
             </div>
           ))}
         </div>

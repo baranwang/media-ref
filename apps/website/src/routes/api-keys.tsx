@@ -254,7 +254,7 @@ function ApiKeysPage() {
           </div>
 
           <Button
-            variant="default"
+            variant={isEmailVerified ? "default" : "secondary"}
             size="default"
             disabled={!isEmailVerified}
             onClick={() => setCreateOpen(true)}

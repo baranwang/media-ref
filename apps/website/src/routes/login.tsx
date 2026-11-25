@@ -14,17 +14,28 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { AuthLayout } from "#/components/auth-layout";
 import { NamespaceLogo } from "#/components/brand-logos";
-import { getApiBaseUrl } from "#/lib/api-client";
+import {
+  getApiBaseUrl,
+  requestSocialSignInUrl,
+  resolveOAuthErrorMessage,
+  type SocialOAuthProvider,
+} from "#/lib/api-client";
 import { useAppStore } from "#/lib/app-store";
 
 interface LoginSearch {
-  error?: number;
+  error?: 1 | string;
 }
 
 export const Route = createFileRoute("/login")({
-  validateSearch: (search: Record<string, unknown>): LoginSearch => ({
-    error: search.error === 1 || search.error === "1" ? 1 : undefined,
-  }),
+  validateSearch: (search: Record<string, unknown>): LoginSearch => {
+    if (search.error === 1 || search.error === "1") {
+      return { error: 1 };
+    }
+    if (typeof search.error === "string" && search.error.trim().length > 0) {
+      return { error: search.error.trim() };
+    }
+    return {};
+  },
   component: LoginPage,
 });
 
@@ -36,6 +47,10 @@ function LoginPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(
     search.error === 1 ? "邮箱或密码不对" : null,
   );
+  const [oauthError, setOauthError] = useState<string | null>(
+    typeof search.error === "string" ? resolveOAuthErrorMessage(search.error) : null,
+  );
+  const [oauthLoading, setOauthLoading] = useState<SocialOAuthProvider | null>(null);
 
   const form = useForm({
     defaultValues: {
@@ -53,16 +68,32 @@ function LoginPage() {
     },
   });
 
-  const handleOAuth = (provider: "github" | "trakt") => {
+  const handleOAuth = async (provider: SocialOAuthProvider) => {
+    if (oauthLoading) return;
+    setErrorMessage(null);
+    setOauthError(null);
+
     const apiBase = getApiBaseUrl();
     if (apiBase) {
-      window.location.href = `${apiBase}/api/auth/sign-in/social?provider=${provider}`;
+      setOauthLoading(provider);
+      const result = await requestSocialSignInUrl(provider, {
+        callbackURL: `${window.location.origin}/`,
+        errorCallbackURL: `${window.location.origin}/login`,
+      });
+      if (!result.ok) {
+        setOauthError(result.error);
+        setOauthLoading(null);
+        return;
+      }
+      window.location.assign(result.url);
       return;
     }
-    void signIn("lin.xiao@example.com", "oauth-demo-pass").then(() => {
-      void navigate({ to: "/" });
-    });
+
+    await signIn("lin.xiao@example.com", "oauth-demo-pass");
+    void navigate({ to: "/" });
   };
+
+  const activeError = oauthError ?? errorMessage;
 
   return (
     <AuthLayout
@@ -78,6 +109,7 @@ function LoginPage() {
         onSubmit={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          setOauthError(null);
           void form.handleSubmit();
         }}
         className="flex flex-col gap-6"
@@ -88,18 +120,22 @@ function LoginPage() {
         </div>
 
         {/* 06D Error State Alert */}
-        {errorMessage && (
+        {activeError && (
           <Alert variant="destructive" className="px-3 py-2.5">
             <RiErrorWarningLine className="size-4" />
-            <AlertTitle>{errorMessage}</AlertTitle>
-            <AlertDescription>检查一下大小写，或者点「忘记密码？」重设。</AlertDescription>
+            <AlertTitle>{activeError}</AlertTitle>
+            <AlertDescription>
+              {oauthError
+                ? "你可以重新尝试授权，或直接使用邮箱登录。"
+                : "检查一下大小写，或者点「忘记密码？」重设。"}
+            </AlertDescription>
           </Alert>
         )}
 
         <FieldGroup>
           <form.Field name="email">
             {(field) => (
-              <Field data-invalid={Boolean(errorMessage)}>
+              <Field>
                 <FieldLabel htmlFor="login-email">邮箱</FieldLabel>
                 <Input
                   id="login-email"
@@ -107,7 +143,6 @@ function LoginPage() {
                   type="email"
                   autoComplete="email"
                   required
-                  aria-invalid={Boolean(errorMessage)}
                   value={field.state.value}
                   onBlur={field.handleBlur}
                   onChange={(e) => field.handleChange(e.target.value)}
@@ -174,21 +209,23 @@ function LoginPage() {
               type="button"
               variant="outline"
               size="lg"
-              onClick={() => handleOAuth("github")}
+              disabled={oauthLoading !== null}
+              onClick={() => void handleOAuth("github")}
               className="w-full"
             >
               <RiGithubFill />
-              GitHub
+              {oauthLoading === "github" ? "正在跳转…" : "GitHub"}
             </Button>
             <Button
               type="button"
               variant="outline"
               size="lg"
-              onClick={() => handleOAuth("trakt")}
+              disabled={oauthLoading !== null}
+              onClick={() => void handleOAuth("trakt")}
               className="w-full"
             >
               <NamespaceLogo namespace="trakt" className="size-4" />
-              Trakt
+              {oauthLoading === "trakt" ? "正在跳转…" : "Trakt"}
             </Button>
           </div>
         </FieldGroup>
