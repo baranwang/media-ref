@@ -311,6 +311,8 @@ async function exchangeTraktTokenViaOutbound(
     headers: {
       "content-type": "application/json",
       accept: "application/json",
+      // Trakt's edge returns 403 to requests without a User-Agent
+      "user-agent": OAUTH_USER_AGENT,
     },
     body: JSON.stringify({
       ...payload,
@@ -351,6 +353,7 @@ async function fetchTraktUserInfoViaOutbound(
       "trakt-api-version": TRAKT_API_VERSION,
       "trakt-api-key": credentials.clientId,
       accept: "application/json",
+      "user-agent": OAUTH_USER_AGENT,
     },
   });
 

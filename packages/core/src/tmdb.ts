@@ -201,6 +201,8 @@ async function lookupTraktId(
   const headers: Record<string, string> = {
     accept: "application/json",
     "trakt-api-version": "2",
+    // Trakt's edge returns 403 to requests without a User-Agent
+    "user-agent": "media-ref",
   };
   if (config.traktClientId) {
     headers["trakt-api-key"] = config.traktClientId;

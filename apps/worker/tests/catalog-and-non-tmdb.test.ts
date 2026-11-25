@@ -137,6 +137,8 @@ function createCatalogAndPlatformStub() {
     }
 
     if (request.kind === "catalog" && request.namespace === "trakt") {
+      // Trakt's edge returns 403 to requests without a User-Agent
+      expect(request.headers?.["user-agent"]).toBe("media-ref");
       if (request.url.includes("/search/tmdb/95479?type=show")) {
         return jsonResponse(request.url, [
           {
