@@ -12,10 +12,12 @@ export const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 export const GITHUB_USER_URL = "https://api.github.com/user";
 export const GITHUB_USER_EMAILS_URL = "https://api.github.com/user/emails";
 
-export const TRAKT_AUTHORIZATION_URL = "https://trakt.tv/oauth/authorize";
-export const TRAKT_TOKEN_URL = "https://api.trakt.tv/oauth/token";
-export const TRAKT_USER_SETTINGS_URL = "https://api.trakt.tv/users/settings";
-export const TRAKT_API_VERSION = "2";
+// Trakt OAuth runs on auth.trakt.tv as an OIDC provider (see its /.well-known/openid-configuration);
+// only the `email` scope makes the account email available, via the userinfo endpoint.
+export const TRAKT_AUTHORIZATION_URL = "https://auth.trakt.tv/api/auth/oauth2/authorize";
+export const TRAKT_TOKEN_URL = "https://auth.trakt.tv/oauth/token";
+export const TRAKT_USERINFO_URL = "https://auth.trakt.tv/api/auth/oauth2/userinfo";
+export const TRAKT_SCOPES = ["public", "openid", "profile", "email"];
 
 const REDIRECT_STATUSES = new Set([0, 301, 302, 303, 307, 308]);
 const OAUTH_USER_AGENT = "media-ref";
@@ -59,21 +61,10 @@ interface RawGithubEmail {
   visibility?: string | null;
 }
 
-interface RawTraktUserSettings {
-  user?: {
-    username?: string;
-    name?: string | null;
-    email?: string | null;
-    ids?: {
-      slug?: string;
-      uuid?: string;
-    };
-    images?: {
-      avatar?: {
-        full?: string | null;
-      };
-    };
-  };
+interface RawTraktUserInfo {
+  sub?: string;
+  email?: string | null;
+  name?: string | null;
 }
 
 function normalizeNonEmpty(value: string | undefined): string | undefined {
@@ -336,7 +327,6 @@ async function exchangeTraktTokenViaOutbound(
 
 async function fetchTraktUserInfoViaOutbound(
   outbound: OutboundClient,
-  credentials: OAuthProviderCredentials,
   tokens: OAuth2Tokens,
 ): Promise<GenericOAuthUserInfo | null> {
   if (!tokens.accessToken) {
@@ -346,12 +336,10 @@ async function fetchTraktUserInfoViaOutbound(
   const response = await outbound.fetchExternal({
     kind: "catalog",
     namespace: "trakt",
-    url: TRAKT_USER_SETTINGS_URL,
+    url: TRAKT_USERINFO_URL,
     method: "GET",
     headers: {
       authorization: `Bearer ${tokens.accessToken}`,
-      "trakt-api-version": TRAKT_API_VERSION,
-      "trakt-api-key": credentials.clientId,
       accept: "application/json",
       "user-agent": OAUTH_USER_AGENT,
     },
@@ -361,31 +349,18 @@ async function fetchTraktUserInfoViaOutbound(
     return null;
   }
 
-  const data = parseJsonObject(response) as RawTraktUserSettings | null;
-  const traktUser = data?.user;
-  if (!traktUser) {
+  const data = parseJsonObject(response) as RawTraktUserInfo | null;
+  const subject = normalizeNonEmpty(data?.sub);
+  if (!data || !subject) {
     return null;
   }
-
-  const subject = normalizeNonEmpty(traktUser.ids?.uuid) ?? normalizeNonEmpty(traktUser.ids?.slug);
-  if (!subject) {
-    return null;
-  }
-
-  const email = normalizeNonEmpty(traktUser.email ?? undefined);
-  const name =
-    normalizeNonEmpty(traktUser.name ?? undefined) ??
-    normalizeNonEmpty(traktUser.username) ??
-    subject;
-  const image = normalizeNonEmpty(traktUser.images?.avatar?.full ?? undefined);
 
   return {
     id: subject,
-    name,
-    email,
-    // Trakt does not expose an email_verified signal; always require media-ref verification.
+    name: normalizeNonEmpty(data.name ?? undefined) ?? subject,
+    email: normalizeNonEmpty(data.email ?? undefined),
+    // Trakt's email_verified claim is not trusted for account linking; media-ref verifies the email itself.
     emailVerified: false,
-    image,
   };
 }
 
@@ -513,15 +488,16 @@ export function buildOAuthAuthOptions(
             authorizationUrl: TRAKT_AUTHORIZATION_URL,
             tokenUrl: TRAKT_TOKEN_URL,
             authentication: "post",
-            pkce: false,
-            scopes: [],
-            getToken: ({ code, redirectURI }) =>
+            pkce: true,
+            scopes: TRAKT_SCOPES,
+            getToken: ({ code, redirectURI, codeVerifier }) =>
               exchangeTraktTokenViaOutbound(outbound, trakt, {
                 code,
                 redirect_uri: redirectURI,
                 grant_type: "authorization_code",
+                ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
               }),
-            getUserInfo: (tokens) => fetchTraktUserInfoViaOutbound(outbound, trakt, tokens),
+            getUserInfo: (tokens) => fetchTraktUserInfoViaOutbound(outbound, tokens),
           },
         ],
       }),

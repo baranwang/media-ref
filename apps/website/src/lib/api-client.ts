@@ -23,8 +23,11 @@ export function resolveOAuthErrorMessage(code: string): string {
   if (normalized === "access_denied" || normalized === "user_cancelled") {
     return "你取消了第三方账号授权";
   }
-  if (normalized.includes("account_not_linked") || normalized.includes("email")) {
+  if (normalized.includes("account_not_linked")) {
     return "该邮箱已有账号但尚未完成关联，请先用原方式登录";
+  }
+  if (normalized.includes("email_not_found")) {
+    return "第三方账号没有提供邮箱，请改用邮箱注册";
   }
   return "第三方账号登录未完成，请重试";
 }
