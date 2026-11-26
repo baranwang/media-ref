@@ -1029,7 +1029,8 @@ describe("Exploration scheduler (#28)", () => {
     expect(transientDemand.status).toBe("open");
     expect(transientDemand.notFoundCount).toBe(0);
     expect(transientDemand.lastExploredAt).toBeNull();
-    expect(new Date(transientDemand.nextEligibleAt).getTime()).toBeLessThanOrEqual(t0.getTime());
+    // Transient outcomes wait an hour before the demand is explored again.
+    expect(new Date(transientDemand.nextEligibleAt).getTime()).toBe(t0.getTime() + 60 * 60 * 1000);
 
     // Remove transientMedia demand so subsequent assertions focus cleanly on notFoundMedia backoff
     await testDb.writeDb.deleteFrom("demands").where("media_id", "=", transientMedia.id).execute();

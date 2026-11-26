@@ -367,6 +367,40 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("fulfilled");
   });
 
+  test("a transient demand waits an hour, and the next job does not resubmit a platform under review", async () => {
+    // bilibili is submitted on the fast path; iQIYI search fails, so the demand is transient.
+    const { testDb, mediaId, outbound, worker, emitted, explore } = await setup({
+      kan360Rows: [["咒术回战", "2020", "34430"]],
+      failIqiyiSearch: true,
+    });
+    await explore();
+    const demand = (await listDemands(testDb.readDb, { mediaId }))[0]!;
+    expect(demand.status).toBe("open");
+    expect(new Date(demand.nextEligibleAt).getTime() - T0.getTime()).toBe(60 * 60 * 1000);
+
+    // An hour later the demand runs again while the bilibili submission is still unchecked.
+    const later = new Date(T0.getTime() + 60 * 60 * 1000);
+    const again = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { enableDailyTmdbSync: false, exploration: { dailyBudget: 10 } },
+      now: () => later,
+    });
+    emitted.length = 0;
+    await again.scheduled(createScheduledController(later));
+    expect(emitted.map((m) => m.jobType)).toContain(EXPLORATION_JOB_TYPE);
+    await again.queue(createQueueBatch(emitted.filter((m) => m.jobType === EXPLORATION_JOB_TYPE)));
+
+    const crs = await testDb.readDb.selectFrom("change_requests").select("namespace").execute();
+    expect(crs).toEqual([{ namespace: "bilibili" }]);
+    void worker;
+  });
+
   test("redelivered job does not submit twice", async () => {
     const { testDb, explore } = await setup({ kan360Rows: [["咒术回战", "2020", "34430"]] });
     await explore();
