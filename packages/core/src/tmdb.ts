@@ -72,6 +72,11 @@ export interface TmdbGateway {
   findByImdbId(imdbId: string): Promise<Array<{ type: MediaType; id: string }>>;
   /** TMDB title search (`/search/{tv,movie,multi}`), at most 10 hits. */
   search(query: string, options?: { type?: MediaType; year?: number }): Promise<CatalogSearchHit[]>;
+  /** Episodes of one TV season (`/tv/{id}/season/{n}`); null when TMDB has no such season. */
+  fetchSeasonEpisodes(
+    tmdbId: string,
+    season: number,
+  ): Promise<Array<{ episodeNumber: number; airYear: number | null }> | null>;
   /** Trakt title search, at most 10 hits. */
   searchTrakt(query: string, options?: { type?: MediaType }): Promise<CatalogSearchHit[]>;
   /** One Trakt entry by native ID (`show:123` / `movie:123`); null when Trakt does not have it. */
@@ -487,6 +492,24 @@ export function createTmdbGateway(
         }
       }
       return found;
+    },
+
+    async fetchSeasonEpisodes(tmdbId, season) {
+      const fetched = await fetchTmdbJson(
+        buildTmdbUrl(`/tv/${encodeURIComponent(tmdbId)}/season/${season}`, { language }),
+        `tv:${tmdbId} season ${season}`,
+      );
+      if (!fetched.ok) {
+        return null;
+      }
+      const episodes = Array.isArray(fetched.data.episodes) ? fetched.data.episodes : [];
+      return episodes.flatMap((raw) => {
+        const record = (raw ?? {}) as Record<string, unknown>;
+        const episodeNumber = record.episode_number;
+        return typeof episodeNumber === "number" && Number.isInteger(episodeNumber)
+          ? [{ episodeNumber, airYear: parseYear(record.air_date) }]
+          : [];
+      });
     },
 
     async fetchMediaSnapshotAndExternalIds(tmdbType, tmdbId, options) {
