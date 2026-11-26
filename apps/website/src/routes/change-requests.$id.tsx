@@ -309,8 +309,8 @@ function ChangeRequestDetailPage() {
             </Card>
           </section>
 
-          {/* 审核员留言 */}
-          {cr.decisionReason && (
+          {/* 审核员留言：自动生效时 decisionReason 是内部代码，不显示 */}
+          {cr.reviewerUserId && cr.decisionReason && (
             <section className="flex flex-col gap-3">
               <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
                 审核员留言
@@ -344,7 +344,7 @@ function ChangeRequestDetailPage() {
             <p className="mt-0.5 text-sm text-muted-foreground">
               {cr.status === "approved"
                 ? cr.reviewedAt
-                  ? `从提交到生效用了 ${elapsedLabel(cr.createdAt, cr.reviewedAt)}`
+                  ? `${cr.reviewerUserId ? "" : "自动核对通过，"}从提交到生效用了 ${elapsedLabel(cr.createdAt, cr.reviewedAt)}`
                   : "关联已经生效"
                 : cr.status === "rejected"
                   ? "本次变更单已被驳回"

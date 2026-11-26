@@ -416,7 +416,7 @@ function timelineFor(
     steps.push({
       label: "已生效",
       time: formatDateTime(cr.reviewedAt),
-      detail: "关联已经生效",
+      detail: cr.reviewerUserId ? "审核员已批准，关联已经生效" : "自动核对通过，已自动生效",
       state: "done",
     });
   } else if (status === "rejected") {
@@ -456,6 +456,7 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
     })),
     conflictReason: cr.conflictReason ?? null,
     decisionReason: cr.decisionReason ?? null,
+    reviewerUserId: cr.reviewerUserId ?? null,
     submitterUserId: cr.submitterUserId,
     createdAt: cr.createdAt,
     reviewedAt: cr.reviewedAt ?? null,
