@@ -129,10 +129,15 @@ function segmentsBySeason(
 }
 
 /** Collapses the seasons an association covers into consecutive season-range bars. */
-function seasonRangeSegments(assocs: Association[]): CoverageSegment[] {
+function seasonRangeSegments(assocs: Association[], seasons: MediaSeasonInfo[]): CoverageSegment[] {
   const bars: CoverageSegment[] = [];
   for (const assoc of assocs) {
-    const covered = [...new Set(assoc.segments.map((s) => s.season))].sort((a, b) => a - b);
+    // No segments = the association covers every season.
+    const seasonNumbers =
+      assoc.segments.length === 0
+        ? seasons.map((s) => s.season)
+        : assoc.segments.map((s) => s.season);
+    const covered = [...new Set(seasonNumbers)].sort((a, b) => a - b);
     let start: number | null = null;
     let prev = 0;
     const flush = () => {
@@ -205,7 +210,7 @@ function buildPlatformRows(
       segmentsBySeason: mergeSeasonMaps(
         group.assocs.map((a) => segmentsBySeason(a, seasons, isMovie)),
       ),
-      allSeasonSegments: seasonRangeSegments(group.assocs),
+      allSeasonSegments: seasonRangeSegments(group.assocs, seasons),
     };
   });
   // Default variant first within a platform, platforms in a stable order.
@@ -257,7 +262,7 @@ function buildCatalogRows(
             segmentsBySeason: mergeSeasonMaps(
               segmented.map((a) => segmentsBySeason(a, seasons, isMovie)),
             ),
-            allSeasonSegments: seasonRangeSegments(segmented),
+            allSeasonSegments: seasonRangeSegments(segmented, seasons),
           }
         : {}),
       ...(namespace === "imdb" ? { note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）" } : {}),
