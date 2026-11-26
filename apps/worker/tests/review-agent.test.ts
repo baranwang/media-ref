@@ -910,6 +910,84 @@ describe("review agent: reject with correction (#76)", () => {
     expect(await leads(ctx)).toHaveLength(1);
   });
 
+  /** Fetches 灵笼's collection and season 1, then rejects with these segments. */
+  const correctsLinglong =
+    (segments: unknown[]): ScriptedModel =>
+    (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+          ["get_catalog_season", { season: 1 }],
+        ]);
+      }
+      if (turn === 1) {
+        return reply(turn, [
+          ["reject_with_correction", { opinion: "中章夹在第 6、7 集之间", season: 1, segments }],
+        ]);
+      }
+      return reply(turn, [["keep_for_human", { opinion: "改正没过复核" }]]);
+    };
+  const linglongWholeSeason: SegmentInput[] = [
+    { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+  ];
+  const linglongCorrection = LINGLONG_SEGMENTS.map(
+    ({ season, episodeStart, episodeEnd, targetEpisodeStart }) => ({
+      season,
+      episodeStart,
+      episodeEnd,
+      targetEpisodeStart,
+    }),
+  );
+
+  test("灵笼: the whole season from position 1 is off by one after 中章; the split correction skips positions and fits the collection, so it holds", async () => {
+    const ctx = track(await setup(correctsLinglong(linglongCorrection)));
+    const id = await ctx.submit("ss28888", { segments: linglongWholeSeason });
+
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("rejected");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "reject_with_correction",
+      correction: { season: 1, segments: linglongCorrection },
+      fallback: null,
+    });
+    expect(await leads(ctx)).toEqual([
+      expect.objectContaining({ native_id: "ss28888", season: 1 }),
+    ]);
+  });
+
+  test.each([
+    {
+      name: "overlapping positions",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 6, targetEpisodeStart: 1 },
+        { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 6 },
+      ],
+    },
+    {
+      name: "positions past the collection's last feature episode",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 6, targetEpisodeStart: 1 },
+        { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 12 },
+      ],
+    },
+  ])("灵笼: a split correction with $name still fails step 2", async ({ segments }) => {
+    const ctx = track(await setup(correctsLinglong(segments)));
+    const id = await ctx.submit("ss28888", { segments: linglongWholeSeason });
+
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("needs_review");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "keep_for_human",
+      fallback: expect.stringMatching(/^correction_failed_step2: /),
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
   test("灵笼 split in two: a segment-only correction reaches exploration, whose fast path resubmits with the corrected segments", async () => {
     // ss28889 holds only TMDB season 1 episodes 7–12; the submission mapped the whole season.
     const wholeSeason: SegmentInput[] = [

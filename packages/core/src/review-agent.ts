@@ -39,7 +39,11 @@ import {
   evaluateEvidenceGateStep2,
   type CatalogEvidence,
 } from "./evidence-gate.ts";
-import { resolveExplorationAgentConfig, type ExplorationAgentConfig } from "./exploration-agent.ts";
+import {
+  checkSegmentsFitCollection,
+  resolveExplorationAgentConfig,
+  type ExplorationAgentConfig,
+} from "./exploration-agent.ts";
 import {
   DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET,
   recordExplorationTokens,
@@ -86,6 +90,37 @@ const EPISODE_COUNT_CONFLICT_CODES: ReadonlySet<string> = new Set([
   "episode_count_mismatch",
   "episode_count_missing",
 ]);
+
+/**
+ * Step 2 conflicts a correction may keep when its segments fit the collection without overlap:
+ * extras between feature episodes leave gaps in the positions and an uneven total (灵笼's 中章).
+ */
+const POSITION_GAP_CONFLICT_CODES: ReadonlySet<string> = new Set([
+  "target_episode_start_mismatch",
+  "segment_episode_count_mismatch",
+]);
+
+/** Why the segments' platform positions don't fit the collection: past its end, or overlapping. */
+function positionMisfit(
+  segments: readonly NormalizedSegment[],
+  collection: CollectionInfo,
+  seasons: CatalogEvidence["seasons"],
+): string | null {
+  const count = (season: number) => seasons.find((s) => s.season === season)?.episodeCount ?? null;
+  const misfit = checkSegmentsFitCollection(segments, collection, count);
+  if (misfit) {
+    return misfit;
+  }
+  const ranges = segments
+    .map((s) => {
+      const end = s.episodeEnd ?? count(s.season)!;
+      return [s.targetEpisodeStart, s.targetEpisodeStart + end - s.episodeStart] as const;
+    })
+    .sort((a, b) => a[0] - b[0]);
+  return ranges.some((r, i) => i > 0 && r[0] <= ranges[i - 1]![1])
+    ? "segments overlap on platform positions"
+    : null;
+}
 
 export interface ReviewAgentConfig extends Omit<ExplorationAgentConfig, "discover"> {
   /** Reviews per UTC day; 0 (the default) runs none. */
@@ -786,9 +821,14 @@ function correctionBlocker(
     variantDescription: cr.variantDescription,
     step1,
   });
-  return step2.conflicts.length > 0
-    ? `correction_failed_step2: ${[...new Set(step2.conflicts.map((c) => c.code))].join(", ")}`
-    : null;
+  const misfit = positionMisfit(segments, collection, catalog.seasons);
+  const blocking = step2.conflicts.filter(
+    (c) => !(misfit === null && POSITION_GAP_CONFLICT_CODES.has(c.code)),
+  );
+  if (blocking.length > 0) {
+    return `correction_failed_step2: ${[...new Set(blocking.map((c) => c.code))].join(", ")}`;
+  }
+  return misfit ? `correction_failed_step2: ${misfit}` : null;
 }
 
 /**
