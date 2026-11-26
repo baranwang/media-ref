@@ -1364,16 +1364,8 @@ export function evaluateEvidenceGate(input: EvaluateEvidenceGateInput): Evidence
   const step1 = evaluateEvidenceGateStep1(input.catalog, input.collection, {
     segments: input.segments,
   });
-  if (step1.decision !== "pass") {
-    return {
-      decision: "needs_review",
-      step1,
-      step2: null,
-      conflicts: step1.conflicts,
-      reasons: step1.reasons,
-    };
-  }
 
+  // Step 2 runs even when Step 1 fails so reviewers see every conflict at once (ADR 0003 section 5)
   const step2Evaluator = input.evaluateStep2 ?? evaluateEvidenceGateStep2;
   const step2 = step2Evaluator({
     catalog: input.catalog,
@@ -1388,7 +1380,7 @@ export function evaluateEvidenceGate(input: EvaluateEvidenceGateInput): Evidence
   const reasons = [...step1.reasons, ...step2.reasons];
 
   return {
-    decision: step2.decision,
+    decision: step1.decision === "pass" ? step2.decision : "needs_review",
     step1,
     step2,
     conflicts,
