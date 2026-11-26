@@ -7,8 +7,8 @@ import {
 } from "@media-ref/client";
 import { createServerFn } from "@tanstack/react-start";
 import type { BrowseSlug } from "./catalogs";
-import { cardFromProto, demandFromProto, mediaItemFrom } from "./mappers";
-import type { CardItem, DemandItem, MediaItem } from "./types";
+import { cardFromProto, demandFromProto, explorationFromProto, mediaItemFrom } from "./mappers";
+import type { CardItem, DemandItem, ExplorationItem, ExplorationPage, MediaItem } from "./types";
 
 // Public reads, run on the website server and sent to the API over the service binding.
 // The internal client is imported lazily so `cloudflare:workers` never reaches the browser bundle.
@@ -51,6 +51,40 @@ export const fetchDemands = createServerFn({ method: "GET" })
     const { browse } = await clients();
     const res = await browse.listDemands(data);
     return res.demands.map(demandFromProto).filter((d): d is DemandItem => d !== null);
+  });
+
+export type ExplorationFilter = "all" | "found" | "not_found";
+
+const EXPLORATION_FILTER: Record<ExplorationFilter, proto.ExplorationFilter> = {
+  all: proto.ExplorationFilter.UNSPECIFIED,
+  found: proto.ExplorationFilter.FOUND,
+  not_found: proto.ExplorationFilter.NOT_FOUND,
+};
+
+export const fetchExplorationActivity = createServerFn({ method: "GET" })
+  .validator((input: { filter: ExplorationFilter; before?: string; limit?: number }) => input)
+  .handler(async ({ data }): Promise<ExplorationPage> => {
+    const { browse } = await clients();
+    const res = await browse.listExplorationActivity({
+      filter: EXPLORATION_FILTER[data.filter],
+      ...(data.before ? { before: data.before } : {}),
+      ...(data.limit ? { limit: data.limit } : {}),
+    });
+    const items = (list: proto.ExplorationActivity[]) =>
+      list.map(explorationFromProto).filter((a): a is ExplorationItem => a !== null);
+    return {
+      running: items(res.running),
+      recent: items(res.recent),
+      summary: res.last24h
+        ? {
+            explored: res.last24h.explored,
+            found: res.last24h.found,
+            approved: res.last24h.approved,
+            inReview: res.last24h.inReview,
+          }
+        : null,
+      nextBefore: res.nextBefore ?? null,
+    };
   });
 
 export const fetchSearch = createServerFn({ method: "GET" })

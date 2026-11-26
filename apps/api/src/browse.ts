@@ -10,6 +10,7 @@ import {
   getCatalogDetail,
   isBrowseNamespace,
   listDemands,
+  listExplorationActivity,
   listTrending,
   queryMediaBatch,
   resolveLookupKeys,
@@ -24,6 +25,8 @@ import { authorizePublicRead, getRuntime, type ApiRequestRuntime } from "./conte
 const DEFAULT_TRENDING_LIMIT = 18;
 const DEFAULT_SEARCH_LIMIT = 10;
 const DEFAULT_DEMANDS_LIMIT = 20;
+const DEFAULT_ACTIVITY_LIMIT = 20;
+const MAX_ACTIVITY_LIMIT = 50;
 const MAX_PAGE = 100;
 
 interface InLibrary {
@@ -311,6 +314,80 @@ export const browseServiceImpl: ServiceImpl<typeof proto.BrowseService> = {
 
     return create(proto.ListDemandsResponseSchema, {
       demands: entries.filter((e): e is proto.DemandEntry => e !== null),
+    });
+  },
+
+  async listExplorationActivity(req, ctx) {
+    await authorizePublicRead(ctx);
+    const runtime = getRuntime(ctx);
+    const before = req.before ? new Date(req.before) : null;
+    if (before && Number.isNaN(before.getTime())) {
+      throw createDomainConnectError({
+        status: 400,
+        code: "INVALID_QUERY",
+        message: "before must be an ISO timestamp",
+      });
+    }
+    const activity = await listExplorationActivity(runtime.dbRead, {
+      now: new Date(),
+      limit: Math.min(clampLimit(req.limit, DEFAULT_ACTIVITY_LIMIT), MAX_ACTIVITY_LIMIT),
+      before,
+      filter:
+        req.filter === proto.ExplorationFilter.FOUND
+          ? "found"
+          : req.filter === proto.ExplorationFilter.NOT_FOUND
+            ? "not_found"
+            : "all",
+      includeLive: !before,
+    });
+
+    const all = [...activity.running, ...activity.recent];
+    const library = await lookupLibrary(
+      runtime,
+      all.map((a) => a.mediaId),
+    );
+    const cards = new Map<string, proto.CatalogCard>();
+    await Promise.all(
+      [...library].map(async ([mediaId, hit]) => {
+        cards.set(mediaId, await cardForDocument(runtime, hit.document));
+      }),
+    );
+    const toProto = (a: (typeof all)[number]) => {
+      const card = cards.get(a.mediaId);
+      if (!card) return [];
+      return [
+        create(proto.ExplorationActivitySchema, {
+          id: a.id,
+          card,
+          ...(a.season !== null ? { season: a.season } : {}),
+          startedAt: a.startedAt.toISOString(),
+          ...(a.finishedAt ? { finishedAt: a.finishedAt.toISOString() } : {}),
+          platforms: a.platforms.map((p) =>
+            create(proto.ExplorationPlatformResultSchema, {
+              namespace: p.namespace,
+              status: p.status,
+              ...(p.reason ? { reason: p.reason } : {}),
+              ...(p.changeRequestId ? { changeRequestId: p.changeRequestId } : {}),
+            }),
+          ),
+        }),
+      ];
+    };
+
+    return create(proto.ListExplorationActivityResponseSchema, {
+      running: activity.running.flatMap(toProto),
+      recent: activity.recent.flatMap(toProto),
+      ...(activity.summary
+        ? {
+            last24h: create(proto.ExplorationSummarySchema, {
+              explored: activity.summary.explored,
+              found: activity.summary.found,
+              approved: activity.summary.approved,
+              inReview: activity.summary.inReview,
+            }),
+          }
+        : {}),
+      ...(activity.nextBefore ? { nextBefore: activity.nextBefore.toISOString() } : {}),
     });
   },
 };

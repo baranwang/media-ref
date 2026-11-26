@@ -181,4 +181,82 @@ describe("BrowseService", () => {
     ]);
     expect(res.demands[1]!.card?.mediaId).toBe(mediaId);
   });
+
+  test("ListExplorationActivity shows running and finished jobs in plain words, never the caller", async () => {
+    const { testDb, rpc, mediaId } = await setup();
+    const now = Date.now();
+    const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000);
+    await testDb.writeDb
+      .insertInto("user")
+      .values({ id: "agent", name: "Agent", email: "agent@example.invalid", emailVerified: true })
+      .execute();
+    const cr = await testDb.writeDb
+      .insertInto("change_requests")
+      .values({
+        submitter_user_id: "agent",
+        submitter_type: "agent",
+        media_id: mediaId,
+        target_external_key: "tmdb:tv:95479",
+        namespace: "bilibili",
+        raw_native_id: "ss38221",
+        native_id: "ss38221",
+        status: "approved",
+        segments: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const job = (minutesAgo: number, outcomes: unknown[]) => ({
+      job_type: "exploration",
+      status: "completed" as const,
+      payload: JSON.stringify({ demandId: "d", mediaId, season: 1 }),
+      result: JSON.stringify({ mediaId, platformOutcomes: outcomes }),
+      leased_at: at(minutesAgo + 1),
+      completed_at: at(minutesAgo),
+    });
+    await testDb.writeDb
+      .insertInto("background_jobs")
+      .values([
+        job(5, [
+          { namespace: "bilibili", status: "submitted", changeRequestId: cr.id },
+          { namespace: "iqiyi", status: "not_found", reason: "Only user uploads, no series." },
+          { namespace: "youku", status: "transient_error", reason: "AI Gateway (x) error: 502" },
+        ]),
+        job(30, [{ namespace: "tencent", status: "not_found", reason: "no_discovery_candidates" }]),
+        {
+          job_type: "exploration",
+          status: "leased" as const,
+          payload: JSON.stringify({ mediaId, season: 2, targetNamespaces: ["bilibili", "mgtv"] }),
+          leased_at: at(1),
+          lease_expires_at: at(-10),
+        },
+      ])
+      .execute();
+
+    const res = await rpc.browse.listExplorationActivity({ limit: 1 });
+    expect(res.running.map((r) => [r.season, r.platforms.map((p) => p.status)])).toEqual([
+      [2, ["searching", "searching"]],
+    ]);
+    expect(res.recent).toHaveLength(1);
+    expect(res.recent[0]!.card?.mediaId).toBe(mediaId);
+    expect(res.recent[0]!.platforms.map((p) => [p.namespace, p.status, p.reason ?? null])).toEqual([
+      ["bilibili", "approved", null],
+      ["iqiyi", "not_found", "Only user uploads, no series."],
+      ["youku", "retry", "暂时出了问题，稍后再找"],
+    ]);
+    expect(res.last24h).toMatchObject({ explored: 2, found: 1, approved: 1, inReview: 0 });
+    expect(JSON.stringify(res)).not.toContain('"d"');
+
+    const next = await rpc.browse.listExplorationActivity({ before: res.nextBefore! });
+    expect(next.running).toEqual([]);
+    expect(next.last24h).toBeUndefined();
+    expect(next.recent[0]!.platforms[0]).toMatchObject({
+      namespace: "tencent",
+      reason: "各个来源都没有这部作品",
+    });
+
+    const notFound = await rpc.browse.listExplorationActivity({
+      filter: proto.ExplorationFilter.NOT_FOUND,
+    });
+    expect(notFound.recent.map((r) => r.platforms[0]!.namespace)).toEqual(["tencent"]);
+  });
 });
