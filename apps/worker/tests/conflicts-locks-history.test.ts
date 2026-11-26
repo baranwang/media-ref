@@ -400,6 +400,123 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     });
   });
 
+  test("Approving another season on an already-mapped collection keeps the seasons it does not speak for", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-27T10:00:00.000Z");
+    const baseStub = createConflictTestStub();
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (request) =>
+        request.kind === "catalog" &&
+        request.namespace === "tmdb" &&
+        request.url.includes("/tv/95479")
+          ? jsonResponse(request.url, {
+              id: 95479,
+              name: "咒术回战",
+              original_name: "呪術廻戦",
+              first_air_date: "2020-10-03",
+              seasons: [
+                { season_number: 1, episode_count: 24, air_date: "2020-10-03" },
+                { season_number: 2, episode_count: 12, air_date: "2023-07-06" },
+              ],
+              external_ids: { imdb_id: "tt12343534", tvdb_id: 377543 },
+            })
+          : baseStub(request),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupUser(app, outbound, "merge-user@example.com");
+    const reviewer = await setupUser(app, outbound, "merge-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        jobTypes: [EVIDENCE_CHECK_JOB_TYPE],
+      },
+      now: () => t0,
+    });
+
+    // Lands a change request on ss34430 (24 entries) through the gate, approving it if it stops at review.
+    const land = async (
+      segments: Array<{
+        season: number;
+        episodeStart: number;
+        episodeEnd: number;
+        targetEpisodeStart: number;
+      }>,
+    ) => {
+      const created = await createRpcClients(app, {
+        apiKey: user.submitKey,
+      }).changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:tv:95479"),
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: segments.map((s) => toProtoSegmentInput({ ...s, baseline: "tmdb" })),
+      });
+      const crId = created.changeRequest!.id;
+      await worker.scheduled(createScheduledController(t0));
+      await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+      const state = await getChangeRequestStateRpc(app, { cookie: reviewer.cookie }, crId);
+      if (state.status === "needs_review") {
+        await createRpcClients(app, { cookie: reviewer.cookie }).reviewer.approveChangeRequest({
+          id: crId,
+          reason: "test",
+        });
+      } else {
+        expect(state.status).toBe("approved");
+      }
+    };
+    const resolve = async (season: number, episode: number) =>
+      resolveEpisode((await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479")).document, {
+        namespace: "bilibili",
+        season,
+        episode,
+      });
+
+    // Season 1 on positions 1–12, then season 2 on positions 13–24 of the same collection.
+    await land([{ season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1 }]);
+    await land([{ season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13 }]);
+    expect(await resolve(1, 5)).toMatchObject({
+      kind: "mapped",
+      nativeId: "ss34430",
+      targetEpisode: 5,
+    });
+    expect(await resolve(2, 3)).toMatchObject({
+      kind: "mapped",
+      nativeId: "ss34430",
+      targetEpisode: 15,
+    });
+
+    // A request that claims positions 1–24 for season 1 supersedes season 2 on those positions.
+    await land([{ season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1 }]);
+    expect(await resolve(1, 20)).toMatchObject({ kind: "mapped", targetEpisode: 20 });
+    expect(await resolve(2, 3)).not.toMatchObject({ kind: "mapped" });
+  });
+
   test("Matrix (new=PASS, old=FAIL) via replacesAssociationId: auto-delists old collection, activates new one, preserves histories, and still rejects accidental overlap without replacesAssociationId", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
