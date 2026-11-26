@@ -9,12 +9,14 @@ import {
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
+  rejectChangeRequest,
   type ExternalHttpRequest,
 } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createApiApp } from "../src/lib.ts";
+import { toProtoChangeRequest } from "../src/proto-records.ts";
 import {
   createRpcClients,
   expectRpcError,
@@ -22,7 +24,10 @@ import {
   mediaRef,
   signUpUser,
   TEST_BASE_URL,
+  approveInCore,
 } from "./rpc-helpers.ts";
+
+const TMDB = { accessToken: "test-tmdb-token", traktClientId: "test-trakt-client-id" };
 
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-media-flow-integration-tests-0123456789";
 
@@ -268,10 +273,13 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     expect(queueBody.changeRequests[0]?.id).toBe(cr1.id);
 
     // Reviewer approves CR #1 -> creates media with TMDB minimal snapshot + IMDb/TVDB/Trakt external IDs
-    const approve1Body = await ownerRpc.reviewer.approveChangeRequest({
-      id: cr1.id,
-      reason: "Verified S1 part 1 on Bilibili",
-    });
+    const approve1Body = await approveInCore(
+      { db: testDb.writeDb, outbound, tmdb: TMDB },
+      {
+        id: cr1.id,
+        reason: "Verified S1 part 1 on Bilibili",
+      },
+    );
     expect(fromProtoChangeRequestStatus(approve1Body.changeRequest!.status)).toBe("approved");
     expect(approve1Body.changeRequest!.decisionReason).toBe("Verified S1 part 1 on Bilibili");
     expect(approve1Body.mediaId).toBeTruthy();
@@ -294,10 +302,13 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         }),
       ],
     });
-    const approve2Body = await ownerRpc.reviewer.approveChangeRequest({
-      id: cr2Body.changeRequest!.id,
-      reason: "Verified S1 part 2 on Bilibili",
-    });
+    const approve2Body = await approveInCore(
+      { db: testDb.writeDb, outbound, tmdb: TMDB },
+      {
+        id: cr2Body.changeRequest!.id,
+        reason: "Verified S1 part 2 on Bilibili",
+      },
+    );
 
     // Read by tmdb:tv:95479
     const byTmdbRes = await readRpc.media.getMedia({
@@ -418,7 +429,6 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
 
     const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
     const readRpc = createRpcClients(app, { apiKey: readKey.key });
-    const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
 
     // Seed an existing media + variant by approving a non-overlapping segment (S1 E1-10)
     const seedCr = await submitRpc.changeRequest.createChangeRequest({
@@ -436,7 +446,10 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         }),
       ],
     });
-    await ownerRpc.reviewer.approveChangeRequest({ id: seedCr.changeRequest!.id });
+    await approveInCore(
+      { db: testDb.writeDb, outbound, tmdb: TMDB },
+      { id: seedCr.changeRequest!.id },
+    );
 
     const mediaDoc = fromProtoMediaDocument(
       (await readRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
@@ -482,7 +495,7 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     // Approve BOTH concurrently against real PostgreSQL 19!
     const approveAttempt = async (id: string) => {
       try {
-        await ownerRpc.reviewer.approveChangeRequest({ id });
+        await approveInCore({ db: testDb.writeDb, outbound, tmdb: TMDB }, { id });
         return { status: 200 as const, code: null as string | null };
       } catch (err) {
         const info = await expectRpcError(Promise.reject(err));
@@ -583,7 +596,6 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
 
     const submitKey = await issueApiKeyRpc(app, user.cookie, { name: "Submit", canSubmit: true });
     const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
-    const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
 
     // Invalid segment syntax (episodeEnd < episodeStart)
     const badSyntaxErr = await expectRpcError(
@@ -622,7 +634,10 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         }),
       ],
     });
-    await ownerRpc.reviewer.approveChangeRequest({ id: cr1.changeRequest!.id });
+    await approveInCore(
+      { db: testDb.writeDb, outbound, tmdb: TMDB },
+      { id: cr1.changeRequest!.id },
+    );
 
     // Submitting a new overlapping association in the same variant is rejected immediately (400)
     const overlapErr = await expectRpcError(
@@ -710,7 +725,6 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
     const userSessionRpc = createRpcClients(app, { cookie: user.cookie });
     const readRpc = createRpcClients(app, { apiKey: readKey.key });
-    const ownerRpc = createRpcClients(app, { cookie: owner.cookie });
 
     // 1. Rejected change request does not create media or appear in GetMedia
     const rejectedCr = await submitRpc.changeRequest.createChangeRequest({
@@ -729,10 +743,15 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       ],
     });
 
-    const rejectRes = await ownerRpc.reviewer.rejectChangeRequest({
-      id: rejectedCr.changeRequest!.id,
-      reason: "Wrong collection ID",
-    });
+    const rejectRes = {
+      changeRequest: toProtoChangeRequest(
+        await rejectChangeRequest(testDb.writeDb, {
+          changeRequestId: rejectedCr.changeRequest!.id,
+          reviewerUserId: owner.userId,
+          reason: "Wrong collection ID",
+        }),
+      ),
+    };
     expect(rejectRes.changeRequest).toMatchObject({
       id: rejectedCr.changeRequest!.id,
       decisionReason: "Wrong collection ID",
@@ -744,7 +763,10 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     expect(
       (
         await expectRpcError(
-          ownerRpc.reviewer.approveChangeRequest({ id: rejectedCr.changeRequest!.id }),
+          approveInCore(
+            { db: testDb.writeDb, outbound, tmdb: TMDB },
+            { id: rejectedCr.changeRequest!.id },
+          ),
         )
       ).status,
     ).toBe(409);
@@ -765,10 +787,13 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       variantDescription: "原声",
       segments: [],
     });
-    const movieApp1 = await ownerRpc.reviewer.approveChangeRequest({
-      id: movieCr1.changeRequest!.id,
-      reason: "Initial approval",
-    });
+    const movieApp1 = await approveInCore(
+      { db: testDb.writeDb, outbound, tmdb: TMDB },
+      {
+        id: movieCr1.changeRequest!.id,
+        reason: "Initial approval",
+      },
+    );
 
     // Submit a second CR updating the same collection -> creates revision 2
     const movieCr2 = await submitRpc.changeRequest.createChangeRequest({
@@ -779,10 +804,13 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       setDefaultVariant: true,
       segments: [],
     });
-    const movieApp2 = await ownerRpc.reviewer.approveChangeRequest({
-      id: movieCr2.changeRequest!.id,
-      reason: "Reclassified as Mandarin dub and set default",
-    });
+    const movieApp2 = await approveInCore(
+      { db: testDb.writeDb, outbound, tmdb: TMDB },
+      {
+        id: movieCr2.changeRequest!.id,
+        reason: "Reclassified as Mandarin dub and set default",
+      },
+    );
     expect(movieApp2.associationId).toBe(movieApp1.associationId);
     expect(movieApp2.revisionId).not.toBe(movieApp1.revisionId);
 
@@ -803,7 +831,10 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       nativeId: "1292052",
       segments: [],
     });
-    await ownerRpc.reviewer.approveChangeRequest({ id: doubanCr.changeRequest!.id });
+    await approveInCore(
+      { db: testDb.writeDb, outbound, tmdb: TMDB },
+      { id: doubanCr.changeRequest!.id },
+    );
 
     const movieDocRes = await readRpc.media.getMedia({ ref: mediaRef({ douban: "1292052" }) });
     const movieDoc = fromProtoMediaDocument(movieDocRes.document!);
@@ -991,11 +1022,18 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
         ).status,
       ).toBe(403);
 
-      // Newly appointed reviewer can now approve the change request!
-      const approved = await regularRpc.reviewer.approveChangeRequest({
-        id: crId,
-        reason: "Approved by newly appointed reviewer",
-      });
+      // The appointed reviewer passes the role check, but people no longer approve: they comment
+      // (ADR 0003 amendment 2). The approval goes through core instead.
+      expect(
+        await expectRpcError(regularRpc.reviewer.approveChangeRequest({ id: crId })),
+      ).toMatchObject({ status: 409, code: "DECIDED_BY_REVIEW_AGENT" });
+      const approved = await approveInCore(
+        { db: testDb.writeDb, outbound, tmdb: TMDB },
+        {
+          id: crId,
+          reason: "Approved by newly appointed reviewer",
+        },
+      );
       expect(approved.mediaId).toBeTruthy();
 
       // Read media via strict read-only dbRead connection succeeds!

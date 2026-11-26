@@ -8,9 +8,18 @@ import {
   type ExtractedConnectErrorInfo,
   type MediaRef,
 } from "@media-ref/client";
-import type { createFakeOutboundClient, EmailMessage } from "@media-ref/core";
+import {
+  approveChangeRequest,
+  type createFakeOutboundClient,
+  type EmailMessage,
+  type OutboundClient,
+  type TmdbGatewayConfig,
+} from "@media-ref/core";
+import type { Db } from "@media-ref/db";
 import { expect } from "vite-plus/test";
 import type { ApiApp } from "../src/app.ts";
+import { rethrowDomainError } from "../src/context.ts";
+import { toProtoChangeRequest } from "../src/proto-records.ts";
 
 export function mediaRef(input: MediaRef | proto.MediaRef | string): proto.MediaRef {
   return toProtoMediaRefFromInput(input) ?? create(proto.MediaRefSchema);
@@ -185,4 +194,30 @@ export async function issueApiKeyRpc(
     start: created.apiKey!.start ?? null,
     canSubmit: created.apiKey!.canSubmit,
   };
+}
+
+/**
+ * Approves a change request through core's approval, the path the review agent takes: people no
+ * longer approve over the API (ADR 0003 amendment 2). Answers and errors take the old RPC's shape.
+ */
+export async function approveInCore(
+  deps: { db: Db; outbound: OutboundClient; tmdb?: TmdbGatewayConfig },
+  input: { id: string; reason?: string; reviewerUserId?: string },
+): Promise<proto.ApproveChangeRequestResponse> {
+  try {
+    const result = await approveChangeRequest(deps.db, deps.outbound, {
+      changeRequestId: input.id,
+      reviewerUserId: input.reviewerUserId ?? null,
+      reason: input.reason ?? null,
+      tmdbConfig: deps.tmdb ?? { accessToken: "test-tmdb-token" },
+    });
+    return create(proto.ApproveChangeRequestResponseSchema, {
+      changeRequest: toProtoChangeRequest(result.changeRequest),
+      mediaId: result.mediaId,
+      associationId: result.associationId,
+      revisionId: result.revisionId,
+    });
+  } catch (error) {
+    rethrowDomainError(error);
+  }
 }

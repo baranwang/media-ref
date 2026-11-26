@@ -12,6 +12,7 @@ import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
 import {
+  approveInCore,
   createRpcClients,
   expectRpcError,
   fromProtoReviewAlertStatus,
@@ -114,7 +115,7 @@ async function setupActors(
 async function submitAndApprove(
   app: ReturnType<typeof createApiApp>,
   submitKey: string,
-  reviewerCookie: string,
+  approver: Parameters<typeof approveInCore>[0],
   body: {
     targetExternalKey: string;
     namespace: string;
@@ -135,9 +136,7 @@ async function submitAndApprove(
     segments: body.segments.map(toProtoSegmentInput),
   });
 
-  const approved = await createRpcClients(app, {
-    cookie: reviewerCookie,
-  }).reviewer.approveChangeRequest({
+  const approved = await approveInCore(approver, {
     id: crRes.changeRequest!.id,
     reason: "Approved in test",
   });
@@ -231,16 +230,21 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       },
     });
 
-    const { reviewer, submitKey, readKey } = await setupActors(testDb, app, outbound);
-    const { mediaId } = await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:95479",
-      namespace: "bilibili",
-      nativeId: "ss34430",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    const { submitKey, readKey } = await setupActors(testDb, app, outbound);
+    const { mediaId } = await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:95479",
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     // Lock the IMDb external ID so sync must NOT overwrite it, while leaving TVDB unlocked
     await testDb.writeDb
@@ -400,23 +404,33 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       },
     });
 
-    const { reviewer, submitKey, readKey } = await setupActors(testDb, app, outbound);
-    await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:movie:550",
-      namespace: "bilibili",
-      nativeId: "ss28281",
-      variantDescription: "原声",
-      segments: [],
-    });
-    await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:108545",
-      namespace: "tencent",
-      nativeId: "mzc002007knmh3g",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 30, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    const { submitKey, readKey } = await setupActors(testDb, app, outbound);
+    await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:movie:550",
+        namespace: "bilibili",
+        nativeId: "ss28281",
+        variantDescription: "原声",
+        segments: [],
+      },
+    );
+    await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:108545",
+        namespace: "tencent",
+        nativeId: "mzc002007knmh3g",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 30, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     let now = new Date("2026-11-10T04:00:00.000Z");
     const emitted: JobQueueMessage[] = [];
@@ -574,18 +588,23 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     });
 
     const { submitter, reviewer, submitKey, readKey } = await setupActors(testDb, app, outbound);
-    const { mediaId } = await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:95479",
-      namespace: "bilibili",
-      nativeId: "ss34430",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-        { season: 2, episodeStart: 1, episodeEnd: 23, targetEpisodeStart: 25, baseline: "tmdb" },
-        { season: 3, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 48, baseline: "tmdb" },
-        { season: 4, episodeStart: 1, episodeEnd: 10, targetEpisodeStart: 60, baseline: "tmdb" },
-      ],
-    });
+    const { mediaId } = await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:95479",
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+          { season: 2, episodeStart: 1, episodeEnd: 23, targetEpisodeStart: 25, baseline: "tmdb" },
+          { season: 3, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 48, baseline: "tmdb" },
+          { season: 4, episodeStart: 1, episodeEnd: 10, targetEpisodeStart: 60, baseline: "tmdb" },
+        ],
+      },
+    );
 
     // Upstream TMDB changes:
     // - Season 1: episode_count 24 -> 47
@@ -734,15 +753,20 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     });
 
     const { submitter, reviewer, submitKey, readKey } = await setupActors(testDb, app, outbound);
-    const { mediaId } = await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:77777",
-      namespace: "bilibili",
-      nativeId: "ss77777",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    const { mediaId } = await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:77777",
+        namespace: "bilibili",
+        nativeId: "ss77777",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     // Now TMDB deletes/merges 77777 -> 404
     return404For77777 = true;
@@ -887,46 +911,66 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     const { submitter, reviewer, submitKey, readKey } = await setupActors(testDb, app, outbound);
 
     // Media A (tmdb:tv:77777): bilibili S1 E25-47 ("原声" default) + tencent S1 E1-47 ("原声" default)
-    const createdA1 = await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:77777",
-      namespace: "bilibili",
-      nativeId: "ss45574",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 25, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
-    await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:77777",
-      namespace: "tencent",
-      nativeId: "mzc002007knmh3g",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    const createdA1 = await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:77777",
+        namespace: "bilibili",
+        nativeId: "ss45574",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 25, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
+    await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:77777",
+        namespace: "tencent",
+        nativeId: "mzc002007knmh3g",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     // Media B (tmdb:tv:88888): bilibili S1 E1-24 ("原声" default)
-    const createdB = await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:88888",
-      namespace: "bilibili",
-      nativeId: "ss34430",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    const createdB = await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:88888",
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     // Media C (tmdb:tv:95479): bilibili S1 E1-47 ("中配" default)
-    const createdC = await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:95479",
-      namespace: "bilibili",
-      nativeId: "ss99999",
-      variantDescription: "中配",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    const createdC = await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:95479",
+        namespace: "bilibili",
+        nativeId: "ss99999",
+        variantDescription: "中配",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     // Trigger 404 alert on Media A via daily sync
     return404For77777 = true;
@@ -1084,15 +1128,20 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       .returning("id")
       .executeTakeFirstOrThrow();
 
-    await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: doubanMedia.id,
-      namespace: "bilibili",
-      nativeId: "ss34430",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "douban" },
-      ],
-    });
+    await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: doubanMedia.id,
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "douban" },
+        ],
+      },
+    );
 
     // Before merge: resolves cleanly under douban baseline
     const beforeMerge = await readMedia(app, readKey.key, doubanMedia.id);
@@ -1102,15 +1151,20 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     ).toMatchObject({ kind: "mapped", nativeId: "ss34430", targetEpisode: 5 });
 
     // Create TMDB-backed target media (e.g. TMDB added later)
-    const tmdbCreated = await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:95479",
-      namespace: "tencent",
-      nativeId: "mzc002007knmh3g",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    const tmdbCreated = await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:95479",
+        namespace: "tencent",
+        nativeId: "mzc002007knmh3g",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 47, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     // Merge douban-baseline media into TMDB-backed target
     const mergeRes = await createRpcClients(app, {
@@ -1163,15 +1217,20 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect("targetEpisode" in resolvedDuringSwitch).toBe(false);
 
     // Contributor resubmits ss34430 on the new "tmdb" baseline and reviewer approves
-    await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: "tmdb:tv:95479",
-      namespace: "bilibili",
-      nativeId: "ss34430",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: "tmdb:tv:95479",
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     // Mapping resumes!
     const afterResubmit = await readMedia(app, readKey.key, "tmdb:tv:95479");
@@ -1216,15 +1275,20 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       .returning("id")
       .executeTakeFirstOrThrow();
 
-    await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: media.id,
-      namespace: "bilibili",
-      nativeId: "ss55555",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "douban" },
-      ],
-    });
+    await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: media.id,
+        namespace: "bilibili",
+        nativeId: "ss55555",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "douban" },
+        ],
+      },
+    );
 
     // Non-reviewer forbidden; invalid baseline rejected
     const submitterRpc = createRpcClients(app, { cookie: submitter.cookie });
@@ -1293,15 +1357,20 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect(needsReviewRes.total).toBe(1);
 
     // Submit & approve replacement on "tmdb" baseline -> mapping resumes and needs-review queue clears!
-    await submitAndApprove(app, submitKey.key, reviewer.cookie, {
-      targetExternalKey: media.id,
-      namespace: "bilibili",
-      nativeId: "ss55555",
-      variantDescription: "原声",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-    });
+    await submitAndApprove(
+      app,
+      submitKey.key,
+      { db: testDb.writeDb, outbound },
+      {
+        targetExternalKey: media.id,
+        namespace: "bilibili",
+        nativeId: "ss55555",
+        variantDescription: "原声",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+    );
 
     const afterReplacement = await readMedia(app, readKey.key, media.id);
     expect(afterReplacement.status).toBe(200);

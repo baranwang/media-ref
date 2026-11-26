@@ -39,6 +39,37 @@ message ListMyChangeRequestsResponse {
   int32 total = 2;
 }
 
+// A comment on a change request, or the review agent's reply to comments (ADR 0003 amendment 2).
+message ChangeRequestComment {
+  string id = 1;
+  string change_request_id = 2;
+  // `system:review-agent` on the agent's replies.
+  string author_user_id = 3;
+  string author_name = 4;
+  string content = 5;
+  // Comments an agent reply answers; empty on people's comments.
+  repeated string reply_to_ids = 6;
+  string created_at = 7;
+}
+
+message CreateChangeRequestCommentRequest {
+  string change_request_id = 1;
+  string content = 2;
+}
+
+message CreateChangeRequestCommentResponse {
+  ChangeRequestComment comment = 1;
+}
+
+message ListChangeRequestCommentsRequest {
+  string change_request_id = 1;
+}
+
+message ListChangeRequestCommentsResponse {
+  // Oldest first: comments and the agent's replies as one thread.
+  repeated ChangeRequestComment comments = 1;
+}
+
 service ChangeRequestService {
   rpc CreateChangeRequest(CreateChangeRequestRequest) returns (CreateChangeRequestResponse);
   rpc GetChangeRequest(GetChangeRequestRequest) returns (GetChangeRequestResponse) {
@@ -46,6 +77,11 @@ service ChangeRequestService {
   }
   // Change requests submitted by the signed-in user (session only), newest first.
   rpc ListMyChangeRequests(ListMyChangeRequestsRequest) returns (ListMyChangeRequestsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Signed-in users only (session, not an API key); a comment queues a review agent session.
+  rpc CreateChangeRequestComment(CreateChangeRequestCommentRequest) returns (CreateChangeRequestCommentResponse);
+  rpc ListChangeRequestComments(ListChangeRequestCommentsRequest) returns (ListChangeRequestCommentsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 }
