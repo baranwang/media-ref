@@ -67,7 +67,9 @@ async function fetchSegmentEpisodeAirYears(
     try {
       const episodes = await gateway.fetchSeasonEpisodes(tmdb.id, season);
       if (episodes) {
-        result[season] = Object.fromEntries(episodes.map((e) => [e.episodeNumber, e.airYear]));
+        result[season] = Object.fromEntries(
+          episodes.map((e) => [e.episode, e.airDate ? Number(e.airDate.slice(0, 4)) : null]),
+        );
       }
     } catch {
       // Without episode air years the gate compares against the season premiere year, as before
