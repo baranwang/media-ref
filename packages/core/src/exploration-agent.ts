@@ -521,10 +521,19 @@ interface PlatformBudget {
   outbound: OutboundClient;
   signal: AbortSignal;
   expired(): boolean;
+  remainingMs(): number;
   dispose(): void;
 }
 
 const BUDGET_EXCEEDED = "exploration_time_budget_exceeded";
+/**
+ * The session switches to wrap-up (conclusions only, no more searching) once this share of the
+ * time or token budget is left, or this many steps: an unfinished namespace is otherwise settled
+ * as transient and the whole job, with its searching, runs again later.
+ */
+const WRAP_UP_REMAINING_SHARE = 0.25;
+const WRAP_UP_STEPS = 3;
+const CONCLUSION_TOOLS: ReadonlySet<string> = new Set(["submit_mapping", "mark_not_found"]);
 
 function createPlatformBudget(
   outbound: OutboundClient,
@@ -544,6 +553,7 @@ function createPlatformBudget(
   return {
     signal,
     expired: () => signal.aborted || clockMs() >= deadlineMs,
+    remainingMs: () => (signal.aborted ? 0 : Math.max(0, deadlineMs - clockMs())),
     dispose: () => clearTimeout(timer),
     outbound: {
       fetchExternal: (request) =>
@@ -1002,12 +1012,32 @@ async function runAgentSession(
   const reply = (id: string, name: string, body: unknown) =>
     messages.push({ role: "tool", toolCallId: id, name, content: JSON.stringify(body) });
 
+  let wrappingUp = false;
+  const conclusionTools = tools.filter((t) => CONCLUSION_TOOLS.has(t.name));
   for (let step = 0; step < config.maxSteps; step += 1) {
     if (budget.expired()) {
       return settleRest((t) => transientOutcome(run, t, BUDGET_EXCEEDED));
     }
     if (usage.tokens >= config.maxTaskTokens) {
       return settleRest((t) => notFoundOutcome(run, t, "token_budget_exhausted"));
+    }
+    if (
+      !wrappingUp &&
+      (budget.remainingMs() <= config.maxDurationMs * WRAP_UP_REMAINING_SHARE ||
+        config.maxTaskTokens - usage.tokens <= config.maxTaskTokens * WRAP_UP_REMAINING_SHARE ||
+        config.maxSteps - step <= WRAP_UP_STEPS)
+    ) {
+      wrappingUp = true;
+      messages.push({
+        role: "user",
+        content: [
+          "The time, step or token budget is almost used up. Stop searching.",
+          `Conclude every open namespace now (${open()
+            .map((t) => t.namespace)
+            .join(", ")}): submit_mapping for a collection you already fetched and checked,`,
+          "or mark_not_found if you found no match. Only the conclusion tools are left.",
+        ].join(" "),
+      });
     }
     let response;
     try {
@@ -1016,10 +1046,10 @@ async function runAgentSession(
         model: config.model,
         ...(config.gatewayId ? { gatewayId: config.gatewayId } : {}),
         messages: [...messages],
-        tools,
+        tools: wrappingUp ? conclusionTools : tools,
         temperature: config.temperature,
         maxTokens: config.maxTokens,
-        webSearch: config.webSearch,
+        webSearch: config.webSearch && !wrappingUp,
         // One session per job: every turn stays on the same routed model and its prompt cache.
         sessionId: ctx.jobId,
         metadata: { demandId: ctx.demandId, jobId: ctx.jobId },
@@ -1049,6 +1079,14 @@ async function runAgentSession(
 
     for (const call of toolCalls) {
       const args = call.arguments ?? {};
+      if (wrappingUp && !CONCLUSION_TOOLS.has(call.name)) {
+        reply(call.id, call.name, {
+          ok: false,
+          error: "WRAP_UP",
+          message: "No more searching: conclude with submit_mapping or mark_not_found.",
+        });
+        continue;
+      }
       if (QUERY_TOOL_NAMES.has(call.name)) {
         // Catalog tools use ctx.tmdbGateway, built on the unbudgeted client: the session deadline
         // still has to end a stalled call.

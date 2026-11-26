@@ -695,6 +695,34 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(checks).toHaveLength(platformCount - 1);
   });
 
+  test("near the end of its budget the session gets only conclusion tools and concludes", async () => {
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      if (request.tools?.some((t) => t.name === "get_catalog_season")) {
+        return {
+          content: null,
+          toolCalls: [{ id: "call_s", name: "get_catalog_season", arguments: { season: 1 } }],
+          model: "test-model",
+        };
+      }
+      return markAllNotFound(request);
+    };
+    const { testDb, outbound, explore } = await setup({ kan360Rows: [] }, invokeModel, {
+      maxSteps: 4,
+    });
+
+    await explore();
+
+    // Step 2 of 4 leaves 3 steps: wrap-up starts there.
+    expect(outbound.modelRequests).toHaveLength(2);
+    const last = outbound.modelRequests[1]!;
+    expect(last.tools?.map((t) => t.name)).toEqual(["submit_mapping", "mark_not_found"]);
+    expect(last.webSearch).toBe(false);
+    expect(last.messages.at(-1)).toMatchObject({ role: "user" });
+    expect(last.messages.at(-1)!.content).toContain("Stop searching");
+    const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
+    expect(checks).toHaveLength(platformCount);
+  });
+
   test("a session over its token budget stops and backs off instead of looping", async () => {
     const search = (): ModelInvocationResponse => ({
       content: null,
