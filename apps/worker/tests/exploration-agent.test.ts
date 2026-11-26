@@ -934,6 +934,9 @@ describe("Exploration agent: discover → judge → gate", () => {
       Array.from({ length: 20 }, (_, i) => i + 81),
     );
     expect(rest!.episodesTruncated).toBeUndefined();
+    // Both windows, asked in the same turn, come from one fetch of the collection.
+    const seasonFetches = outbound.httpRequests.filter((r) => r.url.includes("season_id=34500"));
+    expect(seasonFetches).toHaveLength(1);
   });
 
   test("web tools reach the agent through the session budget when the transport has them", async () => {
