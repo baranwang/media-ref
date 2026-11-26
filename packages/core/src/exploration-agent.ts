@@ -877,6 +877,9 @@ async function explorePlatform(
           tools: [...JUDGE_TOOLS],
           temperature: config.temperature,
           maxTokens: config.maxTokens,
+          // One session per platform task: every judge turn stays on the same routed model.
+          sessionId: taskId,
+          metadata: { demandId: ctx.demandId, taskId, namespace },
         });
       } catch (error) {
         return transientOutcome(error instanceof Error ? error.message : "model_invocation_failed");
