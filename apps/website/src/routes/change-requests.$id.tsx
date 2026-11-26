@@ -313,7 +313,7 @@ function ChangeRequestDetailPage() {
           {cr.reviewedByAgent && cr.reviewAgent ? (
             <section className="flex flex-col gap-3">
               <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
-                审核 agent 的理由
+                {cr.reviewAgent.verdict === "approve" ? "审核 agent 的理由" : "审核 agent 驳回"}
               </h2>
               <Card>
                 <CardContent className="pt-4">
@@ -371,7 +371,7 @@ function ChangeRequestDetailPage() {
                   ? "本次变更单已被驳回"
                   : cr.status === "pending_evidence"
                     ? "正在自动核对平台页面"
-                    : "正在等待审核员处理"}
+                    : "正在等待审核 agent 判定"}
             </p>
           </div>
 

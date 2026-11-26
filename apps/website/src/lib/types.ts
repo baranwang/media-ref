@@ -163,7 +163,7 @@ export interface ChangeRequestSegmentView {
 
 /** What the review agent concluded, from `evidence.reviewAgent`. */
 export interface ReviewAgentView {
-  verdict: "approve" | "keep_for_human" | "reject_with_correction";
+  verdict: "approve" | "reject" | "reject_with_correction";
   /** One per conflict code it explained. */
   reasons: { code: string; reason: string }[];
   opinion: string | null;

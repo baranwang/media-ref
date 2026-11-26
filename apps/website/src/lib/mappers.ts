@@ -440,7 +440,7 @@ function reviewAgentFromEvidence(evidence: Json | null): ReviewAgentView | null 
   const raw = asJson(evidence?.reviewAgent);
   if (
     raw?.verdict !== "approve" &&
-    raw?.verdict !== "keep_for_human" &&
+    raw?.verdict !== "reject" &&
     raw?.verdict !== "reject_with_correction"
   ) {
     return null;
@@ -488,11 +488,16 @@ function timelineFor(
   steps.push({
     label: "自动核对",
     time: "",
-    detail: status === "needs_review" ? "有拿不准的地方，已转交审核员" : "核对完成",
+    detail: status === "needs_review" ? "有拿不准的地方，已转交审核 agent" : "核对完成",
     state: "done",
   });
   if (status === "needs_review") {
-    steps.push({ label: "待审核", time: "进行中", detail: "已进入审核队列", state: "current" });
+    steps.push({
+      label: "待审核",
+      time: "进行中",
+      detail: "等审核 agent 判定通过或驳回",
+      state: "current",
+    });
   } else if (status === "approved") {
     steps.push({
       label: "已生效",
@@ -510,7 +515,9 @@ function timelineFor(
       time: formatDateTime(cr.reviewedAt),
       detail: agent?.correction
         ? `审核 agent 驳回并改正为第 ${agent.correction.season} 季，会按改正重新提交`
-        : (cr.decisionReason ?? `${byAgent ? "审核 agent" : "审核员"}驳回了这张变更单`),
+        : byAgent
+          ? `审核 agent 驳回${cr.decisionReason ? `：${cr.decisionReason}` : ""}`
+          : (cr.decisionReason ?? "审核员驳回了这张变更单"),
       state: "done",
     });
   }

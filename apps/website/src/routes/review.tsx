@@ -27,7 +27,6 @@ import { useState, type ReactNode } from "react";
 import { NAMESPACE_LABELS, NamespaceLogo } from "#/components/brand-logos";
 import { CheckItemRow } from "#/components/check-item-row";
 import { CoverageLegend, CoverageRuler, CoverageTrack } from "#/components/coverage-bar";
-import { ReviewAgentNote } from "#/components/review-agent-note";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
 import { formatEpisodeRange, formatRelativeTime } from "#/lib/format";
@@ -462,7 +461,7 @@ function ReviewWorkbenchPage() {
         <section className="flex flex-col gap-2 pt-12">
           <h1 className="text-3xl leading-9 font-bold tracking-tight text-foreground">审核</h1>
           <p className="text-sm text-muted-foreground">
-            自动核对拿不准的变更单，和需要有人处理的告警，都在这里。
+            自动核对拿不准、等审核 agent 判定的变更单，和告警，都在这里。
           </p>
         </section>
 
@@ -697,25 +696,6 @@ function ReviewDetail({
           </CardContent>
         </Card>
       </section>
-
-      {cr.reviewAgent?.verdict === "keep_for_human" && (
-        <section className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1">
-            <h3 className="text-xl leading-7 font-bold tracking-tight text-foreground">
-              审核 agent 的意见
-            </h3>
-            <p className="text-sm text-muted-foreground">
-              审核 agent 看过这张单，没有放行，留给你决定
-            </p>
-          </div>
-
-          <Card>
-            <CardContent className="pt-4">
-              <ReviewAgentNote agent={cr.reviewAgent} time={null} />
-            </CardContent>
-          </Card>
-        </section>
-      )}
 
       {/* 你的决定 */}
       <section className="flex flex-col gap-4">
