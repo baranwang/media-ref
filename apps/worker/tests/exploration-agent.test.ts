@@ -382,6 +382,10 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(prompt).toContain('"canonicalId": "ss34430"');
     expect(prompt).toContain('"canonicalId": "ss34431"');
     expect(outbound.modelRequests).toHaveLength(3);
+    // All judge turns of one platform task share one session (routing stickiness).
+    const sessions = new Set(outbound.modelRequests.map((r) => r.sessionId));
+    expect(sessions.size).toBe(1);
+    expect([...sessions][0]).toMatch(/^[0-9a-f-]{36}$/);
     expect(replies).toMatchObject([
       { ok: false, error: "UNKNOWN_CANDIDATE" },
       { ok: false, error: "SEGMENTS_OUTSIDE_COLLECTION" },

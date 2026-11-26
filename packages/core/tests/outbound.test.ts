@@ -332,9 +332,17 @@ describe("OutboundClient live HTTP routing", () => {
       ],
       temperature: 0,
       maxTokens: 512,
+      sessionId: "task-1",
+      metadata: { demandId: "d-1" },
     });
 
     expect(sent).toHaveLength(1);
+    expect(sent[0]!.headers.get("session_id")).toBe("task-1");
+    expect(sent[0]!.headers.get("x-session-affinity")).toBe("task-1");
+    expect(JSON.parse(sent[0]!.headers.get("cf-aig-metadata") ?? "{}")).toEqual({
+      demandId: "d-1",
+      "session.id": "task-1",
+    });
     expect(sent[0]!.url).toBe(
       "https://workers-binding.ai/ai-gateway/gateways/gateway/compat/chat/completions",
     );

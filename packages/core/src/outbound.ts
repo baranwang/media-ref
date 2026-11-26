@@ -117,6 +117,13 @@ export interface ModelInvocationRequest {
   maxTokens?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * Keeps one conversation's calls together: sent as session-affinity headers so a dynamic route
+   * stays on one model/replica and its prompt cache, and as `cf-aig-metadata` for gateway logs.
+   */
+  sessionId?: string;
+  /** Extra AI Gateway log metadata (string values), e.g. demand and task ids. */
+  metadata?: Record<string, string>;
 }
 
 export interface ModelInvocationResponse {
@@ -340,6 +347,11 @@ async function invokeViaAiGateway(
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128_000,
     maxTokens: request.maxTokens ?? 1024,
+    compat: { sendSessionAffinityHeaders: true, sessionAffinityFormat: "openai" },
+  };
+  const metadata = {
+    ...request.metadata,
+    ...(request.sessionId ? { "session.id": request.sessionId } : {}),
   };
 
   const message = await streamOpenAiCompletions(model, toPiContext(request, model), {
@@ -349,8 +361,10 @@ async function invokeViaAiGateway(
       "cf-aig-authorization": `Bearer ${CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL}`,
       Authorization: null,
       "x-api-key": null,
+      ...(Object.keys(metadata).length > 0 ? { "cf-aig-metadata": JSON.stringify(metadata) } : {}),
       ...options.aiHeaders,
     },
+    ...(request.sessionId ? { sessionId: request.sessionId } : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
     ...(request.maxTokens !== undefined ? { maxTokens: request.maxTokens } : {}),
     ...(signal ? { signal } : {}),
