@@ -63,6 +63,14 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
       external_ids: { imdb_id: "tt0137523" },
     });
   }
+  if (url.hostname === "api.imdbapi.dev" && url.pathname === "/titles/tt0137523") {
+    return json(request.url, {
+      primaryTitle: "Fight Club",
+      originalTitle: "Fight Club",
+      type: "movie",
+      startYear: 1999,
+    });
+  }
   if (url.hostname === "api.douban.com" && url.pathname === "/v2/movie/imdb/tt0137523") {
     return json(request.url, { id: "https://api.douban.com/movie/1292000" });
   }
@@ -91,6 +99,8 @@ describe("catalog-group exploration", () => {
     baseline: "tmdb" | "douban";
     externalIds: Array<[string, string]>;
     doubanAssociation?: string;
+    /** TMDB `/find` knows nothing about the IMDb ID. */
+    tmdbFindEmpty?: boolean;
   }) {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -142,7 +152,12 @@ describe("catalog-group exploration", () => {
       })
       .execute();
 
-    const outbound = createFakeOutboundClient({ fetchExternal: httpStub });
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (request) =>
+        media.tmdbFindEmpty && request.namespace === "tmdb" && request.url.includes("/find/")
+          ? json(request.url, { movie_results: [], tv_results: [] })
+          : httpStub(request),
+    });
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
       db: testDb.writeDb,
@@ -279,5 +294,26 @@ describe("catalog-group exploration", () => {
     expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
     const demand = (await listDemands(testDb.readDb, { mediaId }))[0]!;
     expect(demand.status).toBe("not_found");
+  });
+
+  test("approving the Douban request while TMDB is still missing reopens the demand to retry TMDB", async () => {
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "douban",
+      externalIds: [["imdb", "tt0137523"]],
+      tmdbFindEmpty: true,
+    });
+    const demand = async () => (await listDemands(testDb.readDb, { mediaId }))[0]!;
+
+    // TMDB not found, Douban change request submitted: waits for review.
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect((await demand()).status).toBe("awaiting_review");
+
+    // Approval covers Douban but not TMDB: the demand is explorable again, not stuck.
+    expect(await runJobs()).toEqual([EVIDENCE_CHECK_JOB_TYPE]);
+    expect((await demand()).status).toBe("open");
+
+    // The retry only has TMDB left; it is still not found, so the demand backs off.
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect((await demand()).status).toBe("not_found");
   });
 });

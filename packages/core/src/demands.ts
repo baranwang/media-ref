@@ -780,6 +780,22 @@ export async function fulfillCoveredDemandsForAssociationInTx(
   const namespaceGroup = getNamespaceGroup(input.namespace);
   const now = input.now ?? new Date();
   if (namespaceGroup === "catalog" && !(await hasTmdbExternalId(executor, input.mediaId))) {
+    // The association landed but the TMDB external ID is still missing: a demand waiting on this
+    // review goes back to open, so the next exploration retries the TMDB lookup instead of
+    // leaving it parked in awaiting_review with nothing left to resolve it.
+    let reopen = executor
+      .updateTable("demands")
+      .set({ status: "open", next_eligible_at: now, lease_expires_at: null, updated_at: now })
+      .where("media_id", "=", input.mediaId)
+      .where("namespace_group", "=", "catalog")
+      .where("status", "=", "awaiting_review");
+    if (input.segments.length > 0) {
+      const coveredSeasons = [...new Set(input.segments.map((seg) => seg.season))];
+      reopen = reopen.where((eb) =>
+        eb.or([eb("season", "is", null), eb("season", "in", coveredSeasons)]),
+      );
+    }
+    await reopen.execute();
     return 0;
   }
 
