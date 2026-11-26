@@ -99,7 +99,11 @@ function mergeEvidenceWithExistingMetadata(
   };
 }
 
-/** Returns whether the request was still `pending_evidence` and is now `needs_review`. */
+/**
+ * Marks the request `needs_review` and queues its review in the same transaction: every request
+ * that turns `needs_review` is decided by the review agent, never left waiting (CONSTITUTION.md).
+ * Returns whether the request was still `pending_evidence` and is now `needs_review`.
+ */
 async function markChangeRequestNeedsReviewInTx(
   trx: Transaction<Database>,
   input: MarkNeedsReviewInput,
@@ -116,7 +120,14 @@ async function markChangeRequestNeedsReviewInTx(
     .where("id", "=", input.changeRequestId)
     .where("status", "=", "pending_evidence")
     .executeTakeFirst();
-  return result.numUpdatedRows > 0n;
+  const marked = result.numUpdatedRows > 0n;
+  if (marked) {
+    await enqueueReviewAgentJobInTx(trx, {
+      changeRequestId: input.changeRequestId,
+      now: input.now,
+    });
+  }
+  return marked;
 }
 
 async function resolveAuthoritativeCatalogKey(
@@ -699,22 +710,13 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         conflictReason: primaryConflictCode,
       },
       async onCommit(trx) {
-        const marked = await markChangeRequestNeedsReviewInTx(trx, {
+        await markChangeRequestNeedsReviewInTx(trx, {
           changeRequestId: changeRequest.id,
           evidence: evidenceRecord,
           conflictReason: primaryConflictCode,
           decisionReason: summaryReason,
           now: ctx.now,
         });
-        // Only gate conflicts get a review: missing evidence, locks and clashes with an existing
-        // association (the other needs_review paths above) are a human's call (ADR 0003 §1).
-        if (marked) {
-          await enqueueReviewAgentJobInTx(trx, {
-            changeRequestId: changeRequest.id,
-            conflictCodes: gate.conflicts.map((c) => c.code),
-            now: ctx.now,
-          });
-        }
       },
     };
   };

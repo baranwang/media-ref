@@ -23,6 +23,4 @@
 
 ## 三、与现状不一致、待改的地方
 
-- 证据门不通过的变更单会变成 `needs_review`，然后一直停在那里。
-- 审核 agent（ADR 0003）有"维持人工"这个结论，默认也是关闭的（`REVIEW_AGENT_DAILY_BUDGET=0`）。
-- GLOSSARY 里「证据门」「审核员」「审核 agent」三条，仍然写成以人工审核收尾。
+目前没有。2026-11-27 已改：`needs_review` 都由审核 agent 判定为通过或驳回（ADR 0003 修订），GLOSSARY 同步更新。

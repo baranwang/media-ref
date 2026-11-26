@@ -1,19 +1,17 @@
 /**
- * Review agent (`@media-ref/core`), ADR 0003: a change request the Evidence Gate sent to
- * `needs_review` gets one model session before a human reviewer sees it.
+ * Review agent (`@media-ref/core`), ADR 0003: every change request that leaves the Evidence Gate as
+ * `needs_review` is decided here, automatically. Nobody reviews after it (CONSTITUTION.md §1).
  *
- * - Queued in the same transaction that marks the request `needs_review`, unless a conflict makes
- *   approval impossible anyway (§1).
- * - The session reuses the exploration agent's loop, budget, wrap-up, query tools and token
- *   accounting (§6), and ends with one conclusion: `approve`, `reject_with_correction` or
- *   `keep_for_human` (§2).
- * - The model's approval only counts when code confirms it (§3): no non-overridable conflict, the
- *   collection and every season in the segments fetched in this session, a reason per conflict
- *   code. A correction only counts when Evidence Gate step 2 passes on it with what the session
- *   fetched, and only once per media and platform ID (§4); then the request is rejected, a lead
- *   written and the demand made explorable now, in one transaction. Anything else, including no
- *   conclusion, a spent budget or an error, keeps the request for a human. The verdict and
- *   reasons go into `evidence.reviewAgent`.
+ * - Queued whenever a request turns `needs_review` (`enqueueReviewAgentJobInTx`), and swept up by
+ *   `enqueuePendingReviews` for any that lack an active job.
+ * - Requests no review can approve (a clash with an existing or locked association, a shared-ID
+ *   conflict, missing evidence) are rejected at once, without a model.
+ * - Gate conflicts get one model session, reusing the exploration agent's loop, budget, wrap-up and
+ *   query tools. It ends with `approve`, `reject_with_correction` or `reject`.
+ * - Code confirms an approval (§3) and a correction (§4); anything it does not confirm, no
+ *   conclusion or a spent session is a plain rejection: the demand backs off and exploration tries
+ *   again later. A model or catalog outage, or a spent daily budget, retries the job instead.
+ *   The verdict and reasons go into `evidence.reviewAgent`.
  */
 
 import {
@@ -87,6 +85,8 @@ const LEASE_MARGIN_MS = 30_000;
 
 /** Gate conflicts the review agent may never approve over (ADR 0003 §1). */
 const NON_OVERRIDABLE_CONFLICT_CODES: ReadonlySet<string> = new Set(["shared_id_conflict"]);
+/** Wait before retrying a review that failed on an outage (model gateway, catalog). */
+const OUTAGE_RETRY_MS = 60 * 60 * 1000;
 /** Platform search finds other collections; a review judges the submitted one (ADR 0003 §6). */
 const OMITTED_QUERY_TOOLS: ReadonlySet<string> = new Set(["search_platform"]);
 /** Step 1 conflicts a correction may keep: a split season differs in count, not identity. */
@@ -144,7 +144,7 @@ interface ReviewReason {
   reason: string;
 }
 
-type ReviewVerdict = "approve" | "reject_with_correction" | "keep_for_human";
+type ReviewVerdict = "approve" | "reject_with_correction" | "reject";
 
 /** Corrected season and segments; segment fields as in a change request (shared with the website). */
 interface ReviewCorrection {
@@ -166,22 +166,59 @@ interface ReviewConclusion {
 }
 
 /**
- * Queues a review for a change request that just turned `needs_review` on these gate conflicts.
- * Call inside that transaction; nothing is queued when a conflict cannot be approved over.
+ * Queues the review of a change request that just turned `needs_review`. Call inside that
+ * transaction. Every such request is queued: the review decides it, even when the answer can only
+ * be a rejection.
  */
 export async function enqueueReviewAgentJobInTx(
   trx: Transaction<Database>,
-  input: { changeRequestId: string; conflictCodes: readonly string[]; now: Date },
+  input: { changeRequestId: string; now: Date },
 ): Promise<void> {
-  if (input.conflictCodes.some((code) => NON_OVERRIDABLE_CONFLICT_CODES.has(code))) {
-    return;
-  }
   await enqueueJob(trx, {
     jobType: REVIEW_AGENT_JOB_TYPE,
     payload: { changeRequestId: input.changeRequestId },
     dedupeKey: `${REVIEW_AGENT_JOB_TYPE}:${input.changeRequestId}`,
     runAfter: input.now,
   });
+}
+
+/**
+ * Queues reviews for `needs_review` requests without an active review job (requests from before
+ * every one was queued, or whose job gave up). Runs on the cron; the dedupe key skips active jobs.
+ */
+export async function enqueuePendingReviews(
+  db: Db,
+  input: { now: Date; limit?: number },
+): Promise<number> {
+  const rows = await db
+    .selectFrom("change_requests")
+    .select("id")
+    .where("status", "=", "needs_review")
+    .where(({ not, exists, selectFrom }) =>
+      not(
+        exists(
+          selectFrom("background_jobs")
+            .select("background_jobs.id")
+            .where("background_jobs.job_type", "=", REVIEW_AGENT_JOB_TYPE)
+            .where("background_jobs.status", "in", ["pending", "leased"])
+            .whereRef(
+              "background_jobs.dedupe_key",
+              "=",
+              sql<string>`${REVIEW_AGENT_JOB_TYPE} || ':' || change_requests.id::text`,
+            ),
+        ),
+      ),
+    )
+    .orderBy("updated_at")
+    .limit(input.limit ?? 50)
+    .execute();
+  for (const row of rows) {
+    await enqueueReviewAgentJobInTx(db as unknown as Transaction<Database>, {
+      changeRequestId: row.id,
+      now: input.now,
+    });
+  }
+  return rows.length;
 }
 
 /** Ensures the review agent's user row exists: its approvals are written as `reviewer_user_id`. */
@@ -246,10 +283,10 @@ function gateConflictCodes(cr: ChangeRequestRecord): string[] {
 
 function buildSystemPrompt(conclusions: string): string {
   return [
-    "You review one change request the automatic Evidence Gate could not approve. It maps a catalog's episodes to a video platform collection. You decide before a human reviewer does.",
+    "You review one change request the automatic Evidence Gate could not approve. It maps a catalog's episodes to a video platform collection. Your decision is final: nobody reviews after you.",
     "Rules:",
     `1. End with exactly one conclusion: ${conclusions}.`,
-    "2. approve only counts if, in this session, you fetched the collection with get_collection and every season the segments name with get_catalog_season, and you give one reason per conflict code saying why that conflict does not make the mapping wrong. Otherwise the request stays with a human.",
+    "2. approve only counts if, in this session, you fetched the collection with get_collection and every season the segments name with get_catalog_season, and you give one reason per conflict code saying why that conflict does not make the mapping wrong. Otherwise it counts as reject.",
     ...(conclusions.includes("reject_with_correction")
       ? [
           "   reject_with_correction is for a submission that is wrong (for example the wrong season): give the corrected season and segments. It only counts if you fetched the collection and every corrected season in this session and the Evidence Gate's segment check passes on the correction.",
@@ -258,7 +295,7 @@ function buildSystemPrompt(conclusions: string): string {
     "3. A platform episode number is the position in the collection's feature episode list, counted from 1, not the number in the episode title.",
     "4. Extras (chapters, recaps, specials) mixed into the platform's list shift every later position. Check that each segment's episodes land on the right positions.",
     "   Example: 灵笼 season 1 on Bilibili has 16 entries: 001–006, 中章, 007–012, 终章上, 终章下, 特别篇. TMDB season 1 has 12 episodes; 中章, 终章 and 特别篇 are in TMDB season 0. Mapping the whole season from position 1 puts TMDB 7–12 on positions 7–12, one off. The right segments are episodes 1–6 at positions 1–6 and 7–12 at positions 8–13. Extras at the end of the list need no split.",
-    "5. If you are unsure, or the submission looks wrong, keep_for_human and say what you found.",
+    "5. If you are unsure, or the submission looks wrong and you cannot correct it, reject and say what you found. A rejection is not final for the media: exploration looks again later.",
     "6. Steps and tokens are limited: fetch what you need, then conclude.",
   ].join("\n");
 }
@@ -331,8 +368,9 @@ const CONCLUSION_TOOL_DEFINITIONS: ModelToolDefinition[] = [
     },
   },
   {
-    name: "keep_for_human",
-    description: "Leave the change request to a human reviewer, with your opinion.",
+    name: "reject",
+    description:
+      "Reject the change request: it is wrong, or you cannot confirm it is right. Say what you found in opinion.",
     parameters: {
       type: "object",
       properties: { opinion: { type: "string" } },
@@ -448,9 +486,38 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
     if (!cr || cr.status !== "needs_review") {
       return skip(cr ? `change_request_already_${cr.status}` : "change_request_not_found");
     }
-    if (cr.evidence?.reviewAgent) {
-      return skip("already_reviewed");
+    const evidence = cr.evidence ?? {};
+
+    // Nothing a review could approve: reject now, without a model or a daily slot.
+    const unreviewable = unreviewableReason(cr);
+    if (unreviewable) {
+      await ensureReviewAgentUser(ctx.db);
+      const reviewAgent: JsonObject = {
+        verdict: "reject",
+        reasons: [],
+        opinion: null,
+        fallback: unreviewable,
+        queries: [],
+        jobId: ctx.job.id,
+        reviewedAt: ctx.now.toISOString(),
+      };
+      return {
+        status: "completed",
+        result: { changeRequestId, verdict: "reject", fallback: unreviewable },
+        onCommit: (trx) =>
+          rejectPlainlyInTx(
+            trx,
+            cr,
+            `无法自动通过：${unreviewable}`,
+            {
+              ...evidence,
+              reviewAgent,
+            },
+            ctx.now,
+          ),
+      };
     }
+
     const leaseLeftMs = ctx.job.leaseExpiresAt
       ? ctx.job.leaseExpiresAt.getTime() - ctx.now.getTime()
       : Infinity;
@@ -467,7 +534,12 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       return { status: "retry", runAfter: ctx.now, errorMessage: "lease_too_short_for_review" };
     }
     if (!(await claimDailyReview(ctx.db, ctx.now, dailyBudget, dailyTokenBudget))) {
-      return skip("daily_budget_exhausted");
+      // Today's reviews are spent: the request waits for tomorrow's, it is not dropped.
+      return {
+        status: "retry",
+        runAfter: nextUtcDay(ctx.now),
+        errorMessage: "daily_budget_exhausted",
+      };
     }
 
     const conflictCodes = gateConflictCodes(cr);
@@ -475,7 +547,6 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       ? CONCLUSION_TOOL_DEFINITIONS.filter((t) => t.name !== "reject_with_correction")
       : CONCLUSION_TOOL_DEFINITIONS;
     const conclusionNames = conclusionTools.map((t) => t.name).join(", ");
-    const evidence = cr.evidence ?? {};
     const catalog = (evidence.catalog ?? {}) as {
       namespace?: string;
       canonicalId?: string;
@@ -650,15 +721,26 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       }
     }
 
+    // An outage says nothing about the request: review it again later instead of rejecting it.
+    const outage =
+      (!concluded && stop.kind === "model_error") || fallback?.startsWith("catalog_unavailable");
+    if (outage) {
+      return {
+        status: "retry",
+        runAfter: new Date(ctx.now.getTime() + OUTAGE_RETRY_MS),
+        errorMessage: fallback ?? "review_outage",
+      };
+    }
+
     const approved = concluded?.verdict === "approve" && fallback === null;
     const rejected = concluded?.verdict === "reject_with_correction" && fallback === null;
     let opinion = concluded?.opinion ?? null;
     if (!rejected && correction) {
-      // Kept for a human: the opinion carries the correction that did not hold (§4).
+      // Rejected plainly: the opinion keeps the correction that did not hold (§4).
       opinion = `${opinion ?? ""}\n改正建议：${describeCorrection(correction)}`.trim();
     }
     const reviewAgent: JsonObject = {
-      verdict: approved ? "approve" : rejected ? "reject_with_correction" : "keep_for_human",
+      verdict: approved ? "approve" : rejected ? "reject_with_correction" : "reject",
       reasons: concluded?.reasons ?? [],
       opinion,
       ...(rejected ? { correction: correction as unknown as JsonObject } : {}),
@@ -668,20 +750,17 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       jobId: ctx.job.id,
       reviewedAt: ctx.now.toISOString(),
     };
-    const keepForHuman = (trx: Transaction<Database>, record: JsonObject) =>
-      trx
-        .updateTable("change_requests")
-        .set({
-          evidence: JSON.stringify({ ...evidence, reviewAgent: record }),
-          updated_at: ctx.now,
-        })
-        .where("id", "=", cr.id)
-        .where("status", "=", "needs_review")
-        .execute();
+    // No approval and no confirmed correction: reject, and exploration tries again later.
+    const rejectPlainly = (trx: Transaction<Database>, record: JsonObject) =>
+      rejectPlainlyInTx(
+        trx,
+        cr,
+        record.opinion ? String(record.opinion) : `无法确认这条对应：${String(record.fallback)}`,
+        { ...evidence, reviewAgent: record },
+        ctx.now,
+      );
 
-    if (approved || rejected) {
-      await ensureReviewAgentUser(ctx.db);
-    }
+    await ensureReviewAgentUser(ctx.db);
     return {
       status: "completed",
       result: { changeRequestId, verdict: reviewAgent.verdict, fallback },
@@ -701,7 +780,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           return;
         }
         if (!approved) {
-          await keepForHuman(trx, reviewAgent);
+          await rejectPlainly(trx, reviewAgent);
           return;
         }
         await sql`savepoint sp_review_agent_approve`.execute(trx);
@@ -725,17 +804,64 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             throw error;
           }
           if (error.code === "INVALID_CHANGE_REQUEST_STATE") {
-            return; // A reviewer decided meanwhile.
+            return; // Decided meanwhile.
           }
-          await keepForHuman(trx, {
+          await rejectPlainly(trx, {
             ...reviewAgent,
-            verdict: "keep_for_human",
+            verdict: "reject",
             fallback: `approval_failed: ${error.code}`,
           });
         }
       },
     };
   };
+}
+
+/**
+ * Why no review could approve this request, or null when it is a gate conflict a session may
+ * decide. Only the gate's own needs_review (its first conflict code as the reason) is reviewable:
+ * a clash with an existing or locked association, missing evidence or a Tier 1 platform is not.
+ */
+function unreviewableReason(cr: ChangeRequestRecord): string | null {
+  const gate = cr.evidence?.gate as { conflicts?: Array<{ code?: unknown }> } | undefined;
+  const codes = (gate?.conflicts ?? []).flatMap((c) =>
+    typeof c.code === "string" ? [c.code] : [],
+  );
+  if (codes.length === 0 || cr.conflictReason !== codes[0]) {
+    return cr.conflictReason ?? cr.decisionReason ?? "not_a_gate_conflict";
+  }
+  const blocking = codes.filter((code) => NON_OVERRIDABLE_CONFLICT_CODES.has(code));
+  return blocking.length > 0
+    ? `non_overridable_conflict: ${[...new Set(blocking)].join(", ")}`
+    : null;
+}
+
+function nextUtcDay(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+}
+
+/** Rejects without a correction: the request's demand gets a not-found round and backs off. */
+async function rejectPlainlyInTx(
+  trx: Transaction<Database>,
+  cr: ChangeRequestRecord,
+  reason: string,
+  evidence: JsonObject,
+  now: Date,
+): Promise<void> {
+  try {
+    await rejectChangeRequestInTx(trx, {
+      changeRequestId: cr.id,
+      reviewerUserId: REVIEW_AGENT_USER_ID,
+      reason,
+      evidence,
+      now,
+    });
+  } catch (error) {
+    if (error instanceof MediaServiceError && error.code === "INVALID_CHANGE_REQUEST_STATE") {
+      return; // Decided meanwhile.
+    }
+    throw error;
+  }
 }
 
 interface SessionFetches {
@@ -868,7 +994,7 @@ async function rejectWithCorrectionInTx(
     });
   } catch (error) {
     if (error instanceof MediaServiceError && error.code === "INVALID_CHANGE_REQUEST_STATE") {
-      return; // A reviewer decided meanwhile.
+      return; // Decided meanwhile.
     }
     throw error;
   }

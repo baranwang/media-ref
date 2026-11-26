@@ -6,6 +6,7 @@ import {
   createChangeRequest,
   createDefaultAdapterRegistry,
   createFakeOutboundClient,
+  enqueuePendingReviews,
   ensureExplorationAgentUser,
   EXPLORATION_AGENT_USER_ID,
   type AdapterRegistry,
@@ -427,7 +428,7 @@ describe("review agent (#75)", () => {
         "get_catalog_season",
         "approve",
         "reject_with_correction",
-        "keep_for_human",
+        "reject",
       ]),
     );
     expect(toolNames).not.toContain("search_platform");
@@ -487,13 +488,6 @@ describe("review agent (#75)", () => {
       fallback: "no_decision",
     },
     {
-      name: "a model call that fails",
-      model: (() => {
-        throw new Error("upstream 503");
-      }) as ScriptedModel,
-      fallback: "model_error: upstream 503",
-    },
-    {
       name: "a session that spends its token budget without concluding",
       model: ((request) =>
         reply(turnOf(request), [
@@ -502,20 +496,23 @@ describe("review agent (#75)", () => {
       config: { maxTaskTokens: 2000 },
       fallback: "tokens_exhausted",
     },
-  ])("$name keeps the change request for a human reviewer", async ({ model, config, fallback }) => {
-    const { submit, drain, changeRequest } = track(await setup(model, config));
-    const id = await submit();
+  ])(
+    "$name rejects the change request; exploration tries again later",
+    async ({ model, config, fallback }) => {
+      const { submit, drain, changeRequest } = track(await setup(model, config));
+      const id = await submit();
 
-    await drain();
+      await drain();
 
-    const cr = await changeRequest(id);
-    expect(cr.status).toBe("needs_review");
-    expect(cr.reviewer_user_id).toBeNull();
-    const evidence = cr.evidence as Record<string, any>;
-    expect(evidence.reviewAgent).toMatchObject({ verdict: "keep_for_human", fallback });
-    // The gate's evidence stays next to the opinion.
-    expect(evidence.gate.decision).toBe("needs_review");
-  });
+      const cr = await changeRequest(id);
+      expect(cr.status).toBe("rejected");
+      expect(cr.reviewer_user_id).toBe(REVIEW_AGENT_USER_ID);
+      const evidence = cr.evidence as Record<string, any>;
+      expect(evidence.reviewAgent).toMatchObject({ verdict: "reject", fallback });
+      // The gate's evidence stays next to the verdict.
+      expect(evidence.gate.decision).toBe("needs_review");
+    },
+  );
 
   test("fetches in the same turn as the approval do not count: the model never saw them", async () => {
     const model: ScriptedModel = (request) =>
@@ -530,9 +527,9 @@ describe("review agent (#75)", () => {
     await drain();
 
     const cr = await changeRequest(id);
-    expect(cr.status).toBe("needs_review");
+    expect(cr.status).toBe("rejected");
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
-      verdict: "keep_for_human",
+      verdict: "reject",
       fallback: "collection_not_fetched",
     });
   });
@@ -577,25 +574,25 @@ describe("review agent (#75)", () => {
     const toolReplies = ctx.outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool");
     expect(JSON.parse(toolReplies[0]!.content)).toMatchObject({ error: "TIME_UP" });
     const cr = await ctx.changeRequest(id);
-    expect(cr.status).toBe("needs_review");
+    expect(cr.status).toBe("rejected");
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
-      verdict: "keep_for_human",
+      verdict: "reject",
       fallback: "collection_not_fetched",
     });
   });
 
-  test("keep_for_human stores the model's opinion for the reviewer", async () => {
+  test("reject stores the model's opinion as the rejection reason", async () => {
     const model: ScriptedModel = (request) =>
-      reply(turnOf(request), [["keep_for_human", { opinion: "季号看起来不对" }]]);
+      reply(turnOf(request), [["reject", { opinion: "季号看起来不对" }]]);
     const { submit, drain, changeRequest } = track(await setup(model));
     const id = await submit();
 
     await drain();
 
     const cr = await changeRequest(id);
-    expect(cr.status).toBe("needs_review");
+    expect(cr.status).toBe("rejected");
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
-      verdict: "keep_for_human",
+      verdict: "reject",
       opinion: "季号看起来不对",
       fallback: null,
     });
@@ -604,19 +601,77 @@ describe("review agent (#75)", () => {
   test.each([
     { name: "shared_id_conflict", registry: conflictingIdRegistry, nativeId: "ss28888" },
     { name: "collection_not_found", registry: undefined, nativeId: "ss404404" },
-  ])("$name: approval is impossible, so no review is queued", async ({ registry, nativeId }) => {
-    const { submit, drain, changeRequest, outbound } = track(
-      await setup(approvesLikeLinglong, {}, registry),
-    );
-    const id = await submit(nativeId);
+  ])(
+    "$name: approval is impossible, so it is rejected without a model",
+    async ({ name, registry, nativeId }) => {
+      const { submit, drain, changeRequest, outbound, testDb } = track(
+        await setup(approvesLikeLinglong, {}, registry),
+      );
+      const id = await submit(nativeId);
 
-    const ran = await drain();
+      const ran = await drain();
 
-    expect(ran.map((m) => m.jobType)).toEqual(["evidence_check"]);
-    expect(outbound.modelRequests).toHaveLength(0);
-    const cr = await changeRequest(id);
+      expect(ran.map((m) => m.jobType)).toEqual(["evidence_check", "review_agent"]);
+      expect(outbound.modelRequests).toHaveLength(0);
+      const cr = await changeRequest(id);
+      expect(cr.status).toBe("rejected");
+      expect(cr.reviewer_user_id).toBe(REVIEW_AGENT_USER_ID);
+      expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+        verdict: "reject",
+        fallback: expect.stringContaining(name),
+      });
+      // No daily slot spent.
+      const budget = await testDb.readDb
+        .selectFrom("exploration_daily_budget")
+        .select("review_consumed")
+        .executeTakeFirst();
+      expect(budget?.review_consumed ?? 0).toBe(0);
+    },
+  );
+
+  test("a model outage puts the review back for an hour instead of rejecting", async () => {
+    const failing: ScriptedModel = () => {
+      throw new Error("upstream 503");
+    };
+    const ctx = track(await setup(failing));
+    const id = await ctx.submit();
+
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
     expect(cr.status).toBe("needs_review");
-    expect((cr.evidence as Record<string, any>).reviewAgent).toBeUndefined();
+    const job = await ctx.testDb.readDb
+      .selectFrom("background_jobs")
+      .select(["status", "run_after"])
+      .where("job_type", "=", "review_agent")
+      .executeTakeFirstOrThrow();
+    expect(job.status).toBe("pending");
+    expect(job.run_after.getTime()).toBe(T0.getTime() + 60 * 60 * 1000);
+  });
+
+  test("a needs_review request without an active review job is queued again by the cron", async () => {
+    const failing: ScriptedModel = () => {
+      throw new Error("upstream 503");
+    };
+    const ctx = track(await setup(failing));
+    const id = await ctx.submit();
+    await ctx.drain();
+    // The job gave up (e.g. every attempt hit an outage).
+    await ctx.testDb.writeDb
+      .updateTable("background_jobs")
+      .set({ status: "failed" })
+      .where("job_type", "=", "review_agent")
+      .execute();
+
+    expect(await enqueuePendingReviews(ctx.testDb.writeDb, { now: T0 })).toBe(1);
+    expect(await enqueuePendingReviews(ctx.testDb.writeDb, { now: T0 })).toBe(0);
+    const pending = await ctx.testDb.readDb
+      .selectFrom("background_jobs")
+      .select("payload")
+      .where("job_type", "=", "review_agent")
+      .where("status", "=", "pending")
+      .execute();
+    expect(pending).toEqual([{ payload: { changeRequestId: id } }]);
   });
 
   test("a redelivered review message does not review twice", async () => {
@@ -666,7 +721,7 @@ describe("review agent (#75)", () => {
     expect(job).toEqual({ status: "pending", attempts: 0, run_after: T0 });
   });
 
-  test("with a daily review budget of 0, the review job runs no session", async () => {
+  test("with no daily reviews left, the review waits for the next UTC day, without a session", async () => {
     const { testDb, submit, drain, changeRequest, outbound } = track(
       await setup(approvesLikeLinglong, { dailyBudget: 0 }),
     );
@@ -684,6 +739,13 @@ describe("review agent (#75)", () => {
       .select("review_consumed")
       .executeTakeFirst();
     expect(budget?.review_consumed ?? 0).toBe(0);
+    const job = await testDb.readDb
+      .selectFrom("background_jobs")
+      .select(["status", "run_after"])
+      .where("job_type", "=", "review_agent")
+      .executeTakeFirstOrThrow();
+    expect(job.status).toBe("pending");
+    expect(job.run_after).toEqual(new Date("2026-11-27T00:00:00.000Z"));
   });
 
   test("worker env: the review agent is off unless REVIEW_AGENT_DAILY_BUDGET says otherwise", () => {
@@ -750,7 +812,7 @@ const correctsTo =
         ["reject_with_correction", { opinion: WIFE_OPINION, ...correctionFor(season) }],
       ]);
     }
-    return reply(turn, [["keep_for_human", { opinion: WIFE_OPINION }]]);
+    return reply(turn, [["reject", { opinion: WIFE_OPINION }]]);
   };
 
 describe("review agent: reject with correction (#76)", () => {
@@ -840,7 +902,7 @@ describe("review agent: reject with correction (#76)", () => {
     ]);
   });
 
-  test("a correction that fails step 2 keeps the request for a human, with the opinion and the proposed correction", async () => {
+  test("a correction that fails step 2 rejects the request plainly, keeping the opinion and the proposed correction", async () => {
     // Season 7 aired in 2024; the collection is from 2026.
     const ctx = track(await setup(correctsTo(7)));
     const id = await submitAsHuman(ctx);
@@ -848,11 +910,11 @@ describe("review agent: reject with correction (#76)", () => {
     await ctx.drain();
 
     const cr = await ctx.changeRequest(id);
-    expect(cr.status).toBe("needs_review");
-    expect(cr.reviewer_user_id).toBeNull();
+    expect(cr.status).toBe("rejected");
+    expect(cr.reviewer_user_id).toBe(REVIEW_AGENT_USER_ID);
     const reviewAgent = (cr.evidence as Record<string, any>).reviewAgent;
     expect(reviewAgent).toMatchObject({
-      verdict: "keep_for_human",
+      verdict: "reject",
       fallback: expect.stringMatching(/^correction_failed_step2: .*segment_year_mismatch/),
     });
     expect(reviewAgent.opinion).toContain(WIFE_OPINION);
@@ -880,9 +942,9 @@ describe("review agent: reject with correction (#76)", () => {
     await ctx.drain();
 
     const cr = await ctx.changeRequest(id);
-    expect(cr.status).toBe("needs_review");
+    expect(cr.status).toBe("rejected");
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
-      verdict: "keep_for_human",
+      verdict: "reject",
       fallback: "correction_failed_step1: title_mismatch",
     });
     expect(await leads(ctx)).toEqual([]);
@@ -899,12 +961,12 @@ describe("review agent: reject with correction (#76)", () => {
 
     // The second session is not offered the tool; calling it anyway gets UNKNOWN_TOOL.
     const tools = ctx.outbound.modelRequests[callsAfterFirst]!.tools!.map((t) => t.name);
-    expect(tools).toEqual(expect.arrayContaining(["approve", "keep_for_human"]));
+    expect(tools).toEqual(expect.arrayContaining(["approve", "reject"]));
     expect(tools).not.toContain("reject_with_correction");
     const cr = await ctx.changeRequest(second);
-    expect(cr.status).toBe("needs_review");
+    expect(cr.status).toBe("rejected");
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
-      verdict: "keep_for_human",
+      verdict: "reject",
       opinion: WIFE_OPINION,
     });
     expect(await leads(ctx)).toHaveLength(1);
@@ -926,7 +988,7 @@ describe("review agent: reject with correction (#76)", () => {
           ["reject_with_correction", { opinion: "中章夹在第 6、7 集之间", season: 1, segments }],
         ]);
       }
-      return reply(turn, [["keep_for_human", { opinion: "改正没过复核" }]]);
+      return reply(turn, [["reject", { opinion: "改正没过复核" }]]);
     };
   const linglongWholeSeason: SegmentInput[] = [
     { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
@@ -980,15 +1042,15 @@ describe("review agent: reject with correction (#76)", () => {
     await ctx.drain();
 
     const cr = await ctx.changeRequest(id);
-    expect(cr.status).toBe("needs_review");
+    expect(cr.status).toBe("rejected");
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
-      verdict: "keep_for_human",
+      verdict: "reject",
       fallback: expect.stringMatching(/^correction_failed_step2: /),
     });
     expect(await leads(ctx)).toEqual([]);
   });
 
-  test("灵笼: a correction mapping the same catalog episodes twice cannot be resubmitted, so the request stays with a human", async () => {
+  test("灵笼: a correction mapping the same catalog episodes twice cannot be resubmitted, so the request is rejected plainly", async () => {
     // Positions 1–6 and 8–13 fit the collection without overlap, but TMDB 1–6 appears twice.
     const ctx = track(
       await setup(
@@ -1003,9 +1065,9 @@ describe("review agent: reject with correction (#76)", () => {
     await ctx.drain();
 
     const cr = await ctx.changeRequest(id);
-    expect(cr.status).toBe("needs_review");
+    expect(cr.status).toBe("rejected");
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
-      verdict: "keep_for_human",
+      verdict: "reject",
       fallback: expect.stringMatching(
         /^correction_invalid_segments: .*OVERLAPPING_VARIANT_SEGMENTS/,
       ),
