@@ -137,8 +137,8 @@ function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
     if (url.hostname === "frodo.douban.com" && url.pathname.startsWith("/api/v2/subject/")) {
       return jsonResponse(request.url, { title: "咒术回战", year: "2020", vendors: [] });
     }
-    if (url.hostname === "frodo.douban.com" && url.pathname === "/api/v2/search/weixin") {
-      return jsonResponse(request.url, { items: [] });
+    if (url.hostname === "api.douban.com") {
+      return jsonResponse(request.url, { msg: "movie_not_found", code: 5000 });
     }
     if (url.hostname === "search.video.iqiyi.com") {
       if (failIqiyiSearch) {
