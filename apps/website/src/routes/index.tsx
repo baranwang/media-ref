@@ -83,7 +83,7 @@ function DiscoveryHomePage() {
               </p>
             </div>
             <Link
-              to="/contribute"
+              to="/wanted"
               className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
             >
               查看全部

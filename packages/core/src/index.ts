@@ -177,6 +177,14 @@ export {
   type ReviewAgentJobOptions,
 } from "./review-agent.ts";
 export {
+  listExplorationActivity,
+  type ExplorationActivityEntry,
+  type ExplorationActivityFilter,
+  type ExplorationActivitySummary,
+  type ExplorationPlatformResult,
+  type ExplorationResultStatus,
+} from "./exploration-activity.ts";
+export {
   createExplorationAgentExecutor,
   DEFAULT_EXPLORATION_MAX_DURATION_MS,
   DEFAULT_EXPLORATION_MAX_STEPS,

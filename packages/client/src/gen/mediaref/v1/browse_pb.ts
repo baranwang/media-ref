@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
 export const file_mediaref_v1_browse: GenFile =
   /*@__PURE__*/
   fileDesc(
-    "ChhtZWRpYXJlZi92MS9icm93c2UucHJvdG8SC21lZGlhcmVmLnYxIp8CCgtDYXRhbG9nQ2FyZBILCgNrZXkYASABKAkSEQoJbmFtZXNwYWNlGAIgASgJEiQKBHR5cGUYAyABKA4yFi5tZWRpYXJlZi52MS5NZWRpYVR5cGUSEAoIaXNfYW5pbWUYBCABKAgSDQoFdGl0bGUYBSABKAkSGwoOb3JpZ2luYWxfdGl0bGUYBiABKAlIAIgBARIRCgR5ZWFyGAcgASgFSAGIAQESFwoKcG9zdGVyX3VybBgIIAEoCUgCiAEBEhUKCG1lZGlhX2lkGAkgASgJSAOIAQESEQoJcGxhdGZvcm1zGAogAygJQhEKD19vcmlnaW5hbF90aXRsZUIHCgVfeWVhckINCgtfcG9zdGVyX3VybEILCglfbWVkaWFfaWQiKwoNQ2F0YWxvZ0NyZWRpdBIMCgRyb2xlGAEgASgJEgwKBG5hbWUYAiABKAkiNgoNQ2F0YWxvZ1NlYXNvbhIOCgZzZWFzb24YASABKAUSFQoNZXBpc29kZV9jb3VudBgCIAEoBSLGAgoNQ2F0YWxvZ0RldGFpbBImCgRjYXJkGAEgASgLMhgubWVkaWFyZWYudjEuQ2F0YWxvZ0NhcmQSGQoMYmFja2Ryb3BfdXJsGAIgASgJSACIAQESFQoIb3ZlcnZpZXcYAyABKAlIAYgBARIOCgZnZW5yZXMYBCADKAkSDwoHcmVnaW9ucxgFIAMoCRIrCgdjcmVkaXRzGAYgAygLMhoubWVkaWFyZWYudjEuQ2F0YWxvZ0NyZWRpdBITCgZzdGF0dXMYByABKAlIAogBARIVCgh5ZWFyX2VuZBgIIAEoBUgDiAEBEisKB3NlYXNvbnMYCSADKAsyGi5tZWRpYXJlZi52MS5DYXRhbG9nU2Vhc29uQg8KDV9iYWNrZHJvcF91cmxCCwoJX292ZXJ2aWV3QgkKB19zdGF0dXNCCwoJX3llYXJfZW5kIm0KE0xpc3RUcmVuZGluZ1JlcXVlc3QSEQoJbmFtZXNwYWNlGAEgASgJEiUKBHR5cGUYAiABKA4yFy5tZWRpYXJlZi52MS5Ccm93c2VUeXBlEhIKBWxpbWl0GAMgASgFSACIAQFCCAoGX2xpbWl0Ij8KFExpc3RUcmVuZGluZ1Jlc3BvbnNlEicKBWl0ZW1zGAEgAygLMhgubWVkaWFyZWYudjEuQ2F0YWxvZ0NhcmQiJgoXR2V0Q2F0YWxvZ0RldGFpbFJlcXVlc3QSCwoDa2V5GAEgASgJIkYKGEdldENhdGFsb2dEZXRhaWxSZXNwb25zZRIqCgZkZXRhaWwYASABKAsyGi5tZWRpYXJlZi52MS5DYXRhbG9nRGV0YWlsIjwKDVNlYXJjaFJlcXVlc3QSDQoFcXVlcnkYASABKAkSEgoFbGltaXQYAiABKAVIAIgBAUIICgZfbGltaXQiUgoOU2VhcmNoUmVzcG9uc2USJwoFaXRlbXMYASADKAsyGC5tZWRpYXJlZi52MS5DYXRhbG9nQ2FyZBIXCg9tYXRjaGVkX2FzX2xpbmsYAiABKAgikQEKC0RlbWFuZEVudHJ5EgoKAmlkGAEgASgJEhQKDGRlbWFuZF9jb3VudBgCIAEoBRITCgZzZWFzb24YAyABKAVIAIgBARIYChBsYXN0X2RlbWFuZGVkX2F0GAQgASgJEiYKBGNhcmQYBSABKAsyGC5tZWRpYXJlZi52MS5DYXRhbG9nQ2FyZEIJCgdfc2Vhc29uIlIKEkxpc3REZW1hbmRzUmVxdWVzdBISCgVsaW1pdBgBIAEoBUgAiAEBEhMKBm9mZnNldBgCIAEoBUgBiAEBQggKBl9saW1pdEIJCgdfb2Zmc2V0IkAKE0xpc3REZW1hbmRzUmVzcG9uc2USKQoHZGVtYW5kcxgBIAMoCzIYLm1lZGlhcmVmLnYxLkRlbWFuZEVudHJ5KmsKCkJyb3dzZVR5cGUSGwoXQlJPV1NFX1RZUEVfVU5TUEVDSUZJRUQQABIVChFCUk9XU0VfVFlQRV9NT1ZJRRABEhIKDkJST1dTRV9UWVBFX1RWEAISFQoRQlJPV1NFX1RZUEVfQU5JTUUQAzLuAgoNQnJvd3NlU2VydmljZRJYCgxMaXN0VHJlbmRpbmcSIC5tZWRpYXJlZi52MS5MaXN0VHJlbmRpbmdSZXF1ZXN0GiEubWVkaWFyZWYudjEuTGlzdFRyZW5kaW5nUmVzcG9uc2UiA5ACARJkChBHZXRDYXRhbG9nRGV0YWlsEiQubWVkaWFyZWYudjEuR2V0Q2F0YWxvZ0RldGFpbFJlcXVlc3QaJS5tZWRpYXJlZi52MS5HZXRDYXRhbG9nRGV0YWlsUmVzcG9uc2UiA5ACARJGCgZTZWFyY2gSGi5tZWRpYXJlZi52MS5TZWFyY2hSZXF1ZXN0GhsubWVkaWFyZWYudjEuU2VhcmNoUmVzcG9uc2UiA5ACARJVCgtMaXN0RGVtYW5kcxIfLm1lZGlhcmVmLnYxLkxpc3REZW1hbmRzUmVxdWVzdBogLm1lZGlhcmVmLnYxLkxpc3REZW1hbmRzUmVzcG9uc2UiA5ACAWIGcHJvdG8z",
+    "ChhtZWRpYXJlZi92MS9icm93c2UucHJvdG8SC21lZGlhcmVmLnYxIp8CCgtDYXRhbG9nQ2FyZBILCgNrZXkYASABKAkSEQoJbmFtZXNwYWNlGAIgASgJEiQKBHR5cGUYAyABKA4yFi5tZWRpYXJlZi52MS5NZWRpYVR5cGUSEAoIaXNfYW5pbWUYBCABKAgSDQoFdGl0bGUYBSABKAkSGwoOb3JpZ2luYWxfdGl0bGUYBiABKAlIAIgBARIRCgR5ZWFyGAcgASgFSAGIAQESFwoKcG9zdGVyX3VybBgIIAEoCUgCiAEBEhUKCG1lZGlhX2lkGAkgASgJSAOIAQESEQoJcGxhdGZvcm1zGAogAygJQhEKD19vcmlnaW5hbF90aXRsZUIHCgVfeWVhckINCgtfcG9zdGVyX3VybEILCglfbWVkaWFfaWQiKwoNQ2F0YWxvZ0NyZWRpdBIMCgRyb2xlGAEgASgJEgwKBG5hbWUYAiABKAkiNgoNQ2F0YWxvZ1NlYXNvbhIOCgZzZWFzb24YASABKAUSFQoNZXBpc29kZV9jb3VudBgCIAEoBSLGAgoNQ2F0YWxvZ0RldGFpbBImCgRjYXJkGAEgASgLMhgubWVkaWFyZWYudjEuQ2F0YWxvZ0NhcmQSGQoMYmFja2Ryb3BfdXJsGAIgASgJSACIAQESFQoIb3ZlcnZpZXcYAyABKAlIAYgBARIOCgZnZW5yZXMYBCADKAkSDwoHcmVnaW9ucxgFIAMoCRIrCgdjcmVkaXRzGAYgAygLMhoubWVkaWFyZWYudjEuQ2F0YWxvZ0NyZWRpdBITCgZzdGF0dXMYByABKAlIAogBARIVCgh5ZWFyX2VuZBgIIAEoBUgDiAEBEisKB3NlYXNvbnMYCSADKAsyGi5tZWRpYXJlZi52MS5DYXRhbG9nU2Vhc29uQg8KDV9iYWNrZHJvcF91cmxCCwoJX292ZXJ2aWV3QgkKB19zdGF0dXNCCwoJX3llYXJfZW5kIm0KE0xpc3RUcmVuZGluZ1JlcXVlc3QSEQoJbmFtZXNwYWNlGAEgASgJEiUKBHR5cGUYAiABKA4yFy5tZWRpYXJlZi52MS5Ccm93c2VUeXBlEhIKBWxpbWl0GAMgASgFSACIAQFCCAoGX2xpbWl0Ij8KFExpc3RUcmVuZGluZ1Jlc3BvbnNlEicKBWl0ZW1zGAEgAygLMhgubWVkaWFyZWYudjEuQ2F0YWxvZ0NhcmQiJgoXR2V0Q2F0YWxvZ0RldGFpbFJlcXVlc3QSCwoDa2V5GAEgASgJIkYKGEdldENhdGFsb2dEZXRhaWxSZXNwb25zZRIqCgZkZXRhaWwYASABKAsyGi5tZWRpYXJlZi52MS5DYXRhbG9nRGV0YWlsIjwKDVNlYXJjaFJlcXVlc3QSDQoFcXVlcnkYASABKAkSEgoFbGltaXQYAiABKAVIAIgBAUIICgZfbGltaXQiUgoOU2VhcmNoUmVzcG9uc2USJwoFaXRlbXMYASADKAsyGC5tZWRpYXJlZi52MS5DYXRhbG9nQ2FyZBIXCg9tYXRjaGVkX2FzX2xpbmsYAiABKAgikQEKC0RlbWFuZEVudHJ5EgoKAmlkGAEgASgJEhQKDGRlbWFuZF9jb3VudBgCIAEoBRITCgZzZWFzb24YAyABKAVIAIgBARIYChBsYXN0X2RlbWFuZGVkX2F0GAQgASgJEiYKBGNhcmQYBSABKAsyGC5tZWRpYXJlZi52MS5DYXRhbG9nQ2FyZEIJCgdfc2Vhc29uIlIKEkxpc3REZW1hbmRzUmVxdWVzdBISCgVsaW1pdBgBIAEoBUgAiAEBEhMKBm9mZnNldBgCIAEoBUgBiAEBQggKBl9saW1pdEIJCgdfb2Zmc2V0IkAKE0xpc3REZW1hbmRzUmVzcG9uc2USKQoHZGVtYW5kcxgBIAMoCzIYLm1lZGlhcmVmLnYxLkRlbWFuZEVudHJ5IpQBChlFeHBsb3JhdGlvblBsYXRmb3JtUmVzdWx0EhEKCW5hbWVzcGFjZRgBIAEoCRIOCgZzdGF0dXMYAiABKAkSEwoGcmVhc29uGAMgASgJSACIAQESHgoRY2hhbmdlX3JlcXVlc3RfaWQYBCABKAlIAYgBAUIJCgdfcmVhc29uQhQKEl9jaGFuZ2VfcmVxdWVzdF9pZCLiAQoTRXhwbG9yYXRpb25BY3Rpdml0eRIKCgJpZBgBIAEoCRImCgRjYXJkGAIgASgLMhgubWVkaWFyZWYudjEuQ2F0YWxvZ0NhcmQSEwoGc2Vhc29uGAMgASgFSACIAQESEgoKc3RhcnRlZF9hdBgEIAEoCRIYCgtmaW5pc2hlZF9hdBgFIAEoCUgBiAEBEjkKCXBsYXRmb3JtcxgGIAMoCzImLm1lZGlhcmVmLnYxLkV4cGxvcmF0aW9uUGxhdGZvcm1SZXN1bHRCCQoHX3NlYXNvbkIOCgxfZmluaXNoZWRfYXQiWgoSRXhwbG9yYXRpb25TdW1tYXJ5EhAKCGV4cGxvcmVkGAEgASgFEg0KBWZvdW5kGAIgASgFEhAKCGFwcHJvdmVkGAMgASgFEhEKCWluX3JldmlldxgEIAEoBSKOAQoeTGlzdEV4cGxvcmF0aW9uQWN0aXZpdHlSZXF1ZXN0EhIKBWxpbWl0GAEgASgFSACIAQESEwoGYmVmb3JlGAIgASgJSAGIAQESLgoGZmlsdGVyGAMgASgOMh4ubWVkaWFyZWYudjEuRXhwbG9yYXRpb25GaWx0ZXJCCAoGX2xpbWl0QgkKB19iZWZvcmUi9QEKH0xpc3RFeHBsb3JhdGlvbkFjdGl2aXR5UmVzcG9uc2USMQoHcnVubmluZxgBIAMoCzIgLm1lZGlhcmVmLnYxLkV4cGxvcmF0aW9uQWN0aXZpdHkSMAoGcmVjZW50GAIgAygLMiAubWVkaWFyZWYudjEuRXhwbG9yYXRpb25BY3Rpdml0eRI2CghsYXN0XzI0aBgDIAEoCzIfLm1lZGlhcmVmLnYxLkV4cGxvcmF0aW9uU3VtbWFyeUgAiAEBEhgKC25leHRfYmVmb3JlGAQgASgJSAGIAQFCCwoJX2xhc3RfMjRoQg4KDF9uZXh0X2JlZm9yZSprCgpCcm93c2VUeXBlEhsKF0JST1dTRV9UWVBFX1VOU1BFQ0lGSUVEEAASFQoRQlJPV1NFX1RZUEVfTU9WSUUQARISCg5CUk9XU0VfVFlQRV9UVhACEhUKEUJST1dTRV9UWVBFX0FOSU1FEAMqdwoRRXhwbG9yYXRpb25GaWx0ZXISIgoeRVhQTE9SQVRJT05fRklMVEVSX1VOU1BFQ0lGSUVEEAASHAoYRVhQTE9SQVRJT05fRklMVEVSX0ZPVU5EEAESIAocRVhQTE9SQVRJT05fRklMVEVSX05PVF9GT1VORBACMukDCg1Ccm93c2VTZXJ2aWNlElgKDExpc3RUcmVuZGluZxIgLm1lZGlhcmVmLnYxLkxpc3RUcmVuZGluZ1JlcXVlc3QaIS5tZWRpYXJlZi52MS5MaXN0VHJlbmRpbmdSZXNwb25zZSIDkAIBEmQKEEdldENhdGFsb2dEZXRhaWwSJC5tZWRpYXJlZi52MS5HZXRDYXRhbG9nRGV0YWlsUmVxdWVzdBolLm1lZGlhcmVmLnYxLkdldENhdGFsb2dEZXRhaWxSZXNwb25zZSIDkAIBEkYKBlNlYXJjaBIaLm1lZGlhcmVmLnYxLlNlYXJjaFJlcXVlc3QaGy5tZWRpYXJlZi52MS5TZWFyY2hSZXNwb25zZSIDkAIBElUKC0xpc3REZW1hbmRzEh8ubWVkaWFyZWYudjEuTGlzdERlbWFuZHNSZXF1ZXN0GiAubWVkaWFyZWYudjEuTGlzdERlbWFuZHNSZXNwb25zZSIDkAIBEnkKF0xpc3RFeHBsb3JhdGlvbkFjdGl2aXR5EisubWVkaWFyZWYudjEuTGlzdEV4cGxvcmF0aW9uQWN0aXZpdHlSZXF1ZXN0GiwubWVkaWFyZWYudjEuTGlzdEV4cGxvcmF0aW9uQWN0aXZpdHlSZXNwb25zZSIDkAIBYgZwcm90bzM",
     [file_mediaref_v1_types],
   );
 
@@ -408,6 +408,205 @@ export const ListDemandsResponseSchema: GenMessage<ListDemandsResponse> =
   messageDesc(file_mediaref_v1_browse, 12);
 
 /**
+ * What the exploration agent did on one namespace of one job.
+ *
+ * @generated from message mediaref.v1.ExplorationPlatformResult
+ */
+export type ExplorationPlatformResult = Message<"mediaref.v1.ExplorationPlatformResult"> & {
+  /**
+   * @generated from field: string namespace = 1;
+   */
+  namespace: string;
+
+  /**
+   * "approved" (in effect), "in_review" (being checked or waiting for a reviewer), "rejected",
+   * "not_found", "retry" (a source was down or time ran out; tried again later), "searching".
+   *
+   * @generated from field: string status = 2;
+   */
+  status: string;
+
+  /**
+   * Plain-language reason, at most 200 characters; internal codes are already translated.
+   *
+   * @generated from field: optional string reason = 3;
+   */
+  reason?: string | undefined;
+
+  /**
+   * Set for "approved", "in_review" and "rejected"; only submitters and reviewers can open it.
+   *
+   * @generated from field: optional string change_request_id = 4;
+   */
+  changeRequestId?: string | undefined;
+};
+
+/**
+ * Describes the message mediaref.v1.ExplorationPlatformResult.
+ * Use `create(ExplorationPlatformResultSchema)` to create a new message.
+ */
+export const ExplorationPlatformResultSchema: GenMessage<ExplorationPlatformResult> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_browse, 13);
+
+/**
+ * @generated from message mediaref.v1.ExplorationActivity
+ */
+export type ExplorationActivity = Message<"mediaref.v1.ExplorationActivity"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: mediaref.v1.CatalogCard card = 2;
+   */
+  card?: CatalogCard | undefined;
+
+  /**
+   * @generated from field: optional int32 season = 3;
+   */
+  season?: number | undefined;
+
+  /**
+   * @generated from field: string started_at = 4;
+   */
+  startedAt: string;
+
+  /**
+   * Unset while the job is running.
+   *
+   * @generated from field: optional string finished_at = 5;
+   */
+  finishedAt?: string | undefined;
+
+  /**
+   * @generated from field: repeated mediaref.v1.ExplorationPlatformResult platforms = 6;
+   */
+  platforms: ExplorationPlatformResult[];
+};
+
+/**
+ * Describes the message mediaref.v1.ExplorationActivity.
+ * Use `create(ExplorationActivitySchema)` to create a new message.
+ */
+export const ExplorationActivitySchema: GenMessage<ExplorationActivity> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_browse, 14);
+
+/**
+ * @generated from message mediaref.v1.ExplorationSummary
+ */
+export type ExplorationSummary = Message<"mediaref.v1.ExplorationSummary"> & {
+  /**
+   * Media the agent finished looking at.
+   *
+   * @generated from field: int32 explored = 1;
+   */
+  explored: number;
+
+  /**
+   * Of those, media with at least one platform found.
+   *
+   * @generated from field: int32 found = 2;
+   */
+  found: number;
+
+  /**
+   * Platform pages found that are in effect.
+   *
+   * @generated from field: int32 approved = 3;
+   */
+  approved: number;
+
+  /**
+   * Platform pages found that wait for a reviewer.
+   *
+   * @generated from field: int32 in_review = 4;
+   */
+  inReview: number;
+};
+
+/**
+ * Describes the message mediaref.v1.ExplorationSummary.
+ * Use `create(ExplorationSummarySchema)` to create a new message.
+ */
+export const ExplorationSummarySchema: GenMessage<ExplorationSummary> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_browse, 15);
+
+/**
+ * @generated from message mediaref.v1.ListExplorationActivityRequest
+ */
+export type ListExplorationActivityRequest =
+  Message<"mediaref.v1.ListExplorationActivityRequest"> & {
+    /**
+     * @generated from field: optional int32 limit = 1;
+     */
+    limit?: number | undefined;
+
+    /**
+     * Cursor: `next_before` of the previous page.
+     *
+     * @generated from field: optional string before = 2;
+     */
+    before?: string | undefined;
+
+    /**
+     * @generated from field: mediaref.v1.ExplorationFilter filter = 3;
+     */
+    filter: ExplorationFilter;
+  };
+
+/**
+ * Describes the message mediaref.v1.ListExplorationActivityRequest.
+ * Use `create(ListExplorationActivityRequestSchema)` to create a new message.
+ */
+export const ListExplorationActivityRequestSchema: GenMessage<ListExplorationActivityRequest> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_browse, 16);
+
+/**
+ * @generated from message mediaref.v1.ListExplorationActivityResponse
+ */
+export type ListExplorationActivityResponse =
+  Message<"mediaref.v1.ListExplorationActivityResponse"> & {
+    /**
+     * Jobs running now (first page only).
+     *
+     * @generated from field: repeated mediaref.v1.ExplorationActivity running = 1;
+     */
+    running: ExplorationActivity[];
+
+    /**
+     * Finished jobs, newest first.
+     *
+     * @generated from field: repeated mediaref.v1.ExplorationActivity recent = 2;
+     */
+    recent: ExplorationActivity[];
+
+    /**
+     * The last 24 hours, by finish time (first page only).
+     *
+     * @generated from field: optional mediaref.v1.ExplorationSummary last_24h = 3;
+     */
+    last24h?: ExplorationSummary | undefined;
+
+    /**
+     * @generated from field: optional string next_before = 4;
+     */
+    nextBefore?: string | undefined;
+  };
+
+/**
+ * Describes the message mediaref.v1.ListExplorationActivityResponse.
+ * Use `create(ListExplorationActivityResponseSchema)` to create a new message.
+ */
+export const ListExplorationActivityResponseSchema: GenMessage<ListExplorationActivityResponse> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_browse, 17);
+
+/**
  * @generated from enum mediaref.v1.BrowseType
  */
 export enum BrowseType {
@@ -440,6 +639,35 @@ export enum BrowseType {
 export const BrowseTypeSchema: GenEnum<BrowseType> =
   /*@__PURE__*/
   enumDesc(file_mediaref_v1_browse, 0);
+
+/**
+ * @generated from enum mediaref.v1.ExplorationFilter
+ */
+export enum ExplorationFilter {
+  /**
+   * all
+   *
+   * @generated from enum value: EXPLORATION_FILTER_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: EXPLORATION_FILTER_FOUND = 1;
+   */
+  FOUND = 1,
+
+  /**
+   * @generated from enum value: EXPLORATION_FILTER_NOT_FOUND = 2;
+   */
+  NOT_FOUND = 2,
+}
+
+/**
+ * Describes the enum mediaref.v1.ExplorationFilter.
+ */
+export const ExplorationFilterSchema: GenEnum<ExplorationFilter> =
+  /*@__PURE__*/
+  enumDesc(file_mediaref_v1_browse, 1);
 
 /**
  * @generated from service mediaref.v1.BrowseService
@@ -476,5 +704,13 @@ export const BrowseService: GenService<{
     methodKind: "unary";
     input: typeof ListDemandsRequestSchema;
     output: typeof ListDemandsResponseSchema;
+  };
+  /**
+   * @generated from rpc mediaref.v1.BrowseService.ListExplorationActivity
+   */
+  listExplorationActivity: {
+    methodKind: "unary";
+    input: typeof ListExplorationActivityRequestSchema;
+    output: typeof ListExplorationActivityResponseSchema;
   };
 }> = /*@__PURE__*/ serviceDesc(file_mediaref_v1_browse, 0);

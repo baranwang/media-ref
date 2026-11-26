@@ -1,7 +1,7 @@
-# Deploys the API and background Workers from main, migrating the production database first.
+# Deploys the API, background and website Workers from main, migrating the production database first.
 # The database is only reachable inside the greencloud-hk machine and over Tailscale, so the runner
 # joins the tailnet as an ephemeral `tag:ci` node for the migration step.
-# The website still deploys through Workers Builds: it never touches the database.
+# The website deploys last: it calls the API over a service binding, so new RPCs must be live first.
 name: deploy
 
 on:
@@ -10,6 +10,8 @@ on:
     paths:
       - "apps/api/**"
       - "apps/worker/**"
+      - "apps/website/**"
+      - "packages/ui/**"
       - "packages/core/**"
       - "packages/db/**"
       - "packages/client/**"
@@ -65,4 +67,22 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 9c578ed9cad837fb4a2564db7b36b483
+        run: bun run deploy
+
+  website:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+      - name: Deploy website
+        working-directory: apps/website
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 9c578ed9cad837fb4a2564db7b36b483
+          VITE_API_BASE_URL: https://api.mediaref.org
         run: bun run deploy

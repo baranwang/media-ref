@@ -109,6 +109,37 @@ export interface DemandItem {
   lastDemandedAt: string;
 }
 
+export type ExplorationStatus =
+  | "approved"
+  | "in_review"
+  | "rejected"
+  | "not_found"
+  | "retry"
+  | "searching";
+
+export interface ExplorationPlatformView {
+  namespace: Namespace;
+  status: ExplorationStatus;
+  reason: string | null;
+  changeRequestId: string | null;
+}
+
+export interface ExplorationItem {
+  id: string;
+  card: CardItem;
+  season: number | null;
+  startedAt: string;
+  finishedAt: string | null;
+  platforms: ExplorationPlatformView[];
+}
+
+export interface ExplorationPage {
+  running: ExplorationItem[];
+  recent: ExplorationItem[];
+  summary: { explored: number; found: number; approved: number; inReview: number } | null;
+  nextBefore: string | null;
+}
+
 export interface AutoCheckItem {
   id: string;
   title: string;

@@ -34,8 +34,9 @@ export function TopNav({ hideSearch = false, transparent = false }: TopNavProps)
 
   const pathname = location.pathname;
   const isDiscover = pathname === "/" || pathname.startsWith("/discover");
-  const isContribute = pathname.startsWith("/contribute");
+  const isWanted = pathname.startsWith("/wanted");
   const isReview = pathname.startsWith("/review");
+  const isExploration = pathname.startsWith("/exploration");
 
   const handleSignOut = async () => {
     await signOut();
@@ -68,15 +69,26 @@ export function TopNav({ hideSearch = false, transparent = false }: TopNavProps)
               发现
             </Link>
             <Link
-              to="/contribute"
+              to="/wanted"
               className={cn(
                 "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                isContribute
+                isWanted
                   ? "bg-secondary text-secondary-foreground"
                   : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
               )}
             >
               待贡献
+            </Link>
+            <Link
+              to="/exploration"
+              className={cn(
+                "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                isExploration
+                  ? "bg-secondary text-secondary-foreground"
+                  : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+              )}
+            >
+              探索动态
             </Link>
             {user && (user.role === "reviewer" || user.role === "owner") && (
               <Link

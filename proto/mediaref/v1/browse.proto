@@ -102,6 +102,62 @@ message ListDemandsResponse {
   repeated DemandEntry demands = 1;
 }
 
+// What the exploration agent did on one namespace of one job.
+message ExplorationPlatformResult {
+  string namespace = 1;
+  // "approved" (in effect), "in_review" (being checked or waiting for a reviewer), "rejected",
+  // "not_found", "retry" (a source was down or time ran out; tried again later), "searching".
+  string status = 2;
+  // Plain-language reason, at most 200 characters; internal codes are already translated.
+  optional string reason = 3;
+  // Set for "approved", "in_review" and "rejected"; only submitters and reviewers can open it.
+  optional string change_request_id = 4;
+}
+
+message ExplorationActivity {
+  string id = 1;
+  CatalogCard card = 2;
+  optional int32 season = 3;
+  string started_at = 4;
+  // Unset while the job is running.
+  optional string finished_at = 5;
+  repeated ExplorationPlatformResult platforms = 6;
+}
+
+message ExplorationSummary {
+  // Media the agent finished looking at.
+  int32 explored = 1;
+  // Of those, media with at least one platform found.
+  int32 found = 2;
+  // Platform pages found that are in effect.
+  int32 approved = 3;
+  // Platform pages found that wait for a reviewer.
+  int32 in_review = 4;
+}
+
+enum ExplorationFilter {
+  EXPLORATION_FILTER_UNSPECIFIED = 0; // all
+  EXPLORATION_FILTER_FOUND = 1;
+  EXPLORATION_FILTER_NOT_FOUND = 2;
+}
+
+message ListExplorationActivityRequest {
+  optional int32 limit = 1;
+  // Cursor: `next_before` of the previous page.
+  optional string before = 2;
+  ExplorationFilter filter = 3;
+}
+
+message ListExplorationActivityResponse {
+  // Jobs running now (first page only).
+  repeated ExplorationActivity running = 1;
+  // Finished jobs, newest first.
+  repeated ExplorationActivity recent = 2;
+  // The last 24 hours, by finish time (first page only).
+  optional ExplorationSummary last_24h = 3;
+  optional string next_before = 4;
+}
+
 service BrowseService {
   rpc ListTrending(ListTrendingRequest) returns (ListTrendingResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -113,6 +169,9 @@ service BrowseService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   rpc ListDemands(ListDemandsRequest) returns (ListDemandsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ListExplorationActivity(ListExplorationActivityRequest) returns (ListExplorationActivityResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 }
