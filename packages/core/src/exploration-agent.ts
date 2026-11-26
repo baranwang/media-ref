@@ -56,6 +56,11 @@ import { fulfillCoveredCatalogDemandsInTx, isCoveredByAssociationsInTx } from ".
 import { loadCatalogEvidenceForMedia } from "./invalidation.ts";
 import { listLeadsForTarget, type Lead } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
+import {
+  evaluateVarietyDateEvidence,
+  type CatalogEpisodeDate,
+  type VarietyDateEvidence,
+} from "./variety.ts";
 import { createChangeRequest, MediaServiceError } from "./media-service.ts";
 import {
   combineAbortSignals,
@@ -349,7 +354,7 @@ const JUDGE_TOOLS: readonly ModelToolDefinition[] = [
   {
     name: "submit_mapping",
     description:
-      "Submit one listed candidate as the match. For TV, segments map baseline episodes to the collection's episode indexes: baseline episodes episodeStart..episodeEnd of `season` play as collection episodes targetEpisodeStart onward. Omit segments to map the requested season 1:1.",
+      "Submit one listed candidate as the match. For TV, segments map baseline episodes to the collection's episode indexes: baseline episodes episodeStart..episodeEnd of `season` play as collection episodes targetEpisodeStart onward. Omit segments to map the requested season 1:1. For a variety show whose platform splits broadcasts or adds extras, submit one segment for the whole season with nonLinear: true; it is accepted only when the candidate's airDateEvidence.pass is true.",
     parameters: {
       type: "object",
       properties: {
@@ -428,6 +433,14 @@ function defaultSegments(media: ExplorationTargetMedia, season: number | null): 
   ];
 }
 
+/** The requested TV season as one non-linear segment (collection-level only, no episode mapping). */
+function wholeSeasonNonLinearSegments(
+  media: ExplorationTargetMedia,
+  season: number | null,
+): SegmentInput[] {
+  return defaultSegments(media, season).map((seg) => ({ ...seg, nonLinear: true }));
+}
+
 function parseModelSegments(
   raw: unknown,
   media: ExplorationTargetMedia,
@@ -494,9 +507,14 @@ export function checkSegmentsFitCollection(
   return null;
 }
 
-function summarizeCandidate(candidate: FetchedCandidate, step1Pass: boolean) {
+function summarizeCandidate(
+  candidate: FetchedCandidate,
+  step1Pass: boolean,
+  airDateEvidence: VarietyDateEvidence | null,
+) {
   const { info } = candidate;
   return {
+    ...(airDateEvidence ? { airDateEvidence } : {}),
     canonicalId: info.canonicalId,
     title: info.title,
     originalTitle: info.originalTitle ?? null,
@@ -517,7 +535,8 @@ function buildJudgeSystemPrompt(namespace: Namespace): string {
     "3. Prefer the original-audio collection over dubbed or recut versions.",
     "4. A collection may hold several seasons, or a season may be split; express that with segments.",
     "5. passesAutomaticCheckWithDefaultMapping is a hint from a deterministic check, not a decision.",
-    "6. Finish with exactly one submit_mapping or mark_not_found.",
+    "6. airDateEvidence compares TMDB air dates with the platform's main episodes; use it for variety shows.",
+    "7. Finish with exactly one submit_mapping or mark_not_found.",
   ].join("\n");
 }
 
@@ -659,6 +678,7 @@ async function explorePlatform(
   catalog: CatalogEvidence,
   config: ResolvedExplorationAgentConfig,
   clockMs: () => number,
+  seasonDates: () => Promise<CatalogEpisodeDate[]>,
 ): Promise<PlatformExplorationOutcome> {
   const namespace = adapter.namespace;
   const taskId = await deriveExplorationTaskId(ctx.jobId, namespace, ctx.targetNamespaces.length);
@@ -799,19 +819,51 @@ async function explorePlatform(
       }
     };
 
-    // 3. Fast path: one fetched candidate that the gate would already accept.
+    // Variety: a whole-season non-linear segment, allowed only on air-date evidence.
+    const varietySegments = wholeSeasonNonLinearSegments(ctx.media, ctx.season);
+    const dateEvidence = new Map<string, VarietyDateEvidence | null>();
+    const airDateEvidenceFor = async (info: CollectionInfo) => {
+      if (!dateEvidence.has(info.canonicalId)) {
+        const dates = varietySegments.length > 0 ? await seasonDates() : [];
+        dateEvidence.set(
+          info.canonicalId,
+          dates.length > 0 ? evaluateVarietyDateEvidence(dates, info.featureEpisodes) : null,
+        );
+      }
+      return dateEvidence.get(info.canonicalId)!;
+    };
+
+    // 3. Fast path: one fetched candidate that the gate would already accept, either mapped
+    //    1:1 or, for a variety season, as a whole with matching air dates.
     const only = fetched.size === 1 ? [...fetched.values()][0]! : null;
-    if (only && passesStep1(only.info, baseSegments)) {
-      const result = await submit(only.info, baseSegments, undefined);
-      if ("status" in result) {
-        return result;
+    if (only) {
+      let fastSegments: SegmentInput[] | null = passesStep1(only.info, baseSegments)
+        ? baseSegments
+        : null;
+      if (
+        !fastSegments &&
+        varietySegments.length > 0 &&
+        (await airDateEvidenceFor(only.info))?.pass &&
+        passesStep1(only.info, varietySegments)
+      ) {
+        fastSegments = varietySegments;
+      }
+      if (fastSegments) {
+        const result = await submit(only.info, fastSegments, undefined);
+        if ("status" in result) {
+          return result;
+        }
       }
     }
 
     // 4. Judge with the model, closed over the fetched candidates.
-    const summaries = [...fetched.values()].map((c) =>
-      summarizeCandidate(c, passesStep1(c.info, baseSegments)),
-    );
+    const summaries = [];
+    for (const c of fetched.values()) {
+      const step1Pass = passesStep1(c.info, baseSegments);
+      summaries.push(
+        summarizeCandidate(c, step1Pass, step1Pass ? null : await airDateEvidenceFor(c.info)),
+      );
+    }
     const messages: ModelMessage[] = [
       { role: "system", content: buildJudgeSystemPrompt(namespace) },
       { role: "user", content: buildJudgeUserPrompt(ctx.media, namespace, ctx.season, summaries) },
@@ -894,6 +946,18 @@ async function explorePlatform(
             continue;
           }
           const segments = parseModelSegments(args.segments, ctx.media, ctx.season);
+          if (
+            segments.some((seg) => seg.nonLinear) &&
+            !(await airDateEvidenceFor(candidate.info))?.pass
+          ) {
+            reply(call.id, call.name, {
+              ok: false,
+              error: "NONLINEAR_NEEDS_AIR_DATE_EVIDENCE",
+              message:
+                "Non-linear segments are accepted only when the candidate's air dates match the catalog season.",
+            });
+            continue;
+          }
           const misfit = segmentMisfit(candidate.info, segments);
           if (misfit) {
             reply(call.id, call.name, {
@@ -1109,13 +1173,28 @@ export function createExplorationAgentExecutor(
       ? await discover(toDiscoveryInput(ctx.media, ctx.season), { outbound: ctx.outbound })
       : null;
 
+    // TMDB air dates for the requested season, fetched once per job and only when needed.
+    // shortcut: a failed fetch counts as "no dates" (no variety submit), not as transient; upgrade if TMDB errors show up in exploration results.
+    let seasonDatesPromise: Promise<CatalogEpisodeDate[]> | null = null;
+    const seasonDates = () => {
+      const tmdbId = ctx.media.externalIds.find((e) => e.namespace === "tmdb")?.nativeId;
+      const tvId = tmdbId?.startsWith("tv:") ? tmdbId.slice(3) : null;
+      seasonDatesPromise ??=
+        tvId && ctx.season !== null
+          ? ctx.tmdbGateway.fetchSeasonEpisodes(tvId, ctx.season).catch(() => [])
+          : Promise.resolve([]);
+      return seasonDatesPromise;
+    };
+
     for (const adapter of targets) {
       const candidates =
         adapter.namespace === "douban"
           ? await doubanCandidates(ctx.media, ctx.outbound)
           : platformCandidates(discovery!, adapter.namespace);
       platformOutcomes.push(
-        await timed(() => explorePlatform(ctx, adapter, candidates, catalog, config, clockMs)),
+        await timed(() =>
+          explorePlatform(ctx, adapter, candidates, catalog, config, clockMs, seasonDates),
+        ),
       );
     }
     return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
