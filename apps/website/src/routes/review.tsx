@@ -27,11 +27,13 @@ import { useState, type ReactNode } from "react";
 import { NAMESPACE_LABELS, NamespaceLogo } from "#/components/brand-logos";
 import { CheckItemRow } from "#/components/check-item-row";
 import { CoverageLegend, CoverageRuler, CoverageTrack } from "#/components/coverage-bar";
+import { ReviewAgentNote } from "#/components/review-agent-note";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
 import { formatEpisodeRange, formatRelativeTime } from "#/lib/format";
 import { conflictTagFor } from "#/lib/mappers";
 import {
+  agentApprovalsQuery,
   browserClients,
   cardsByKeyQuery,
   mediaDetailQuery,
@@ -95,9 +97,13 @@ function ReviewWorkbenchPage() {
 
   const queueQuery = useQuery({ ...reviewQueueQuery(), enabled: canReview });
   const alertsQuery = useQuery({ ...reviewAlertsQuery(), enabled: canReview });
+  const agentQuery = useQuery({ ...agentApprovalsQuery(), enabled: canReview });
   const pendingQueue = queueQuery.data ?? [];
   const openAlerts = alertsQuery.data ?? [];
-  const cardsQuery = useQuery(cardsByKeyQuery(pendingQueue.map((cr) => cr.targetKey)));
+  const agentApprovals = agentQuery.data ?? [];
+  const cardsQuery = useQuery(
+    cardsByKeyQuery([...pendingQueue, ...agentApprovals].map((cr) => cr.targetKey)),
+  );
   const cards = cardsQuery.data ?? {};
 
   const resolveAlert = useMutation({
@@ -105,7 +111,7 @@ function ReviewWorkbenchPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: reviewAlertsQuery().queryKey }),
   });
 
-  const [activeTab, setActiveTab] = useState<"queue" | "alerts">("queue");
+  const [activeTab, setActiveTab] = useState<"queue" | "alerts" | "agent">("queue");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const selectedCr = pendingQueue.find((c) => c.id === selectedId) ?? pendingQueue[0] ?? null;
@@ -141,10 +147,10 @@ function ReviewWorkbenchPage() {
     body = (
       <Tabs
         value={activeTab}
-        onValueChange={(v) => setActiveTab(v as "queue" | "alerts")}
+        onValueChange={(v) => setActiveTab(v as "queue" | "alerts" | "agent")}
         className="mt-6"
       >
-        <TabsList className="grid w-full max-w-xs grid-cols-2">
+        <TabsList className="grid w-full max-w-md grid-cols-3">
           <TabsTrigger value="queue" className="gap-1.5 px-3">
             <span>待审核</span>
             <span className="font-mono text-2xs text-muted-foreground">
@@ -155,6 +161,12 @@ function ReviewWorkbenchPage() {
             <span>告警</span>
             <span className="font-mono text-2xs text-muted-foreground">
               {alertsQuery.data?.length}
+            </span>
+          </TabsTrigger>
+          <TabsTrigger value="agent" className="gap-1.5 px-3">
+            <span>审核 agent 放行</span>
+            <span className="font-mono text-2xs text-muted-foreground">
+              {agentQuery.data?.length}
             </span>
           </TabsTrigger>
         </TabsList>
@@ -337,6 +349,101 @@ function ReviewWorkbenchPage() {
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="agent" className="mt-6">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
+                审核 agent 放行的变更单
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                最近批准的在最上面。抽查时看它的理由，放错了到媒体页核对处理
+              </p>
+            </div>
+
+            {agentQuery.isPending ? (
+              <Skeleton className="h-40 w-full rounded-xl" />
+            ) : agentQuery.isError ? (
+              <ErrorAlert title="审核 agent 放行记录加载失败" error={agentQuery.error} />
+            ) : agentApprovals.length === 0 ? (
+              <Empty className="rounded-xl border border-border bg-card py-16">
+                <EmptyHeader>
+                  <EmptyTitle>审核 agent 还没有放行过变更单</EmptyTitle>
+                  <EmptyDescription>它批准的变更单会出现在这里，方便抽查。</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            ) : (
+              <div className="overflow-hidden rounded-xl border border-border bg-card">
+                <div className="divide-y divide-border/70">
+                  {agentApprovals.map((cr) => {
+                    const first = cr.segments[0];
+                    const mediaId = cr.mediaId ?? cards[cr.targetKey]?.id;
+                    return (
+                      <div
+                        key={cr.id}
+                        className="flex flex-wrap items-center justify-between gap-4 px-5 py-4"
+                      >
+                        <div className="flex min-w-0 flex-1 items-start gap-3.5">
+                          <NamespaceLogo
+                            namespace={cr.namespace}
+                            className="mt-0.5 size-7 shrink-0"
+                          />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-foreground">
+                              {cards[cr.targetKey]?.title ?? cr.pageTitle ?? cr.nativeId}
+                              <span className="font-normal text-muted-foreground">
+                                {" "}
+                                · {NAMESPACE_LABELS[cr.namespace]}
+                                {first &&
+                                  ` · 第 ${first.season} 季 ${formatEpisodeRange(first.start, first.end)}`}
+                              </span>
+                            </div>
+                            {cr.reviewAgent?.reasons.map((r) => (
+                              <p
+                                key={r.code}
+                                className="mt-1 text-xs leading-5 text-muted-foreground"
+                              >
+                                {r.reason}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="flex shrink-0 items-center gap-4">
+                          {cr.reviewedAt && (
+                            <span className="text-xs text-muted-foreground">
+                              {formatRelativeTime(cr.reviewedAt)}
+                            </span>
+                          )}
+                          <div className="flex items-center gap-2">
+                            {mediaId && (
+                              <Button
+                                variant="outline"
+                                size="default"
+                                nativeButton={false}
+                                render={<Link to="/media/$mediaId" params={{ mediaId }} />}
+                              >
+                                去核对
+                              </Button>
+                            )}
+                            <Button
+                              variant="outline"
+                              size="default"
+                              nativeButton={false}
+                              render={<Link to="/change-requests/$id" params={{ id: cr.id }} />}
+                            >
+                              看变更单
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -590,6 +697,25 @@ function ReviewDetail({
           </CardContent>
         </Card>
       </section>
+
+      {cr.reviewAgent?.verdict === "keep_for_human" && (
+        <section className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1">
+            <h3 className="text-xl leading-7 font-bold tracking-tight text-foreground">
+              审核 agent 的意见
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              审核 agent 看过这张单，没有放行，留给你决定
+            </p>
+          </div>
+
+          <Card>
+            <CardContent className="pt-4">
+              <ReviewAgentNote agent={cr.reviewAgent} time={null} />
+            </CardContent>
+          </Card>
+        </section>
+      )}
 
       {/* 你的决定 */}
       <section className="flex flex-col gap-4">

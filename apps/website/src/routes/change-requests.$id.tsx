@@ -24,6 +24,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { NAMESPACE_LABELS, NamespaceLogo } from "#/components/brand-logos";
 import { CheckItemRow } from "#/components/check-item-row";
+import { ReviewAgentNote } from "#/components/review-agent-note";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
 import { formatDateTime, formatEpisodeRange } from "#/lib/format";
@@ -309,31 +310,51 @@ function ChangeRequestDetailPage() {
             </Card>
           </section>
 
-          {/* 审核员留言：自动生效时 decisionReason 是内部代码，不显示 */}
-          {cr.reviewerUserId && cr.decisionReason && (
+          {cr.reviewedByAgent && cr.reviewAgent ? (
             <section className="flex flex-col gap-3">
               <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
-                审核员留言
+                审核 agent 的理由
               </h2>
               <Card>
-                <CardContent className="flex items-start gap-3 pt-4">
-                  <Avatar size="default">
-                    <AvatarFallback className="bg-muted text-xs font-medium text-foreground">
-                      审
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2 text-xs">
-                      <span className="font-medium text-foreground">审核员</span>
-                      <span className="text-muted-foreground">{formatDateTime(cr.reviewedAt)}</span>
-                    </div>
-                    <p className="mt-1.5 text-sm leading-6 text-foreground/90">
-                      {cr.decisionReason}
-                    </p>
-                  </div>
+                <CardContent className="pt-4">
+                  <ReviewAgentNote
+                    agent={cr.reviewAgent}
+                    time={cr.reviewedAt}
+                    fallback={cr.decisionReason}
+                  />
                 </CardContent>
               </Card>
             </section>
+          ) : (
+            /* 审核员留言：自动生效时 decisionReason 是内部代码，不显示 */
+            cr.reviewerUserId &&
+            cr.decisionReason && (
+              <section className="flex flex-col gap-3">
+                <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
+                  审核员留言
+                </h2>
+                <Card>
+                  <CardContent className="flex items-start gap-3 pt-4">
+                    <Avatar size="default">
+                      <AvatarFallback className="bg-muted text-xs font-medium text-foreground">
+                        审
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-medium text-foreground">审核员</span>
+                        <span className="text-muted-foreground">
+                          {formatDateTime(cr.reviewedAt)}
+                        </span>
+                      </div>
+                      <p className="mt-1.5 text-sm leading-6 text-foreground/90">
+                        {cr.decisionReason}
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              </section>
+            )
           )}
         </div>
 
@@ -344,7 +365,7 @@ function ChangeRequestDetailPage() {
             <p className="mt-0.5 text-sm text-muted-foreground">
               {cr.status === "approved"
                 ? cr.reviewedAt
-                  ? `${cr.reviewerUserId ? "" : "自动核对通过，"}从提交到生效用了 ${elapsedLabel(cr.createdAt, cr.reviewedAt)}`
+                  ? `${cr.reviewedByAgent ? "审核 agent 已批准，" : cr.reviewerUserId ? "" : "自动核对通过，"}从提交到生效用了 ${elapsedLabel(cr.createdAt, cr.reviewedAt)}`
                   : "关联已经生效"
                 : cr.status === "rejected"
                   ? "本次变更单已被驳回"
