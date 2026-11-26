@@ -217,6 +217,7 @@ describe("Exploration agent: discover → judge → gate", () => {
     stub: StubOptions,
     invokeModel: (request: ModelInvocationRequest) => ModelInvocationResponse = markAllNotFound,
     explorationAgent: Record<string, unknown> = {},
+    callWebTool?: (name: string, args: Record<string, unknown>) => string,
   ) {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -269,6 +270,7 @@ describe("Exploration agent: discover → judge → gate", () => {
     const outbound = createFakeOutboundClient({
       fetchExternal: createHttpStub(stub),
       invokeModel,
+      ...(callWebTool ? { callWebTool } : {}),
     });
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -597,6 +599,63 @@ describe("Exploration agent: discover → judge → gate", () => {
         },
       ],
     });
+  });
+
+  test("web tools reach the agent through the session budget when the transport has them", async () => {
+    const searched: unknown[] = [];
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      const turn = request.messages.filter((m) => m.role === "assistant").length;
+      if (turn === 0) {
+        expect(request.tools?.map((t) => t.name)).toEqual(
+          expect.arrayContaining(["web_search", "web_fetch"]),
+        );
+        return {
+          content: null,
+          toolCalls: [
+            { id: "call_w", name: "web_search", arguments: { query: "咒术回战 腾讯视频" } },
+          ],
+          model: "test-model",
+        };
+      }
+      return markAllNotFound(request);
+    };
+    const { outbound, explore } = await setup({ kan360Rows: [] }, invokeModel, {}, (name, args) => {
+      searched.push({ name, args });
+      return "no results";
+    });
+
+    await explore();
+
+    expect(searched).toEqual([{ name: "web_search", args: { query: "咒术回战 腾讯视频" } }]);
+    const toolReply = outbound.modelRequests[1]!.messages.find((m) => m.role === "tool")!;
+    expect(JSON.parse(toolReply.content)).toEqual({ text: "no results" });
+  });
+
+  test("an upstream outage while the agent fetches a collection keeps that platform transient", async () => {
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      const turn = request.messages.filter((m) => m.role === "assistant").length;
+      if (turn === 0) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_g",
+              name: "get_collection",
+              arguments: { namespace: "bilibili", id: "https://www.bilibili.com/bangumi/play/ep1" },
+            },
+          ],
+          model: "test-model",
+        };
+      }
+      return markAllNotFound(request);
+    };
+    const { testDb, explore } = await setup({ kan360Rows: [] }, invokeModel);
+
+    await explore();
+
+    const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
+    expect(checks.map((c) => c.platform)).not.toContain("bilibili");
+    expect(checks).toHaveLength(platformCount - 1);
   });
 
   test("a session over its token budget stops and backs off instead of looping", async () => {

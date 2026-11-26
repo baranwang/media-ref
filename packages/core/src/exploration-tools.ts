@@ -31,6 +31,8 @@ export interface ToolContext {
   collectionNamespaces: readonly Namespace[];
   /** Records a fetched collection as a candidate; returns whether the default mapping passes. */
   register(info: CollectionInfo, source: string): boolean;
+  /** An upstream outage on a namespace: its "not found" is then inconclusive. */
+  noteTransient(namespace: Namespace, reason: string): void;
   seasons: ReadonlyArray<{ season: number; episodeCount: number; airYear?: number | null }>;
 }
 
@@ -292,12 +294,21 @@ async function getCollection(ctx: ToolContext, namespace: Namespace, id: string)
   if (!adapter || !isTier2Adapter(adapter)) {
     return { error: "UNKNOWN_NAMESPACE" };
   }
-  const canonicalId = await adapter.canonicalize(id, ctx.outbound);
-  const evidence = await adapter.fetchCollection(canonicalId, ctx.outbound);
+  let evidence;
+  try {
+    const canonicalId = await adapter.canonicalize(id, ctx.outbound);
+    evidence = await adapter.fetchCollection(canonicalId, ctx.outbound);
+  } catch (error) {
+    if (error instanceof AdapterTransientError) {
+      ctx.noteTransient(namespace, error.reason);
+    }
+    throw error;
+  }
   if (evidence.status === "not_found") {
     return { error: "NOT_FOUND", reason: evidence.reason ?? null };
   }
   if (evidence.status === "transient_error") {
+    ctx.noteTransient(namespace, evidence.reason);
     return { error: "UPSTREAM_UNAVAILABLE", message: evidence.reason };
   }
   const { info } = evidence;

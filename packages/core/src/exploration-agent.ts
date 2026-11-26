@@ -556,6 +556,20 @@ function createPlatformBudget(
           BUDGET_EXCEEDED,
         ),
       sendEmail: (message) => outbound.sendEmail(message),
+      ...(outbound.callWebTool
+        ? {
+            callWebTool: (name, args, callerSignal) =>
+              raceWithAbortSignal(
+                outbound.callWebTool!(
+                  name,
+                  args,
+                  callerSignal ? AbortSignal.any([signal, callerSignal]) : signal,
+                ),
+                signal,
+                BUDGET_EXCEEDED,
+              ),
+          }
+        : {}),
       invokeModel: (request) =>
         raceWithAbortSignal(
           outbound.invokeModel({
@@ -917,6 +931,12 @@ async function runAgentSession(
       }
       return run.passesStep1(info, run.baseSegments);
     },
+    noteTransient: (namespace, reason) => {
+      const target = byNamespace.get(namespace);
+      if (target) {
+        target.transient = new PlatformTransient(reason);
+      }
+    },
   };
   const namespaceParam = { type: "string", enum: targets.map((t) => t.namespace) };
   const tools: ModelToolDefinition[] = [
@@ -1030,7 +1050,19 @@ async function runAgentSession(
     for (const call of toolCalls) {
       const args = call.arguments ?? {};
       if (QUERY_TOOL_NAMES.has(call.name)) {
-        reply(call.id, call.name, await runQueryTool(toolCtx, call.name, args));
+        // Catalog tools use ctx.tmdbGateway, built on the unbudgeted client: the session deadline
+        // still has to end a stalled call.
+        let result: unknown;
+        try {
+          result = await raceWithAbortSignal(
+            runQueryTool(toolCtx, call.name, args),
+            budget.signal,
+            BUDGET_EXCEEDED,
+          );
+        } catch {
+          return settleRest((t) => transientOutcome(run, t, BUDGET_EXCEEDED));
+        }
+        reply(call.id, call.name, result);
         continue;
       }
       if (call.name !== "submit_mapping" && call.name !== "mark_not_found") {
