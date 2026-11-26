@@ -68,7 +68,7 @@ agent 认为提交错了时，必须给出改正后的季和分段。代码用�
 驳回时在同一事务里：
 
 - 以 `rejectChangeRequest` 驳回，理由写明错在哪、改正是什么；
-- 写一条**线索**：同一媒体、命名空间、平台编号，改正后的季号，备注写理由，上报人 `system:review-agent`；
+- 写一条**线索**：同一媒体、命名空间、平台编号，改正后的季号，备注写理由。上报人 `system:review-agent`；审核 agent 没有 API key，`reporter_key_id` 填常量 `REVIEW_AGENT_KEY_ID`（值同为 `system:review-agent`，这一列没有外键，不改表）；
 - 确保这一季在该命名空间组有一条可以立即探索的需求：变更单本来就关联了需求的，把它重新打开且**不计入没找到、不退避**
   （`reopenDemandAfterRejectionInTx` 增加这个分支）；人工提交的单没有需求，就新建一条。
 
@@ -117,7 +117,6 @@ token 计入当天的 `exploration_daily_budget.pi_usage`，和探索共用每�
 - **平台集号的含义**：按集查询时 `targetEpisode = targetEpisodeStart + 偏移`，哔哩哔哩适配器按正片列表的位置编号，
   灵笼的中章在第 7 位。提示词要教 agent 平台集号按位置还是按标题编号数，夹在中间的额外内容算不算错位。
 - 线上 `needs_review` 队列里各冲突码的数量还没统计，第 6 节的预算是估的。
-- `leads.reporter_key_id` 现在不能为空，审核 agent 没有 API key，要放宽或约定一个系统值。
 
 ## 后果
 
