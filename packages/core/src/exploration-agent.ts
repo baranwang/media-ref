@@ -819,11 +819,21 @@ async function prepareTarget(
   const namespace = adapter.namespace;
   const taskId = await deriveExplorationTaskId(ctx.jobId, namespace, ctx.targetNamespaces.length);
 
-  // A redelivered job must not submit twice for the same platform.
+  // Never submit twice for one platform: not on a redelivered job (same task id), and not on a
+  // later job for the same demand while an earlier submission is still being checked or reviewed.
   const existingCr = await ctx.db
     .selectFrom("change_requests")
     .select(["id", "native_id"])
-    .where("task_id", "=", taskId)
+    .where((eb) =>
+      eb.or([
+        eb("task_id", "=", taskId),
+        eb.and([
+          eb("demand_id", "=", ctx.demandId),
+          eb("namespace", "=", namespace),
+          eb("status", "in", ["pending_evidence", "needs_review"]),
+        ]),
+      ]),
+    )
     .executeTakeFirst();
   if (existingCr) {
     return {

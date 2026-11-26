@@ -62,6 +62,8 @@ export const DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET = 1_000_000_000;
 export const DEFAULT_EXPLORATION_BATCH_SIZE = 10;
 export const DEFAULT_EXPLORATION_LEASE_DURATION_MS = 15 * 60 * 1000;
 export const DEFAULT_EXPLORATION_JOB_MAX_ATTEMPTS = 3;
+/** Wait before a demand with a transient outcome (a source down, a timeout) is explored again. */
+export const DEFAULT_EXPLORATION_TRANSIENT_RETRY_DELAY_MS = 60 * 60 * 1000;
 
 const UTC_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const POSITIVE_INT_STRING_PATTERN = /^[1-9]\d*$/;
@@ -412,7 +414,7 @@ export function resolveExplorationSchedulerConfig(
     Number.isFinite(partial.transientRetryDelayMs) &&
     partial.transientRetryDelayMs >= 0
       ? partial.transientRetryDelayMs
-      : 0;
+      : DEFAULT_EXPLORATION_TRANSIENT_RETRY_DELAY_MS;
 
   const jobMaxAttempts =
     partial.jobMaxAttempts !== undefined &&
@@ -2038,7 +2040,8 @@ export function createExplorationJobHandler(
         }
 
         // Transient error: do NOT mark not_found, do NOT increment not_found_count, reset to open
-        let transientDelayMs = config.transientRetryDelayMs ?? 0;
+        let transientDelayMs =
+          config.transientRetryDelayMs ?? DEFAULT_EXPLORATION_TRANSIENT_RETRY_DELAY_MS;
         for (const outcome of outcomes) {
           if (
             outcome.status === "transient_error" &&
