@@ -52,6 +52,5 @@ jobs:
       - name: Publish
         # Outside the repo: npm refuses to run under the root devEngines (bun only).
         working-directory: ${{ runner.temp }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # Auth via npm trusted publishing (OIDC), configured for release.yml; no token secret.
         run: npm publish ./client.tgz --access public --provenance
