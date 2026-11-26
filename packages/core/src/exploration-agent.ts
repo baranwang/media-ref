@@ -521,10 +521,19 @@ interface PlatformBudget {
   outbound: OutboundClient;
   signal: AbortSignal;
   expired(): boolean;
+  remainingMs(): number;
   dispose(): void;
 }
 
 const BUDGET_EXCEEDED = "exploration_time_budget_exceeded";
+/**
+ * The session switches to wrap-up (conclusions only, no more searching) once this share of the
+ * time or token budget is left, or this many steps: an unfinished namespace is otherwise settled
+ * as transient and the whole job, with its searching, runs again later.
+ */
+const WRAP_UP_REMAINING_SHARE = 0.25;
+const WRAP_UP_STEPS = 3;
+const CONCLUSION_TOOLS: ReadonlySet<string> = new Set(["submit_mapping", "mark_not_found"]);
 
 function createPlatformBudget(
   outbound: OutboundClient,
@@ -544,6 +553,7 @@ function createPlatformBudget(
   return {
     signal,
     expired: () => signal.aborted || clockMs() >= deadlineMs,
+    remainingMs: () => (signal.aborted ? 0 : Math.max(0, deadlineMs - clockMs())),
     dispose: () => clearTimeout(timer),
     outbound: {
       fetchExternal: (request) =>
@@ -1002,12 +1012,35 @@ async function runAgentSession(
   const reply = (id: string, name: string, body: unknown) =>
     messages.push({ role: "tool", toolCallId: id, name, content: JSON.stringify(body) });
 
+  let wrappingUp = false;
+  const conclusionTools = tools.filter((t) => CONCLUSION_TOOLS.has(t.name));
+  // Searching may use the time up to the wrap-up reserve, not beyond: a slow model turn or tool
+  // batch started just before wrap-up would otherwise eat the reserve and end in a timeout.
+  const searchLeftMs = () => budget.remainingMs() - config.maxDurationMs * WRAP_UP_REMAINING_SHARE;
   for (let step = 0; step < config.maxSteps; step += 1) {
     if (budget.expired()) {
       return settleRest((t) => transientOutcome(run, t, BUDGET_EXCEEDED));
     }
     if (usage.tokens >= config.maxTaskTokens) {
       return settleRest((t) => notFoundOutcome(run, t, "token_budget_exhausted"));
+    }
+    if (
+      !wrappingUp &&
+      (searchLeftMs() <= 0 ||
+        config.maxTaskTokens - usage.tokens <= config.maxTaskTokens * WRAP_UP_REMAINING_SHARE ||
+        config.maxSteps - step <= WRAP_UP_STEPS)
+    ) {
+      wrappingUp = true;
+      messages.push({
+        role: "user",
+        content: [
+          "The time, step or token budget is almost used up. Stop searching.",
+          `Conclude every open namespace now (${open()
+            .map((t) => t.namespace)
+            .join(", ")}): submit_mapping for a collection you already fetched and checked,`,
+          "or mark_not_found if you found no match. Only the conclusion tools are left.",
+        ].join(" "),
+      });
     }
     let response;
     try {
@@ -1016,15 +1049,19 @@ async function runAgentSession(
         model: config.model,
         ...(config.gatewayId ? { gatewayId: config.gatewayId } : {}),
         messages: [...messages],
-        tools,
+        tools: wrappingUp ? conclusionTools : tools,
         temperature: config.temperature,
         maxTokens: config.maxTokens,
-        webSearch: config.webSearch,
+        webSearch: config.webSearch && !wrappingUp,
         // One session per job: every turn stays on the same routed model and its prompt cache.
         sessionId: ctx.jobId,
         metadata: { demandId: ctx.demandId, jobId: ctx.jobId },
+        ...(wrappingUp ? {} : { timeoutMs: Math.max(1, searchLeftMs()) }),
       });
     } catch (error) {
+      if (!wrappingUp && !budget.expired() && searchLeftMs() <= 0) {
+        continue; // The search phase ran out mid-turn: the next step wraps up.
+      }
       const reason = error instanceof Error ? error.message : "model_invocation_failed";
       return settleRest((t) => transientOutcome(run, t, reason));
     }
@@ -1047,22 +1084,45 @@ async function runAgentSession(
       return settleRest((t) => transientOutcome(run, t, "model_finished_without_decision"));
     }
 
+    // Query tools of one turn run side by side, bounded by the search phase; conclusions below
+    // stay in call order.
+    const searchSignal = AbortSignal.any([
+      budget.signal,
+      AbortSignal.timeout(Math.max(1, searchLeftMs())),
+    ]);
+    const queryResults = new Map(
+      wrappingUp
+        ? []
+        : toolCalls
+            .filter((call) => QUERY_TOOL_NAMES.has(call.name))
+            .map((call) => [
+              call.id,
+              raceWithAbortSignal(
+                runQueryTool(toolCtx, call.name, call.arguments ?? {}),
+                searchSignal,
+                BUDGET_EXCEEDED,
+              ).catch(() => ({ error: "TIME_UP", message: "No time left for searching." })),
+            ]),
+    );
+
     for (const call of toolCalls) {
       const args = call.arguments ?? {};
-      if (QUERY_TOOL_NAMES.has(call.name)) {
-        // Catalog tools use ctx.tmdbGateway, built on the unbudgeted client: the session deadline
-        // still has to end a stalled call.
-        let result: unknown;
-        try {
-          result = await raceWithAbortSignal(
-            runQueryTool(toolCtx, call.name, args),
-            budget.signal,
-            BUDGET_EXCEEDED,
-          );
-        } catch {
+      if (wrappingUp && !CONCLUSION_TOOLS.has(call.name)) {
+        reply(call.id, call.name, {
+          ok: false,
+          error: "WRAP_UP",
+          message: "No more searching: conclude with submit_mapping or mark_not_found.",
+        });
+        continue;
+      }
+      const pending = queryResults.get(call.id);
+      if (pending) {
+        // Catalog tools use ctx.tmdbGateway, built on the unbudgeted client: the race above still
+        // ends a stalled call.
+        reply(call.id, call.name, await pending);
+        if (budget.expired()) {
           return settleRest((t) => transientOutcome(run, t, BUDGET_EXCEEDED));
         }
-        reply(call.id, call.name, result);
         continue;
       }
       if (call.name !== "submit_mapping" && call.name !== "mark_not_found") {
