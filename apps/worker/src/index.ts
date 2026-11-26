@@ -18,6 +18,9 @@ import {
   DEFAULT_EXPLORATION_MAX_STEPS,
   DEFAULT_EXPLORATION_MAX_TASK_TOKENS,
   DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
+  DEFAULT_REVIEW_AGENT_MAX_DURATION_MS,
+  DEFAULT_REVIEW_AGENT_MAX_STEPS,
+  DEFAULT_REVIEW_AGENT_MAX_TASK_TOKENS,
   parseExplorationBackoffSeconds,
   parseOutboundProxyConfig,
   type EgressFetcher,
@@ -67,6 +70,11 @@ export interface BackgroundWorkerEnv {
   EXPLORATION_MAX_DURATION_MS?: string;
   EXPLORATION_MAX_TASK_TOKENS?: string;
   EXPLORATION_DAILY_TOKEN_BUDGET?: string;
+  // Review agent (ADR 0003): reviews per UTC day ("0" turns it off) and per-review limits.
+  REVIEW_AGENT_DAILY_BUDGET?: string;
+  REVIEW_AGENT_MAX_STEPS?: string;
+  REVIEW_AGENT_MAX_DURATION_MS?: string;
+  REVIEW_AGENT_MAX_TASK_TOKENS?: string;
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
   TMDB_API_BASE_URL?: string;
@@ -107,6 +115,12 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
 
 export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerConfig {
   const gatewayId = parseOptionalString(env.AI_GATEWAY_ID);
+  const model = {
+    ...(gatewayId ? { gatewayId } : {}),
+    provider: parseOptionalString(env.AI_PROVIDER) ?? DEFAULT_AI_PROVIDER,
+    model: parseOptionalString(env.AI_MODEL) ?? DEFAULT_AI_MODEL,
+    tokensApiToken: parseOptionalString(env.TOKENS_API_TOKEN),
+  };
   const tmdb = {
     accessToken: env.TMDB_ACCESS_TOKEN,
     apiKey: env.TMDB_API_KEY,
@@ -139,9 +153,7 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
       ),
     },
     explorationAgent: {
-      ...(gatewayId ? { gatewayId } : {}),
-      provider: parseOptionalString(env.AI_PROVIDER) ?? DEFAULT_AI_PROVIDER,
-      model: parseOptionalString(env.AI_MODEL) ?? DEFAULT_AI_MODEL,
+      ...model,
       maxSteps: parsePositiveInt(env.EXPLORATION_MAX_STEPS, DEFAULT_EXPLORATION_MAX_STEPS),
       maxDurationMs: parsePositiveInt(
         env.EXPLORATION_MAX_DURATION_MS,
@@ -151,7 +163,19 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
         env.EXPLORATION_MAX_TASK_TOKENS,
         DEFAULT_EXPLORATION_MAX_TASK_TOKENS,
       ),
-      tokensApiToken: parseOptionalString(env.TOKENS_API_TOKEN),
+    },
+    reviewAgent: {
+      ...model,
+      dailyBudget: parseNonNegativeInt(env.REVIEW_AGENT_DAILY_BUDGET, 0),
+      maxSteps: parsePositiveInt(env.REVIEW_AGENT_MAX_STEPS, DEFAULT_REVIEW_AGENT_MAX_STEPS),
+      maxDurationMs: parsePositiveInt(
+        env.REVIEW_AGENT_MAX_DURATION_MS,
+        DEFAULT_REVIEW_AGENT_MAX_DURATION_MS,
+      ),
+      maxTaskTokens: parsePositiveInt(
+        env.REVIEW_AGENT_MAX_TASK_TOKENS,
+        DEFAULT_REVIEW_AGENT_MAX_TASK_TOKENS,
+      ),
     },
     tmdb,
     catalog: {

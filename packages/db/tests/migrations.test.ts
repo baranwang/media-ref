@@ -97,6 +97,16 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0016_exploration_token_budget",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0017_review_agent_budget",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb

@@ -6,6 +6,7 @@ import {
   createAdapterRegistry,
   createFakeOutboundClient,
   createTier1Adapter,
+  EVIDENCE_CHECK_JOB_TYPE,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -313,7 +314,11 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        jobTypes: [EVIDENCE_CHECK_JOB_TYPE],
+      },
       now: () => t0,
     });
 
@@ -744,6 +749,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
         defaultRetryDelayMs: 60_000,
         tmdb: { accessToken: "test-tmdb-token" },
         enableDailyTmdbSync: false,
+        jobTypes: [EVIDENCE_CHECK_JOB_TYPE],
       },
       now: () => now,
     });
@@ -856,7 +862,11 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
           emitted.push(message);
         },
       },
-      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        jobTypes: [EVIDENCE_CHECK_JOB_TYPE],
+      },
       now: () => t0,
     });
 

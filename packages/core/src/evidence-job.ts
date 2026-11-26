@@ -33,6 +33,7 @@ import {
   MediaServiceError,
   TIER1_MANUAL_REVIEW_REASON,
 } from "./media-service.ts";
+import { enqueueReviewAgentJobInTx } from "./review-agent.ts";
 import type { TmdbGateway, TmdbGatewayConfig } from "./tmdb.ts";
 
 export interface EvidenceCheckJobOptions {
@@ -63,11 +64,12 @@ function mergeEvidenceWithExistingMetadata(
   };
 }
 
+/** Returns whether the request was still `pending_evidence` and is now `needs_review`. */
 async function markChangeRequestNeedsReviewInTx(
   trx: Transaction<Database>,
   input: MarkNeedsReviewInput,
-): Promise<void> {
-  await trx
+): Promise<boolean> {
+  const result = await trx
     .updateTable("change_requests")
     .set({
       status: "needs_review",
@@ -78,7 +80,8 @@ async function markChangeRequestNeedsReviewInTx(
     })
     .where("id", "=", input.changeRequestId)
     .where("status", "=", "pending_evidence")
-    .execute();
+    .executeTakeFirst();
+  return result.numUpdatedRows > 0n;
 }
 
 async function resolveAuthoritativeCatalogKey(
@@ -652,13 +655,22 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         conflictReason: primaryConflictCode,
       },
       async onCommit(trx) {
-        await markChangeRequestNeedsReviewInTx(trx, {
+        const marked = await markChangeRequestNeedsReviewInTx(trx, {
           changeRequestId: changeRequest.id,
           evidence: evidenceRecord,
           conflictReason: primaryConflictCode,
           decisionReason: summaryReason,
           now: ctx.now,
         });
+        // Only gate conflicts get a review: missing evidence, locks and clashes with an existing
+        // association (the other needs_review paths above) are a human's call (ADR 0003 §1).
+        if (marked) {
+          await enqueueReviewAgentJobInTx(trx, {
+            changeRequestId: changeRequest.id,
+            conflictCodes: gate.conflicts.map((c) => c.code),
+            now: ctx.now,
+          });
+        }
       },
     };
   };

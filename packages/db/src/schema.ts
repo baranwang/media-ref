@@ -356,6 +356,8 @@ export interface ExplorationDailyBudgetTable {
   tokens_used: Generated<string>;
   /** That day's totals per model, as submitted to tokens.ci (`PiUsageTotals` in core). */
   pi_usage: ColumnType<JsonObject, JsonObject | string | undefined, JsonObject | string>;
+  /** Change requests the review agent reviewed that day. */
+  review_consumed: Generated<number>;
   updated_at: Generated<Date>;
 }
 

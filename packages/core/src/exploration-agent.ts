@@ -60,19 +60,20 @@ import { listLeadsForTarget, type Lead } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { createChangeRequest, MediaServiceError } from "./media-service.ts";
 import { recordExplorationTokens } from "./exploration-scheduler.ts";
-import { addPiUsage, reportPiUsage, type PiUsageBucket } from "./tokens-report.ts";
+import { reportPiUsage } from "./tokens-report.ts";
+import { buildQueryTools, runQueryTool, type ToolContext } from "./exploration-tools.ts";
 import {
-  buildQueryTools,
-  QUERY_TOOL_NAMES,
-  runQueryTool,
-  type ToolContext,
-} from "./exploration-tools.ts";
+  BUDGET_EXCEEDED,
+  createSessionBudget,
+  runToolSession,
+  type SessionBudget,
+  type SessionUsage,
+} from "./agent-session.ts";
 import {
-  combineAbortSignals,
   DEFAULT_AI_MODEL,
   DEFAULT_AI_PROVIDER,
-  raceWithAbortSignal,
   type ModelMessage,
+  type ModelToolCall,
   type ModelToolDefinition,
   type OutboundClient,
 } from "./outbound.ts";
@@ -517,81 +518,7 @@ function buildAgentUserPrompt(
   return `Find the matching collections:\n${JSON.stringify(payload, null, 2)}`;
 }
 
-interface PlatformBudget {
-  outbound: OutboundClient;
-  signal: AbortSignal;
-  expired(): boolean;
-  remainingMs(): number;
-  dispose(): void;
-}
-
-const BUDGET_EXCEEDED = "exploration_time_budget_exceeded";
-/**
- * The session switches to wrap-up (conclusions only, no more searching) once this share of the
- * time or token budget is left, or this many steps: an unfinished namespace is otherwise settled
- * as transient and the whole job, with its searching, runs again later.
- */
-const WRAP_UP_REMAINING_SHARE = 0.25;
-const WRAP_UP_STEPS = 3;
 const CONCLUSION_TOOLS: ReadonlySet<string> = new Set(["submit_mapping", "mark_not_found"]);
-
-function createPlatformBudget(
-  outbound: OutboundClient,
-  deadlineMs: number,
-  clockMs: () => number,
-): PlatformBudget {
-  const controller = new AbortController();
-  const remainingMs = Math.max(0, deadlineMs - clockMs());
-  const timer =
-    remainingMs > 0
-      ? setTimeout(() => controller.abort(new Error(BUDGET_EXCEEDED)), remainingMs)
-      : undefined;
-  if (remainingMs <= 0) {
-    controller.abort(new Error(BUDGET_EXCEEDED));
-  }
-  const signal = controller.signal;
-  return {
-    signal,
-    expired: () => signal.aborted || clockMs() >= deadlineMs,
-    remainingMs: () => (signal.aborted ? 0 : Math.max(0, deadlineMs - clockMs())),
-    dispose: () => clearTimeout(timer),
-    outbound: {
-      fetchExternal: (request) =>
-        raceWithAbortSignal(
-          outbound.fetchExternal({
-            ...request,
-            signal: combineAbortSignals(signal, request.timeoutMs),
-          }),
-          signal,
-          BUDGET_EXCEEDED,
-        ),
-      sendEmail: (message) => outbound.sendEmail(message),
-      ...(outbound.callWebTool
-        ? {
-            callWebTool: (name, args, callerSignal) =>
-              raceWithAbortSignal(
-                outbound.callWebTool!(
-                  name,
-                  args,
-                  callerSignal ? AbortSignal.any([signal, callerSignal]) : signal,
-                ),
-                signal,
-                BUDGET_EXCEEDED,
-              ),
-          }
-        : {}),
-      invokeModel: (request) =>
-        raceWithAbortSignal(
-          outbound.invokeModel({
-            ...request,
-            signal: combineAbortSignals(signal, request.timeoutMs),
-          }),
-          signal,
-          BUDGET_EXCEEDED,
-        ),
-    },
-  };
-}
 
 class PlatformTransient extends Error {
   constructor(
@@ -703,7 +630,7 @@ interface OpenTarget {
 /** What every namespace of one job shares: the time budget and the gate checks. */
 interface JobRun {
   ctx: ExplorationExecutionContext;
-  budget: PlatformBudget;
+  budget: SessionBudget;
   passesStep1(info: CollectionInfo, segments: readonly SegmentInput[]): boolean;
   segmentMisfit(info: CollectionInfo, segments: readonly SegmentInput[]): string | null;
   baseSegments: SegmentInput[];
@@ -712,7 +639,7 @@ interface JobRun {
 function createJobRun(
   ctx: ExplorationExecutionContext,
   catalog: CatalogEvidence,
-  budget: PlatformBudget,
+  budget: SessionBudget,
 ): JobRun {
   const segmentMisfit = (info: CollectionInfo, segments: readonly SegmentInput[]) =>
     checkSegmentsFitCollection(segments, info, (season) => {
@@ -903,13 +830,6 @@ async function prepareTarget(
   return { open: target };
 }
 
-/** Totals for one agent session. */
-interface SessionUsage {
-  tokens: number;
-  /** Per routed model, for the tokens.ci report. */
-  byModel: Map<string, PiUsageBucket>;
-}
-
 /**
  * One model session for every open namespace of the job, with the open tools. Each namespace is
  * concluded by `submit_mapping` (a fetched collection only, segments inside its episodes) or
@@ -1025,190 +945,96 @@ async function runAgentSession(
       ),
     },
   ];
-  const reply = (id: string, name: string, body: unknown) =>
-    messages.push({ role: "tool", toolCallId: id, name, content: JSON.stringify(body) });
+  const conclude = async (call: ModelToolCall): Promise<unknown> => {
+    const args = call.arguments ?? {};
+    const target =
+      typeof args.namespace === "string" ? byNamespace.get(args.namespace as Namespace) : undefined;
+    if (!target || outcomes.has(target.namespace)) {
+      return {
+        ok: false,
+        error: target ? "ALREADY_CONCLUDED" : "UNKNOWN_NAMESPACE",
+        open: open().map((t) => t.namespace),
+      };
+    }
 
-  let wrappingUp = false;
-  const conclusionTools = tools.filter((t) => CONCLUSION_TOOLS.has(t.name));
-  // Searching may use the time up to the wrap-up reserve, not beyond: a slow model turn or tool
-  // batch started just before wrap-up would otherwise eat the reserve and end in a timeout.
-  const searchLeftMs = () => budget.remainingMs() - config.maxDurationMs * WRAP_UP_REMAINING_SHARE;
-  for (let step = 0; step < config.maxSteps; step += 1) {
-    if (budget.expired()) {
+    if (call.name === "mark_not_found") {
+      const reason =
+        typeof args.reason === "string" && args.reason.trim()
+          ? args.reason.trim()
+          : "no_matching_candidate";
+      outcomes.set(target.namespace, notFoundOutcome(run, target, reason));
+      return { ok: true, open: open().map((t) => t.namespace) };
+    }
+
+    const candidate =
+      typeof args.canonicalId === "string"
+        ? target.fetched.get(args.canonicalId.trim())
+        : undefined;
+    if (!candidate) {
+      return {
+        ok: false,
+        error: "UNKNOWN_CANDIDATE",
+        message: "Fetch the collection with get_collection before submitting it.",
+      };
+    }
+    const segments = parseModelSegments(args.segments, ctx.media, ctx.season);
+    const misfit = run.segmentMisfit(candidate.info, segments);
+    if (misfit) {
+      return { ok: false, error: "SEGMENTS_OUTSIDE_COLLECTION", message: misfit };
+    }
+    const result = await submitMapping(
+      run,
+      target,
+      candidate.info,
+      segments,
+      args.variantDescription,
+    );
+    if ("status" in result) {
+      outcomes.set(target.namespace, result);
+      return { ok: true, open: open().map((t) => t.namespace) };
+    }
+    return { ok: false, ...result };
+  };
+
+  const stop = await runToolSession({
+    budget,
+    config,
+    usage,
+    messages,
+    tools,
+    conclusionToolNames: CONCLUSION_TOOLS,
+    sessionId: ctx.jobId,
+    metadata: { demandId: ctx.demandId, jobId: ctx.jobId },
+    runQuery: (name, args) => runQueryTool(toolCtx, name, args),
+    wrapUpMessage: () =>
+      [
+        "The time, step or token budget is almost used up. Stop searching.",
+        `Conclude every open namespace now (${open()
+          .map((t) => t.namespace)
+          .join(", ")}): submit_mapping for a collection you already fetched and checked,`,
+        "or mark_not_found if you found no match. Only the conclusion tools are left.",
+      ].join(" "),
+    wrapUpRefusal: "No more searching: conclude with submit_mapping or mark_not_found.",
+    conclude,
+    done: () => open().length === 0,
+  });
+  // An unfinished namespace is settled as transient (the whole job runs again later) or, once
+  // the steps or tokens are spent, as not found.
+  switch (stop.kind) {
+    case "concluded":
+      return targets.map((t) => outcomes.get(t.namespace)!);
+    case "time_up":
       return settleRest((t) => transientOutcome(run, t, BUDGET_EXCEEDED));
-    }
-    if (usage.tokens >= config.maxTaskTokens) {
+    case "tokens_exhausted":
       return settleRest((t) => notFoundOutcome(run, t, "token_budget_exhausted"));
-    }
-    if (
-      !wrappingUp &&
-      (searchLeftMs() <= 0 ||
-        config.maxTaskTokens - usage.tokens <= config.maxTaskTokens * WRAP_UP_REMAINING_SHARE ||
-        config.maxSteps - step <= WRAP_UP_STEPS)
-    ) {
-      wrappingUp = true;
-      messages.push({
-        role: "user",
-        content: [
-          "The time, step or token budget is almost used up. Stop searching.",
-          `Conclude every open namespace now (${open()
-            .map((t) => t.namespace)
-            .join(", ")}): submit_mapping for a collection you already fetched and checked,`,
-          "or mark_not_found if you found no match. Only the conclusion tools are left.",
-        ].join(" "),
-      });
-    }
-    let response;
-    try {
-      response = await budget.outbound.invokeModel({
-        provider: config.provider,
-        model: config.model,
-        ...(config.gatewayId ? { gatewayId: config.gatewayId } : {}),
-        messages: [...messages],
-        tools: wrappingUp ? conclusionTools : tools,
-        temperature: config.temperature,
-        maxTokens: config.maxTokens,
-        webSearch: config.webSearch && !wrappingUp,
-        // One session per job: every turn stays on the same routed model and its prompt cache.
-        sessionId: ctx.jobId,
-        metadata: { demandId: ctx.demandId, jobId: ctx.jobId },
-        ...(wrappingUp ? {} : { timeoutMs: Math.max(1, searchLeftMs()) }),
-      });
-    } catch (error) {
-      if (!wrappingUp && !budget.expired() && searchLeftMs() <= 0) {
-        continue; // The search phase ran out mid-turn: the next step wraps up.
-      }
-      const reason = error instanceof Error ? error.message : "model_invocation_failed";
-      return settleRest((t) => transientOutcome(run, t, reason));
-    }
-    const u = response.usage;
-    usage.tokens +=
-      (u?.inputTokens ?? 0) +
-      (u?.outputTokens ?? 0) +
-      (u?.cacheReadTokens ?? 0) +
-      (u?.cacheWriteTokens ?? 0);
-    addPiUsage(usage.byModel, response);
-
-    const toolCalls = response.toolCalls ?? [];
-    messages.push({
-      role: "assistant",
-      content: response.text ?? response.content ?? "",
-      ...(toolCalls.length > 0 ? { toolCalls } : {}),
-    });
-    if (toolCalls.length === 0) {
+    case "steps_exhausted":
+      return settleRest((t) => notFoundOutcome(run, t, "max_steps_exhausted"));
+    case "no_decision":
       // A model that stops without deciding is a failed run, not evidence of absence.
       return settleRest((t) => transientOutcome(run, t, "model_finished_without_decision"));
-    }
-
-    // Query tools of one turn run side by side, bounded by the search phase; conclusions below
-    // stay in call order.
-    const searchSignal = AbortSignal.any([
-      budget.signal,
-      AbortSignal.timeout(Math.max(1, searchLeftMs())),
-    ]);
-    const queryResults = new Map(
-      wrappingUp
-        ? []
-        : toolCalls
-            .filter((call) => QUERY_TOOL_NAMES.has(call.name))
-            .map((call) => [
-              call.id,
-              raceWithAbortSignal(
-                runQueryTool(toolCtx, call.name, call.arguments ?? {}),
-                searchSignal,
-                BUDGET_EXCEEDED,
-              ).catch(() => ({ error: "TIME_UP", message: "No time left for searching." })),
-            ]),
-    );
-
-    for (const call of toolCalls) {
-      const args = call.arguments ?? {};
-      if (wrappingUp && !CONCLUSION_TOOLS.has(call.name)) {
-        reply(call.id, call.name, {
-          ok: false,
-          error: "WRAP_UP",
-          message: "No more searching: conclude with submit_mapping or mark_not_found.",
-        });
-        continue;
-      }
-      const pending = queryResults.get(call.id);
-      if (pending) {
-        // Catalog tools use ctx.tmdbGateway, built on the unbudgeted client: the race above still
-        // ends a stalled call.
-        reply(call.id, call.name, await pending);
-        if (budget.expired()) {
-          return settleRest((t) => transientOutcome(run, t, BUDGET_EXCEEDED));
-        }
-        continue;
-      }
-      if (call.name !== "submit_mapping" && call.name !== "mark_not_found") {
-        reply(call.id, call.name, { ok: false, error: "UNKNOWN_TOOL" });
-        continue;
-      }
-      const target =
-        typeof args.namespace === "string"
-          ? byNamespace.get(args.namespace as Namespace)
-          : undefined;
-      if (!target || outcomes.has(target.namespace)) {
-        reply(call.id, call.name, {
-          ok: false,
-          error: target ? "ALREADY_CONCLUDED" : "UNKNOWN_NAMESPACE",
-          open: open().map((t) => t.namespace),
-        });
-        continue;
-      }
-
-      if (call.name === "mark_not_found") {
-        const reason =
-          typeof args.reason === "string" && args.reason.trim()
-            ? args.reason.trim()
-            : "no_matching_candidate";
-        outcomes.set(target.namespace, notFoundOutcome(run, target, reason));
-        reply(call.id, call.name, { ok: true, open: open().map((t) => t.namespace) });
-        continue;
-      }
-
-      const candidate =
-        typeof args.canonicalId === "string"
-          ? target.fetched.get(args.canonicalId.trim())
-          : undefined;
-      if (!candidate) {
-        reply(call.id, call.name, {
-          ok: false,
-          error: "UNKNOWN_CANDIDATE",
-          message: "Fetch the collection with get_collection before submitting it.",
-        });
-        continue;
-      }
-      const segments = parseModelSegments(args.segments, ctx.media, ctx.season);
-      const misfit = run.segmentMisfit(candidate.info, segments);
-      if (misfit) {
-        reply(call.id, call.name, {
-          ok: false,
-          error: "SEGMENTS_OUTSIDE_COLLECTION",
-          message: misfit,
-        });
-        continue;
-      }
-      const result = await submitMapping(
-        run,
-        target,
-        candidate.info,
-        segments,
-        args.variantDescription,
-      );
-      if ("status" in result) {
-        outcomes.set(target.namespace, result);
-        reply(call.id, call.name, { ok: true, open: open().map((t) => t.namespace) });
-      } else {
-        reply(call.id, call.name, { ok: false, ...result });
-      }
-    }
-    if (open().length === 0) {
-      return targets.map((t) => outcomes.get(t.namespace)!);
-    }
+    case "model_error":
+      return settleRest((t) => transientOutcome(run, t, stop.reason));
   }
-  return settleRest((t) => notFoundOutcome(run, t, "max_steps_exhausted"));
 }
 
 /**
@@ -1389,7 +1215,7 @@ export function createExplorationAgentExecutor(
         )
       : null;
 
-    const budget = createPlatformBudget(ctx.outbound, clockMs() + config.maxDurationMs, clockMs);
+    const budget = createSessionBudget(ctx.outbound, clockMs() + config.maxDurationMs, clockMs);
     try {
       const run = createJobRun(ctx, catalog, budget);
       const open: OpenTarget[] = [];
