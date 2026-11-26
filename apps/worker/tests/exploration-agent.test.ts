@@ -723,6 +723,35 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(checks).toHaveLength(platformCount);
   });
 
+  test("a slow search cannot eat the wrap-up reserve: it is cut off and the session concludes", async () => {
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      if (request.tools?.some((t) => t.name === "web_search")) {
+        return {
+          content: null,
+          toolCalls: [{ id: "call_w", name: "web_search", arguments: { query: "x" } }],
+          model: "test-model",
+        };
+      }
+      return markAllNotFound(request);
+    };
+    const slowSearch = () => new Promise<string>((r) => setTimeout(() => r("late"), 3000));
+    const { testDb, outbound, explore } = await setup(
+      { kan360Rows: [] },
+      invokeModel,
+      { maxDurationMs: 2000 },
+      slowSearch as unknown as (name: string, args: Record<string, unknown>) => string,
+    );
+
+    await explore();
+
+    const last = outbound.modelRequests.at(-1)!;
+    expect(last.tools?.map((t) => t.name)).toEqual(["submit_mapping", "mark_not_found"]);
+    const timedOut = last.messages.find((m) => m.role === "tool")!;
+    expect(JSON.parse(timedOut.content)).toMatchObject({ error: "TIME_UP" });
+    const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
+    expect(checks).toHaveLength(platformCount);
+  });
+
   test("a session over its token budget stops and backs off instead of looping", async () => {
     const search = (): ModelInvocationResponse => ({
       content: null,
