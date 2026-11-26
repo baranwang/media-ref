@@ -988,6 +988,31 @@ describe("review agent: reject with correction (#76)", () => {
     expect(await leads(ctx)).toEqual([]);
   });
 
+  test("灵笼: a correction mapping the same catalog episodes twice cannot be resubmitted, so the request stays with a human", async () => {
+    // Positions 1–6 and 8–13 fit the collection without overlap, but TMDB 1–6 appears twice.
+    const ctx = track(
+      await setup(
+        correctsLinglong([
+          { season: 1, episodeStart: 1, episodeEnd: 6, targetEpisodeStart: 1 },
+          { season: 1, episodeStart: 1, episodeEnd: 6, targetEpisodeStart: 8 },
+        ]),
+      ),
+    );
+    const id = await ctx.submit("ss28888", { segments: linglongWholeSeason });
+
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("needs_review");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "keep_for_human",
+      fallback: expect.stringMatching(
+        /^correction_invalid_segments: .*OVERLAPPING_VARIANT_SEGMENTS/,
+      ),
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
   test("灵笼 split in two: a segment-only correction reaches exploration, whose fast path resubmits with the corrected segments", async () => {
     // ss28889 holds only TMDB season 1 episodes 7–12; the submission mapped the whole season.
     const wholeSeason: SegmentInput[] = [
@@ -1065,7 +1090,13 @@ describe("review agent: reject with correction (#76)", () => {
       })
       .returning("id")
       .executeTakeFirstOrThrow();
-    const id = await ctx.submit("ss28889", { segments: wholeSeason, demandId: demand.id });
+    // A dub: the correction must not turn it into the default original-audio variant.
+    const id = await ctx.submit("ss28889", {
+      segments: wholeSeason,
+      demandId: demand.id,
+      variantDescription: "国语配音",
+      setDefaultVariant: false,
+    });
 
     await ctx.tick(); // evidence_check
     await ctx.tick(); // review_agent
@@ -1090,6 +1121,8 @@ describe("review agent: reject with correction (#76)", () => {
         native_id: "ss28889",
         submitter_user_id: EXPLORATION_AGENT_USER_ID,
         segments: [expect.objectContaining(secondHalf)],
+        variant_description: "国语配音",
+        set_default_variant: false,
       }),
     ]);
   });

@@ -359,6 +359,8 @@ interface FetchedCandidate {
   sources: string[];
   /** Segments a review agent correction gave for this collection (its lead). */
   suggestedSegments?: SegmentInput[];
+  /** The corrected request's variant (e.g. a dub), resubmitted with those segments. */
+  suggestedVariantDescription?: string | null;
 }
 
 function toDiscoveryInput(
@@ -487,6 +489,7 @@ function summarizeCandidate(run: JobRun, candidate: FetchedCandidate) {
               targetEpisodeStart: s.targetEpisodeStart,
             })),
             passesAutomaticCheck: run.passesStep1(info, suggestedSegments),
+            variantDescription: candidate.suggestedVariantDescription ?? null,
           },
         }
       : {}),
@@ -800,7 +803,10 @@ async function prepareTarget(
 
   // Candidate IDs: discovery plus client leads (untrusted, but they still go through fetch).
   const sourcesById = new Map(candidates.sourcesById);
-  const suggestedById = new Map<string, SegmentInput[]>();
+  const suggestedById = new Map<
+    string,
+    { segments: SegmentInput[]; variantDescription: string | null }
+  >();
   const leads = await loadLeadsContext(ctx.db, ctx.media, namespace, ctx.season);
   for (const lead of leads) {
     try {
@@ -809,10 +815,10 @@ async function prepareTarget(
       // Leads come newest first: the latest correction wins.
       if (lead.segments && ctx.media.baseline && !suggestedById.has(id)) {
         const baseline = ctx.media.baseline;
-        suggestedById.set(
-          id,
-          lead.segments.map((s) => ({ ...s, baseline })),
-        );
+        suggestedById.set(id, {
+          segments: lead.segments.map((s) => ({ ...s, baseline })),
+          variantDescription: lead.variantDescription,
+        });
       }
     } catch {
       // An unusable lead is just skipped.
@@ -826,11 +832,16 @@ async function prepareTarget(
     try {
       const evidence = await adapter.fetchCollection(id, budget.outbound);
       if (evidence.status === "found") {
-        const suggestedSegments = suggestedById.get(id);
+        const suggested = suggestedById.get(id);
         target.fetched.set(evidence.info.canonicalId, {
           info: evidence.info,
           sources,
-          ...(suggestedSegments ? { suggestedSegments } : {}),
+          ...(suggested
+            ? {
+                suggestedSegments: suggested.segments,
+                suggestedVariantDescription: suggested.variantDescription,
+              }
+            : {}),
         });
       } else if (evidence.status === "transient_error") {
         target.transient = new PlatformTransient(evidence.reason, evidence.retryAfterMs);
@@ -857,7 +868,7 @@ async function prepareTarget(
       target,
       passing[0]!.info,
       mapping(passing[0]!),
-      undefined,
+      passing[0]!.suggestedVariantDescription ?? undefined,
     );
     if ("status" in result) {
       return { outcome: result };

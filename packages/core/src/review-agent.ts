@@ -16,7 +16,11 @@
  *   reasons go into `evidence.reviewAgent`.
  */
 
-import { getNamespaceGroup, type NormalizedSegment } from "@media-ref/client";
+import {
+  getNamespaceGroup,
+  validateVariantSegments,
+  type NormalizedSegment,
+} from "@media-ref/client";
 import type { Database, Db, JsonObject } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import { createDefaultAdapterRegistry, type AdapterRegistry } from "./adapters/index.ts";
@@ -807,6 +811,11 @@ function correctionBlocker(
     nonLinear: false,
     needsReview: false,
   }));
+  // Exploration resubmits the correction through createChangeRequest: it must pass the same check.
+  const valid = validateVariantSegments([segments], { baseline });
+  if (!valid.valid) {
+    return `correction_invalid_segments: ${[...new Set(valid.errors.map((e) => e.code))].join(", ")}`;
+  }
   // Step 1 on the correction: only an episode count may differ, never the collection's identity.
   const step1 = evaluateEvidenceGateStep1(catalog, collection, { segments });
   const identity = step1.conflicts.filter((c) => !EPISODE_COUNT_CONFLICT_CODES.has(c.code));

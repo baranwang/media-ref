@@ -738,7 +738,11 @@ describe("Exploration agent: discover → judge → gate", () => {
       expect.objectContaining({
         canonicalId: "ss34430",
         passesAutomaticCheckWithDefaultMapping: true,
-        suggestedMapping: { segments: [suggested], passesAutomaticCheck: false },
+        suggestedMapping: {
+          segments: [suggested],
+          passesAutomaticCheck: false,
+          variantDescription: null,
+        },
       }),
     ]);
     expect(await testDb.readDb.selectFrom("change_requests").select("id").execute()).toEqual([]);
