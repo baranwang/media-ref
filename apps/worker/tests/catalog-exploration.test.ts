@@ -77,8 +77,11 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
       startYear: 1999,
     });
   }
-  if (url.hostname === "api.douban.com" && url.pathname === "/v2/movie/imdb/tt0137523") {
-    return json(request.url, { id: "https://api.douban.com/movie/1292000" });
+  if (url.hostname === "frodo.douban.com" && url.pathname === "/api/v2/search/weixin") {
+    return json(request.url, { items: [{ target: { id: "1292000" } }] });
+  }
+  if (url.hostname === "frodo.douban.com" && url.pathname === "/api/v2/subject/1292000/desc") {
+    return json(request.url, { html: "<tr> <td>IMDb</td> <td>tt0137523</td> </tr>" });
   }
   if (url.hostname === "frodo.douban.com" && url.pathname.endsWith("/subject/1292000")) {
     return json(request.url, {

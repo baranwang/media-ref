@@ -1,9 +1,8 @@
 import type { ExternalHttpRequest, ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 
 /**
- * Douban access, the way douban-bridge does it: the WeChat mini program API (frodo) for subjects,
- * and `api.douban.com/v2/movie/imdb` for IMDb lookups. That endpoint rejects the frodo key
- * (code 104), so it keeps its own public key below. Tests set the delays to 0.
+ * Douban access through the WeChat mini program API (frodo), the way douban-bridge does it.
+ * Tests set the delays to 0.
  *
  * Douban answers bursts with HTTP 400 (frodo after ~19 quick requests from one IP), so every
  * Douban request in this isolate waits for its slot, and a 400/403/429 is retried once.
@@ -21,17 +20,11 @@ export const DOUBAN_API: {
 };
 
 export const DOUBAN_FRODO_BASE_URL = "https://frodo.douban.com/api/v2";
-const DOUBAN_IMDB_API = "https://api.douban.com/v2/movie/imdb";
-// Public key the Douban mobile web client ships with; accepted by the IMDb lookup endpoint.
-const DOUBAN_IMDB_LOOKUP_KEY = "0ac44ae016490db2204ce0a042db2916";
 const MINI_PROGRAM_HEADERS = {
   referer: "https://servicewechat.com/wx2f9b06c1de1ccfca/99/page-frame.html",
   "user-agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) NetType/WIFI MiniProgramEnv/Mac MacWechat/WMPF MacWechat/3.8.7(0x13080712) UnifiedPCMacWechat(0xf264101d) XWEB/16390",
 };
-
-const MOBILE_UA =
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
 const RATE_LIMIT_STATUSES = new Set([400, 403, 429]);
 let nextSlotMs = 0;
@@ -84,20 +77,7 @@ export function fetchDoubanFrodo(
   });
 }
 
-/** POST the IMDb lookup (`tt…` → `{ id: "https://api.douban.com/movie/<subject>" }`). */
-export function fetchDoubanImdbLookup(
-  outbound: OutboundClient,
-  imdbId: string,
-  options: { kind: ExternalHttpRequest["kind"]; timeoutMs?: number },
-): Promise<ExternalHttpResponse> {
-  return fetchDoubanPaced(outbound, {
-    kind: options.kind,
-    namespace: "douban",
-    url: `${DOUBAN_IMDB_API}/${encodeURIComponent(imdbId)}`,
-    method: "POST",
-    // This endpoint answers 403 to the mini program referer; a plain mobile UA works.
-    headers: { "content-type": "application/json", "user-agent": MOBILE_UA },
-    body: JSON.stringify({ apikey: DOUBAN_IMDB_LOOKUP_KEY }),
-    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-  });
+/** The IMDb ID a Douban subject lists in its info table (frodo `/subject/<id>/desc` HTML). */
+export function parseDoubanDescImdbId(html: string): string | null {
+  return html.match(/<td>\s*IMDb\s*<\/td>\s*<td>\s*(tt\d+)\s*<\/td>/i)?.[1] ?? null;
 }

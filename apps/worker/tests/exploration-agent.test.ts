@@ -134,8 +134,8 @@ function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
         },
       });
     }
-    if (url.hostname === "api.douban.com") {
-      return jsonResponse(request.url, { msg: "movie_not_found", code: 5000 });
+    if (url.hostname === "frodo.douban.com" && url.pathname === "/api/v2/search/weixin") {
+      return jsonResponse(request.url, { items: [] });
     }
     if (url.hostname === "search.video.iqiyi.com") {
       if (failIqiyiSearch) {

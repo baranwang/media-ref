@@ -8,7 +8,7 @@ import {
   type PlatformAdapter,
   type Tier3Adapter,
 } from "../adapters/types.ts";
-import { fetchDoubanFrodo, fetchDoubanImdbLookup } from "../adapters/douban-api.ts";
+import { fetchDoubanFrodo, parseDoubanDescImdbId } from "../adapters/douban-api.ts";
 import { youkuAdapter } from "../adapters/youku.ts";
 import { normalizeTitleForComparison } from "../evidence-gate.ts";
 import type { ExternalHttpRequest, ExternalHttpResponse, OutboundClient } from "../outbound.ts";
@@ -85,6 +85,8 @@ export const DEFAULT_DISCOVERY_TIMEOUT_MS = 10_000;
 
 const KAN360_INDEX_API = "https://api.so.360kan.com/index";
 const MAX_360KAN_ROWS = 6;
+/** frodo search hits checked against their desc HTML when resolving an IMDb ID. */
+const DOUBAN_IMDB_CANDIDATES = 3;
 
 // Workers keep at most 6 connections open; timeouts start at call time, so queue here instead.
 const MAX_CONCURRENT_RESOLVES = 4;
@@ -391,25 +393,43 @@ async function fetchDoubanVendors(
 }
 
 /**
- * Douban subject ID for an IMDb ID (`tt…`), or null when Douban does not know it.
+ * Douban subject ID for an IMDb ID (`tt…`), or null when Douban does not know it. frodo search
+ * finds candidates by the IMDb ID; a candidate counts only when its own info table (desc HTML)
+ * lists exactly that IMDb ID, so search ranking never decides.
  * Throws on request failures and unexpected payloads, which mean "unknown", not "absent".
  */
 export async function lookupDoubanSubjectByImdb(
   imdbId: string,
   outbound: OutboundClient,
 ): Promise<string | null> {
-  const lookup = asRecord(
-    parseJsonResponse(await fetchDoubanImdbLookup(outbound, imdbId, { kind: "platform" }), [404]),
+  const search = asRecord(
+    parseJsonResponse(
+      await fetchDoubanFrodo(
+        outbound,
+        `/search/weixin?q=${encodeURIComponent(imdbId)}&start=0&count=${DOUBAN_IMDB_CANDIDATES}`,
+        { kind: "platform" },
+      ),
+    ),
   );
-  // Unknown IMDb IDs come back as HTTP 200 `{"msg":"movie_not_found","code":5000}` (or a 404).
-  const idMatch = stringOrNull(lookup?.id)?.match(/\/(\d+)\/?$/);
-  if (idMatch) {
-    return idMatch[1]!;
+  if (!search || !Array.isArray(search.items)) {
+    throw new Error("unexpected_douban_search_payload");
   }
-  if (lookup === null || lookup.code === 5000 || lookup.msg === "movie_not_found") {
-    return null;
+  const ids = search.items
+    .map((item) => stringOrNull(asRecord(asRecord(item)?.target)?.id))
+    .filter((id): id is string => id !== null && /^\d+$/.test(id))
+    .slice(0, DOUBAN_IMDB_CANDIDATES);
+  for (const id of ids) {
+    const desc = asRecord(
+      parseJsonResponse(
+        await fetchDoubanFrodo(outbound, `/subject/${id}/desc`, { kind: "platform" }),
+        [404],
+      ),
+    );
+    if (parseDoubanDescImdbId(stringOrNull(desc?.html) ?? "") === imdbId) {
+      return id;
+    }
   }
-  throw new Error("unexpected_imdb_lookup_payload");
+  return null;
 }
 
 async function fetchIqiyiSearch(
