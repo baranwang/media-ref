@@ -20,14 +20,14 @@ const demandPagesQuery = infiniteQueryOptions({
   staleTime: 60_000,
 });
 
-export const Route = createFileRoute("/contribute")({
+export const Route = createFileRoute("/wanted")({
   loader: ({ context }) => context.queryClient.ensureInfiniteQueryData(demandPagesQuery),
-  component: ContributeQueuePage,
+  component: WantedPage,
 });
 
 type DemandTab = "all" | "tv" | "movie";
 
-function ContributeQueuePage() {
+function WantedPage() {
   const [tab, setTab] = useState<DemandTab>("all");
   const { data, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useSuspenseInfiniteQuery(demandPagesQuery);

@@ -10,13 +10,13 @@
 
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
-import { Route as AgentRouteImport } from "./routes/agent";
 import { Route as ApiKeysRouteImport } from "./routes/api-keys";
-import { Route as ContributeRouteImport } from "./routes/contribute";
+import { Route as ExplorationRouteImport } from "./routes/exploration";
 import { Route as LoginRouteImport } from "./routes/login";
 import { Route as ReviewRouteImport } from "./routes/review";
 import { Route as SignupRouteImport } from "./routes/signup";
 import { Route as VerifyEmailRouteImport } from "./routes/verify-email";
+import { Route as WantedRouteImport } from "./routes/wanted";
 import { Route as ChangeRequestsIndexRouteImport } from "./routes/change-requests.index";
 import { Route as ChangeRequestsIdRouteImport } from "./routes/change-requests.$id";
 import { Route as DiscoverCatalogRouteImport } from "./routes/discover.$catalog";
@@ -28,19 +28,14 @@ const IndexRoute = IndexRouteImport.update({
   path: "/",
   getParentRoute: () => rootRouteImport,
 } as any);
-const AgentRoute = AgentRouteImport.update({
-  id: "/agent",
-  path: "/agent",
-  getParentRoute: () => rootRouteImport,
-} as any);
 const ApiKeysRoute = ApiKeysRouteImport.update({
   id: "/api-keys",
   path: "/api-keys",
   getParentRoute: () => rootRouteImport,
 } as any);
-const ContributeRoute = ContributeRouteImport.update({
-  id: "/contribute",
-  path: "/contribute",
+const ExplorationRoute = ExplorationRouteImport.update({
+  id: "/exploration",
+  path: "/exploration",
   getParentRoute: () => rootRouteImport,
 } as any);
 const LoginRoute = LoginRouteImport.update({
@@ -61,6 +56,11 @@ const SignupRoute = SignupRouteImport.update({
 const VerifyEmailRoute = VerifyEmailRouteImport.update({
   id: "/verify-email",
   path: "/verify-email",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const WantedRoute = WantedRouteImport.update({
+  id: "/wanted",
+  path: "/wanted",
   getParentRoute: () => rootRouteImport,
 } as any);
 const ChangeRequestsIndexRoute = ChangeRequestsIndexRouteImport.update({
@@ -91,13 +91,13 @@ const MediaMediaIdRoute = MediaMediaIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
-  "/agent": typeof AgentRoute;
   "/api-keys": typeof ApiKeysRoute;
-  "/contribute": typeof ContributeRoute;
+  "/exploration": typeof ExplorationRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
+  "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/img/douban": typeof ImgDoubanRoute;
@@ -106,13 +106,13 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
-  "/agent": typeof AgentRoute;
   "/api-keys": typeof ApiKeysRoute;
-  "/contribute": typeof ContributeRoute;
+  "/exploration": typeof ExplorationRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
+  "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/img/douban": typeof ImgDoubanRoute;
@@ -122,13 +122,13 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
-  "/agent": typeof AgentRoute;
   "/api-keys": typeof ApiKeysRoute;
-  "/contribute": typeof ContributeRoute;
+  "/exploration": typeof ExplorationRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
+  "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/img/douban": typeof ImgDoubanRoute;
@@ -139,13 +139,13 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
   fullPaths:
     | "/"
-    | "/agent"
     | "/api-keys"
-    | "/contribute"
+    | "/exploration"
     | "/login"
     | "/review"
     | "/signup"
     | "/verify-email"
+    | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/img/douban"
@@ -154,13 +154,13 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo;
   to:
     | "/"
-    | "/agent"
     | "/api-keys"
-    | "/contribute"
+    | "/exploration"
     | "/login"
     | "/review"
     | "/signup"
     | "/verify-email"
+    | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/img/douban"
@@ -169,13 +169,13 @@ export interface FileRouteTypes {
   id:
     | "__root__"
     | "/"
-    | "/agent"
     | "/api-keys"
-    | "/contribute"
+    | "/exploration"
     | "/login"
     | "/review"
     | "/signup"
     | "/verify-email"
+    | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/img/douban"
@@ -185,13 +185,13 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
-  AgentRoute: typeof AgentRoute;
   ApiKeysRoute: typeof ApiKeysRoute;
-  ContributeRoute: typeof ContributeRoute;
+  ExplorationRoute: typeof ExplorationRoute;
   LoginRoute: typeof LoginRoute;
   ReviewRoute: typeof ReviewRoute;
   SignupRoute: typeof SignupRoute;
   VerifyEmailRoute: typeof VerifyEmailRoute;
+  WantedRoute: typeof WantedRoute;
   ChangeRequestsIdRoute: typeof ChangeRequestsIdRoute;
   DiscoverCatalogRoute: typeof DiscoverCatalogRoute;
   ImgDoubanRoute: typeof ImgDoubanRoute;
@@ -208,13 +208,6 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof IndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
-    "/agent": {
-      id: "/agent";
-      path: "/agent";
-      fullPath: "/agent";
-      preLoaderRoute: typeof AgentRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
     "/api-keys": {
       id: "/api-keys";
       path: "/api-keys";
@@ -222,11 +215,11 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof ApiKeysRouteImport;
       parentRoute: typeof rootRouteImport;
     };
-    "/contribute": {
-      id: "/contribute";
-      path: "/contribute";
-      fullPath: "/contribute";
-      preLoaderRoute: typeof ContributeRouteImport;
+    "/exploration": {
+      id: "/exploration";
+      path: "/exploration";
+      fullPath: "/exploration";
+      preLoaderRoute: typeof ExplorationRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/login": {
@@ -255,6 +248,13 @@ declare module "@tanstack/react-router" {
       path: "/verify-email";
       fullPath: "/verify-email";
       preLoaderRoute: typeof VerifyEmailRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/wanted": {
+      id: "/wanted";
+      path: "/wanted";
+      fullPath: "/wanted";
+      preLoaderRoute: typeof WantedRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/change-requests/": {
@@ -297,13 +297,13 @@ declare module "@tanstack/react-router" {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AgentRoute: AgentRoute,
   ApiKeysRoute: ApiKeysRoute,
-  ContributeRoute: ContributeRoute,
+  ExplorationRoute: ExplorationRoute,
   LoginRoute: LoginRoute,
   ReviewRoute: ReviewRoute,
   SignupRoute: SignupRoute,
   VerifyEmailRoute: VerifyEmailRoute,
+  WantedRoute: WantedRoute,
   ChangeRequestsIdRoute: ChangeRequestsIdRoute,
   DiscoverCatalogRoute: DiscoverCatalogRoute,
   ImgDoubanRoute: ImgDoubanRoute,

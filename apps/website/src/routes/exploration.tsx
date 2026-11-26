@@ -33,10 +33,10 @@ const activityQuery = (filter: ExplorationFilter) =>
     refetchInterval: REFRESH_MS,
   });
 
-export const Route = createFileRoute("/agent")({
+export const Route = createFileRoute("/exploration")({
   loader: ({ context }) => context.queryClient.ensureInfiniteQueryData(activityQuery("all")),
   head: () => ({ meta: [{ title: "探索动态 · MediaRef" }] }),
-  component: AgentActivityPage,
+  component: ExplorationPage,
 });
 
 const STATUS_BADGE: Record<
@@ -294,7 +294,7 @@ function ActivityRow({
   );
 }
 
-function AgentActivityPage() {
+function ExplorationPage() {
   const [filter, setFilter] = useState<ExplorationFilter>("all");
   const now = useNow();
   const { user } = useAppStore();
