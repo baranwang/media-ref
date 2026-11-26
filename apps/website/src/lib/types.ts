@@ -147,6 +147,8 @@ export interface ChangeRequestItem {
   segments: ChangeRequestSegmentView[];
   conflictReason: string | null;
   decisionReason: string | null;
+  /** Null when the evidence gate approved it automatically. */
+  reviewerUserId: string | null;
   submitterUserId: string;
   createdAt: string;
   reviewedAt: string | null;
