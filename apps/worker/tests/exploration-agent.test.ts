@@ -100,6 +100,19 @@ interface StubOptions {
 function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     const url = new URL(request.url);
+    const tmdbSeason = url.pathname.match(/\/tv\/95479\/season\/(\d+)$/);
+    if (request.namespace === "tmdb" && tmdbSeason) {
+      // Season 2's episode list is down: the tool falls back to count and year.
+      return tmdbSeason[1] === "2"
+        ? jsonResponse(request.url, {}, 500)
+        : jsonResponse(request.url, {
+            season_number: Number(tmdbSeason[1]),
+            episodes: [
+              { episode_number: 1, name: "两面宿傩", air_date: "2020-10-03" },
+              { episode_number: 2, name: "为了自己", air_date: null },
+            ],
+          });
+    }
     if (request.namespace === "tmdb" && request.url.includes("/tv/95479")) {
       return jsonResponse(request.url, {
         id: 95479,
@@ -580,6 +593,14 @@ describe("Exploration agent: discover → judge → gate", () => {
       featureEpisodeCount: 24,
       passesAutomaticCheckWithDefaultMapping: true,
     });
+    // Position, both titles, air date and duration, so extras mixed into the list stand out.
+    expect((fetched.episodes as unknown[])[0]).toEqual({
+      index: 1,
+      title: "1",
+      longTitle: "第1话",
+      airDate: null,
+      durationSeconds: 1435,
+    });
     const crs = await testDb.readDb.selectFrom("change_requests").select("native_id").execute();
     expect(crs).toEqual([{ native_id: "ss34430" }]);
     // Session tokens land in today's budget row.
@@ -633,6 +654,47 @@ describe("Exploration agent: discover → judge → gate", () => {
         },
       ],
     });
+  });
+
+  test("get_catalog_season lists each catalog episode, season 0 too; without the list, count and year only", async () => {
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      if (request.messages.some((m) => m.role === "assistant")) {
+        return markAllNotFound(request);
+      }
+      return {
+        content: null,
+        toolCalls: [0, 1, 2].map((season) => ({
+          id: `call_s${season}`,
+          name: "get_catalog_season",
+          arguments: { season },
+        })),
+        model: "test-model",
+      };
+    };
+    const { testDb, mediaId, outbound, explore } = await setup({ kan360Rows: [] }, invokeModel);
+    await testDb.writeDb
+      .updateTable("media")
+      .set({
+        seasons: JSON.stringify([
+          { season: 0, episodeCount: 2, airYear: 2021 },
+          { season: 1, episodeCount: 24, airYear: 2020 },
+          { season: 2, episodeCount: 23, airYear: 2023 },
+        ]),
+      })
+      .where("id", "=", mediaId)
+      .execute();
+
+    await explore();
+
+    const replies = outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool");
+    const [special, first, second] = replies.map((m) => JSON.parse(m.content) as unknown);
+    const episodes = [
+      { episode: 1, title: "两面宿傩", airDate: "2020-10-03" },
+      { episode: 2, title: "为了自己", airDate: null },
+    ];
+    expect(special).toEqual({ season: 0, episodeCount: 2, airYear: 2021, episodes });
+    expect(first).toEqual({ season: 1, episodeCount: 24, airYear: 2020, episodes });
+    expect(second).toEqual({ season: 2, episodeCount: 23, airYear: 2023 });
   });
 
   test("web tools reach the agent through the session budget when the transport has them", async () => {
