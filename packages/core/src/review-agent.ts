@@ -772,7 +772,8 @@ function correctionBlocker(
 /**
  * Rejects with the correction (ADR 0003 §4), in the job's transaction: the rejection says what was
  * wrong and the correction, a lead hands the correction to the exploration agent, and the
- * corrected season's demand is explorable now (the request's own demand reopens without backoff).
+ * corrected season's demand is explorable now (the request's own demand reopens without backoff
+ * only when the correction keeps its season).
  */
 async function rejectWithCorrectionInTx(
   trx: Transaction<Database>,
@@ -789,7 +790,9 @@ async function rejectWithCorrectionInTx(
       reviewerUserId: REVIEW_AGENT_USER_ID,
       reason,
       evidence,
-      corrected: true,
+      // Only a correction within the request's own seasons answers its demand; one to another
+      // season leaves that demand a normal not-found round.
+      corrected: cr.segments.some((s) => s.season === correction.season),
       now,
     });
   } catch (error) {

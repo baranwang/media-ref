@@ -858,7 +858,7 @@ describe("review agent: reject with correction (#76)", () => {
     expect(await leads(ctx)).toHaveLength(1);
   });
 
-  test("an exploration submission's demand reopens without backoff, and exploration resubmits from the lead", async () => {
+  test("a correction to another season: the submission's own demand backs off, the corrected season is explorable now, and exploration resubmits from the lead", async () => {
     // The exploration agent marks every platform it has no candidate for as not found.
     const model: ScriptedModel = (request) => {
       const tool = request.tools?.find((t) => t.name === "mark_not_found");
@@ -934,12 +934,13 @@ describe("review agent: reject with correction (#76)", () => {
 
     expect((await ctx.changeRequest(id)).status).toBe("rejected");
     expect(await demands(ctx)).toEqual([
+      // Season 6 was not corrected, only abandoned: its second not-found round, 3 days.
       expect.objectContaining({
         id: demand.id,
         season: 6,
         status: "open",
-        not_found_count: 1,
-        next_eligible_at: T0,
+        not_found_count: 2,
+        next_eligible_at: new Date(T0.getTime() + 259_200_000),
       }),
       expect.objectContaining({
         media_id: media.id,
