@@ -1,5 +1,6 @@
 import type { MediaType } from "@media-ref/client";
 import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
+import { selectBroadcastEpisodes } from "./variety.ts";
 import {
   AdapterTransientError,
   InvalidNativeIdError,
@@ -649,7 +650,8 @@ export const youkuAdapter: Tier2Adapter<"youku"> = {
     const episodeLast = parsePositiveInt(extra.episodeLast);
 
     const anthology = extractAnthologyEpisodes(extracted.data);
-    const featureCount = anthology.featureEpisodes.length;
+    const featureEpisodes = selectBroadcastEpisodes(anthology.featureEpisodes);
+    const featureCount = featureEpisodes.length;
 
     const isTruncated =
       anthology.hasMore ||
@@ -674,7 +676,7 @@ export const youkuAdapter: Tier2Adapter<"youku"> = {
         year,
         mediaType,
         featureEpisodeCount,
-        featureEpisodes: anthology.featureEpisodes,
+        featureEpisodes,
       },
     };
   },

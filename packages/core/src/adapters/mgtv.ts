@@ -1,5 +1,6 @@
 import type { MediaType } from "@media-ref/client";
 import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
+import { selectBroadcastEpisodes } from "./variety.ts";
 import {
   InvalidNativeIdError,
   type CollectionEvidenceResult,
@@ -508,7 +509,8 @@ export const mgtvAdapter: Tier2Adapter<"mgtv"> = {
 
     const mediaType = videoInfo?.mediaType ?? mapMgtvMediaType(listInfoType, null);
     const year = videoInfo?.year ?? null;
-    const featureEpisodeCount = featureEpisodes.length > 0 ? featureEpisodes.length : null;
+    const broadcast = selectBroadcastEpisodes(featureEpisodes);
+    const featureEpisodeCount = broadcast.length > 0 ? broadcast.length : null;
 
     return {
       status: "found",
@@ -520,7 +522,7 @@ export const mgtvAdapter: Tier2Adapter<"mgtv"> = {
         year,
         mediaType,
         featureEpisodeCount,
-        featureEpisodes,
+        featureEpisodes: broadcast,
       },
     };
   },

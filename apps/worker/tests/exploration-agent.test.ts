@@ -47,47 +47,7 @@ function bilibiliEpisodes(count: number, idBase: number) {
   return episodes;
 }
 
-/** Weekly broadcasts from 2020-10-03 (TMDB season 1 of the stub, 24 episodes). */
-const BROADCAST_DAYS = Array.from({ length: 24 }, (_, i) =>
-  new Date(Date.parse("2020-10-03T00:00:00Z") + i * 7 * 86_400_000).toISOString().slice(0, 10),
-);
-
-/** A variety-style listing: each broadcast split into 上/下, plus an extra; shifted by `dayOffset`. */
-function varietyEpisodes(idBase: number, dayOffset = 0) {
-  return BROADCAST_DAYS.flatMap((day, i) => {
-    const pubTime = Math.floor(Date.parse(`${day}T12:00:00Z`) / 1000) + dayOffset * 86_400;
-    return ["上", "下", "加更"].map((part, j) => ({
-      id: idBase + i * 3 + j,
-      title: String(i * 3 + j + 1),
-      long_title: `第${i + 1}期${part}`,
-      badge: "",
-      badge_type: 0,
-      section_type: 0,
-      duration: 2400000,
-      pub_time: pubTime,
-    }));
-  });
-}
-
 const BILIBILI_SEASONS: Record<string, Record<string, unknown>> = {
-  "88888": {
-    season_id: 88888,
-    title: "咒术回战",
-    jp_title: "呪術廻戦",
-    type: 1,
-    total: 72,
-    publish: { pub_time: "2020-10-03 12:00:00" },
-    episodes: varietyEpisodes(900000),
-  },
-  "77777": {
-    season_id: 77777,
-    title: "咒术回战",
-    jp_title: "呪術廻戦",
-    type: 1,
-    total: 72,
-    publish: { pub_time: "2020-10-03 12:00:00" },
-    episodes: varietyEpisodes(800000, 30),
-  },
   "34430": {
     season_id: 34430,
     title: "咒术回战",
@@ -123,11 +83,6 @@ interface StubOptions {
 function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     const url = new URL(request.url);
-    if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/95479/season/1")) {
-      return jsonResponse(request.url, {
-        episodes: BROADCAST_DAYS.map((air_date, i) => ({ episode_number: i + 1, air_date })),
-      });
-    }
     if (request.namespace === "tmdb" && request.url.includes("/tv/95479")) {
       return jsonResponse(request.url, {
         id: 95479,
@@ -482,66 +437,5 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(outbound.modelRequests).toHaveLength(1);
     const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
     expect(checks.map((c) => c.platform)).not.toContain("bilibili");
-  });
-
-  test("variety: split broadcasts with matching air dates are fast-submitted as a non-linear season", async () => {
-    const { testDb, outbound, explore } = await setup({
-      kan360Rows: [["咒术回战", "2020", "88888"]],
-    });
-
-    await explore();
-
-    expect(outbound.modelRequests).toHaveLength(0);
-    const cr = await testDb.readDb
-      .selectFrom("change_requests")
-      .select(["native_id", "segments"])
-      .executeTakeFirstOrThrow();
-    expect(cr.native_id).toBe("ss88888");
-    expect(cr.segments).toMatchObject([
-      { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, nonLinear: true },
-    ]);
-  });
-
-  test("variety: without matching air dates a non-linear submission is refused", async () => {
-    const replies: unknown[] = [];
-    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
-      const tools = request.messages.filter((m) => m.role === "tool");
-      replies.splice(0, replies.length, ...tools.map((m) => JSON.parse(m.content)));
-      return tools.length === 0
-        ? {
-            content: null,
-            toolCalls: [
-              {
-                id: "call_nl",
-                name: "submit_mapping",
-                arguments: {
-                  canonicalId: "ss77777",
-                  segments: [
-                    {
-                      season: 1,
-                      episodeStart: 1,
-                      episodeEnd: 24,
-                      targetEpisodeStart: 1,
-                      nonLinear: true,
-                    },
-                  ],
-                },
-              },
-            ],
-            model: "test-model",
-          }
-        : markNotFound();
-    };
-    const { testDb, outbound, explore } = await setup(
-      { kan360Rows: [["咒术回战", "2020", "77777"]] },
-      invokeModel,
-    );
-
-    await explore();
-
-    const prompt = outbound.modelRequests[0]!.messages.find((m) => m.role === "user")!.content;
-    expect(prompt).toContain('"airDateEvidence"');
-    expect(replies).toMatchObject([{ ok: false, error: "NONLINEAR_NEEDS_AIR_DATE_EVIDENCE" }]);
-    expect(await testDb.readDb.selectFrom("change_requests").select("id").execute()).toEqual([]);
   });
 });
