@@ -24,6 +24,7 @@ export const BUDGET_EXCEEDED = "exploration_time_budget_exceeded";
  */
 const WRAP_UP_REMAINING_SHARE = 0.25;
 const WRAP_UP_STEPS = 3;
+const TIME_UP_REPLY = { error: "TIME_UP", message: "No time left for searching." };
 
 export interface SessionBudget {
   outbound: OutboundClient;
@@ -136,8 +137,13 @@ export interface ToolSessionInput {
   wrapUpMessage(): string;
   /** Reply to a query call during wrap-up. */
   wrapUpRefusal: string;
-  /** Handles one conclusion call; returns the tool reply. */
-  conclude(call: ModelToolCall): Promise<unknown>;
+  /**
+   * A query's own result was replied to the model in turn `step` (not a TIME_UP or wrap-up
+   * refusal): the model sees it from turn `step + 1` on.
+   */
+  onQueryReplied?(call: ModelToolCall, result: unknown, step: number): void;
+  /** Handles one conclusion call made in turn `step`; returns the tool reply. */
+  conclude(call: ModelToolCall, step: number): Promise<unknown>;
   done(): boolean;
 }
 
@@ -227,7 +233,7 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
                 input.runQuery(call.name, call.arguments ?? {}),
                 searchSignal,
                 BUDGET_EXCEEDED,
-              ).catch(() => ({ error: "TIME_UP", message: "No time left for searching." })),
+              ).catch(() => TIME_UP_REPLY),
             ]),
     );
 
@@ -240,7 +246,11 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
       if (pending) {
         // Catalog tools use a TMDB gateway built on the unbudgeted client: the race above still
         // ends a stalled call.
-        reply(call.id, call.name, await pending);
+        const result = await pending;
+        reply(call.id, call.name, result);
+        if (result !== TIME_UP_REPLY) {
+          input.onQueryReplied?.(call, result, step);
+        }
         if (budget.expired()) {
           return { kind: "time_up" };
         }
@@ -250,7 +260,7 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
         reply(call.id, call.name, { ok: false, error: "UNKNOWN_TOOL" });
         continue;
       }
-      reply(call.id, call.name, await input.conclude(call));
+      reply(call.id, call.name, await input.conclude(call, step));
     }
     if (input.done()) {
       return { kind: "concluded" };

@@ -495,6 +495,73 @@ describe("review agent (#75)", () => {
     expect(evidence.gate.decision).toBe("needs_review");
   });
 
+  test("fetches in the same turn as the approval do not count: the model never saw them", async () => {
+    const model: ScriptedModel = (request) =>
+      reply(turnOf(request), [
+        ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+        ["get_catalog_season", { season: 1 }],
+        ["approve", { reasons: reasonsFor(request) }],
+      ]);
+    const { submit, drain, changeRequest } = track(await setup(model));
+    const id = await submit();
+
+    await drain();
+
+    const cr = await changeRequest(id);
+    expect(cr.status).toBe("needs_review");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "keep_for_human",
+      fallback: "collection_not_fetched",
+    });
+  });
+
+  test("a fetch answered TIME_UP does not count, even when it finishes before the approval", async () => {
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      return turn === 0
+        ? reply(turn, [
+            ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+            ["get_catalog_season", { season: 1 }],
+          ])
+        : reply(turn, [["approve", { reasons: reasonsFor(request) }]]);
+    };
+    // Searching gets 1500 of the 2000 ms; the collection fetch outlasts it.
+    const ctx = track(await setup(model, { maxDurationMs: 2000 }));
+    const id = await ctx.submit();
+    await ctx.tick(); // evidence_check
+    const fetchExternal = ctx.outbound.fetchExternal.bind(ctx.outbound);
+    ctx.outbound.fetchExternal = async (request) => {
+      if (request.url.includes("season_id=28888")) {
+        await released;
+      }
+      return fetchExternal(request);
+    };
+    const invokeModel = ctx.outbound.invokeModel.bind(ctx.outbound);
+    ctx.outbound.invokeModel = async (request) => {
+      if (turnOf(request) > 0) {
+        // The late fetch completes before the model concludes.
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return invokeModel(request);
+    };
+
+    await ctx.tick(); // review_agent
+
+    const toolReplies = ctx.outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool");
+    expect(JSON.parse(toolReplies[0]!.content)).toMatchObject({ error: "TIME_UP" });
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("needs_review");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "keep_for_human",
+      fallback: "collection_not_fetched",
+    });
+  });
+
   test("keep_for_human stores the model's opinion for the reviewer", async () => {
     const model: ScriptedModel = (request) =>
       reply(turnOf(request), [["keep_for_human", { opinion: "季号看起来不对" }]]);

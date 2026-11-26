@@ -420,13 +420,16 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       options.catalogConfig?.tmdbGateway ??
       createTmdbGateway(ctx.outbound, options.catalogConfig?.tmdb ?? options.tmdbConfig);
 
-    // What the session actually fetched: approval needs the collection and every season (§3),
-    // and a correction is re-checked against them (§4).
-    const fetchedCollections = new Map<string, CollectionInfo>();
-    const fetchedSeasons = new Set<number>();
+    // What the model was shown, by the turn its result was replied in: approval needs the
+    // collection and every season shown before the conclusion's turn (§3), and a correction is
+    // re-checked against them (§4).
+    const collected = new Map<string, CollectionInfo>();
+    const fetchedCollections = new Map<string, { info: CollectionInfo; step: number }>();
+    const fetchedSeasons = new Map<number, number>();
     const episodeAirYears: Record<number, Record<number, number | null>> = {};
     const queries: Array<{ tool: string; arguments: Record<string, unknown> }> = [];
     let conclusion: ReviewConclusion | null = null;
+    let conclusionStep = 0;
 
     const budget = createSessionBudget(ctx.outbound, clockMs() + config.maxDurationMs, clockMs);
     const usage: SessionUsage = { tokens: 0, byModel: new Map() };
@@ -443,7 +446,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             ? (catalog.canonicalId?.match(/^tv:(\d+)$/)?.[1] ?? null)
             : null,
         register: (info) => {
-          fetchedCollections.set(`${info.namespace}:${info.canonicalId}`, info);
+          collected.set(`${info.namespace}:${info.canonicalId}`, info);
           // The submitted mapping already failed the gate; the hint would only repeat that.
           return false;
         },
@@ -452,10 +455,11 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       const queryTools = buildQueryTools(toolCtx).filter((t) => !OMITTED_QUERY_TOOLS.has(t.name));
       const offered = new Set(queryTools.map((t) => t.name));
 
-      const conclude = async (call: ModelToolCall): Promise<unknown> => {
+      const conclude = async (call: ModelToolCall, step: number): Promise<unknown> => {
         if (conclusion) {
           return { ok: false, error: "ALREADY_CONCLUDED" };
         }
+        conclusionStep = step;
         const args = call.arguments ?? {};
         const opinion =
           typeof args.opinion === "string" && args.opinion.trim() ? args.opinion.trim() : null;
@@ -485,10 +489,25 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             return { error: "UNKNOWN_TOOL" };
           }
           queries.push({ tool: name, arguments: args });
-          const result = await runQueryTool(toolCtx, name, args);
-          const failed = typeof result === "object" && result !== null && "error" in result;
-          if (name === "get_catalog_season" && !failed && typeof args.season === "number") {
-            fetchedSeasons.add(args.season);
+          return runQueryTool(toolCtx, name, args);
+        },
+        onQueryReplied: (call, result, step) => {
+          if (typeof result !== "object" || result === null || "error" in result) {
+            return;
+          }
+          const args = call.arguments ?? {};
+          if (call.name === "get_collection") {
+            const { namespace, canonicalId } = result as { namespace: string; canonicalId: string };
+            const key = `${namespace}:${canonicalId}`;
+            const info = collected.get(key);
+            if (info && !fetchedCollections.has(key)) {
+              fetchedCollections.set(key, { info, step });
+            }
+          }
+          if (call.name === "get_catalog_season" && typeof args.season === "number") {
+            if (!fetchedSeasons.has(args.season)) {
+              fetchedSeasons.set(args.season, step);
+            }
             const { episodes } = result as {
               episodes?: Array<{ episode: number; airDate: string | null }>;
             };
@@ -505,7 +524,6 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
               };
             }
           }
-          return result;
         },
         wrapUpMessage: () =>
           `The time, step or token budget is almost used up. Stop searching and conclude now with ${conclusionNames}.`,
@@ -529,7 +547,17 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
 
     const concluded = conclusion as ReviewConclusion | null;
     let fallback: string | null = concluded ? null : stopReason(stop);
-    const fetched = { fetchedCollections, fetchedSeasons };
+    // Only what the model saw before the turn it concluded in counts.
+    const fetched: SessionFetches = {
+      fetchedCollections: new Map(
+        [...fetchedCollections]
+          .filter(([, f]) => f.step < conclusionStep)
+          .map(([key, f]) => [key, f.info]),
+      ),
+      fetchedSeasons: new Set(
+        [...fetchedSeasons].filter(([, step]) => step < conclusionStep).map(([season]) => season),
+      ),
+    };
     if (concluded?.verdict === "approve") {
       fallback = approvalBlocker(cr, conflictCodes, concluded.reasons, fetched);
     }
