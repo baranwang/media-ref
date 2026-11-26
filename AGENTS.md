@@ -30,6 +30,10 @@ release. Add a tool name to select part of the graph. For example, run
 
 <!--VITE PLUS END-->
 
+## Project constitution
+
+Read [`CONSTITUTION.md`](./CONSTITUTION.md) before designing anything. In short: no maintainer intervenes at runtime; every flow ends automatically (approved or rejected, never "wait for a human"); outside people may take part, but their input is evidence that goes through the same gates. It overrides ADRs, the glossary, code and prompts.
+
 ## Agent skills
 
 ### Issue tracker

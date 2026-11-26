@@ -3,6 +3,7 @@
 An open database mapping media (movies and TV series) to their collection and entry IDs across video platforms and catalog sites, down to season and episode segments.
 
 Domain terminology is defined in [`GLOSSARY.md`](./GLOSSARY.md).
+Project principles are in [`CONSTITUTION.md`](./CONSTITUTION.md).
 
 ## Workspace Layout
 
