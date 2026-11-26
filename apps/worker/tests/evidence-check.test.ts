@@ -658,7 +658,7 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     expect(mediaBody.document.associations[0]?.nativeId).toBe("ss43123");
   });
 
-  test("routes Tier 1-only platform submissions immediately to needs_review without enqueueing an evidence job", async () => {
+  test("routes Tier 1-only platform submissions to needs_review without an evidence job, then the review agent rejects them", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -730,7 +730,7 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
     expect(okCr.rawNativeId).toBe("https://list.youku.com/show/id_zcc001f06962411de83b1.html");
     expect(okCr.decisionReason).toBe("adapter_tier_1_manual_review");
 
-    // Background worker finds zero jobs to claim
+    // No evidence job: the cron queues a review, which rejects it (nothing can verify a Tier 1 ID).
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
       db: testDb.writeDb,
@@ -744,8 +744,16 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
       now: () => t0,
     });
     const tick = await worker.scheduled(createScheduledController(t0));
-    expect(tick.claimed).toBe(0);
-    expect(emitted).toHaveLength(0);
+    expect(tick.claimed).toBe(1);
+    expect(emitted.map((m) => m.jobType)).toEqual(["review_agent"]);
+    await worker.queue(createQueueBatch(emitted, t0).batch);
+    const cr = await testDb.readDb
+      .selectFrom("change_requests")
+      .select(["status", "decision_reason"])
+      .where("id", "=", okCr.id)
+      .executeTakeFirstOrThrow();
+    expect(cr.status).toBe("rejected");
+    expect(cr.decision_reason).toContain("adapter_tier_1_manual_review");
   });
 
   test("auto-approves via consistent platform-fetched shared ID and blocks on mixed match + conflict", async () => {

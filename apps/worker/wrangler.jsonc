@@ -23,8 +23,9 @@
     // One exploration job per cron tick: queue messages run one after another in one consumer
     // invocation (15-minute wall clock), and a job may take up to its 5-minute budget.
     "EXPLORATION_BATCH_SIZE": "1",
-    // Change requests the review agent reviews per UTC day (ADR 0003). Off until evaluated.
-    "REVIEW_AGENT_DAILY_BUDGET": "0",
+    // Change requests the review agent reviews with a model per UTC day (ADR 0003). Beyond it they
+    // wait for the next day; nothing is left for a person (CONSTITUTION.md).
+    "REVIEW_AGENT_DAILY_BUDGET": "200",
     "ENABLE_DAILY_TMDB_EXPORTS_SYNC": "false",
     // Exploration agent model: a magpie routing group, through HK (MAGPIE_GATEWAY_KEY secret).
     // Without that secret the worker falls back to AI Gateway (AI_GATEWAY_ID) over the AI binding.

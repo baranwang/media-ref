@@ -23,6 +23,7 @@ import {
   INVALIDATION_RECHECK_JOB_TYPE,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
+  enqueuePendingReviews,
   REVIEW_AGENT_JOB_TYPE,
   scheduleExplorationJobs,
   SEED_EVIDENCE_CHECK_JOB_TYPE,
@@ -228,6 +229,11 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           config: deps.config?.exploration,
           adapterRegistry: deps.adapterRegistry,
         });
+      }
+
+      // Every needs_review request gets decided: queue reviews for any without an active job.
+      if (!deps.config?.jobTypes || deps.config.jobTypes.includes(REVIEW_AGENT_JOB_TYPE)) {
+        await enqueuePendingReviews(deps.db, { now });
       }
 
       const claimedJobs = await claimDueJobs(deps.db, {
