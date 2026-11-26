@@ -142,12 +142,21 @@ function MediaDetailPage() {
       ? seasonCount
       : (currentSeasonInfo?.episodeCount ?? 1);
 
+  const segmentsInView = (row: (typeof media.platformRows)[number]): CoverageSegment[] =>
+    isMovie
+      ? (row.segmentsBySeason[0] ?? [])
+      : isAllSeasons
+        ? (row.allSeasonSegments ?? [])
+        : (row.segmentsBySeason[selectedSeason] ?? []);
+  // A platform with nothing for this season has no page to link to, so it gets no row here.
+  const platformRows = media.platformRows.filter((row) => segmentsInView(row).length > 0);
+
   const availablePlatformCount = new Set(media.platformRows.map((r) => r.namespace)).size;
   const catalogLink = parseExternalInput(media.catalogKey);
 
   const showCatalogRuler =
     !isMovie &&
-    (media.platformRows.length === 0 || isLongSeries) &&
+    (platformRows.length === 0 || isLongSeries) &&
     media.catalogRows.some(
       (r) =>
         (isAllSeasons
@@ -373,7 +382,7 @@ function MediaDetailPage() {
             <div className="flex flex-col gap-1">
               <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">在哪看</h2>
               <p className="text-sm text-muted-foreground">
-                {media.platformRows.length === 0
+                {platformRows.length === 0
                   ? isMovie
                     ? "还没有任何平台记录"
                     : `第 ${selectedSeason} 季 · 还没有任何平台记录`
@@ -384,13 +393,15 @@ function MediaDetailPage() {
                       : `第 ${selectedSeason} 季${isLongSeries ? ` · ${totalEpisodesForAxis} 集` : ""} · 以 TMDB 的集数为准，横条是每个平台收录的集数`}
               </p>
             </div>
-            {media.platformRows.length > 0 && !isMovie && <CoverageLegend />}
+            {platformRows.length > 0 && !isMovie && <CoverageLegend />}
           </div>
 
-          {media.platformRows.length === 0 ? (
+          {platformRows.length === 0 ? (
             <Empty className="rounded-xl border border-border bg-card py-14">
               <EmptyHeader>
-                <EmptyTitle>还没有人记录这部剧在哪看</EmptyTitle>
+                <EmptyTitle>
+                  还没有人记录{media.platformRows.length > 0 ? "这一季" : "这部剧"}在哪看
+                </EmptyTitle>
                 <EmptyDescription>
                   知道在哪个平台能看？贴一个播放页网址就行，审核通过后所有人都能查到。
                 </EmptyDescription>
@@ -398,7 +409,7 @@ function MediaDetailPage() {
               <EmptyContent>
                 <Button variant="outline" size="default" onClick={() => openContribute()}>
                   <RiAddLine />
-                  补充第一个平台
+                  {media.platformRows.length > 0 ? "补充这一季的平台" : "补充第一个平台"}
                 </Button>
               </EmptyContent>
             </Empty>
@@ -420,17 +431,13 @@ function MediaDetailPage() {
 
               <div className="overflow-hidden rounded-xl border border-border bg-card">
                 <div className="divide-y divide-border/70">
-                  {media.platformRows.map((row) => {
-                    const segments: CoverageSegment[] = isMovie
-                      ? (row.segmentsBySeason[0] ?? [])
-                      : isAllSeasons
-                        ? (row.allSeasonSegments ?? [])
-                        : (row.segmentsBySeason[selectedSeason] ?? []);
-
-                    const primarySeg = segments[0];
-                    const externalUrl = primarySeg
-                      ? buildExternalUrl(row.namespace, primarySeg.nativeId, media.type)
-                      : buildExternalUrl(row.namespace, "", media.type);
+                  {platformRows.map((row) => {
+                    const segments = segmentsInView(row);
+                    const externalUrl = buildExternalUrl(
+                      row.namespace,
+                      segments[0]!.nativeId,
+                      media.type,
+                    );
                     const isExpanded =
                       expandedRowId === row.id && segments.length > 0 && !isAllSeasons;
 
@@ -577,7 +584,7 @@ function MediaDetailPage() {
                                     openContribute({
                                       url: buildExternalUrl(
                                         row.namespace,
-                                        segments[0]?.nativeId ?? "",
+                                        segments[0]!.nativeId,
                                         media.type,
                                       ),
                                       variant: row.isDefault ? `${row.label}（默认）` : row.label,

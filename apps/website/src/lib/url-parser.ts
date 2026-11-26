@@ -25,8 +25,12 @@ export function buildExternalUrl(
     }
     case "tencent":
       return `https://v.qq.com/x/cover/${nativeId}.html`;
-    case "iqiyi":
-      return `https://www.iqiyi.com/a_${nativeId}.html`;
+    case "iqiyi": {
+      if (!/^\d+$/.test(nativeId)) return `https://www.iqiyi.com/a_${nativeId}.html`;
+      // iQIYI page slugs are base36 of (id XOR "upiqgl"); movie/episode tvIds end in 00 and live on v_ pages.
+      const slug = (BigInt(nativeId) ^ 0x75706971676cn).toString(36);
+      return `https://www.iqiyi.com/${nativeId.endsWith("00") ? "v" : "a"}_${slug}.html`;
+    }
     case "youku":
       return `https://v.youku.com/v_show/id_${nativeId}.html`;
     case "mgtv":
@@ -149,12 +153,12 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
   }
 
   if (host.includes("iqiyi.com")) {
-    const m = path.match(/\/(?:a|v)_([a-z0-9]+)\.html/i);
+    const m = path.match(/\/(a|v)_([a-z0-9]+)\.html/i);
     if (m) {
       return {
         namespace: "iqiyi",
-        nativeId: m[1]!,
-        url: buildExternalUrl("iqiyi", m[1]!),
+        nativeId: m[2]!,
+        url: `https://www.iqiyi.com/${m[1]!.toLowerCase()}_${m[2]!}.html`,
         isCatalog: false,
       };
     }
