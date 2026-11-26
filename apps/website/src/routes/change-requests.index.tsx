@@ -41,7 +41,7 @@ function ChangeRequestsListPage() {
               查看你提交的平台与资料站关联记录、自动核对结果和审核进度。
             </p>
           </div>
-          <Button variant="outline" nativeButton={false} render={<Link to="/contribute" />}>
+          <Button variant="outline" nativeButton={false} render={<Link to="/wanted" />}>
             去待贡献列表
           </Button>
         </section>
