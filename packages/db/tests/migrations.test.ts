@@ -107,6 +107,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0018_lead_segments",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb

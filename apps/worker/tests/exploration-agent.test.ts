@@ -7,6 +7,7 @@ import {
   EXPLORATION_JOB_TYPE,
   getExplorationTargetNamespaces,
   createDefaultAdapterRegistry,
+  ensureReviewAgentUser,
   listDemands,
   scheduleExplorationJobs,
   type ExternalHttpRequest,
@@ -706,6 +707,41 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(special).toEqual({ season: 0, episodeCount: 2, airYear: 2021, episodes });
     expect(first).toEqual({ season: 1, episodeCount: 24, airYear: 2020, episodes });
     expect(second).toEqual({ season: 2, episodeCount: 23, airYear: 2023 });
+  });
+
+  test("a review agent's lead shows its corrected segments to the model as the candidate's suggested mapping", async () => {
+    const { testDb, outbound, explore } = await setup({ kan360Rows: [] });
+    // The correction does not fit the collection (it reaches position 25 of 24): no fast path,
+    // and the default mapping, which the review rejected, is not submitted instead.
+    const suggested = { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 2 };
+    const reviewer = await ensureReviewAgentUser(testDb.writeDb);
+    await testDb.writeDb
+      .insertInto("leads")
+      .values({
+        target_external_key: "tmdb:tv:95479",
+        namespace: "bilibili",
+        native_id: "ss34430",
+        season: 1,
+        segments: JSON.stringify([suggested]),
+        reporter_user_id: reviewer,
+        reporter_key_id: reviewer,
+      })
+      .execute();
+
+    await explore();
+
+    const prompt = outbound.modelRequests[0]!.messages.find((m) => m.role === "user")!.content;
+    const { namespaces } = JSON.parse(prompt.slice(prompt.indexOf("{"))) as {
+      namespaces: Array<{ namespace: string; candidates: unknown[] }>;
+    };
+    expect(namespaces.find((n) => n.namespace === "bilibili")!.candidates).toEqual([
+      expect.objectContaining({
+        canonicalId: "ss34430",
+        passesAutomaticCheckWithDefaultMapping: true,
+        suggestedMapping: { segments: [suggested], passesAutomaticCheck: false },
+      }),
+    ]);
+    expect(await testDb.readDb.selectFrom("change_requests").select("id").execute()).toEqual([]);
   });
 
   test("get_catalog_season lists at most 80 episodes, says so, and fromEpisode lists the rest", async () => {

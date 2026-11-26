@@ -160,6 +160,28 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
       },
     });
   }
+  if (request.namespace === "bilibili" && url.includes("season_id=28889")) {
+    // 灵笼's second half on its own: TMDB season 1 episodes 7–12.
+    return jsonResponse(url, {
+      code: 0,
+      message: "success",
+      result: {
+        season_id: 28889,
+        title: "灵笼",
+        type: 4,
+        publish: { pub_time: "2019-09-01 11:00:00" },
+        episodes: LINGLONG_TITLES.slice(7, 13).map((title, i) => ({
+          id: 310000 + i,
+          title,
+          long_title: "",
+          badge: "",
+          badge_type: 0,
+          section_type: 0,
+          duration: 1500000,
+        })),
+      },
+    });
+  }
   if (request.namespace === "bilibili" && url.includes("season_id=77777")) {
     // The 2026 season, which is TMDB season 8.
     return jsonResponse(url, {
@@ -856,6 +878,112 @@ describe("review agent: reject with correction (#76)", () => {
       opinion: WIFE_OPINION,
     });
     expect(await leads(ctx)).toHaveLength(1);
+  });
+
+  test("灵笼 split in two: a segment-only correction reaches exploration, whose fast path resubmits with the corrected segments", async () => {
+    // ss28889 holds only TMDB season 1 episodes 7–12; the submission mapped the whole season.
+    const wholeSeason: SegmentInput[] = [
+      { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+    ];
+    const secondHalf = { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 1 };
+    const model: ScriptedModel = (request) => {
+      const tool = request.tools?.find((t) => t.name === "mark_not_found");
+      if (tool) {
+        // Exploration: nothing on the other platforms.
+        const { enum: namespaces } = (
+          tool.parameters as { properties: { namespace: { enum: string[] } } }
+        ).properties.namespace;
+        return reply(
+          turnOf(request),
+          namespaces.map((namespace) => ["mark_not_found", { namespace, reason: "no match" }]),
+        );
+      }
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss28889" }],
+          ["get_catalog_season", { season: 1 }],
+        ]);
+      }
+      return reply(turn, [
+        [
+          "reject_with_correction",
+          { opinion: "这是第一季的后半部分", season: 1, segments: [secondHalf] },
+        ],
+      ]);
+    };
+    const ctx = track(
+      await setup(model, {}, createDefaultAdapterRegistry(), {
+        enableExplorationScheduling: true,
+        exploration: { dailyBudget: 10 },
+        explorationAgent: { discover: async () => ({ candidates: [], sources: [], dropped: [] }) },
+      }),
+    );
+    const media = await ctx.testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "灵笼",
+        original_title: "灵笼",
+        year: 2019,
+        seasons: JSON.stringify([
+          { season: 0, episodeCount: 4, airYear: 2019 },
+          { season: 1, episodeCount: 12, airYear: 2019 },
+        ]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await ctx.testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        is_external_id: true,
+        media_id: media.id,
+        namespace: "tmdb",
+        native_id: "tv:91234",
+      })
+      .execute();
+    const demand = await ctx.testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: media.id,
+        season: 1,
+        namespace_group: "platform",
+        status: "awaiting_review",
+        not_found_count: 0,
+        next_eligible_at: T0,
+        last_demanded_at: T0,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const id = await ctx.submit("ss28889", { segments: wholeSeason, demandId: demand.id });
+
+    await ctx.tick(); // evidence_check
+    await ctx.tick(); // review_agent
+
+    expect((await ctx.changeRequest(id)).status).toBe("rejected");
+    expect(await leads(ctx)).toEqual([
+      expect.objectContaining({ native_id: "ss28889", season: 1, segments: [secondHalf] }),
+    ]);
+    // The correction keeps the request's season: its demand is explorable now, no not-found round.
+    expect(await demands(ctx)).toEqual([
+      expect.objectContaining({ id: demand.id, status: "open", not_found_count: 0 }),
+    ]);
+
+    await ctx.tick(); // exploration of season 1
+    const resubmitted = await ctx.testDb.readDb
+      .selectFrom("change_requests")
+      .selectAll()
+      .where("id", "!=", id)
+      .execute();
+    expect(resubmitted).toEqual([
+      expect.objectContaining({
+        native_id: "ss28889",
+        submitter_user_id: EXPLORATION_AGENT_USER_ID,
+        segments: [expect.objectContaining(secondHalf)],
+      }),
+    ]);
   });
 
   test("a correction to another season: the submission's own demand backs off, the corrected season is explorable now, and exploration resubmits from the lead", async () => {

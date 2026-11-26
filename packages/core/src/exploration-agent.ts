@@ -357,6 +357,8 @@ type CollectionAdapter = Tier2Adapter | Tier3Adapter;
 interface FetchedCandidate {
   info: CollectionInfo;
   sources: string[];
+  /** Segments a review agent correction gave for this collection (its lead). */
+  suggestedSegments?: SegmentInput[];
 }
 
 function toDiscoveryInput(
@@ -464,8 +466,8 @@ export function checkSegmentsFitCollection(
   return null;
 }
 
-function summarizeCandidate(candidate: FetchedCandidate, step1Pass: boolean) {
-  const { info } = candidate;
+function summarizeCandidate(run: JobRun, candidate: FetchedCandidate) {
+  const { info, suggestedSegments } = candidate;
   return {
     canonicalId: info.canonicalId,
     title: info.title,
@@ -474,7 +476,15 @@ function summarizeCandidate(candidate: FetchedCandidate, step1Pass: boolean) {
     mediaType: info.mediaType,
     featureEpisodeCount: info.featureEpisodes.length,
     sources: candidate.sources,
-    passesAutomaticCheckWithDefaultMapping: step1Pass,
+    passesAutomaticCheckWithDefaultMapping: run.passesStep1(info, run.baseSegments),
+    ...(suggestedSegments
+      ? {
+          suggestedMapping: {
+            segments: suggestedSegments.map(({ baseline: _, ...s }) => s),
+            passesAutomaticCheck: run.passesStep1(info, suggestedSegments),
+          },
+        }
+      : {}),
   };
 }
 
@@ -490,6 +500,7 @@ function buildAgentSystemPrompt(namespaces: readonly Namespace[]): string {
     "4. Check title, year, media type and episode count against the target. Prefer original audio over dubs or recuts.",
     "5. A collection may hold several seasons, or a season may be split; express that with segments.",
     "6. passesAutomaticCheckWithDefaultMapping is a hint from a deterministic check, not a decision.",
+    "   suggestedMapping comes from a review that rejected an earlier submission of that collection: submit its segments unless the evidence says otherwise.",
     "7. mark_not_found only after you looked: the platform may simply not carry it, which is common.",
     "8. Steps and tokens are limited; stop searching a namespace once the evidence is clear.",
   ].join("\n");
@@ -784,11 +795,20 @@ async function prepareTarget(
 
   // Candidate IDs: discovery plus client leads (untrusted, but they still go through fetch).
   const sourcesById = new Map(candidates.sourcesById);
+  const suggestedById = new Map<string, SegmentInput[]>();
   const leads = await loadLeadsContext(ctx.db, ctx.media, namespace, ctx.season);
   for (const lead of leads) {
     try {
       const id = await adapter.canonicalize(lead.nativeId, budget.outbound);
       sourcesById.set(id, [...(sourcesById.get(id) ?? []), "client_lead"]);
+      // Leads come newest first: the latest correction wins.
+      if (lead.segments && ctx.media.baseline && !suggestedById.has(id)) {
+        const baseline = ctx.media.baseline;
+        suggestedById.set(
+          id,
+          lead.segments.map((s) => ({ ...s, baseline })),
+        );
+      }
     } catch {
       // An unusable lead is just skipped.
     }
@@ -801,7 +821,12 @@ async function prepareTarget(
     try {
       const evidence = await adapter.fetchCollection(id, budget.outbound);
       if (evidence.status === "found") {
-        target.fetched.set(evidence.info.canonicalId, { info: evidence.info, sources });
+        const suggestedSegments = suggestedById.get(id);
+        target.fetched.set(evidence.info.canonicalId, {
+          info: evidence.info,
+          sources,
+          ...(suggestedSegments ? { suggestedSegments } : {}),
+        });
       } else if (evidence.status === "transient_error") {
         target.transient = new PlatformTransient(evidence.reason, evidence.retryAfterMs);
       }
@@ -817,12 +842,18 @@ async function prepareTarget(
     }
   }
 
-  // Fast path: the others failed the same check (title, year, type or episode count).
-  const passing = [...target.fetched.values()].filter((c) =>
-    run.passesStep1(c.info, run.baseSegments),
-  );
+  // Fast path: the others failed the same check (title, year, type or episode count). A
+  // candidate a review corrected is checked, and submitted, with its corrected segments.
+  const mapping = (c: FetchedCandidate) => c.suggestedSegments ?? run.baseSegments;
+  const passing = [...target.fetched.values()].filter((c) => run.passesStep1(c.info, mapping(c)));
   if (passing.length === 1) {
-    const result = await submitMapping(run, target, passing[0]!.info, run.baseSegments, undefined);
+    const result = await submitMapping(
+      run,
+      target,
+      passing[0]!.info,
+      mapping(passing[0]!),
+      undefined,
+    );
     if ("status" in result) {
       return { outcome: result };
     }
@@ -869,6 +900,7 @@ async function runAgentSession(
       if (target) {
         const known = target.fetched.get(info.canonicalId);
         target.fetched.set(info.canonicalId, {
+          ...known,
           info,
           sources: known?.sources.includes(source)
             ? known.sources
@@ -938,9 +970,7 @@ async function runAgentSession(
         ctx.season,
         targets.map((t) => ({
           namespace: t.namespace,
-          candidates: [...t.fetched.values()].map((c) =>
-            summarizeCandidate(c, run.passesStep1(c.info, run.baseSegments)),
-          ),
+          candidates: [...t.fetched.values()].map((c) => summarizeCandidate(run, c)),
         })),
       ),
     },

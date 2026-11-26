@@ -806,6 +806,7 @@ async function rejectWithCorrectionInTx(
     namespace: cr.namespace,
     nativeId: cr.nativeId,
     season: correction.season,
+    segments: correction.segments,
     variantDescription: cr.variantDescription,
     notes: reason.slice(0, MAX_LEAD_NOTES_LENGTH),
     reporterUserId: REVIEW_AGENT_USER_ID,
