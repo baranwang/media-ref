@@ -480,7 +480,12 @@ function summarizeCandidate(run: JobRun, candidate: FetchedCandidate) {
     ...(suggestedSegments
       ? {
           suggestedMapping: {
-            segments: suggestedSegments.map(({ baseline: _, ...s }) => s),
+            segments: suggestedSegments.map((s) => ({
+              season: s.season,
+              episodeStart: s.episodeStart,
+              episodeEnd: s.episodeEnd,
+              targetEpisodeStart: s.targetEpisodeStart,
+            })),
             passesAutomaticCheck: run.passesStep1(info, suggestedSegments),
           },
         }
