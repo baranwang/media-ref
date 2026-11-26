@@ -282,8 +282,19 @@ export interface LeadsTable {
   notes: string | null;
   reporter_user_id: string;
   reporter_key_id: string;
+  /** Corrected segments from a review agent correction; null on client leads. */
+  segments: ColumnType<
+    LeadSegmentJson[] | null,
+    LeadSegmentJson[] | string | null | undefined,
+    LeadSegmentJson[] | string | null
+  >;
   created_at: Generated<Date>;
 }
+
+export type LeadSegmentJson = Pick<
+  StoredSegmentJson,
+  "season" | "episodeStart" | "episodeEnd" | "targetEpisodeStart"
+>;
 
 export interface PlatformChecksTable {
   id: Generated<string>;
@@ -356,6 +367,8 @@ export interface ExplorationDailyBudgetTable {
   tokens_used: Generated<string>;
   /** That day's totals per model, as submitted to tokens.ci (`PiUsageTotals` in core). */
   pi_usage: ColumnType<JsonObject, JsonObject | string | undefined, JsonObject | string>;
+  /** Change requests the review agent reviewed that day. */
+  review_consumed: Generated<number>;
   updated_at: Generated<Date>;
 }
 

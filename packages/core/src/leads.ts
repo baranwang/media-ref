@@ -1,5 +1,5 @@
 import { isNamespace, parseExternalKey, type Namespace } from "@media-ref/client";
-import type { Database, Db } from "@media-ref/db";
+import type { Database, Db, LeadSegmentJson } from "@media-ref/db";
 import type { Selectable } from "kysely";
 
 export const MAX_LEAD_NATIVE_ID_LENGTH = 512;
@@ -35,6 +35,8 @@ export interface Lead {
   season: number | null;
   variantDescription: string | null;
   notes: string | null;
+  /** The review agent's corrected segments (ADR 0003 §4); null on client leads. */
+  segments: LeadSegmentJson[] | null;
   reporterUserId: string;
   reporterKeyId: string;
   createdAt: Date;
@@ -47,6 +49,8 @@ export interface RecordLeadInput {
   season?: number | null;
   variantDescription?: string | null;
   notes?: string | null;
+  /** Trusted callers only (the review agent); not validated here. */
+  segments?: LeadSegmentJson[] | null;
   reporterUserId: string;
   reporterKeyId: string;
 }
@@ -69,6 +73,7 @@ function mapLeadRow(row: LeadRow): Lead {
     season: row.season,
     variantDescription: row.variant_description,
     notes: row.notes,
+    segments: row.segments,
     reporterUserId: row.reporter_user_id,
     reporterKeyId: row.reporter_key_id,
     createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at),
@@ -167,6 +172,7 @@ export async function recordLead(dbWrite: Db, input: RecordLeadInput): Promise<L
       season,
       variant_description: variantDescription,
       notes,
+      segments: input.segments ? JSON.stringify(input.segments) : null,
       reporter_user_id: reporterUserId,
       reporter_key_id: reporterKeyId,
     })

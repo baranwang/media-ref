@@ -1,4 +1,8 @@
-import { formatExternalKey, type CatalogNamespace } from "@media-ref/client";
+import {
+  formatExternalKey,
+  type CatalogNamespace,
+  type NormalizedSegment,
+} from "@media-ref/client";
 import type { Database, Db, ExternalIdNamespaceRow, JsonObject } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import {
@@ -33,7 +37,13 @@ import {
   MediaServiceError,
   TIER1_MANUAL_REVIEW_REASON,
 } from "./media-service.ts";
-import type { TmdbGateway, TmdbGatewayConfig } from "./tmdb.ts";
+import { enqueueReviewAgentJobInTx } from "./review-agent.ts";
+import {
+  createTmdbGateway,
+  parseTmdbNativeId,
+  type TmdbGateway,
+  type TmdbGatewayConfig,
+} from "./tmdb.ts";
 
 export interface EvidenceCheckJobOptions {
   adapterRegistry?: AdapterRegistry;
@@ -41,6 +51,32 @@ export interface EvidenceCheckJobOptions {
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   evaluateStep2?: EvidenceGateStep2Evaluator;
+}
+
+/** TMDB air year per episode, for the seasons a segment starts partway through. */
+async function fetchSegmentEpisodeAirYears(
+  gateway: TmdbGateway,
+  catalog: CatalogEvidence,
+  segments: readonly NormalizedSegment[],
+): Promise<CatalogEvidence["episodeAirYears"]> {
+  const tmdb = catalog.namespace === "tmdb" ? parseTmdbNativeId(catalog.canonicalId) : null;
+  if (tmdb?.type !== "tv") {
+    return undefined;
+  }
+  const result: Record<number, Record<number, number | null>> = {};
+  for (const season of new Set(segments.filter((s) => s.episodeStart > 1).map((s) => s.season))) {
+    try {
+      const episodes = await gateway.fetchSeasonEpisodes(tmdb.id, season);
+      if (episodes) {
+        result[season] = Object.fromEntries(
+          episodes.map((e) => [e.episode, e.airDate ? Number(e.airDate.slice(0, 4)) : null]),
+        );
+      }
+    } catch {
+      // Without episode air years the gate compares against the season premiere year, as before
+    }
+  }
+  return result;
 }
 
 interface MarkNeedsReviewInput {
@@ -63,11 +99,12 @@ function mergeEvidenceWithExistingMetadata(
   };
 }
 
+/** Returns whether the request was still `pending_evidence` and is now `needs_review`. */
 async function markChangeRequestNeedsReviewInTx(
   trx: Transaction<Database>,
   input: MarkNeedsReviewInput,
-): Promise<void> {
-  await trx
+): Promise<boolean> {
+  const result = await trx
     .updateTable("change_requests")
     .set({
       status: "needs_review",
@@ -78,7 +115,8 @@ async function markChangeRequestNeedsReviewInTx(
     })
     .where("id", "=", input.changeRequestId)
     .where("status", "=", "pending_evidence")
-    .execute();
+    .executeTakeFirst();
+  return result.numUpdatedRows > 0n;
 }
 
 async function resolveAuthoritativeCatalogKey(
@@ -290,7 +328,16 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
     }
 
     prefetchedCatalog = catalogResult.target;
-    catalogEvidence = catalogResult.target.evidence;
+    catalogEvidence = {
+      ...catalogResult.target.evidence,
+      episodeAirYears: await fetchSegmentEpisodeAirYears(
+        options.catalogConfig?.tmdbGateway ??
+          options.tmdbGateway ??
+          createTmdbGateway(ctx.outbound, options.catalogConfig?.tmdb ?? options.tmdbConfig),
+        catalogResult.target.evidence,
+        changeRequest.segments,
+      ),
+    };
 
     // 2. Fetch fresh platform/collection evidence via Tier 2+ adapter outside DB locks
     const collectionResult = await adapter.fetchCollection(changeRequest.nativeId, ctx.outbound);
@@ -652,13 +699,22 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         conflictReason: primaryConflictCode,
       },
       async onCommit(trx) {
-        await markChangeRequestNeedsReviewInTx(trx, {
+        const marked = await markChangeRequestNeedsReviewInTx(trx, {
           changeRequestId: changeRequest.id,
           evidence: evidenceRecord,
           conflictReason: primaryConflictCode,
           decisionReason: summaryReason,
           now: ctx.now,
         });
+        // Only gate conflicts get a review: missing evidence, locks and clashes with an existing
+        // association (the other needs_review paths above) are a human's call (ADR 0003 §1).
+        if (marked) {
+          await enqueueReviewAgentJobInTx(trx, {
+            changeRequestId: changeRequest.id,
+            conflictCodes: gate.conflicts.map((c) => c.code),
+            now: ctx.now,
+          });
+        }
       },
     };
   };

@@ -315,7 +315,32 @@ describe("Evidence Gate Step 1", () => {
     expect(gate.step1.fieldChecks.title).toBe("mismatch");
   });
 
-  test("invokes pluggable Step 2 hook only after Step 1 passes", () => {
+  test("records Step 2 conflicts alongside Step 1 conflicts when Step 1 fails", () => {
+    const gate = evaluateEvidenceGate({
+      catalog: makeTvCatalog(),
+      collection: makeBilibiliCollection({ title: "进击的巨人", originalTitle: null }),
+      segments: [
+        {
+          season: 9,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(gate.decision).toBe("needs_review");
+    expect(gate.step1.decision).toBe("needs_review");
+    expect(gate.step2?.conflicts.map((c) => c.code)).toEqual(["segment_season_not_found"]);
+    // Step 1 conflicts come first, so the primary conflict code is still Step 1's
+    expect(gate.conflicts[0]?.step).toBe(1);
+    expect(gate.conflicts.map((c) => c.step)).toContain(2);
+    expect(gate.reasons).toHaveLength(gate.conflicts.length);
+  });
+
+  test("invokes pluggable Step 2 hook whether or not Step 1 passes", () => {
     let step2Called = 0;
     const step2Hook: EvidenceGateStep2Evaluator = (ctx) => {
       step2Called += 1;
@@ -335,7 +360,7 @@ describe("Evidence Gate Step 1", () => {
       };
     };
 
-    // When Step 1 fails, Step 2 is NOT called
+    // When Step 1 fails, Step 2 still runs and is recorded; the verdict stays needs_review
     const failedStep1 = evaluateEvidenceGate({
       catalog: makeTvCatalog(),
       collection: makeBilibiliCollection({ year: 1999 }),
@@ -343,8 +368,8 @@ describe("Evidence Gate Step 1", () => {
       evaluateStep2: step2Hook,
     });
     expect(failedStep1.decision).toBe("needs_review");
-    expect(failedStep1.step2).toBeNull();
-    expect(step2Called).toBe(0);
+    expect(failedStep1.step2).toEqual({ decision: "pass", conflicts: [], reasons: [] });
+    expect(step2Called).toBe(1);
 
     // When Step 1 passes, Step 2 runs and its decision determines final outcome
     const vetoedByStep2 = evaluateEvidenceGate({
@@ -363,7 +388,7 @@ describe("Evidence Gate Step 1", () => {
       ],
       evaluateStep2: step2Hook,
     });
-    expect(step2Called).toBe(1);
+    expect(step2Called).toBe(2);
     expect(vetoedByStep2.step1.decision).toBe("pass");
     expect(vetoedByStep2.step2?.decision).toBe("needs_review");
     expect(vetoedByStep2.decision).toBe("needs_review");
@@ -1296,5 +1321,95 @@ describe("Evidence Gate Step 2", () => {
       setDefaultVariant: true,
     });
     expect(neutralDefault.decision).toBe("pass");
+  });
+});
+
+describe("Evidence Gate rules from the needs_review queue", () => {
+  test("诛仙 最终季 matches catalog title 诛仙", () => {
+    const result = evaluateEvidenceGateStep1(
+      makeTvCatalog({ title: "诛仙", originalTitle: null, aliases: [] }),
+      makeBilibiliCollection({ namespace: "tencent", title: "诛仙 最终季", originalTitle: null }),
+    );
+    expect(result.fieldChecks.title).toBe("matched");
+  });
+
+  test("妻子的浪漫旅行2026 matches catalog title 妻子的浪漫旅行, but a trailing single digit still does not", () => {
+    const catalog = makeTvCatalog({ title: "妻子的浪漫旅行", originalTitle: null, aliases: [] });
+    const withYear = evaluateEvidenceGateStep1(
+      catalog,
+      makeBilibiliCollection({
+        namespace: "mgtv",
+        title: "妻子的浪漫旅行2026",
+        originalTitle: null,
+        year: 2026,
+      }),
+    );
+    expect(withYear.fieldChecks.title).toBe("matched");
+
+    const sequel = evaluateEvidenceGateStep1(
+      catalog,
+      makeBilibiliCollection({ namespace: "mgtv", title: "妻子的浪漫旅行2", originalTitle: null }),
+    );
+    expect(sequel.fieldChecks.title).toBe("mismatch");
+  });
+
+  test("银翼杀手2049 does not match 银翼杀手: a trailing number that is not the release year is part of the title", () => {
+    const original = { title: "银翼杀手", originalTitle: null, aliases: [] };
+    const sequel = { title: "银翼杀手2049", originalTitle: null, aliases: [] };
+    const result = evaluateEvidenceGateStep1(
+      makeTvCatalog({ ...original, year: 1982 }),
+      makeBilibiliCollection({ ...sequel, year: 2017 }),
+    );
+    expect(result.fieldChecks.title).toBe("mismatch");
+
+    const reversed = evaluateEvidenceGateStep1(
+      makeTvCatalog({ ...sequel, year: 2017 }),
+      makeBilibiliCollection({ ...original, year: 1982 }),
+    );
+    expect(reversed.fieldChecks.title).toBe("mismatch");
+  });
+
+  test("咒术回战 第二季 (TMDB S1 E25–47) compares the collection year with those episodes' air year", () => {
+    // TMDB keeps 59 episodes in one season: E1–24 2020, E25–47 2023, E48–59 2026
+    const episodeAirYears: Record<number, number> = {};
+    for (let ep = 1; ep <= 59; ep += 1) {
+      episodeAirYears[ep] = ep <= 24 ? 2020 : ep <= 47 ? 2023 : 2026;
+    }
+    const catalog = makeTvCatalog({
+      year: 2020,
+      seasons: [{ season: 1, episodeCount: 59, airYear: 2020 }],
+      episodeAirYears: { 1: episodeAirYears },
+    });
+    const segments = [
+      {
+        season: 1,
+        episodeStart: 25,
+        episodeEnd: 47,
+        targetEpisodeStart: 1,
+        baseline: "tmdb" as const,
+        nonLinear: false,
+        needsReview: false,
+      },
+    ];
+    const season2 = makeBilibiliCollection({
+      canonicalId: "ss45574",
+      title: "咒术回战 第二季",
+      year: 2023,
+      featureEpisodeCount: 23,
+    });
+
+    const result = evaluateEvidenceGate({ catalog, collection: season2, segments });
+    expect(result.step1.fieldChecks.year).toBe("matched");
+    expect(result.step2?.decision).toBe("pass");
+    expect(result.decision).toBe("pass");
+
+    // The same episodes listed under the season premiere year are now the wrong year
+    const wrongYear = evaluateEvidenceGate({
+      catalog,
+      collection: { ...season2, year: 2020 },
+      segments,
+    });
+    expect(wrongYear.decision).toBe("needs_review");
+    expect(wrongYear.step2?.conflicts.map((c) => c.code)).toContain("segment_year_mismatch");
   });
 });

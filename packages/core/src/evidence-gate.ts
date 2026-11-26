@@ -18,6 +18,11 @@ export interface CatalogEvidence {
   aliases?: readonly string[];
   year: number | null;
   seasons: readonly SeasonSnapshot[];
+  /**
+   * Air year per episode, by season then episode number. Fetched only for seasons a submitted
+   * segment starts partway through; segment year checks fall back to the season premiere year.
+   */
+  episodeAirYears?: Readonly<Record<number, Readonly<Record<number, number | null>>>>;
   /** Optional explicit episode count for single-season catalogs (e.g., Douban/Bangumi) or movies. */
   episodeCount?: number | null;
   /**
@@ -575,9 +580,15 @@ const TRAILING_BRACKET_QUALIFIER =
   /\s*(?:\([^)]{1,24}\)|\[[^\]]{1,24}\]|（[^）]{1,24}）|【[^】]{1,24}】)\s*$/u;
 
 const TRAILING_SEASON_QUALIFIER =
-  /\s*(?:第[0-9一二三四五六七八九十百]+[季部期篇]|season\s*\d+|part\s*\d+|s\d{1,2})\s*$/iu;
+  /\s*(?:第[0-9一二三四五六七八九十百]+[季部期篇]|最[终終]季|season\s*\d+|part\s*\d+|s\d{1,2})\s*$/iu;
 
-function stripTrailingQualifiers(raw: string): string {
+/** A trailing year is a qualifier only when it is the item's own year: 「银翼杀手2049」 is a title. */
+function trailingYearPattern(year: number | null): RegExp | null {
+  return year === null ? null : new RegExp(`\\s*(?<!\\d)${year}\\s*$`, "u");
+}
+
+function stripTrailingQualifiers(raw: string, year: number | null): string {
+  const trailingYear = trailingYearPattern(year);
   let current = raw.trim();
   for (let i = 0; i < 4; i += 1) {
     const withoutBracket = current.replace(TRAILING_BRACKET_QUALIFIER, "").trim();
@@ -585,7 +596,10 @@ function stripTrailingQualifiers(raw: string): string {
       current = withoutBracket;
       continue;
     }
-    const withoutSeason = current.replace(TRAILING_SEASON_QUALIFIER, "").trim();
+    let withoutSeason = current.replace(TRAILING_SEASON_QUALIFIER, "").trim();
+    if (withoutSeason === current && trailingYear) {
+      withoutSeason = current.replace(trailingYear, "").trim();
+    }
     if (withoutSeason !== current && withoutSeason.length >= 2) {
       current = withoutSeason;
       continue;
@@ -605,6 +619,7 @@ function collectNormalizedTitleCandidates(
   primary: string | null | undefined,
   original: string | null | undefined,
   aliases: readonly string[] | undefined,
+  year: number | null,
 ): Set<string> {
   const result = new Set<string>();
   const rawList: string[] = [];
@@ -628,7 +643,7 @@ function collectNormalizedTitleCandidates(
       result.add(normalized);
     }
 
-    const stripped = stripTrailingQualifiers(raw);
+    const stripped = stripTrailingQualifiers(raw, year);
     if (stripped !== raw) {
       const normalizedStripped = normalizeTitleForComparison(stripped);
       if (normalizedStripped.length >= 2) {
@@ -675,6 +690,18 @@ function collectCollectionFetchedIds(
   return ids;
 }
 
+/** Air year of the segment's first episode, else the season premiere year. */
+function segmentStartYear(
+  catalog: CatalogEvidence,
+  segment: Pick<NormalizedSegment, "season" | "episodeStart">,
+): number | null {
+  const year =
+    catalog.episodeAirYears?.[segment.season]?.[segment.episodeStart] ??
+    catalog.seasons.find((s) => s.season === segment.season)?.airYear ??
+    null;
+  return year !== null && Number.isInteger(year) ? year : null;
+}
+
 function collectCatalogCandidateYears(
   catalog: CatalogEvidence,
   segments?: readonly NormalizedSegment[],
@@ -682,6 +709,12 @@ function collectCatalogCandidateYears(
   const years = new Set<number>();
   if (catalog.year !== null && Number.isInteger(catalog.year)) {
     years.add(catalog.year);
+  }
+  for (const segment of segments ?? []) {
+    const year = segmentStartYear(catalog, segment);
+    if (year !== null) {
+      years.add(year);
+    }
   }
   const includeSpecials = Boolean(segments?.some((s) => s.season === 0));
   if (catalog.mediaType === "tv") {
@@ -934,11 +967,13 @@ export function evaluateEvidenceGateStep1(
     catalog.title,
     catalog.originalTitle,
     catalog.aliases,
+    catalog.year,
   );
   const collectionTitles = collectNormalizedTitleCandidates(
     collection.title,
     collection.originalTitle,
     collection.aliases,
+    collection.year,
   );
 
   if (catalogTitles.size === 0 || collectionTitles.size === 0) {
@@ -1171,22 +1206,29 @@ export function evaluateEvidenceGateStep2(
     }
   }
 
-  // 2. Year check against the earliest segment season's premiere year
+  // 2. Year check against the air year of the earliest segment's first episode
   const regularSeasonNumbers = context.segments.map((s) => s.season).filter((s) => s >= 1);
   const earliestSeasonNumber =
     regularSeasonNumbers.length > 0
       ? Math.min(...regularSeasonNumbers)
       : Math.min(...context.segments.map((s) => s.season));
   const earliestSeason = seasonMap.get(earliestSeasonNumber);
+  const earliestEpisode = Math.min(
+    ...context.segments.filter((s) => s.season === earliestSeasonNumber).map((s) => s.episodeStart),
+  );
+  const earliestLabel = `season ${earliestSeasonNumber} episode ${earliestEpisode}`;
 
   if (earliestSeason) {
-    const expectedYear = earliestSeason.airYear;
-    if (expectedYear === null || !Number.isInteger(expectedYear)) {
+    const expectedYear = segmentStartYear(context.catalog, {
+      season: earliestSeasonNumber,
+      episodeStart: earliestEpisode,
+    });
+    if (expectedYear === null) {
       conflicts.push({
         step: 2,
         code: "segment_year_missing",
         field: "year",
-        message: `Catalog season ${earliestSeasonNumber} is missing premiere year`,
+        message: `Catalog ${earliestLabel} is missing air year`,
         catalogValue: null,
         collectionValue: context.collection.year,
       });
@@ -1204,7 +1246,7 @@ export function evaluateEvidenceGateStep2(
         step: 2,
         code: "segment_year_mismatch",
         field: "year",
-        message: `Collection year (${context.collection.year}) does not match season ${earliestSeasonNumber} premiere year (${expectedYear})`,
+        message: `Collection year (${context.collection.year}) does not match ${earliestLabel} air year (${expectedYear})`,
         catalogValue: expectedYear,
         collectionValue: context.collection.year,
       });
@@ -1364,16 +1406,8 @@ export function evaluateEvidenceGate(input: EvaluateEvidenceGateInput): Evidence
   const step1 = evaluateEvidenceGateStep1(input.catalog, input.collection, {
     segments: input.segments,
   });
-  if (step1.decision !== "pass") {
-    return {
-      decision: "needs_review",
-      step1,
-      step2: null,
-      conflicts: step1.conflicts,
-      reasons: step1.reasons,
-    };
-  }
 
+  // Step 2 runs even when Step 1 fails so reviewers see every conflict at once (ADR 0003 section 5)
   const step2Evaluator = input.evaluateStep2 ?? evaluateEvidenceGateStep2;
   const step2 = step2Evaluator({
     catalog: input.catalog,
@@ -1388,7 +1422,7 @@ export function evaluateEvidenceGate(input: EvaluateEvidenceGateInput): Evidence
   const reasons = [...step1.reasons, ...step2.reasons];
 
   return {
-    decision: step2.decision,
+    decision: step1.decision === "pass" ? step2.decision : "needs_review",
     step1,
     step2,
     conflicts,

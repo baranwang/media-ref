@@ -161,6 +161,8 @@ export interface ListChangeRequestsOptions {
   status?: ChangeRequestStatus;
   /** List one submitter's requests across every status, newest first (`status` is ignored). */
   submitterUserId?: string;
+  /** With `status`: only requests this reviewer decided, latest decision first. */
+  reviewerUserId?: string;
   limit?: number;
   offset?: number;
 }
@@ -1175,14 +1177,18 @@ export async function listChangeRequests(
   const offset = Math.max(options.offset ?? 0, 0);
 
   const mine = options.submitterUserId;
+  const reviewer = options.reviewerUserId;
   const [rows, countRow] = await Promise.all([
     dbWrite
       .selectFrom("change_requests")
       .selectAll()
       .$if(mine === undefined, (qb) => qb.where("status", "=", status))
       .$if(mine !== undefined, (qb) => qb.where("submitter_user_id", "=", mine!))
-      .orderBy("created_at", mine === undefined ? "asc" : "desc")
-      .orderBy("id", mine === undefined ? "asc" : "desc")
+      .$if(reviewer !== undefined, (qb) =>
+        qb.where("reviewer_user_id", "=", reviewer!).orderBy("reviewed_at", "desc"),
+      )
+      .orderBy("created_at", mine === undefined && reviewer === undefined ? "asc" : "desc")
+      .orderBy("id", mine === undefined && reviewer === undefined ? "asc" : "desc")
       .limit(limit)
       .offset(offset)
       .execute(),
@@ -1191,6 +1197,7 @@ export async function listChangeRequests(
       .select(sql<string>`count(*)`.as("count"))
       .$if(mine === undefined, (qb) => qb.where("status", "=", status))
       .$if(mine !== undefined, (qb) => qb.where("submitter_user_id", "=", mine!))
+      .$if(reviewer !== undefined, (qb) => qb.where("reviewer_user_id", "=", reviewer!))
       .executeTakeFirstOrThrow(),
   ]);
 
@@ -1997,48 +2004,62 @@ export async function rejectChangeRequest(
     throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
   }
 
+  return dbWrite.transaction().execute((trx) => rejectChangeRequestInTx(trx, input));
+}
+
+/**
+ * `rejectChangeRequest` inside the caller's transaction. A review agent correction (ADR 0003 §4)
+ * also stores the evidence and reopens the demand without backoff (`corrected`).
+ */
+export async function rejectChangeRequestInTx(
+  trx: Transaction<Database>,
+  input: RejectChangeRequestInput & { evidence?: JsonObject; corrected?: boolean; now?: Date },
+): Promise<ChangeRequestRecord> {
   const allowedStatuses = input.allowedStatuses ?? ["needs_review"];
   const reason = input.reason?.trim() || null;
 
-  return dbWrite.transaction().execute(async (trx) => {
-    const cr = await trx
-      .selectFrom("change_requests")
-      .selectAll()
-      .where("id", "=", input.changeRequestId)
-      .forUpdate()
-      .executeTakeFirst();
+  const cr = await trx
+    .selectFrom("change_requests")
+    .selectAll()
+    .where("id", "=", input.changeRequestId)
+    .forUpdate()
+    .executeTakeFirst();
 
-    if (!cr) {
-      throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
-    }
-    if (!allowedStatuses.includes(cr.status)) {
-      throw new MediaServiceError(
-        "INVALID_CHANGE_REQUEST_STATE",
-        409,
-        `Change request is in status "${cr.status}" and cannot be rejected`,
-      );
-    }
+  if (!cr) {
+    throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
+  }
+  if (!allowedStatuses.includes(cr.status)) {
+    throw new MediaServiceError(
+      "INVALID_CHANGE_REQUEST_STATE",
+      409,
+      `Change request is in status "${cr.status}" and cannot be rejected`,
+    );
+  }
 
-    const now = new Date();
-    const updated = await trx
-      .updateTable("change_requests")
-      .set({
-        status: "rejected",
-        decision_reason: reason,
-        reviewer_user_id: input.reviewerUserId,
-        reviewed_at: now,
-        updated_at: now,
-      })
-      .where("id", "=", cr.id)
-      .returningAll()
-      .executeTakeFirstOrThrow();
+  const now = input.now ?? new Date();
+  const updated = await trx
+    .updateTable("change_requests")
+    .set({
+      status: "rejected",
+      decision_reason: reason,
+      reviewer_user_id: input.reviewerUserId,
+      reviewed_at: now,
+      updated_at: now,
+      ...(input.evidence ? { evidence: JSON.stringify(input.evidence) } : {}),
+    })
+    .where("id", "=", cr.id)
+    .returningAll()
+    .executeTakeFirstOrThrow();
 
-    if (cr.demand_id) {
-      await reopenDemandAfterRejectionInTx(trx, { demandId: cr.demand_id, now });
-    }
+  if (cr.demand_id) {
+    await reopenDemandAfterRejectionInTx(trx, {
+      demandId: cr.demand_id,
+      now,
+      corrected: input.corrected,
+    });
+  }
 
-    return toChangeRequestRecord(updated);
-  });
+  return toChangeRequestRecord(updated);
 }
 
 export async function readMediaDocument(

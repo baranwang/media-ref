@@ -2,7 +2,12 @@ import { proto } from "@media-ref/client";
 import { queryOptions } from "@tanstack/react-query";
 import { createBrowserClients } from "./api-client";
 import type { BrowseSlug } from "./catalogs";
-import { apiKeyFromProto, changeRequestFromProto, reviewAlertFromProto } from "./mappers";
+import {
+  apiKeyFromProto,
+  changeRequestFromProto,
+  REVIEW_AGENT_USER_ID,
+  reviewAlertFromProto,
+} from "./mappers";
 import {
   fetchCardsByKey,
   fetchDemands,
@@ -97,6 +102,20 @@ export const reviewQueueQuery = () =>
       return [...needsReview.changeRequests, ...pending.changeRequests]
         .map(changeRequestFromProto)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    },
+  });
+
+/** Change requests the review agent approved, latest first, for spot checks. */
+export const agentApprovalsQuery = () =>
+  queryOptions({
+    queryKey: ["agent-approvals"],
+    queryFn: async () => {
+      const res = await browserClients().reviewer.listChangeRequests({
+        status: proto.ChangeRequestStatus.APPROVED,
+        reviewerUserId: REVIEW_AGENT_USER_ID,
+        limit: 100,
+      });
+      return res.changeRequests.map(changeRequestFromProto);
     },
   });
 

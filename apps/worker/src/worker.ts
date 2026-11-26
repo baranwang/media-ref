@@ -10,6 +10,7 @@ import {
   createExplorationAgentExecutor,
   createExplorationJobHandler,
   createInvalidationRecheckJobHandler,
+  createReviewAgentJobHandler,
   createSeedEvidenceCheckJobHandler,
   createTmdbDailyExportsJobHandler,
   createTmdbSyncJobHandler,
@@ -22,6 +23,7 @@ import {
   INVALIDATION_RECHECK_JOB_TYPE,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
+  REVIEW_AGENT_JOB_TYPE,
   scheduleExplorationJobs,
   SEED_EVIDENCE_CHECK_JOB_TYPE,
   TMDB_DAILY_EXPORTS_JOB_TYPE,
@@ -37,6 +39,7 @@ import {
   type JobQueueMessage,
   type JobQueueSender,
   type OutboundClient,
+  type ReviewAgentConfig,
   type TmdbGateway,
   type TmdbGatewayConfig,
 } from "@media-ref/core";
@@ -59,6 +62,7 @@ export interface BackgroundWorkerConfig {
   tmdbExportsBaseUrl?: string;
   exploration?: Partial<ExplorationSchedulerConfig>;
   explorationAgent?: ExplorationAgentConfig;
+  reviewAgent?: ReviewAgentConfig;
   enableExplorationScheduling?: boolean;
 }
 
@@ -183,6 +187,14 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           ...deps.config?.explorationAgent,
         }),
       catalogVerifier: deps.explorationCatalogVerifier,
+    }),
+    [REVIEW_AGENT_JOB_TYPE]: createReviewAgentJobHandler({
+      adapterRegistry: deps.adapterRegistry,
+      catalogConfig: deps.config?.catalog,
+      tmdbConfig: deps.config?.tmdb,
+      tmdbGateway: deps.tmdbGateway,
+      dailyTokenBudget: deps.config?.exploration?.dailyTokenBudget,
+      ...deps.config?.reviewAgent,
     }),
     ...deps.handlers,
   };
@@ -327,6 +339,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
               jobType: body.jobType,
               leaseGeneration: body.leaseGeneration,
               payload: body.payload,
+              leaseExpiresAt: currentJob.leaseExpiresAt,
             },
             now: resolveNow(deps.now),
           });

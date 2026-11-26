@@ -17,6 +17,7 @@ import type {
   CardItem,
   CatalogDirectoryRow,
   ChangeRequestItem,
+  ChangeRequestSegmentView,
   ChangeRequestTimelineStep,
   CoverageSegment,
   DemandItem,
@@ -25,6 +26,7 @@ import type {
   MediaItem,
   MediaSeasonInfo,
   PlatformVariantRow,
+  ReviewAgentView,
   ReviewAlertItem,
 } from "./types";
 import { buildExternalUrl } from "./url-parser";
@@ -417,10 +419,59 @@ function checksFromEvidence(id: string, evidence: Json | null): AutoCheckItem[] 
   return checks;
 }
 
+/** Same id as `REVIEW_AGENT_USER_ID` in `@media-ref/core`. */
+export const REVIEW_AGENT_USER_ID = "system:review-agent";
+
+type SegmentFields = Pick<
+  proto.Segment,
+  "season" | "episodeStart" | "episodeEnd" | "targetEpisodeStart"
+>;
+
+function segmentView(s: SegmentFields): ChangeRequestSegmentView {
+  return {
+    season: s.season,
+    start: s.episodeStart,
+    end: s.episodeEnd ?? null,
+    targetStart: s.targetEpisodeStart,
+  };
+}
+
+function reviewAgentFromEvidence(evidence: Json | null): ReviewAgentView | null {
+  const raw = asJson(evidence?.reviewAgent);
+  if (
+    raw?.verdict !== "approve" &&
+    raw?.verdict !== "keep_for_human" &&
+    raw?.verdict !== "reject_with_correction"
+  ) {
+    return null;
+  }
+  const reasons = (Array.isArray(raw.reasons) ? raw.reasons : []).flatMap((r) => {
+    const reason = asJson(r);
+    return typeof reason?.code === "string" && typeof reason.reason === "string"
+      ? [{ code: reason.code, reason: reason.reason }]
+      : [];
+  });
+  const correction = asJson(raw.correction);
+  return {
+    verdict: raw.verdict,
+    reasons,
+    opinion: typeof raw.opinion === "string" ? raw.opinion : null,
+    correction:
+      typeof correction?.season === "number" && Array.isArray(correction.segments)
+        ? {
+            season: correction.season,
+            segments: (correction.segments as SegmentFields[]).map(segmentView),
+          }
+        : null,
+  };
+}
+
 function timelineFor(
   cr: proto.ChangeRequest,
   status: ChangeRequestItem["status"],
+  agent: ReviewAgentView | null,
 ): ChangeRequestTimelineStep[] {
+  const byAgent = cr.reviewerUserId === REVIEW_AGENT_USER_ID;
   const steps: ChangeRequestTimelineStep[] = [
     { label: "已提交", time: formatDateTime(cr.createdAt), detail: "变更单已提交", state: "done" },
   ];
@@ -446,14 +497,20 @@ function timelineFor(
     steps.push({
       label: "已生效",
       time: formatDateTime(cr.reviewedAt),
-      detail: "关联已经生效",
+      detail: byAgent
+        ? "审核 agent 已批准，关联已经生效"
+        : cr.reviewerUserId
+          ? "审核员已批准，关联已经生效"
+          : "自动核对通过，已自动生效",
       state: "done",
     });
   } else if (status === "rejected") {
     steps.push({
       label: "已驳回",
       time: formatDateTime(cr.reviewedAt),
-      detail: cr.decisionReason ?? "审核员驳回了这张变更单",
+      detail: agent?.correction
+        ? `审核 agent 驳回并改正为第 ${agent.correction.season} 季，会按改正重新提交`
+        : (cr.decisionReason ?? `${byAgent ? "审核 agent" : "审核员"}驳回了这张变更单`),
       state: "done",
     });
   }
@@ -466,6 +523,7 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
   const collection = asJson(evidence?.collection);
   const namespace = cr.namespace as Namespace;
   const rawIsUrl = /^https?:\/\//i.test(cr.rawNativeId);
+  const reviewAgent = reviewAgentFromEvidence(evidence);
   return {
     id: cr.id,
     status,
@@ -478,19 +536,17 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
     pageEpisodeCount:
       typeof collection?.featureEpisodeCount === "number" ? collection.featureEpisodeCount : null,
     variantLabel: cr.variantDescription ?? null,
-    segments: cr.segments.map((s) => ({
-      season: s.season,
-      start: s.episodeStart,
-      end: s.episodeEnd ?? null,
-      targetStart: s.targetEpisodeStart,
-    })),
+    segments: cr.segments.map(segmentView),
     conflictReason: cr.conflictReason ?? null,
     decisionReason: cr.decisionReason ?? null,
+    reviewerUserId: cr.reviewerUserId ?? null,
+    reviewedByAgent: cr.reviewerUserId === REVIEW_AGENT_USER_ID,
+    reviewAgent,
     submitterUserId: cr.submitterUserId,
     createdAt: cr.createdAt,
     reviewedAt: cr.reviewedAt ?? null,
     checks: checksFromEvidence(cr.id, evidence),
-    timeline: timelineFor(cr, status),
+    timeline: timelineFor(cr, status, reviewAgent),
   };
 }
 

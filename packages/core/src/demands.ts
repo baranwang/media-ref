@@ -727,12 +727,13 @@ export interface FulfillCoveredDemandsInput {
 /**
  * After a rejection, reopens the demand a change request was submitted for, unless another
  * request for that demand is still pending or already approved. The rejection counts as a
- * not-found round, so the demand backs off before it is explored again.
+ * not-found round, so the demand backs off before it is explored again; a rejection with a
+ * correction (`corrected`, ADR 0003 §4) does not, and the demand is explorable at once.
  * shortcut: uses the default backoff schedule, not the worker's EXPLORATION_BACKOFF_SECONDS; pass it in if that diverges.
  */
 export async function reopenDemandAfterRejectionInTx(
   executor: DbExecutor,
-  input: { demandId: string; now: Date },
+  input: { demandId: string; now: Date; corrected?: boolean },
 ): Promise<boolean> {
   const demand = await executor
     .selectFrom("demands")
@@ -752,20 +753,65 @@ export async function reopenDemandAfterRejectionInTx(
   if (live) {
     return false;
   }
-  const notFoundCount = demand.not_found_count + 1;
+  const notFoundCount = demand.not_found_count + (input.corrected ? 0 : 1);
   await executor
     .updateTable("demands")
     .set({
       status: "open",
       not_found_count: notFoundCount,
-      next_eligible_at: new Date(
-        input.now.getTime() + computeNotFoundBackoffSeconds(notFoundCount) * 1000,
-      ),
+      next_eligible_at: input.corrected
+        ? input.now
+        : new Date(input.now.getTime() + computeNotFoundBackoffSeconds(notFoundCount) * 1000),
       updated_at: input.now,
     })
     .where("id", "=", demand.id)
     .execute();
   return true;
+}
+
+/**
+ * Makes `(media or external key, season, namespace group)` explorable now, for a review agent
+ * correction (ADR 0003 §4): creates the demand, or reopens it without a not-found round. A demand
+ * being explored or awaiting review is left alone.
+ */
+export async function ensureDemandExplorableNowInTx(
+  executor: DbExecutor,
+  input: {
+    mediaId: string | null;
+    externalKey: string;
+    season: number;
+    namespaceGroup: NamespaceGroup;
+    now: Date;
+  },
+): Promise<void> {
+  const { mediaId, season, namespaceGroup, now } = input;
+  const demand = mediaId
+    ? await upsertMediaDemandRow(
+        executor,
+        {
+          mediaId,
+          season,
+          namespaceGroup,
+          delta: 1,
+          status: "open",
+          notFoundCount: 0,
+          nextEligibleAt: now,
+          lastExploredAt: null,
+          lastDemandedAt: now,
+        },
+        now,
+      )
+    : await upsertExternalKeyDemandTarget(
+        executor,
+        { kind: "external_key", externalKey: input.externalKey, season, namespaceGroup, delta: 1 },
+        now,
+      );
+  await executor
+    .updateTable("demands")
+    .set({ status: "open", next_eligible_at: now, updated_at: now })
+    .where("id", "=", demand.id)
+    .where("status", "in", ["open", "not_found", "fulfilled"])
+    .execute();
 }
 
 /**

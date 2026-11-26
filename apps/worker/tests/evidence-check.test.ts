@@ -1257,7 +1257,10 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
     now: Date,
   ) {
     await worker.scheduled(createScheduledController(now));
-    const messages = emitted.splice(0, emitted.length);
+    // Review agent jobs queued by earlier needs_review requests are not this suite's concern.
+    const messages = emitted
+      .splice(0, emitted.length)
+      .filter((m) => m.jobType === "evidence_check");
     if (messages.length > 0) {
       await worker.queue(createQueueBatch(messages, now).batch);
     }

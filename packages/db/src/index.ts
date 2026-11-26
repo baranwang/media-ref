@@ -37,6 +37,7 @@ export type {
   SeasonSnapshotRow,
   SegmentsTable,
   SessionTable,
+  LeadSegmentJson,
   StoredSegmentJson,
   SubmitterTypeRow,
   SyncStateTable,

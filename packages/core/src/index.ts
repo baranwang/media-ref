@@ -165,6 +165,18 @@ export {
 } from "./conflict-resolution.ts";
 export { createEvidenceCheckJobHandler, type EvidenceCheckJobOptions } from "./evidence-job.ts";
 export {
+  createReviewAgentJobHandler,
+  DEFAULT_REVIEW_AGENT_MAX_DURATION_MS,
+  DEFAULT_REVIEW_AGENT_MAX_STEPS,
+  DEFAULT_REVIEW_AGENT_MAX_TASK_TOKENS,
+  ensureReviewAgentUser,
+  REVIEW_AGENT_JOB_TYPE,
+  REVIEW_AGENT_KEY_ID,
+  REVIEW_AGENT_USER_ID,
+  type ReviewAgentConfig,
+  type ReviewAgentJobOptions,
+} from "./review-agent.ts";
+export {
   listExplorationActivity,
   type ExplorationActivityEntry,
   type ExplorationActivityFilter,

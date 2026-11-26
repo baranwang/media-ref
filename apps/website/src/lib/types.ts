@@ -161,6 +161,16 @@ export interface ChangeRequestSegmentView {
   targetStart: number;
 }
 
+/** What the review agent concluded, from `evidence.reviewAgent`. */
+export interface ReviewAgentView {
+  verdict: "approve" | "keep_for_human" | "reject_with_correction";
+  /** One per conflict code it explained. */
+  reasons: { code: string; reason: string }[];
+  opinion: string | null;
+  /** The corrected season and segments when it rejected with a correction. */
+  correction: { season: number; segments: ChangeRequestSegmentView[] } | null;
+}
+
 export interface ChangeRequestItem {
   id: string;
   status: ChangeRequestStatus;
@@ -178,6 +188,11 @@ export interface ChangeRequestItem {
   segments: ChangeRequestSegmentView[];
   conflictReason: string | null;
   decisionReason: string | null;
+  /** Null when the evidence gate approved it automatically. */
+  reviewerUserId: string | null;
+  /** The review agent approved or rejected it (not a human reviewer). */
+  reviewedByAgent: boolean;
+  reviewAgent: ReviewAgentView | null;
   submitterUserId: string;
   createdAt: string;
   reviewedAt: string | null;
