@@ -1997,48 +1997,62 @@ export async function rejectChangeRequest(
     throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
   }
 
+  return dbWrite.transaction().execute((trx) => rejectChangeRequestInTx(trx, input));
+}
+
+/**
+ * `rejectChangeRequest` inside the caller's transaction. A review agent correction (ADR 0003 §4)
+ * also stores the evidence and reopens the demand without backoff (`corrected`).
+ */
+export async function rejectChangeRequestInTx(
+  trx: Transaction<Database>,
+  input: RejectChangeRequestInput & { evidence?: JsonObject; corrected?: boolean; now?: Date },
+): Promise<ChangeRequestRecord> {
   const allowedStatuses = input.allowedStatuses ?? ["needs_review"];
   const reason = input.reason?.trim() || null;
 
-  return dbWrite.transaction().execute(async (trx) => {
-    const cr = await trx
-      .selectFrom("change_requests")
-      .selectAll()
-      .where("id", "=", input.changeRequestId)
-      .forUpdate()
-      .executeTakeFirst();
+  const cr = await trx
+    .selectFrom("change_requests")
+    .selectAll()
+    .where("id", "=", input.changeRequestId)
+    .forUpdate()
+    .executeTakeFirst();
 
-    if (!cr) {
-      throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
-    }
-    if (!allowedStatuses.includes(cr.status)) {
-      throw new MediaServiceError(
-        "INVALID_CHANGE_REQUEST_STATE",
-        409,
-        `Change request is in status "${cr.status}" and cannot be rejected`,
-      );
-    }
+  if (!cr) {
+    throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
+  }
+  if (!allowedStatuses.includes(cr.status)) {
+    throw new MediaServiceError(
+      "INVALID_CHANGE_REQUEST_STATE",
+      409,
+      `Change request is in status "${cr.status}" and cannot be rejected`,
+    );
+  }
 
-    const now = new Date();
-    const updated = await trx
-      .updateTable("change_requests")
-      .set({
-        status: "rejected",
-        decision_reason: reason,
-        reviewer_user_id: input.reviewerUserId,
-        reviewed_at: now,
-        updated_at: now,
-      })
-      .where("id", "=", cr.id)
-      .returningAll()
-      .executeTakeFirstOrThrow();
+  const now = input.now ?? new Date();
+  const updated = await trx
+    .updateTable("change_requests")
+    .set({
+      status: "rejected",
+      decision_reason: reason,
+      reviewer_user_id: input.reviewerUserId,
+      reviewed_at: now,
+      updated_at: now,
+      ...(input.evidence ? { evidence: JSON.stringify(input.evidence) } : {}),
+    })
+    .where("id", "=", cr.id)
+    .returningAll()
+    .executeTakeFirstOrThrow();
 
-    if (cr.demand_id) {
-      await reopenDemandAfterRejectionInTx(trx, { demandId: cr.demand_id, now });
-    }
+  if (cr.demand_id) {
+    await reopenDemandAfterRejectionInTx(trx, {
+      demandId: cr.demand_id,
+      now,
+      corrected: input.corrected,
+    });
+  }
 
-    return toChangeRequestRecord(updated);
-  });
+  return toChangeRequestRecord(updated);
 }
 
 export async function readMediaDocument(

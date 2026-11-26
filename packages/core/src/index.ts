@@ -171,6 +171,7 @@ export {
   DEFAULT_REVIEW_AGENT_MAX_TASK_TOKENS,
   ensureReviewAgentUser,
   REVIEW_AGENT_JOB_TYPE,
+  REVIEW_AGENT_KEY_ID,
   REVIEW_AGENT_USER_ID,
   type ReviewAgentConfig,
   type ReviewAgentJobOptions,

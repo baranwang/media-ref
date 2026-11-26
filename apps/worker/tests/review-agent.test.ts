@@ -65,9 +65,45 @@ const LINGLONG_SEGMENTS: SegmentInput[] = [
   { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 8, baseline: "tmdb" },
 ];
 
+// 妻子的浪漫旅行 on TMDB: season n aired in WIFE_SEASON_YEARS[n - 1]; season 8 has 10 episodes.
+const WIFE_SEASON_YEARS = [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2026];
+const wifeEpisodeCount = (season: number) => (season === 8 ? 10 : 12);
+
+function wifeTmdbStub(url: string): ExternalHttpResponse | null {
+  const season = url.match(/\/tv\/70001\/season\/(\d+)/)?.[1];
+  if (season) {
+    return jsonResponse(url, {
+      episodes: Array.from({ length: wifeEpisodeCount(Number(season)) }, (_, i) => ({
+        episode_number: i + 1,
+        name: `第${i + 1}期`,
+        air_date: `${WIFE_SEASON_YEARS[Number(season) - 1]}-03-01`,
+      })),
+    });
+  }
+  if (url.includes("/tv/70001")) {
+    return jsonResponse(url, {
+      id: 70001,
+      name: "妻子的浪漫旅行",
+      original_name: "妻子的浪漫旅行",
+      first_air_date: "2018-03-01",
+      seasons: WIFE_SEASON_YEARS.map((year, i) => ({
+        season_number: i + 1,
+        episode_count: wifeEpisodeCount(i + 1),
+        air_date: `${year}-03-01`,
+      })),
+      external_ids: { imdb_id: null, tvdb_id: null },
+    });
+  }
+  return null;
+}
+
 function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
   const url = request.url;
   if (request.namespace === "tmdb") {
+    const wife = wifeTmdbStub(url);
+    if (wife) {
+      return wife;
+    }
     if (url.includes("/tv/91234/season/1")) {
       return jsonResponse(url, {
         episodes: Array.from({ length: 12 }, (_, i) => ({
@@ -120,6 +156,28 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
           badge_type: 0,
           section_type: 0,
           duration: 1500000,
+        })),
+      },
+    });
+  }
+  if (request.namespace === "bilibili" && url.includes("season_id=77777")) {
+    // The 2026 season, which is TMDB season 8.
+    return jsonResponse(url, {
+      code: 0,
+      message: "success",
+      result: {
+        season_id: 77777,
+        title: "妻子的浪漫旅行2026",
+        type: 7,
+        publish: { pub_time: "2026-03-01 12:00:00" },
+        episodes: Array.from({ length: 10 }, (_, i) => ({
+          id: 400000 + i,
+          title: String(i + 1),
+          long_title: `第${i + 1}期`,
+          badge: "",
+          badge_type: 0,
+          section_type: 0,
+          duration: 5400000,
         })),
       },
     });
@@ -216,6 +274,7 @@ async function setup(
   invokeModel: ScriptedModel,
   reviewAgent: BackgroundWorkerConfig["reviewAgent"] = {},
   adapterRegistry: AdapterRegistry = createDefaultAdapterRegistry(),
+  workerConfig: Partial<BackgroundWorkerConfig> = {},
 ) {
   const testDb = await createTestDb();
   const outbound = createFakeOutboundClient({ fetchExternal: httpStub, invokeModel });
@@ -234,11 +293,15 @@ async function setup(
       enableExplorationScheduling: false,
       tmdb: { accessToken: "test-tmdb-token" },
       reviewAgent: { dailyBudget: 10, ...reviewAgent },
+      ...workerConfig,
     },
     now: () => T0,
   });
 
-  const submit = async (nativeId = "ss28888") => {
+  const submit = async (
+    nativeId = "ss28888",
+    overrides: Partial<Parameters<typeof createChangeRequest>[1]> = {},
+  ) => {
     await ensureExplorationAgentUser(testDb.writeDb);
     const cr = await createChangeRequest(
       testDb.writeDb,
@@ -252,6 +315,7 @@ async function setup(
         setDefaultVariant: true,
         segments: LINGLONG_SEGMENTS,
         now: T0,
+        ...overrides,
       },
       { adapterRegistry, outbound, now: T0 },
     );
@@ -336,10 +400,15 @@ describe("review agent (#75)", () => {
     // The session's tools: the query tools minus platform search, and the conclusions.
     const toolNames = outbound.modelRequests[0]!.tools!.map((t) => t.name);
     expect(toolNames).toEqual(
-      expect.arrayContaining(["get_collection", "get_catalog_season", "approve", "keep_for_human"]),
+      expect.arrayContaining([
+        "get_collection",
+        "get_catalog_season",
+        "approve",
+        "reject_with_correction",
+        "keep_for_human",
+      ]),
     );
     expect(toolNames).not.toContain("search_platform");
-    expect(toolNames).not.toContain("reject_with_correction");
 
     // Two turns of 1100 tokens count towards the day's model usage, and one review is used.
     const budget = await testDb.readDb
@@ -523,5 +592,287 @@ describe("review agent (#75)", () => {
       maxTaskTokens: 100_000,
       model: "group/test",
     });
+  });
+});
+
+// Reject with correction (ADR 0003 §4, #76): code re-runs Evidence Gate step 2 on the correction.
+
+const WIFE_KEY = "tmdb:tv:70001";
+const WIFE_OPINION = "这是 2026 年播出的一季，TMDB 第 8 季，不是第 6 季";
+const wifeSegments = (season: number): SegmentInput[] => [
+  {
+    season,
+    episodeStart: 1,
+    episodeEnd: wifeEpisodeCount(season),
+    targetEpisodeStart: 1,
+    baseline: "tmdb",
+  },
+];
+const correctionFor = (season: number) => ({
+  season,
+  segments: [
+    { season, episodeStart: 1, episodeEnd: wifeEpisodeCount(season), targetEpisodeStart: 1 },
+  ],
+});
+
+/** Fetches the collection and the corrected season, then rejects with that correction. */
+const correctsTo =
+  (season: number): ScriptedModel =>
+  (request) => {
+    const turn = turnOf(request);
+    if (turn === 0) {
+      return reply(turn, [
+        ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+        ["get_catalog_season", { season }],
+      ]);
+    }
+    if (turn === 1) {
+      return reply(turn, [
+        ["reject_with_correction", { opinion: WIFE_OPINION, ...correctionFor(season) }],
+      ]);
+    }
+    return reply(turn, [["keep_for_human", { opinion: WIFE_OPINION }]]);
+  };
+
+describe("review agent: reject with correction (#76)", () => {
+  const handles: TestDbHandle[] = [];
+  const track = <T extends { testDb: TestDbHandle }>(ctx: T) => {
+    handles.push(ctx.testDb);
+    return ctx;
+  };
+
+  afterEach(async () => {
+    while (handles.length > 0) {
+      await handles.pop()!.cleanup();
+    }
+  });
+
+  async function submitAsHuman(ctx: Awaited<ReturnType<typeof setup>>, season = 6) {
+    await ctx.testDb.writeDb
+      .insertInto("user")
+      .values({
+        id: "user-human",
+        name: "Human",
+        email: "human@example.test",
+        emailVerified: true,
+        image: null,
+        role: "user",
+        reputation: 0,
+      })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+    return ctx.submit("ss77777", {
+      submitterUserId: "user-human",
+      submitterType: "human",
+      targetExternalKey: WIFE_KEY,
+      segments: wifeSegments(season),
+    });
+  }
+
+  const leads = (ctx: Awaited<ReturnType<typeof setup>>) =>
+    ctx.testDb.readDb.selectFrom("leads").selectAll().execute();
+  const demands = (ctx: Awaited<ReturnType<typeof setup>>) =>
+    ctx.testDb.readDb.selectFrom("demands").selectAll().orderBy("season").execute();
+
+  test("妻子的浪漫旅行: a human submitted season 6, the correction to season 8 passes step 2, so the request is rejected, a lead written and a demand opened now", async () => {
+    const ctx = track(await setup(correctsTo(8)));
+    const id = await submitAsHuman(ctx);
+
+    const ran = await ctx.drain();
+
+    expect(ran.map((m) => m.jobType)).toEqual(["evidence_check", "review_agent"]);
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("rejected");
+    expect(cr.reviewer_user_id).toBe(REVIEW_AGENT_USER_ID);
+    expect(cr.decision_reason).toContain(WIFE_OPINION);
+    expect(cr.decision_reason).toContain("第 8 季");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "reject_with_correction",
+      correction: correctionFor(8),
+      opinion: WIFE_OPINION,
+      fallback: null,
+    });
+    expect(ctx.outbound.modelRequests[0]!.tools!.map((t) => t.name)).toContain(
+      "reject_with_correction",
+    );
+
+    expect(await leads(ctx)).toEqual([
+      expect.objectContaining({
+        target_external_key: WIFE_KEY,
+        namespace: "bilibili",
+        native_id: "ss77777",
+        season: 8,
+        reporter_user_id: REVIEW_AGENT_USER_ID,
+        reporter_key_id: REVIEW_AGENT_USER_ID,
+        notes: expect.stringContaining(WIFE_OPINION),
+      }),
+    ]);
+    // No media yet, so the demand is on the external key; explorable now, no not-found round.
+    expect(await demands(ctx)).toEqual([
+      expect.objectContaining({
+        media_id: null,
+        external_key: WIFE_KEY,
+        season: 8,
+        namespace_group: "platform",
+        status: "open",
+        not_found_count: 0,
+        next_eligible_at: T0,
+      }),
+    ]);
+  });
+
+  test("a correction that fails step 2 keeps the request for a human, with the opinion and the proposed correction", async () => {
+    // Season 7 aired in 2024; the collection is from 2026.
+    const ctx = track(await setup(correctsTo(7)));
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("needs_review");
+    expect(cr.reviewer_user_id).toBeNull();
+    const reviewAgent = (cr.evidence as Record<string, any>).reviewAgent;
+    expect(reviewAgent).toMatchObject({
+      verdict: "keep_for_human",
+      fallback: expect.stringMatching(/^correction_failed_step2: .*segment_year_mismatch/),
+    });
+    expect(reviewAgent.opinion).toContain(WIFE_OPINION);
+    expect(reviewAgent.opinion).toContain("第 7 季");
+    expect(reviewAgent.correction).toBeUndefined();
+    expect(await leads(ctx)).toEqual([]);
+    expect(await demands(ctx)).toEqual([]);
+  });
+
+  test("the same media and platform ID is corrected only once: the second review cannot reject", async () => {
+    const ctx = track(await setup(correctsTo(8)));
+    await submitAsHuman(ctx);
+    await ctx.drain();
+    const callsAfterFirst = ctx.outbound.modelRequests.length;
+
+    const second = await submitAsHuman(ctx);
+    await ctx.drain();
+
+    // The second session is not offered the tool; calling it anyway gets UNKNOWN_TOOL.
+    const tools = ctx.outbound.modelRequests[callsAfterFirst]!.tools!.map((t) => t.name);
+    expect(tools).toEqual(expect.arrayContaining(["approve", "keep_for_human"]));
+    expect(tools).not.toContain("reject_with_correction");
+    const cr = await ctx.changeRequest(second);
+    expect(cr.status).toBe("needs_review");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "keep_for_human",
+      opinion: WIFE_OPINION,
+    });
+    expect(await leads(ctx)).toHaveLength(1);
+  });
+
+  test("an exploration submission's demand reopens without backoff, and exploration resubmits from the lead", async () => {
+    // The exploration agent marks every platform it has no candidate for as not found.
+    const model: ScriptedModel = (request) => {
+      const tool = request.tools?.find((t) => t.name === "mark_not_found");
+      if (!tool) {
+        return correctsTo(8)(request);
+      }
+      const { enum: namespaces } = (
+        tool.parameters as { properties: { namespace: { enum: string[] } } }
+      ).properties.namespace;
+      return reply(
+        turnOf(request),
+        namespaces.map((namespace) => ["mark_not_found", { namespace, reason: "no match" }]),
+      );
+    };
+    const ctx = track(
+      await setup(model, {}, createDefaultAdapterRegistry(), {
+        enableExplorationScheduling: true,
+        exploration: { dailyBudget: 10 },
+        explorationAgent: { discover: async () => ({ candidates: [], sources: [], dropped: [] }) },
+      }),
+    );
+    const media = await ctx.testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "妻子的浪漫旅行",
+        original_title: "妻子的浪漫旅行",
+        year: 2018,
+        seasons: JSON.stringify(
+          WIFE_SEASON_YEARS.map((airYear, i) => ({
+            season: i + 1,
+            episodeCount: wifeEpisodeCount(i + 1),
+            airYear,
+          })),
+        ),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await ctx.testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        is_external_id: true,
+        media_id: media.id,
+        namespace: "tmdb",
+        native_id: "tv:70001",
+      })
+      .execute();
+    // The season 6 demand the exploration agent submitted for, now waiting on that review.
+    const demand = await ctx.testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: media.id,
+        season: 6,
+        namespace_group: "platform",
+        status: "awaiting_review",
+        not_found_count: 1,
+        next_eligible_at: T0,
+        last_demanded_at: T0,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const id = await ctx.submit("ss77777", {
+      targetExternalKey: WIFE_KEY,
+      segments: wifeSegments(6),
+      demandId: demand.id,
+    });
+
+    // evidence_check, then review_agent: nothing else is due before the rejection.
+    await ctx.tick();
+    await ctx.tick();
+
+    expect((await ctx.changeRequest(id)).status).toBe("rejected");
+    expect(await demands(ctx)).toEqual([
+      expect.objectContaining({
+        id: demand.id,
+        season: 6,
+        status: "open",
+        not_found_count: 1,
+        next_eligible_at: T0,
+      }),
+      expect.objectContaining({
+        media_id: media.id,
+        season: 8,
+        status: "open",
+        not_found_count: 0,
+        next_eligible_at: T0,
+      }),
+    ]);
+
+    // Exploration of season 8 finds the lead's collection and submits it as season 8.
+    await ctx.drain();
+    const resubmitted = await ctx.testDb.readDb
+      .selectFrom("change_requests")
+      .selectAll()
+      .where("id", "!=", id)
+      .execute();
+    expect(resubmitted).toEqual([
+      expect.objectContaining({
+        native_id: "ss77777",
+        submitter_user_id: EXPLORATION_AGENT_USER_ID,
+        status: "approved",
+      }),
+    ]);
+    expect((resubmitted[0]!.segments as Array<{ season: number }>).map((s) => s.season)).toEqual([
+      8,
+    ]);
   });
 });
