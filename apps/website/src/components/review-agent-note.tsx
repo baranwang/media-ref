@@ -46,8 +46,8 @@ export function ReviewAgentNote({
         {agent.opinion && <p className="text-sm leading-6 text-foreground/90">{agent.opinion}</p>}
         {agent.reasons.length > 0 && (
           <ul className="flex flex-col gap-1.5">
-            {agent.reasons.map((r) => (
-              <li key={r.code} className="text-sm leading-6 text-foreground/90">
+            {agent.reasons.map((r, i) => (
+              <li key={`${i}-${r.code}`} className="text-sm leading-6 text-foreground/90">
                 {r.reason}
                 <span className="ml-2 font-mono text-2xs text-muted-foreground">{r.code}</span>
               </li>
