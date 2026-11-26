@@ -295,8 +295,9 @@ function buildSystemPrompt(conclusions: string): string {
     "3. A platform episode number is the position in the collection's feature episode list, counted from 1, not the number in the episode title.",
     "4. Extras (chapters, recaps, specials) mixed into the platform's list shift every later position. Check that each segment's episodes land on the right positions.",
     "   Example: 灵笼 season 1 on Bilibili has 16 entries: 001–006, 中章, 007–012, 终章上, 终章下, 特别篇. TMDB season 1 has 12 episodes; 中章, 终章 and 特别篇 are in TMDB season 0. Mapping the whole season from position 1 puts TMDB 7–12 on positions 7–12, one off. The right segments are episodes 1–6 at positions 1–6 and 7–12 at positions 8–13. Extras at the end of the list need no split.",
-    "5. If you are unsure, or the submission looks wrong and you cannot correct it, reject and say what you found. A rejection is not final for the media: exploration looks again later.",
-    "6. Steps and tokens are limited: fetch what you need, then conclude.",
+    "5. Long lists come in windows of 80. When a result has episodesTruncated, fetch the rest with get_collection fromPosition and get_catalog_season fromEpisode before judging positions you have not seen; request all the windows you need in one turn.",
+    "6. If you are unsure, or the submission looks wrong and you cannot correct it, reject and say what you found. A rejection is not final for the media: exploration looks again later.",
+    "7. Steps and tokens are limited: fetch what you need, then conclude.",
   ].join("\n");
 }
 
