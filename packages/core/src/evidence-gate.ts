@@ -580,9 +580,15 @@ const TRAILING_BRACKET_QUALIFIER =
   /\s*(?:\([^)]{1,24}\)|\[[^\]]{1,24}\]|（[^）]{1,24}）|【[^】]{1,24}】)\s*$/u;
 
 const TRAILING_SEASON_QUALIFIER =
-  /\s*(?:第[0-9一二三四五六七八九十百]+[季部期篇]|最[终終]季|(?<!\d)(?:19|20)\d{2}|season\s*\d+|part\s*\d+|s\d{1,2})\s*$/iu;
+  /\s*(?:第[0-9一二三四五六七八九十百]+[季部期篇]|最[终終]季|season\s*\d+|part\s*\d+|s\d{1,2})\s*$/iu;
 
-function stripTrailingQualifiers(raw: string): string {
+/** A trailing year is a qualifier only when it is the item's own year: 「银翼杀手2049」 is a title. */
+function trailingYearPattern(year: number | null): RegExp | null {
+  return year === null ? null : new RegExp(`\\s*(?<!\\d)${year}\\s*$`, "u");
+}
+
+function stripTrailingQualifiers(raw: string, year: number | null): string {
+  const trailingYear = trailingYearPattern(year);
   let current = raw.trim();
   for (let i = 0; i < 4; i += 1) {
     const withoutBracket = current.replace(TRAILING_BRACKET_QUALIFIER, "").trim();
@@ -590,7 +596,10 @@ function stripTrailingQualifiers(raw: string): string {
       current = withoutBracket;
       continue;
     }
-    const withoutSeason = current.replace(TRAILING_SEASON_QUALIFIER, "").trim();
+    let withoutSeason = current.replace(TRAILING_SEASON_QUALIFIER, "").trim();
+    if (withoutSeason === current && trailingYear) {
+      withoutSeason = current.replace(trailingYear, "").trim();
+    }
     if (withoutSeason !== current && withoutSeason.length >= 2) {
       current = withoutSeason;
       continue;
@@ -610,6 +619,7 @@ function collectNormalizedTitleCandidates(
   primary: string | null | undefined,
   original: string | null | undefined,
   aliases: readonly string[] | undefined,
+  year: number | null,
 ): Set<string> {
   const result = new Set<string>();
   const rawList: string[] = [];
@@ -633,7 +643,7 @@ function collectNormalizedTitleCandidates(
       result.add(normalized);
     }
 
-    const stripped = stripTrailingQualifiers(raw);
+    const stripped = stripTrailingQualifiers(raw, year);
     if (stripped !== raw) {
       const normalizedStripped = normalizeTitleForComparison(stripped);
       if (normalizedStripped.length >= 2) {
@@ -957,11 +967,13 @@ export function evaluateEvidenceGateStep1(
     catalog.title,
     catalog.originalTitle,
     catalog.aliases,
+    catalog.year,
   );
   const collectionTitles = collectNormalizedTitleCandidates(
     collection.title,
     collection.originalTitle,
     collection.aliases,
+    collection.year,
   );
 
   if (catalogTitles.size === 0 || collectionTitles.size === 0) {

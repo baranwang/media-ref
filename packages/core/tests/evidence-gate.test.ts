@@ -1341,6 +1341,7 @@ describe("Evidence Gate rules from the needs_review queue", () => {
         namespace: "mgtv",
         title: "妻子的浪漫旅行2026",
         originalTitle: null,
+        year: 2026,
       }),
     );
     expect(withYear.fieldChecks.title).toBe("matched");
@@ -1350,6 +1351,22 @@ describe("Evidence Gate rules from the needs_review queue", () => {
       makeBilibiliCollection({ namespace: "mgtv", title: "妻子的浪漫旅行2", originalTitle: null }),
     );
     expect(sequel.fieldChecks.title).toBe("mismatch");
+  });
+
+  test("银翼杀手2049 does not match 银翼杀手: a trailing number that is not the release year is part of the title", () => {
+    const original = { title: "银翼杀手", originalTitle: null, aliases: [] };
+    const sequel = { title: "银翼杀手2049", originalTitle: null, aliases: [] };
+    const result = evaluateEvidenceGateStep1(
+      makeTvCatalog({ ...original, year: 1982 }),
+      makeBilibiliCollection({ ...sequel, year: 2017 }),
+    );
+    expect(result.fieldChecks.title).toBe("mismatch");
+
+    const reversed = evaluateEvidenceGateStep1(
+      makeTvCatalog({ ...sequel, year: 2017 }),
+      makeBilibiliCollection({ ...original, year: 1982 }),
+    );
+    expect(reversed.fieldChecks.title).toBe("mismatch");
   });
 
   test("咒术回战 第二季 (TMDB S1 E25–47) compares the collection year with those episodes' air year", () => {
