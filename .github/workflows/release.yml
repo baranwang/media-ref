@@ -1,0 +1,57 @@
+# release-please keeps a release PR open from conventional commits under packages/client;
+# merging it tags client-vX.Y.Z, cuts a GitHub release, and publishes @media-ref/client to npm.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      client: ${{ steps.release.outputs['packages/client--release_created'] }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v4
+
+  publish-client:
+    needs: release-please
+    if: needs.release-please.outputs.client == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing + provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      # npm >= 11.5 for trusted publishing (OIDC)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: bun install --frozen-lockfile
+      - name: Build and test
+        working-directory: packages/client
+        run: bun run test && bun run build
+      - name: Pack
+        working-directory: packages/client
+        # Neither bun nor npm applies publishConfig.exports, so hoist it; bun pack resolves catalog: ranges.
+        run: |
+          jq '.exports = .publishConfig.exports | del(.publishConfig.exports)' package.json > package.tmp.json
+          mv package.tmp.json package.json
+          bun pm pack --ignore-scripts --filename "$RUNNER_TEMP/client.tgz"
+      - name: Publish
+        # Outside the repo: npm refuses to run under the root devEngines (bun only).
+        working-directory: ${{ runner.temp }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish ./client.tgz --access public --provenance
