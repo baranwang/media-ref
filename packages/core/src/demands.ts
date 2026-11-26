@@ -770,6 +770,53 @@ export async function reopenDemandAfterRejectionInTx(
 }
 
 /**
+ * After the review agent takes back an approval (ADR 0003 amendment 2), the media's demands for
+ * the seasons it covered (null: a whole-media association) open again, unless another confirmed
+ * association still covers them. The revocation counts as a not-found round, like a rejection:
+ * the demand backs off before exploration looks again.
+ */
+export async function reopenDemandsAfterRevokeInTx(
+  executor: DbExecutor,
+  input: {
+    mediaId: string;
+    seasons: ReadonlyArray<number | null>;
+    namespaceGroup: NamespaceGroup;
+    now: Date;
+  },
+): Promise<void> {
+  for (const season of new Set(input.seasons)) {
+    const target = { mediaId: input.mediaId, season, namespaceGroup: input.namespaceGroup };
+    if (await isCoveredByAssociationsInTx(executor, target)) {
+      continue;
+    }
+    const rows = await executor
+      .selectFrom("demands")
+      .select(["id", "not_found_count"])
+      .where("media_id", "=", input.mediaId)
+      .where("namespace_group", "=", input.namespaceGroup)
+      .where("season", season === null ? "is" : "=", season)
+      .where("status", "in", ["open", "not_found", "fulfilled"])
+      .forUpdate()
+      .execute();
+    for (const row of rows) {
+      const notFoundCount = row.not_found_count + 1;
+      await executor
+        .updateTable("demands")
+        .set({
+          status: "open",
+          not_found_count: notFoundCount,
+          next_eligible_at: new Date(
+            input.now.getTime() + computeNotFoundBackoffSeconds(notFoundCount) * 1000,
+          ),
+          updated_at: input.now,
+        })
+        .where("id", "=", row.id)
+        .execute();
+    }
+  }
+}
+
+/**
  * Makes `(media or external key, season, namespace group)` explorable now, for a review agent
  * correction (ADR 0003 §4): creates the demand, or reopens it without a not-found round. A demand
  * being explored or awaiting review is left alone.

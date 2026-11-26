@@ -4,6 +4,7 @@ import {
   bilibiliAdapter,
   createAdapterRegistry,
   createChangeRequest,
+  createChangeRequestComment,
   createDefaultAdapterRegistry,
   createFakeOutboundClient,
   enqueuePendingReviews,
@@ -1298,6 +1299,518 @@ describe("review agent: reject with correction (#76)", () => {
     ]);
     expect((resubmitted[0]!.segments as Array<{ season: number }>).map((s) => s.season)).toEqual([
       8,
+    ]);
+  });
+});
+
+// People take part by commenting (ADR 0003 amendment 2): each comment drives a review session,
+// which verifies before it acts and always replies in the thread.
+
+const COMMENTER_ID = "user-commenter";
+/** Comments are written a minute before the worker's clock. */
+const BEFORE_T0 = new Date(T0.getTime() - 60_000);
+
+/** Comment contents the session was shown, read back from its first user message. */
+function commentsShown(request: ModelInvocationRequest): string[] {
+  const prompt = request.messages.find((m) => m.role === "user")!.content;
+  const payload = JSON.parse(prompt.slice(prompt.indexOf("{"))) as {
+    comments?: Array<{ content: string }>;
+  };
+  return (payload.comments ?? []).map((c) => c.content);
+}
+
+/** One script for sessions without comments, another for sessions that read comments. */
+const byComments =
+  (without: ScriptedModel, withComments: ScriptedModel): ScriptedModel =>
+  (request) =>
+    commentsShown(request).length > 0 ? withComments(request) : without(request);
+
+const rejects: ScriptedModel = (request) =>
+  reply(turnOf(request), [["reject", { opinion: "拿不准分段对不对" }]]);
+
+/** Like `approvesLikeLinglong`, with a reply to the comments. */
+const approvesReplying =
+  (text: string): ScriptedModel =>
+  (request) => {
+    const turn = turnOf(request);
+    if (turn === 0) {
+      return approvesLikeLinglong(request);
+    }
+    return reply(turn, [["approve", { reasons: reasonsFor(request), reply: text }]]);
+  };
+
+type Ctx = Awaited<ReturnType<typeof setup>>;
+
+async function comment(ctx: Ctx, changeRequestId: string, content: string, now = BEFORE_T0) {
+  await ctx.testDb.writeDb
+    .insertInto("user")
+    .values({
+      id: COMMENTER_ID,
+      name: "Commenter",
+      email: "commenter@example.test",
+      emailVerified: true,
+      image: null,
+      role: "user",
+      reputation: 0,
+    })
+    .onConflict((oc) => oc.column("id").doNothing())
+    .execute();
+  const created = await createChangeRequestComment(ctx.testDb.writeDb, {
+    changeRequestId,
+    authorUserId: COMMENTER_ID,
+    content,
+    now,
+  });
+  return created.id;
+}
+
+const agentReplies = (ctx: Ctx, changeRequestId: string) =>
+  ctx.testDb.readDb
+    .selectFrom("change_request_comments")
+    .selectAll()
+    .where("change_request_id", "=", changeRequestId)
+    .where("author_user_id", "=", REVIEW_AGENT_USER_ID)
+    .execute();
+
+const replyTo = async (ctx: Ctx, changeRequestId: string, commentId: string) =>
+  (await agentReplies(ctx, changeRequestId)).filter((r) => r.reply_to_ids.includes(commentId));
+
+describe("review agent: people comment, the agent verifies and replies (amendment 2)", () => {
+  const handles: TestDbHandle[] = [];
+  const track = <T extends { testDb: TestDbHandle }>(ctx: T) => {
+    handles.push(ctx.testDb);
+    return ctx;
+  };
+
+  afterEach(async () => {
+    while (handles.length > 0) {
+      await handles.pop()!.cleanup();
+    }
+  });
+
+  test("a review without comments still writes its conclusion into the thread", async () => {
+    const ctx = track(await setup(rejects));
+    const id = await ctx.submit();
+
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).status).toBe("rejected");
+    expect(await agentReplies(ctx, id)).toEqual([
+      expect.objectContaining({
+        reply_to_ids: [],
+        content: expect.stringContaining("拿不准分段对不对"),
+      }),
+    ]);
+  });
+
+  test("a 「通过」 comment on a rejected request: the agent fetches, approves from rejected and replies", async () => {
+    const ctx = track(
+      await setup(byComments(rejects, approvesReplying("核实过，多出来的是中章等额外内容"))),
+    );
+    const id = await ctx.submit();
+    await ctx.drain();
+    expect((await ctx.changeRequest(id)).status).toBe("rejected");
+
+    const commentId = await comment(ctx, id, "通过：多出来的 4 条是中章、终章和特别篇");
+    const ran = await ctx.drain();
+
+    expect(ran.map((m) => m.jobType)).toEqual(["review_agent"]);
+    expect(commentsShown(ctx.outbound.modelRequests.at(-1)!)).toEqual([
+      "通过：多出来的 4 条是中章、终章和特别篇",
+    ]);
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("approved");
+    expect(cr.reviewer_user_id).toBe(REVIEW_AGENT_USER_ID);
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "approve",
+      fallback: null,
+    });
+    const association = await ctx.testDb.readDb
+      .selectFrom("associations")
+      .select(["id", "status"])
+      .where("native_id", "=", "ss28888")
+      .executeTakeFirstOrThrow();
+    expect(association.status).toBe("confirmed");
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({
+        content: expect.stringMatching(/通过[\s\S]*核实过，多出来的是中章等额外内容/),
+      }),
+    ]);
+  });
+
+  test("a comment written while evidence is collected waits for the review; a request the agent cannot verify is not followed, and the reply says why", async () => {
+    const ctx = track(
+      await setup(
+        approvesReplying("留言说这是第二季，但 TMDB 只有第 1 季，合集也对得上第 1 季，没有照做"),
+      ),
+    );
+    const id = await ctx.submit();
+    const commentId = await comment(ctx, id, "这是第二季，请改成第 2 季");
+
+    const ran = await ctx.drain();
+
+    // No job of its own: the review after the evidence check reads it.
+    expect(ran.map((m) => m.jobType)).toEqual(["evidence_check", "review_agent"]);
+    expect(commentsShown(ctx.outbound.modelRequests[0]!)).toEqual(["这是第二季，请改成第 2 季"]);
+    expect((await ctx.changeRequest(id)).status).toBe("approved");
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({ content: expect.stringContaining("没有照做") }),
+    ]);
+    // The prompt tells the model a comment may be wrong and must be verified first.
+    const system = ctx.outbound.modelRequests[0]!.messages.find((m) => m.role === "system")!;
+    expect(system.content).toMatch(/comment/i);
+    expect(system.content).toMatch(/verify/i);
+  });
+
+  test("「这是第 8 季」 on a rejected request: the agent rejects with the correction, writes the lead and replies", async () => {
+    const ctx = track(await setup(byComments(rejects, correctsTo(8))));
+    await ctx.testDb.writeDb
+      .insertInto("user")
+      .values({
+        id: "user-human",
+        name: "Human",
+        email: "human@example.test",
+        emailVerified: true,
+        image: null,
+        role: "user",
+        reputation: 0,
+      })
+      .execute();
+    const id = await ctx.submit("ss77777", {
+      submitterUserId: "user-human",
+      submitterType: "human",
+      targetExternalKey: WIFE_KEY,
+      segments: wifeSegments(6),
+    });
+    await ctx.drain();
+    expect((await ctx.changeRequest(id)).status).toBe("rejected");
+
+    const commentId = await comment(ctx, id, "这是 2026 年那季，是第 8 季");
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("rejected");
+    expect(cr.decision_reason).toContain("第 8 季");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "reject_with_correction",
+      correction: correctionFor(8),
+    });
+    expect(await ctx.testDb.readDb.selectFrom("leads").select("season").execute()).toEqual([
+      { season: 8 },
+    ]);
+    expect(
+      await ctx.testDb.readDb
+        .selectFrom("demands")
+        .select(["season", "status", "next_eligible_at"])
+        .where("season", "=", 8)
+        .execute(),
+    ).toEqual([{ season: 8, status: "open", next_eligible_at: T0 }]);
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({ content: expect.stringContaining("第 8 季") }),
+    ]);
+  });
+
+  test("on a model outage the comment gets no reply until the retried session concludes", async () => {
+    let failing = false;
+    const ctx = track(
+      await setup((request) => {
+        if (failing) {
+          throw new Error("upstream 503");
+        }
+        return rejects(request);
+      }),
+    );
+    const id = await ctx.submit();
+    await ctx.drain();
+    failing = true;
+
+    const commentId = await comment(ctx, id, "通过");
+    await ctx.drain();
+
+    expect(await replyTo(ctx, id, commentId)).toEqual([]);
+    const job = await ctx.testDb.readDb
+      .selectFrom("background_jobs")
+      .select(["status", "run_after"])
+      .where("job_type", "=", "review_agent")
+      .where("status", "=", "pending")
+      .executeTakeFirstOrThrow();
+    expect(job.run_after.getTime()).toBe(T0.getTime() + 60 * 60 * 1000);
+  });
+
+  /** Fetches the collection and season 1, then takes the live mapping down. */
+  const revokesLinglong: ScriptedModel = (request) => {
+    const turn = turnOf(request);
+    if (turn === 0) {
+      return reply(turn, [
+        ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+        ["get_catalog_season", { season: 1 }],
+      ]);
+    }
+    return reply(turn, [
+      [
+        "revoke",
+        { opinion: "位置 7 是中章，第 7–12 集错开了一位", reply: "核实过，确实错开一位，已撤下" },
+      ],
+    ]);
+  };
+
+  const keeps: ScriptedModel = (request) =>
+    reply(turnOf(request), [["keep", { opinion: "对应没问题", reply: "核实过，维持" }]]);
+
+  /** Approves 灵笼 in its first review, then lets `withComments` answer comments. */
+  async function approvedLinglong(withComments: ScriptedModel) {
+    const ctx = track(await setup(byComments(approvesLikeLinglong, withComments)));
+    const id = await ctx.submit();
+    await ctx.drain();
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("approved");
+    return { ctx, id, associationId: cr.applied_association_id!, mediaId: cr.media_id! };
+  }
+
+  const association = (ctx: Ctx, associationId: string) =>
+    ctx.testDb.readDb
+      .selectFrom("associations")
+      .select(["status", "current_revision_id"])
+      .where("id", "=", associationId)
+      .executeTakeFirstOrThrow();
+
+  test("revoke: a comment says the approved mapping is wrong; the agent verifies, delists the association with a revision, reopens the season's demand and replies", async () => {
+    const { ctx, id, associationId, mediaId } = await approvedLinglong(revokesLinglong);
+    // The season 1 demand the approval fulfilled.
+    await ctx.testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: mediaId,
+        season: 1,
+        namespace_group: "platform",
+        status: "fulfilled",
+        not_found_count: 0,
+        next_eligible_at: T0,
+        last_demanded_at: T0,
+      })
+      .execute();
+
+    const commentId = await comment(ctx, id, "撤下：第 7 集起错开一位");
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("rejected");
+    expect(cr.reviewer_user_id).toBe(REVIEW_AGENT_USER_ID);
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "revoke",
+      fallback: null,
+    });
+    const after = await association(ctx, associationId);
+    expect(after.status).toBe("delisted");
+    const revision = await ctx.testDb.readDb
+      .selectFrom("association_revisions")
+      .selectAll()
+      .where("id", "=", after.current_revision_id!)
+      .executeTakeFirstOrThrow();
+    expect(revision).toMatchObject({
+      status: "delisted",
+      actor_user_id: REVIEW_AGENT_USER_ID,
+      change_request_id: id,
+      revision_number: 2,
+    });
+    expect(revision.reason).toContain("撤下：第 7 集起错开一位");
+    expect(revision.reason).toContain("位置 7 是中章");
+    expect(
+      await ctx.testDb.readDb
+        .selectFrom("segments")
+        .select("id")
+        .where("association_id", "=", associationId)
+        .execute(),
+    ).toEqual([]);
+    // Wanted again after a not-found round, like a rejection.
+    expect(
+      await ctx.testDb.readDb
+        .selectFrom("demands")
+        .select(["status", "not_found_count", "next_eligible_at"])
+        .execute(),
+    ).toEqual([
+      { status: "open", not_found_count: 1, next_eligible_at: new Date(T0.getTime() + 86_400_000) },
+    ]);
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({ content: expect.stringMatching(/撤下[\s\S]*已撤下/) }),
+    ]);
+  });
+
+  test("revoke without fetching the collection and season keeps the mapping, and the reply says why", async () => {
+    const lazyRevoke: ScriptedModel = (request) =>
+      reply(turnOf(request), [["revoke", { opinion: "留言说错了" }]]);
+    const { ctx, id, associationId } = await approvedLinglong(lazyRevoke);
+
+    const commentId = await comment(ctx, id, "这条是错的，撤下");
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).status).toBe("approved");
+    expect((await association(ctx, associationId)).status).toBe("confirmed");
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({
+        content: expect.stringMatching(/维持通过[\s\S]*collection_not_fetched/),
+      }),
+    ]);
+  });
+
+  test("a locked association cannot be revoked: the request stays approved", async () => {
+    const { ctx, id, associationId } = await approvedLinglong(revokesLinglong);
+    await ctx.testDb.writeDb
+      .updateTable("associations")
+      .set({ locked: true })
+      .where("id", "=", associationId)
+      .execute();
+
+    const commentId = await comment(ctx, id, "撤下：第 7 集起错开一位");
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("approved");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "keep",
+      concluded: "revoke",
+      fallback: "revoke_failed: ASSOCIATION_LOCKED",
+    });
+    expect((await association(ctx, associationId)).status).toBe("confirmed");
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({ content: expect.stringContaining("ASSOCIATION_LOCKED") }),
+    ]);
+  });
+
+  test("revoke_with_correction: 妻子的浪漫旅行 approved as season 6 is taken down, and season 8 handed to exploration without backoff", async () => {
+    // The first review approves season 6; the comment session corrects it to season 8.
+    const approvesSeason6: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 6 }],
+        ]);
+      }
+      return reply(turn, [
+        [
+          "approve",
+          { reasons: conflictCodes(request).map((code) => ({ code, reason: "看着没问题" })) },
+        ],
+      ]);
+    };
+    const correctsApproved: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 6 }],
+          ["get_catalog_season", { season: 8 }],
+        ]);
+      }
+      return reply(turn, [
+        ["revoke_with_correction", { opinion: WIFE_OPINION, ...correctionFor(8) }],
+      ]);
+    };
+    const ctx = track(await setup(byComments(approvesSeason6, correctsApproved)));
+    const id = await ctx.submit("ss77777", {
+      targetExternalKey: WIFE_KEY,
+      segments: wifeSegments(6),
+    });
+    await ctx.drain();
+    const approved = await ctx.changeRequest(id);
+    expect(approved.status).toBe("approved");
+
+    const commentId = await comment(ctx, id, "这是 2026 年那季，第 8 季");
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("rejected");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "revoke_with_correction",
+      correction: correctionFor(8),
+      fallback: null,
+    });
+    expect((await association(ctx, approved.applied_association_id!)).status).toBe("delisted");
+    expect(
+      await ctx.testDb.readDb.selectFrom("leads").select(["season", "reporter_user_id"]).execute(),
+    ).toEqual([{ season: 8, reporter_user_id: REVIEW_AGENT_USER_ID }]);
+    expect(
+      await ctx.testDb.readDb
+        .selectFrom("demands")
+        .select(["media_id", "season", "status", "not_found_count", "next_eligible_at"])
+        .execute(),
+    ).toEqual([
+      {
+        media_id: approved.media_id,
+        season: 8,
+        status: "open",
+        not_found_count: 0,
+        next_eligible_at: T0,
+      },
+    ]);
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({ content: expect.stringMatching(/撤下并改正[\s\S]*第 8 季/) }),
+    ]);
+  });
+
+  test(`comments drive at most ${3} sessions per change request a day; the next comment waits for the next UTC day`, async () => {
+    const { ctx, id } = await approvedLinglong(keeps);
+    for (let i = 1; i <= 3; i += 1) {
+      await comment(ctx, id, `第 ${i} 条：请再核实`);
+      await ctx.drain();
+    }
+    const sessionsBefore = ctx.outbound.modelRequests.length;
+
+    const fourth = await comment(ctx, id, "第 4 条：请再核实");
+    await ctx.drain();
+
+    expect(ctx.outbound.modelRequests).toHaveLength(sessionsBefore);
+    expect(await replyTo(ctx, id, fourth)).toEqual([]);
+    const answered = (await agentReplies(ctx, id)).filter((r) => r.reply_to_ids.length > 0);
+    expect(answered).toHaveLength(3);
+    const job = await ctx.testDb.readDb
+      .selectFrom("background_jobs")
+      .select(["status", "run_after"])
+      .where("job_type", "=", "review_agent")
+      .where("status", "=", "pending")
+      .executeTakeFirstOrThrow();
+    expect(job.run_after).toEqual(new Date("2026-11-27T00:00:00.000Z"));
+    // Each comment session took one of the day's review slots, as did the first review.
+    const budget = await ctx.testDb.readDb
+      .selectFrom("exploration_daily_budget")
+      .select("review_consumed")
+      .executeTakeFirstOrThrow();
+    expect(budget.review_consumed).toBe(4);
+  });
+
+  test("the cron queues a review for a decided request with unanswered comments and no active job, but not for one still collecting evidence", async () => {
+    const { ctx, id } = await approvedLinglong(keeps);
+    const pendingId = await ctx.submit("ss28889", {
+      variantDescription: "国语配音",
+      setDefaultVariant: false,
+    });
+    // Comments without a job of their own (e.g. written while a session ran).
+    const write = (changeRequestId: string) =>
+      ctx.testDb.writeDb
+        .insertInto("change_request_comments")
+        .values({
+          change_request_id: changeRequestId,
+          author_user_id: EXPLORATION_AGENT_USER_ID,
+          content: "请再核实",
+          created_at: BEFORE_T0,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+    const unanswered = await write(id);
+    await write(pendingId);
+    await ctx.testDb.writeDb
+      .updateTable("background_jobs")
+      .set({ status: "completed" })
+      .where("job_type", "=", "review_agent")
+      .execute();
+
+    expect(await enqueuePendingReviews(ctx.testDb.writeDb, { now: T0 })).toBe(1);
+    expect(await enqueuePendingReviews(ctx.testDb.writeDb, { now: T0 })).toBe(0);
+    await ctx.tick();
+
+    expect(await replyTo(ctx, id, unanswered.id)).toEqual([
+      expect.objectContaining({ content: expect.stringContaining("维持通过") }),
     ]);
   });
 });
