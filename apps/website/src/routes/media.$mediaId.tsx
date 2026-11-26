@@ -154,15 +154,21 @@ function MediaDetailPage() {
   const availablePlatformCount = new Set(media.platformRows.map((r) => r.namespace)).size;
   const catalogLink = parseExternalInput(media.catalogKey);
 
+  const catalogSegmentsInView = (row: (typeof media.catalogRows)[number]) =>
+    (isMovie
+      ? row.segmentsBySeason?.[0]
+      : isAllSeasons
+        ? row.allSeasonSegments
+        : row.segmentsBySeason?.[selectedSeason]) ?? [];
+  // Same as platforms: a catalog with no whole entry and nothing for this season has no link.
+  const catalogRows = media.catalogRows.filter(
+    (row) => row.externalUrl || row.wholeMediaNativeId || catalogSegmentsInView(row).length > 0,
+  );
+
   const showCatalogRuler =
     !isMovie &&
     (platformRows.length === 0 || isLongSeries) &&
-    media.catalogRows.some(
-      (r) =>
-        (isAllSeasons
-          ? (r.allSeasonSegments?.length ?? 0)
-          : (r.segmentsBySeason?.[selectedSeason]?.length ?? 0)) > 0,
-    );
+    catalogRows.some((r) => catalogSegmentsInView(r).length > 0);
 
   const openContribute = (prefill?: { url?: string; variant?: string }) => {
     setDrawerPrefill(prefill ?? {});
@@ -608,7 +614,7 @@ function MediaDetailPage() {
         </section>
 
         {/* Section 2: 资料目录 */}
-        {media.catalogRows.length > 0 && (
+        {catalogRows.length > 0 && (
           <section className="flex flex-col gap-3 pt-12">
             <div className="flex flex-col gap-1">
               <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
@@ -638,21 +644,19 @@ function MediaDetailPage() {
 
               <div className="overflow-hidden rounded-xl border border-border bg-card">
                 <div className="divide-y divide-border/70">
-                  {media.catalogRows.map((cat) => {
-                    const seasonSegments = isAllSeasons
-                      ? cat.allSeasonSegments
-                      : cat.segmentsBySeason?.[selectedSeason];
+                  {catalogRows.map((cat) => {
+                    const seasonSegments = catalogSegmentsInView(cat);
 
                     const openUrl =
                       cat.externalUrl ??
                       buildExternalUrl(
                         cat.namespace,
-                        cat.wholeMediaNativeId ?? seasonSegments?.[0]?.nativeId ?? "",
+                        cat.wholeMediaNativeId ?? seasonSegments[0]!.nativeId,
                         media.type,
                       );
 
                     const hasWholeTrack = Boolean(cat.wholeMediaLabel);
-                    const hasSeasonTrack = Boolean(seasonSegments && seasonSegments.length > 0);
+                    const hasSeasonTrack = seasonSegments.length > 0;
 
                     return (
                       <div key={cat.id} className="flex items-center gap-4 px-5 py-3.5">
@@ -677,7 +681,7 @@ function MediaDetailPage() {
                             </div>
                           )}
 
-                          {hasSeasonTrack && seasonSegments && (
+                          {hasSeasonTrack && (
                             <CoverageTrack
                               total={totalEpisodesForAxis}
                               segments={seasonSegments}
