@@ -86,7 +86,13 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
     }
 
     const { limit, offset } = validatePagination(req.limit, req.offset);
-    const listed = await listChangeRequests(runtime.dbWrite, { status, limit, offset });
+    const reviewerUserId = req.reviewerUserId?.trim() || undefined;
+    const listed = await listChangeRequests(runtime.dbWrite, {
+      status,
+      reviewerUserId,
+      limit,
+      offset,
+    });
 
     return create(proto.ListChangeRequestsResponseSchema, {
       changeRequests: listed.changeRequests.map(toProtoChangeRequest),

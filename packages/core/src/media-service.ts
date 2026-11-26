@@ -161,6 +161,8 @@ export interface ListChangeRequestsOptions {
   status?: ChangeRequestStatus;
   /** List one submitter's requests across every status, newest first (`status` is ignored). */
   submitterUserId?: string;
+  /** With `status`: only requests this reviewer decided, latest decision first. */
+  reviewerUserId?: string;
   limit?: number;
   offset?: number;
 }
@@ -1175,14 +1177,18 @@ export async function listChangeRequests(
   const offset = Math.max(options.offset ?? 0, 0);
 
   const mine = options.submitterUserId;
+  const reviewer = options.reviewerUserId;
   const [rows, countRow] = await Promise.all([
     dbWrite
       .selectFrom("change_requests")
       .selectAll()
       .$if(mine === undefined, (qb) => qb.where("status", "=", status))
       .$if(mine !== undefined, (qb) => qb.where("submitter_user_id", "=", mine!))
-      .orderBy("created_at", mine === undefined ? "asc" : "desc")
-      .orderBy("id", mine === undefined ? "asc" : "desc")
+      .$if(reviewer !== undefined, (qb) =>
+        qb.where("reviewer_user_id", "=", reviewer!).orderBy("reviewed_at", "desc"),
+      )
+      .orderBy("created_at", mine === undefined && reviewer === undefined ? "asc" : "desc")
+      .orderBy("id", mine === undefined && reviewer === undefined ? "asc" : "desc")
       .limit(limit)
       .offset(offset)
       .execute(),
@@ -1191,6 +1197,7 @@ export async function listChangeRequests(
       .select(sql<string>`count(*)`.as("count"))
       .$if(mine === undefined, (qb) => qb.where("status", "=", status))
       .$if(mine !== undefined, (qb) => qb.where("submitter_user_id", "=", mine!))
+      .$if(reviewer !== undefined, (qb) => qb.where("reviewer_user_id", "=", reviewer!))
       .executeTakeFirstOrThrow(),
   ]);
 

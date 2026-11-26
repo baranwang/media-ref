@@ -59,6 +59,8 @@ message ListChangeRequestsRequest {
   ChangeRequestStatus status = 1;
   optional int32 limit = 2;
   optional int32 offset = 3;
+  // Only change requests decided by this reviewer, latest decision first.
+  optional string reviewer_user_id = 4;
 }
 
 message ListChangeRequestsResponse {
