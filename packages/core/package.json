@@ -11,6 +11,7 @@
     "check": "vp check"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "catalog:",
     "@media-ref/client": "workspace:*",
     "@media-ref/db": "workspace:*",
     "kysely": "catalog:"
