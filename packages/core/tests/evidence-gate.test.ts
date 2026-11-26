@@ -1323,3 +1323,76 @@ describe("Evidence Gate Step 2", () => {
     expect(neutralDefault.decision).toBe("pass");
   });
 });
+
+describe("Evidence Gate rules from the needs_review queue", () => {
+  test("诛仙 最终季 matches catalog title 诛仙", () => {
+    const result = evaluateEvidenceGateStep1(
+      makeTvCatalog({ title: "诛仙", originalTitle: null, aliases: [] }),
+      makeBilibiliCollection({ namespace: "tencent", title: "诛仙 最终季", originalTitle: null }),
+    );
+    expect(result.fieldChecks.title).toBe("matched");
+  });
+
+  test("妻子的浪漫旅行2026 matches catalog title 妻子的浪漫旅行, but a trailing single digit still does not", () => {
+    const catalog = makeTvCatalog({ title: "妻子的浪漫旅行", originalTitle: null, aliases: [] });
+    const withYear = evaluateEvidenceGateStep1(
+      catalog,
+      makeBilibiliCollection({
+        namespace: "mgtv",
+        title: "妻子的浪漫旅行2026",
+        originalTitle: null,
+      }),
+    );
+    expect(withYear.fieldChecks.title).toBe("matched");
+
+    const sequel = evaluateEvidenceGateStep1(
+      catalog,
+      makeBilibiliCollection({ namespace: "mgtv", title: "妻子的浪漫旅行2", originalTitle: null }),
+    );
+    expect(sequel.fieldChecks.title).toBe("mismatch");
+  });
+
+  test("咒术回战 第二季 (TMDB S1 E25–47) compares the collection year with those episodes' air year", () => {
+    // TMDB keeps 59 episodes in one season: E1–24 2020, E25–47 2023, E48–59 2026
+    const episodeAirYears: Record<number, number> = {};
+    for (let ep = 1; ep <= 59; ep += 1) {
+      episodeAirYears[ep] = ep <= 24 ? 2020 : ep <= 47 ? 2023 : 2026;
+    }
+    const catalog = makeTvCatalog({
+      year: 2020,
+      seasons: [{ season: 1, episodeCount: 59, airYear: 2020 }],
+      episodeAirYears: { 1: episodeAirYears },
+    });
+    const segments = [
+      {
+        season: 1,
+        episodeStart: 25,
+        episodeEnd: 47,
+        targetEpisodeStart: 1,
+        baseline: "tmdb" as const,
+        nonLinear: false,
+        needsReview: false,
+      },
+    ];
+    const season2 = makeBilibiliCollection({
+      canonicalId: "ss45574",
+      title: "咒术回战 第二季",
+      year: 2023,
+      featureEpisodeCount: 23,
+    });
+
+    const result = evaluateEvidenceGate({ catalog, collection: season2, segments });
+    expect(result.step1.fieldChecks.year).toBe("matched");
+    expect(result.step2?.decision).toBe("pass");
+    expect(result.decision).toBe("pass");
+
+    // The same episodes listed under the season premiere year are now the wrong year
+    const wrongYear = evaluateEvidenceGate({
+      catalog,
+      collection: { ...season2, year: 2020 },
+      segments,
+    });
+    expect(wrongYear.decision).toBe("needs_review");
+    expect(wrongYear.step2?.conflicts.map((c) => c.code)).toContain("segment_year_mismatch");
+  });
+});

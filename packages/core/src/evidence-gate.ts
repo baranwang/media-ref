@@ -18,6 +18,11 @@ export interface CatalogEvidence {
   aliases?: readonly string[];
   year: number | null;
   seasons: readonly SeasonSnapshot[];
+  /**
+   * Air year per episode, by season then episode number. Fetched only for seasons a submitted
+   * segment starts partway through; segment year checks fall back to the season premiere year.
+   */
+  episodeAirYears?: Readonly<Record<number, Readonly<Record<number, number | null>>>>;
   /** Optional explicit episode count for single-season catalogs (e.g., Douban/Bangumi) or movies. */
   episodeCount?: number | null;
   /**
@@ -575,7 +580,7 @@ const TRAILING_BRACKET_QUALIFIER =
   /\s*(?:\([^)]{1,24}\)|\[[^\]]{1,24}\]|（[^）]{1,24}）|【[^】]{1,24}】)\s*$/u;
 
 const TRAILING_SEASON_QUALIFIER =
-  /\s*(?:第[0-9一二三四五六七八九十百]+[季部期篇]|season\s*\d+|part\s*\d+|s\d{1,2})\s*$/iu;
+  /\s*(?:第[0-9一二三四五六七八九十百]+[季部期篇]|最[终終]季|(?<!\d)(?:19|20)\d{2}|season\s*\d+|part\s*\d+|s\d{1,2})\s*$/iu;
 
 function stripTrailingQualifiers(raw: string): string {
   let current = raw.trim();
@@ -675,6 +680,18 @@ function collectCollectionFetchedIds(
   return ids;
 }
 
+/** Air year of the segment's first episode, else the season premiere year. */
+function segmentStartYear(
+  catalog: CatalogEvidence,
+  segment: Pick<NormalizedSegment, "season" | "episodeStart">,
+): number | null {
+  const year =
+    catalog.episodeAirYears?.[segment.season]?.[segment.episodeStart] ??
+    catalog.seasons.find((s) => s.season === segment.season)?.airYear ??
+    null;
+  return year !== null && Number.isInteger(year) ? year : null;
+}
+
 function collectCatalogCandidateYears(
   catalog: CatalogEvidence,
   segments?: readonly NormalizedSegment[],
@@ -682,6 +699,12 @@ function collectCatalogCandidateYears(
   const years = new Set<number>();
   if (catalog.year !== null && Number.isInteger(catalog.year)) {
     years.add(catalog.year);
+  }
+  for (const segment of segments ?? []) {
+    const year = segmentStartYear(catalog, segment);
+    if (year !== null) {
+      years.add(year);
+    }
   }
   const includeSpecials = Boolean(segments?.some((s) => s.season === 0));
   if (catalog.mediaType === "tv") {
@@ -1171,22 +1194,29 @@ export function evaluateEvidenceGateStep2(
     }
   }
 
-  // 2. Year check against the earliest segment season's premiere year
+  // 2. Year check against the air year of the earliest segment's first episode
   const regularSeasonNumbers = context.segments.map((s) => s.season).filter((s) => s >= 1);
   const earliestSeasonNumber =
     regularSeasonNumbers.length > 0
       ? Math.min(...regularSeasonNumbers)
       : Math.min(...context.segments.map((s) => s.season));
   const earliestSeason = seasonMap.get(earliestSeasonNumber);
+  const earliestEpisode = Math.min(
+    ...context.segments.filter((s) => s.season === earliestSeasonNumber).map((s) => s.episodeStart),
+  );
+  const earliestLabel = `season ${earliestSeasonNumber} episode ${earliestEpisode}`;
 
   if (earliestSeason) {
-    const expectedYear = earliestSeason.airYear;
-    if (expectedYear === null || !Number.isInteger(expectedYear)) {
+    const expectedYear = segmentStartYear(context.catalog, {
+      season: earliestSeasonNumber,
+      episodeStart: earliestEpisode,
+    });
+    if (expectedYear === null) {
       conflicts.push({
         step: 2,
         code: "segment_year_missing",
         field: "year",
-        message: `Catalog season ${earliestSeasonNumber} is missing premiere year`,
+        message: `Catalog ${earliestLabel} is missing air year`,
         catalogValue: null,
         collectionValue: context.collection.year,
       });
@@ -1204,7 +1234,7 @@ export function evaluateEvidenceGateStep2(
         step: 2,
         code: "segment_year_mismatch",
         field: "year",
-        message: `Collection year (${context.collection.year}) does not match season ${earliestSeasonNumber} premiere year (${expectedYear})`,
+        message: `Collection year (${context.collection.year}) does not match ${earliestLabel} air year (${expectedYear})`,
         catalogValue: expectedYear,
         collectionValue: context.collection.year,
       });

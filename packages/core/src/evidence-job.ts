@@ -1,4 +1,8 @@
-import { formatExternalKey, type CatalogNamespace } from "@media-ref/client";
+import {
+  formatExternalKey,
+  type CatalogNamespace,
+  type NormalizedSegment,
+} from "@media-ref/client";
 import type { Database, Db, ExternalIdNamespaceRow, JsonObject } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
 import {
@@ -34,7 +38,12 @@ import {
   TIER1_MANUAL_REVIEW_REASON,
 } from "./media-service.ts";
 import { enqueueReviewAgentJobInTx } from "./review-agent.ts";
-import type { TmdbGateway, TmdbGatewayConfig } from "./tmdb.ts";
+import {
+  createTmdbGateway,
+  parseTmdbNativeId,
+  type TmdbGateway,
+  type TmdbGatewayConfig,
+} from "./tmdb.ts";
 
 export interface EvidenceCheckJobOptions {
   adapterRegistry?: AdapterRegistry;
@@ -42,6 +51,32 @@ export interface EvidenceCheckJobOptions {
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   evaluateStep2?: EvidenceGateStep2Evaluator;
+}
+
+/** TMDB air year per episode, for the seasons a segment starts partway through. */
+async function fetchSegmentEpisodeAirYears(
+  gateway: TmdbGateway,
+  catalog: CatalogEvidence,
+  segments: readonly NormalizedSegment[],
+): Promise<CatalogEvidence["episodeAirYears"]> {
+  const tmdb = catalog.namespace === "tmdb" ? parseTmdbNativeId(catalog.canonicalId) : null;
+  if (tmdb?.type !== "tv") {
+    return undefined;
+  }
+  const result: Record<number, Record<number, number | null>> = {};
+  for (const season of new Set(segments.filter((s) => s.episodeStart > 1).map((s) => s.season))) {
+    try {
+      const episodes = await gateway.fetchSeasonEpisodes(tmdb.id, season);
+      if (episodes) {
+        result[season] = Object.fromEntries(
+          episodes.map((e) => [e.episode, e.airDate ? Number(e.airDate.slice(0, 4)) : null]),
+        );
+      }
+    } catch {
+      // Without episode air years the gate compares against the season premiere year, as before
+    }
+  }
+  return result;
 }
 
 interface MarkNeedsReviewInput {
@@ -293,7 +328,16 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
     }
 
     prefetchedCatalog = catalogResult.target;
-    catalogEvidence = catalogResult.target.evidence;
+    catalogEvidence = {
+      ...catalogResult.target.evidence,
+      episodeAirYears: await fetchSegmentEpisodeAirYears(
+        options.catalogConfig?.tmdbGateway ??
+          options.tmdbGateway ??
+          createTmdbGateway(ctx.outbound, options.catalogConfig?.tmdb ?? options.tmdbConfig),
+        catalogResult.target.evidence,
+        changeRequest.segments,
+      ),
+    };
 
     // 2. Fetch fresh platform/collection evidence via Tier 2+ adapter outside DB locks
     const collectionResult = await adapter.fetchCollection(changeRequest.nativeId, ctx.outbound);

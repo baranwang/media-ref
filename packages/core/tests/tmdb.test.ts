@@ -78,6 +78,36 @@ describe("TmdbGateway", () => {
     expect(outbound.httpRequests.map((r) => r.namespace)).toEqual(["tmdb", "tmdb", "trakt"]);
   });
 
+  test("fetches one season's episodes, null when TMDB has no such season", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request): ExternalHttpResponse {
+        if (request.url.includes("/tv/95479/season/1?")) {
+          return {
+            status: 200,
+            headers: {},
+            url: request.url,
+            body: JSON.stringify({
+              episodes: [
+                { episode_number: 24, name: "明日", air_date: "2021-03-27" },
+                { episode_number: 25, name: "隐藏的宝物", air_date: "2023-07-06" },
+                { episode_number: 26, air_date: null },
+              ],
+            }),
+          };
+        }
+        return { status: 404, headers: {}, url: request.url, body: "{}" };
+      },
+    });
+    const gateway = createTmdbGateway(outbound, { accessToken: "tok" });
+
+    expect(await gateway.fetchSeasonEpisodes("95479", 1)).toEqual([
+      { episode: 24, title: "明日", airDate: "2021-03-27" },
+      { episode: 25, title: "隐藏的宝物", airDate: "2023-07-06" },
+      { episode: 26, title: null, airDate: null },
+    ]);
+    expect(await gateway.fetchSeasonEpisodes("95479", 9)).toBeNull();
+  });
+
   test("returns null on 404 and throws TmdbGatewayError on 5xx", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request): ExternalHttpResponse {
