@@ -168,6 +168,7 @@ export {
   createExplorationAgentExecutor,
   DEFAULT_EXPLORATION_MAX_DURATION_MS,
   DEFAULT_EXPLORATION_MAX_STEPS,
+  DEFAULT_EXPLORATION_MAX_TASK_TOKENS,
   DEFAULT_EXPLORATION_VARIANT_DESCRIPTION,
   deriveExplorationTaskId,
   ensureExplorationAgentUser,
@@ -185,6 +186,7 @@ export {
   createTmdbDailyExportsJobHandler,
   DEFAULT_EXPLORATION_BATCH_SIZE,
   DEFAULT_EXPLORATION_DAILY_BUDGET,
+  DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET,
   DEFAULT_EXPLORATION_JOB_MAX_ATTEMPTS,
   DEFAULT_EXPLORATION_LEASE_DURATION_MS,
   DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
@@ -419,7 +421,9 @@ export {
   type ModelToolCall,
   type ModelToolDefinition,
   type NamespaceRouteConfig,
+  type MagpieConfig,
   type OutboundClient,
+  type WebToolName,
   type OutboundProxyConfig,
 } from "./outbound.ts";
 export {

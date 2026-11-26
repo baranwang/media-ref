@@ -12,9 +12,11 @@ import {
   DEFAULT_AI_PROVIDER,
   DEFAULT_EXPLORATION_BATCH_SIZE,
   DEFAULT_EXPLORATION_DAILY_BUDGET,
+  DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET,
   DEFAULT_EXPLORATION_LEASE_DURATION_MS,
   DEFAULT_EXPLORATION_MAX_DURATION_MS,
   DEFAULT_EXPLORATION_MAX_STEPS,
+  DEFAULT_EXPLORATION_MAX_TASK_TOKENS,
   DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
   parseExplorationBackoffSeconds,
   parseOutboundProxyConfig,
@@ -48,6 +50,10 @@ export interface BackgroundWorkerEnv {
   AI_GATEWAY_ID?: string;
   AI_PROVIDER?: string;
   AI_MODEL?: string;
+  // magpie's gateway key: model calls and web search go to magpie through HK when set.
+  MAGPIE_GATEWAY_KEY?: string;
+  // tokens.ci API token: the agent's model usage is submitted there as pi, device MediaRef.
+  TOKENS_API_TOKEN?: string;
   OUTBOUND_PROXY_CONFIG?: string;
   // Workers VPC service: the greencloud-hk egress relay.
   HK?: EgressFetcher;
@@ -59,6 +65,8 @@ export interface BackgroundWorkerEnv {
   EXPLORATION_BACKOFF_SECONDS?: string;
   EXPLORATION_MAX_STEPS?: string;
   EXPLORATION_MAX_DURATION_MS?: string;
+  EXPLORATION_MAX_TASK_TOKENS?: string;
+  EXPLORATION_DAILY_TOKEN_BUDGET?: string;
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
   TMDB_API_BASE_URL?: string;
@@ -116,6 +124,10 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
         env.EXPLORATION_DAILY_BUDGET,
         DEFAULT_EXPLORATION_DAILY_BUDGET,
       ),
+      dailyTokenBudget: parseNonNegativeInt(
+        env.EXPLORATION_DAILY_TOKEN_BUDGET,
+        DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET,
+      ),
       batchSize: parsePositiveInt(env.EXPLORATION_BATCH_SIZE, DEFAULT_EXPLORATION_BATCH_SIZE),
       leaseDurationMs: parsePositiveInt(
         env.EXPLORATION_LEASE_DURATION_MS,
@@ -135,6 +147,11 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
         env.EXPLORATION_MAX_DURATION_MS,
         DEFAULT_EXPLORATION_MAX_DURATION_MS,
       ),
+      maxTaskTokens: parsePositiveInt(
+        env.EXPLORATION_MAX_TASK_TOKENS,
+        DEFAULT_EXPLORATION_MAX_TASK_TOKENS,
+      ),
+      tokensApiToken: parseOptionalString(env.TOKENS_API_TOKEN),
     },
     tmdb,
     catalog: {
@@ -151,9 +168,11 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
 }
 
 function createWorkerOutboundClient(env: BackgroundWorkerEnv) {
+  const magpieKey = parseOptionalString(env.MAGPIE_GATEWAY_KEY);
   return createLiveOutboundClient({
     proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
     egressFetcher: env.HK,
+    ...(magpieKey && env.HK ? { magpie: { fetcher: env.HK, apiKey: magpieKey } } : {}),
     aiBinding: env.AI,
     aiGatewayId: parseOptionalString(env.AI_GATEWAY_ID),
     aiProvider: parseOptionalString(env.AI_PROVIDER) ?? DEFAULT_AI_PROVIDER,

@@ -44,14 +44,12 @@
    - 目录组：IMDb 编号 → TMDB `/find`，TMDB、Trakt 搜索。
    - 所有候选登记进本任务的**候选集合**，模型只能从这里选。
 2. **快速通道**：只有一个候选，且片名、年份、季、集数都对得上时，直接进入把关，不调用模型。
-3. **判断（调用模型）**：其余情况交给模型。模型的工具只做查询和核对：
-   `list_candidates`、`inspect_collection`（合集信息）、`list_episodes`（分集列表）、
-   `probe_mapping`（按季、集范围、偏移抽查分集）、`get_catalog_season`（基准目录的季与集）。
-   结束只能调用 `submit_mapping` 或 `mark_not_found`。
+3. **判断（调用模型）**：其余平台（包括发现阶段一个候选都没有的）放进同一个会话，交给模型。
+   模型可以自己查（见 3.1），结束时每个平台各调用一次 `submit_mapping` 或 `mark_not_found`。
 4. **把关（代码）**，依次：
    - 候选必须在候选集合里；
-   - **证据门**：提交的每个合集和集范围，必须在本任务里被 `list_episodes` 或 `probe_mapping`
-     实际拉过且返回了分集；
+   - **证据门**：提交的合集必须在本任务里实际拉过（发现阶段或 `get_collection`），
+     集范围必须落在拉到的正片分集之内；
    - 再走现有取证关卡（`evidence-gate.ts`）。通过即自动生效，没通过转审核员。
    - 目录组编号额外要求身份链条：IMDb 编号一致，或片名、年份、导演三项都对得上。不接受只凭模型置信度写入。
 
@@ -87,9 +85,33 @@ B 站无角标），会让后面的集号整体错位。所以由适配器统一
 
 ### 3. 模型
 
-经 AI Gateway 动态路由 `dynamic/cheap`（网关 `gateway`），用 Workers AI 绑定调用，
-OpenAI chat completions 格式。配置：`AI_MODEL=dynamic/cheap`、`AI_GATEWAY_ID=gateway`。
-每次调用带 `cf-aig-metadata`（需求 ID、任务 ID）以便在网关里追踪花费。
+经香港机器上的 magpie（`HK` 绑定加 `x-hk-service: magpie` 请求头），OpenAI chat completions 格式，
+pi 流式调用。配置：`AI_MODEL=group/cheap-first`，密钥 `MAGPIE_GATEWAY_KEY`；没有密钥时退回
+AI Gateway（`AI_GATEWAY_ID`）。同一任务的所有调用带同一个会话编号，保持路由和提示缓存不变。
+
+### 3.1 开放工具
+
+模型自己找候选，可用的工具：
+
+- `search_catalog`：TMDB、Trakt、豆瓣（frodo 搜索，按 IP 限流）、360 影视按片名搜索；
+- `get_catalog_entry`：按编号精确查询 TMDB、Trakt、豆瓣条目（豆瓣条目带「在哪看」链接）；
+- `search_platform`：平台原生搜索，目前只有哔哩哔哩和爱奇艺能用；
+- `resolve_link`：平台或豆瓣链接换成命名空间和合集编号；
+- `get_collection`：拉取一个合集和它的正片分集，唯一能把合集放进候选集合的工具；
+- `get_catalog_season`：基准目录的季与集；
+- `web_search`、`web_fetch`：magpie 的搜索 MCP；另外模型自带的搜索也开着（`web_search_options`），
+  一个坏了还有另一个。
+
+搜索结果和网页只是线索，提交前必须用 `get_collection` 拉过。每个任务最多 64 步、5 分钟、
+200 万 token（输入加输出，`EXPLORATION_MAX_TASK_TOKENS`）。步数或 token 用完时，没结论的平台
+按未找到退避，不会马上重跑。
+
+当天按模型的用量累计在 `exploration_daily_budget.pi_usage`（UTC 日）。配了 `TOKENS_API_TOKEN` 时，
+每次会话后把当天的累计提交到 tokens.ci，客户端记为 pi，设备名 MediaRef（和 douban-bridge 同一格式）。
+tokens.ci 对同一设备、同一天只保留最新值，所以每次都要提交当天全量，不能只报增量。
+
+2026-11-26 用平台方向 6 个样本冒烟：上一轮的命中都还在，另外找到一部片名不同的
+（《血意少年》在 B 站叫《热血少年》）；每个样本约 10 次调用、3–4 万 token、30 秒。
 
 ### 4. 抓取能力
 
@@ -107,9 +129,10 @@ OpenAI chat completions 格式。配置：`AI_MODEL=dynamic/cheap`、`AI_GATEWAY
 
 - 先在 Cloudflare 上直接跑。逐个接口实测从 Workers 出口能否访问；不通的接口先不用。
   之后可以按命名空间接出站代理（`OUTBOUND_PROXY_CONFIG`），例如国内朋友的 Tailscale 出口节点。
-- 每个平台单独计时、单独限步；任务内的平台按结果分别记账，已提交的平台不会因为别的平台失败而重跑。
+- 一个任务共用一个时限和步数；平台按结果分别记账，已提交的平台不会因为别的平台失败而重跑。
 - 需求在变更单**生效后**才标为已满足；变更单被驳回或被取证关卡打回时，需求回到待探索并退避。
-- 每日预算按需求条数和模型花费双重限制。
+- 每日预算按需求条数（`EXPLORATION_DAILY_BUDGET`）和模型 token（`EXPLORATION_DAILY_TOKEN_BUDGET`，
+  默认 10 亿）双重限制；当天 token 用到上限就不再派新任务。
 
 ### 5.1 出口实测（2026-11-26）
 

@@ -352,6 +352,10 @@ export interface InvalidationReportsTable {
 export interface ExplorationDailyBudgetTable {
   budget_date: string;
   consumed: Generated<number>;
+  /** bigint: comes back as a string. */
+  tokens_used: Generated<string>;
+  /** That day's totals per model, as submitted to tokens.ci (`PiUsageTotals` in core). */
+  pi_usage: ColumnType<JsonObject, JsonObject | string | undefined, JsonObject | string>;
   updated_at: Generated<Date>;
 }
 

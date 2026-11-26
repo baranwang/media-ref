@@ -57,6 +57,8 @@ export const TMDB_DAILY_EXPORTS_JOB_TYPE = "tmdb_daily_exports";
 export const TMDB_DAILY_EXPORTS_SYNC_KEY = "tmdb_daily_exports";
 export const DEFAULT_TMDB_EXPORTS_BASE_URL = "https://files.tmdb.org/p/exports";
 export const DEFAULT_EXPLORATION_DAILY_BUDGET = 100;
+/** Model tokens (input + output) the agent may spend per UTC day before scheduling stops. */
+export const DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET = 1_000_000_000;
 export const DEFAULT_EXPLORATION_BATCH_SIZE = 10;
 export const DEFAULT_EXPLORATION_LEASE_DURATION_MS = 15 * 60 * 1000;
 export const DEFAULT_EXPLORATION_JOB_MAX_ATTEMPTS = 3;
@@ -68,6 +70,7 @@ const EXTERNAL_ID_NAMESPACE_SET: ReadonlySet<string> = new Set(EXTERNAL_ID_NAMES
 
 export interface ExplorationSchedulerConfig {
   dailyBudget: number;
+  dailyTokenBudget: number;
   batchSize: number;
   leaseDurationMs: number;
   notFoundBackoffSeconds: readonly number[];
@@ -379,6 +382,13 @@ export function resolveExplorationSchedulerConfig(
       ? partial.dailyBudget
       : DEFAULT_EXPLORATION_DAILY_BUDGET;
 
+  const dailyTokenBudget =
+    partial.dailyTokenBudget !== undefined &&
+    Number.isFinite(partial.dailyTokenBudget) &&
+    partial.dailyTokenBudget >= 0
+      ? partial.dailyTokenBudget
+      : DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET;
+
   const batchSize =
     partial.batchSize !== undefined && Number.isInteger(partial.batchSize) && partial.batchSize > 0
       ? partial.batchSize
@@ -413,6 +423,7 @@ export function resolveExplorationSchedulerConfig(
 
   return {
     dailyBudget,
+    dailyTokenBudget,
     batchSize,
     leaseDurationMs,
     notFoundBackoffSeconds,
@@ -854,14 +865,15 @@ export async function scheduleExplorationJobs(
 
     const budgetRow = await trx
       .selectFrom("exploration_daily_budget")
-      .select(["budget_date", "consumed"])
+      .select(["budget_date", "consumed", "tokens_used"])
       .where("budget_date", "=", budgetDate)
       .forUpdate()
       .executeTakeFirstOrThrow();
 
     const consumedBefore = budgetRow.consumed;
     const remainingBefore = Math.max(0, config.dailyBudget - consumedBefore);
-    if (remainingBefore <= 0 || config.batchSize <= 0) {
+    const tokensExhausted = Number(budgetRow.tokens_used) >= config.dailyTokenBudget;
+    if (remainingBefore <= 0 || tokensExhausted || config.batchSize <= 0) {
       return {
         budgetDate,
         dailyBudget: config.dailyBudget,
@@ -2053,4 +2065,26 @@ export function createExplorationJobHandler(
       },
     };
   };
+}
+
+/** Adds model tokens the agent spent to today's budget row (UTC day of `now`). */
+export async function recordExplorationTokens(db: Db, now: Date, tokens: number): Promise<void> {
+  if (!(tokens > 0)) {
+    return;
+  }
+  await db
+    .insertInto("exploration_daily_budget")
+    .values({
+      budget_date: formatUtcDate(now),
+      consumed: 0,
+      tokens_used: String(tokens),
+      updated_at: now,
+    })
+    .onConflict((oc) =>
+      oc.column("budget_date").doUpdateSet({
+        tokens_used: sql`exploration_daily_budget.tokens_used + ${tokens}`,
+        updated_at: now,
+      }),
+    )
+    .execute();
 }
