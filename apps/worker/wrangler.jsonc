@@ -18,7 +18,11 @@
     },
   },
   "vars": {
-    "EXPLORATION_DAILY_BUDGET": "0",
+    // Demands explored per UTC day; start small and watch outcomes before raising it.
+    "EXPLORATION_DAILY_BUDGET": "20",
+    // One exploration job per cron tick: queue messages run one after another in one consumer
+    // invocation (15-minute wall clock), and a job may take up to its 5-minute budget.
+    "EXPLORATION_BATCH_SIZE": "1",
     "ENABLE_DAILY_TMDB_EXPORTS_SYNC": "false",
     // Exploration agent model: a magpie routing group, through HK (MAGPIE_GATEWAY_KEY secret).
     // Without that secret the worker falls back to AI Gateway (AI_GATEWAY_ID) over the AI binding.
