@@ -233,63 +233,100 @@ describe("OutboundClient live HTTP routing", () => {
     ).rejects.toThrow(/sender/i);
   });
 
-  test("invokes Cloudflare Workers AI binding with AI Gateway options and normalizes multi-turn tool calls", async () => {
-    const runCalls: Array<{
-      model: string;
-      input: Record<string, unknown>;
-      options?: Record<string, unknown>;
-    }> = [];
-
-    const aiBinding = {
-      async run(model: string, input: Record<string, unknown>, options?: Record<string, unknown>) {
-        runCalls.push({ model, input, options });
-        return {
-          response: null,
-          tool_calls: [
-            {
-              name: "search_platform",
-              arguments: { keyword: "咒术回战", page: 1 },
+  test("streams model calls through AI Gateway's compat endpoint over the AI binding (pi)", async () => {
+    const sent: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = [];
+    const chunks = [
+      {
+        id: "c1",
+        model: "gpt-6-luna",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_a",
+                  type: "function",
+                  function: { name: "list_episodes", arguments: "" },
+                },
+              ],
             },
-          ],
-          usage: {
-            prompt_tokens: 120,
-            completion_tokens: 24,
           },
-        };
+        ],
+      },
+      {
+        id: "c1",
+        model: "gpt-6-luna",
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [{ index: 0, function: { arguments: '{"canonicalId":' } }] },
+          },
+        ],
+      },
+      {
+        id: "c1",
+        model: "gpt-6-luna",
+        choices: [
+          {
+            index: 0,
+            delta: { tool_calls: [{ index: 0, function: { arguments: '"ss34430"}' } }] },
+          },
+        ],
+      },
+      {
+        id: "c1",
+        model: "gpt-6-luna",
+        choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+        usage: { prompt_tokens: 120, completion_tokens: 24, total_tokens: 144 },
+      },
+    ];
+    const aiBinding = {
+      aiGatewayLogId: null,
+      async fetch(input: Request | string | URL, init?: RequestInit) {
+        const request = new Request(input, init);
+        sent.push({
+          url: request.url,
+          headers: request.headers,
+          body: (await request.json()) as Record<string, unknown>,
+        });
+        const sse =
+          chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+        return new Response(sse, { headers: { "content-type": "text/event-stream" } });
       },
     };
 
     const outbound = createLiveOutboundClient({
       aiBinding,
-      aiGatewayId: "media-ref-gateway",
-      aiProvider: "workers-ai",
-      aiModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      aiGatewayId: "gateway",
+      aiModel: "dynamic/cheap",
     });
-
     const response = await outbound.invokeModel({
       messages: [
-        { role: "system", content: "You find candidate collections." },
-        { role: "user", content: "Find Bilibili collection for 咒术回战 S1" },
+        { role: "system", content: "Pick a collection." },
+        { role: "user", content: "咒术回战 S1" },
         {
           role: "assistant",
           content: "",
-          toolCalls: [{ id: "call_prev", name: "search_platform", arguments: { keyword: "JJK" } }],
+          toolCalls: [{ id: "call_prev", name: "get_catalog_season", arguments: { season: 1 } }],
         },
         {
           role: "tool",
           toolCallId: "call_prev",
-          name: "search_platform",
-          content: '{"status":"ok","candidates":[]}',
+          name: "get_catalog_season",
+          content: '{"episodeCount":24}',
         },
       ],
       tools: [
         {
-          name: "search_platform",
-          description: "Search platform collections",
+          name: "list_episodes",
+          description: "List episodes",
           parameters: {
             type: "object",
-            properties: { keyword: { type: "string" } },
-            required: ["keyword"],
+            properties: { canonicalId: { type: "string" } },
+            required: ["canonicalId"],
           },
         },
       ],
@@ -297,199 +334,43 @@ describe("OutboundClient live HTTP routing", () => {
       maxTokens: 512,
     });
 
-    expect(runCalls).toHaveLength(1);
-    expect(runCalls[0]?.model).toBe("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
-    expect(runCalls[0]?.options).toEqual({
-      gateway: { id: "media-ref-gateway" },
-    });
-    expect(runCalls[0]?.input).toMatchObject({
-      temperature: 0,
-      max_tokens: 512,
-      tools: [
-        {
-          type: "function",
-          function: {
-            name: "search_platform",
-            description: "Search platform collections",
-          },
-        },
-      ],
-    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.url).toBe(
+      "https://workers-binding.ai/ai-gateway/gateways/gateway/compat/chat/completions",
+    );
+    expect(sent[0]!.headers.get("cf-aig-authorization")).toBe("Bearer cloudflare-gateway-binding");
+    expect(sent[0]!.headers.get("authorization")).toBeNull();
+    const body = sent[0]!.body;
+    expect(body).toMatchObject({ model: "dynamic/cheap", stream: true, temperature: 0 });
+    const roles = (body.messages as Array<{ role: string }>).map((m) => m.role);
+    expect(roles).toEqual(["system", "user", "assistant", "tool"]);
+    expect(body.tools).toMatchObject([{ type: "function", function: { name: "list_episodes" } }]);
+
     expect(response).toEqual({
       content: null,
       text: null,
-      toolCalls: [
-        {
-          id: "call_1",
-          name: "search_platform",
-          arguments: { keyword: "咒术回战", page: 1 },
-        },
-      ],
-      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      toolCalls: [{ id: "call_a", name: "list_episodes", arguments: { canonicalId: "ss34430" } }],
+      model: "gpt-6-luna",
       provider: "workers-ai",
       finishReason: "tool_calls",
-      usage: {
-        inputTokens: 120,
-        outputTokens: 24,
-      },
+      usage: { inputTokens: 120, outputTokens: 24 },
     });
   });
 
-  test("routes non-workers-ai providers through Cloudflare AI Gateway binding purely by config", async () => {
-    const gatewayCalls: Array<{
-      gatewayId: string;
-      data: {
-        provider: string;
-        endpoint: string;
-        headers?: Record<string, string>;
-        query: Record<string, unknown>;
-      };
-    }> = [];
-
-    const aiBinding = {
-      async run() {
-        throw new Error("Should use gateway.run for external provider");
+  test("a gateway error surfaces as a thrown error, not an empty answer", async () => {
+    const outbound = createLiveOutboundClient({
+      aiBinding: {
+        aiGatewayLogId: null,
+        fetch: async () => new Response('{"error":"rate limited"}', { status: 429 }),
       },
-      gateway(gatewayId: string) {
-        return {
-          async run(data: {
-            provider: string;
-            endpoint: string;
-            headers?: Record<string, string>;
-            query: Record<string, unknown>;
-          }) {
-            gatewayCalls.push({ gatewayId, data });
-            if (data.provider === "openai") {
-              return new Response(
-                JSON.stringify({
-                  model: "gpt-4o-mini",
-                  choices: [
-                    {
-                      finish_reason: "tool_calls",
-                      message: {
-                        content: null,
-                        tool_calls: [
-                          {
-                            id: "call_oa_1",
-                            type: "function",
-                            function: {
-                              name: "inspect_collection",
-                              arguments: '{"nativeId":"ss34430"}',
-                            },
-                          },
-                        ],
-                      },
-                    },
-                  ],
-                  usage: { prompt_tokens: 88, completion_tokens: 19 },
-                }),
-                { status: 200, headers: { "content-type": "application/json" } },
-              );
-            }
-            if (data.provider === "anthropic") {
-              return new Response(
-                JSON.stringify({
-                  model: "claude-sonnet-4-5",
-                  stop_reason: "tool_use",
-                  content: [
-                    { type: "text", text: "Checking ss34430" },
-                    {
-                      type: "tool_use",
-                      id: "toolu_01",
-                      name: "submit_candidate",
-                      input: { nativeId: "ss34430", variantDescription: "原声" },
-                    },
-                  ],
-                  usage: { input_tokens: 95, output_tokens: 31 },
-                }),
-                { status: 200, headers: { "content-type": "application/json" } },
-              );
-            }
-            throw new Error(`Unexpected provider: ${data.provider}`);
-          },
-        };
-      },
-    };
-
-    const openaiOutbound = createLiveOutboundClient({
-      aiBinding,
-      aiGatewayId: "prod-gateway",
-      aiProvider: "openai",
-      aiModel: "gpt-4o-mini",
+      aiGatewayId: "gateway",
+      aiModel: "dynamic/cheap",
     });
-
-    const openaiRes = await openaiOutbound.invokeModel({
-      messages: [{ role: "user", content: "inspect candidate" }],
-      tools: [
-        {
-          name: "inspect_collection",
-          description: "Inspect collection",
-          parameters: { type: "object", properties: { nativeId: { type: "string" } } },
-        },
-      ],
-    });
-
-    expect(gatewayCalls[0]?.gatewayId).toBe("prod-gateway");
-    expect(gatewayCalls[0]?.data.provider).toBe("openai");
-    expect(gatewayCalls[0]?.data.endpoint).toBe("chat/completions");
-    expect(openaiRes).toEqual({
-      content: null,
-      text: null,
-      toolCalls: [
-        {
-          id: "call_oa_1",
-          name: "inspect_collection",
-          arguments: { nativeId: "ss34430" },
-        },
-      ],
-      model: "gpt-4o-mini",
-      provider: "openai",
-      finishReason: "tool_calls",
-      usage: { inputTokens: 88, outputTokens: 19 },
-    });
-
-    const anthropicOutbound = createLiveOutboundClient({
-      aiBinding,
-      aiGatewayId: "prod-gateway",
-      aiProvider: "anthropic",
-      aiModel: "claude-sonnet-4-5",
-    });
-
-    const anthropicRes = await anthropicOutbound.invokeModel({
-      messages: [
-        { role: "system", content: "System rule" },
-        { role: "user", content: "submit ss34430" },
-      ],
-      tools: [
-        {
-          name: "submit_candidate",
-          description: "Submit candidate",
-          parameters: { type: "object", properties: { nativeId: { type: "string" } } },
-        },
-      ],
-    });
-
-    expect(gatewayCalls[1]?.data.provider).toBe("anthropic");
-    expect(gatewayCalls[1]?.data.endpoint).toBe("v1/messages");
-    expect(anthropicRes).toEqual({
-      content: "Checking ss34430",
-      text: "Checking ss34430",
-      toolCalls: [
-        {
-          id: "toolu_01",
-          name: "submit_candidate",
-          arguments: { nativeId: "ss34430", variantDescription: "原声" },
-        },
-      ],
-      model: "claude-sonnet-4-5",
-      provider: "anthropic",
-      finishReason: "tool_calls",
-      usage: { inputTokens: 95, outputTokens: 31 },
-    });
+    await expect(
+      outbound.invokeModel({ messages: [{ role: "user", content: "hi" }] }),
+    ).rejects.toThrow(/AI Gateway \(dynamic\/cheap\) error/);
   });
-});
 
-describe("createFakeOutboundClient", () => {
   test("intercepts external HTTP, email, and model calls and records them without hitting the network", async () => {
     const fake = createFakeOutboundClient({
       fetchExternal: async (request) => ({
@@ -588,12 +469,17 @@ describe("createFakeOutboundClient", () => {
       });
 
     const hangingAiBinding = {
-      run: () => new Promise<never>(() => {}),
+      aiGatewayLogId: null,
+      fetch: (_input: Request | string | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
     };
 
     const live = createLiveOutboundClient({
       fetchImpl: hangingFetch,
       aiBinding: hangingAiBinding,
+      aiGatewayId: "gateway",
       aiProvider: "workers-ai",
       aiModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     });

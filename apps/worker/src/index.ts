@@ -18,7 +18,6 @@ import {
   DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
   parseExplorationBackoffSeconds,
   parseOutboundProxyConfig,
-  type CloudflareAiBinding,
   type EgressFetcher,
   type JobQueueMessage,
 } from "@media-ref/core";
@@ -72,34 +71,6 @@ export interface BackgroundWorkerEnv {
   IMDB_API_BASE_URL?: string;
   TRAKT_CLIENT_ID?: string;
   TRAKT_API_BASE_URL?: string;
-}
-
-function adaptCloudflareAiBinding(ai: Ai | undefined): CloudflareAiBinding | undefined {
-  if (!ai) {
-    return undefined;
-  }
-  return {
-    run(model, input, options) {
-      return (
-        ai.run as (
-          modelName: string,
-          modelInput: Record<string, unknown>,
-          runOptions?: Record<string, unknown>,
-        ) => Promise<unknown>
-      )(model, input, options);
-    },
-    gateway(gatewayId) {
-      const gw = ai.gateway(gatewayId);
-      return {
-        run(data, options) {
-          return gw.run(
-            data as Parameters<typeof gw.run>[0],
-            options as Parameters<typeof gw.run>[1],
-          );
-        },
-      };
-    },
-  };
 }
 
 function parseOptionalString(raw: string | undefined): string | undefined {
@@ -183,7 +154,7 @@ function createWorkerOutboundClient(env: BackgroundWorkerEnv) {
   return createLiveOutboundClient({
     proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
     egressFetcher: env.EGRESS,
-    aiBinding: adaptCloudflareAiBinding(env.AI),
+    aiBinding: env.AI,
     aiGatewayId: parseOptionalString(env.AI_GATEWAY_ID),
     aiProvider: parseOptionalString(env.AI_PROVIDER) ?? DEFAULT_AI_PROVIDER,
     aiModel: parseOptionalString(env.AI_MODEL) ?? DEFAULT_AI_MODEL,
