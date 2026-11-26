@@ -17,7 +17,7 @@ export interface ApiWorkerEnv {
   TRAKT_CLIENT_SECRET?: string;
   OUTBOUND_PROXY_CONFIG?: string;
   // Workers VPC service: the greencloud-hk egress relay.
-  EGRESS?: EgressFetcher;
+  HK?: EgressFetcher;
   ENABLE_HEALTH_OUTBOUND_PROBE?: string;
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;

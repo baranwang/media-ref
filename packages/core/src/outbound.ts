@@ -42,7 +42,7 @@ export type NamespaceRouteConfig =
       proxyBaseUrl: string;
       headers?: Record<string, string>;
     }
-  // Through the `egressFetcher` binding (Workers VPC → greencloud-hk egress relay).
+  // Through the `egressFetcher` binding (Workers VPC `HK` → greencloud-hk gateway's outbound relay).
   | { mode: "egress" };
 
 /** Header the egress relay reads to pick the HTTPS host it re-sends the request to. */
@@ -452,7 +452,7 @@ export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}
       if (options.proxyConfig?.[request.namespace]?.mode === "egress") {
         if (!options.egressFetcher) {
           throw new Error(
-            `Namespace "${request.namespace}" routes via egress but no EGRESS binding is configured`,
+            `Namespace "${request.namespace}" routes via egress but no HK binding is configured`,
           );
         }
         const sent = await fetchViaEgress(options.egressFetcher, request, signal);

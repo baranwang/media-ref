@@ -109,7 +109,7 @@ describe("OutboundClient live HTTP routing", () => {
     expect(captured[1]?.url).toBe("https://api.themoviedb.org/3/tv/95479");
   });
 
-  test("routes egress namespace through the EGRESS binding with the target host in x-egress-host, following redirects", async () => {
+  test("routes egress namespace through the HK binding with the target host in x-egress-host, following redirects", async () => {
     const sent: { url: string; host: string | null; ua: string | null; method?: string }[] = [];
     const egressFetcher = {
       async fetch(input: string, init?: RequestInit) {
@@ -163,7 +163,7 @@ describe("OutboundClient live HTTP routing", () => {
     ]);
   });
 
-  test("egress namespace without an EGRESS binding fails loudly instead of going direct", async () => {
+  test("egress namespace without an HK binding fails loudly instead of going direct", async () => {
     const outbound = createLiveOutboundClient({
       fetchImpl: async () => new Response("direct"),
       proxyConfig: { bilibili: { mode: "egress" } },
@@ -174,7 +174,7 @@ describe("OutboundClient live HTTP routing", () => {
         namespace: "bilibili",
         url: "https://api.bilibili.com/x",
       }),
-    ).rejects.toThrow(/EGRESS binding/);
+    ).rejects.toThrow(/HK binding/);
   });
 
   test("sends email via Cloudflare Email Service binding when emailBinding is configured", async () => {
