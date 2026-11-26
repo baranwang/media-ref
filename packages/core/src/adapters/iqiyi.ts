@@ -1,5 +1,7 @@
 import type { MediaType } from "@media-ref/client";
+import { createHash } from "node:crypto";
 import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
+import { selectBroadcastEpisodes } from "./variety.ts";
 import {
   AdapterTransientError,
   InvalidNativeIdError,
@@ -111,6 +113,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function parsePositiveIdString(value: unknown): string | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return String(value);
+  }
+  return typeof value === "string" && /^[1-9]\d*$/.test(value.trim()) ? value.trim() : null;
 }
 
 function parsePositiveInt(value: unknown): number | null {
@@ -623,6 +632,143 @@ type FetchAvListResult =
   | { status: "ok"; episodes: FeatureEpisode[] | null }
   | { status: "transient_error"; reason: string };
 
+const IQIYI_LW_BASE_INFO_API = "https://www.iqiyi.com/prelw/tvg/v2/lw/base_info";
+// Public signing secret of iQIYI's web client for the lw/tvg endpoints.
+const IQIYI_LW_SECRET = "howcuteitis";
+const IQIYI_PREVIEW_MARK = 17;
+
+function signIqiyiLwParams(params: Record<string, string>): string {
+  const base = Object.keys(params)
+    .sort()
+    .map((key) => `${key}=${params[key]}`)
+    .join("&");
+  return createHash("md5")
+    .update(`${base}&secret_key=${IQIYI_LW_SECRET}`)
+    .digest("hex")
+    .toUpperCase();
+}
+
+async function fetchIqiyiJson(
+  url: string,
+  outbound: OutboundClient,
+): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; reason: string }> {
+  let response: ExternalHttpResponse;
+  try {
+    response = await outbound.fetchExternal({
+      kind: "platform",
+      namespace: "iqiyi",
+      url,
+      method: "GET",
+      headers: IQIYI_API_HEADERS,
+    });
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "iqiyi_request_failed" };
+  }
+  if (response.status < 200 || response.status >= 300) {
+    return { ok: false, reason: `http_${response.status}` };
+  }
+  try {
+    const parsed = asRecord(JSON.parse(response.body));
+    return parsed ? { ok: true, data: parsed } : { ok: false, reason: "unexpected_payload" };
+  } catch {
+    return { ok: false, reason: "invalid_json" };
+  }
+}
+
+/**
+ * Broadcast list of a variety album: the signed `lw/base_info` page for one of its episodes has a
+ * `source_selector_bk` block with one group per album (usually per year); the album's own group is
+ * either inline or a signed selector URL.
+ */
+async function fetchVarietySelectorEpisodes(
+  albumId: string,
+  tvId: string,
+  outbound: OutboundClient,
+): Promise<
+  { status: "ok"; episodes: FeatureEpisode[] } | { status: "transient_error"; reason: string }
+> {
+  const params: Record<string, string> = {
+    entity_id: tvId,
+    device_id: "qd5fwuaj4hunxxdgzwkcqmefeb3ww5hx",
+    auth_cookie: "",
+    user_id: "0",
+    vip_type: "-1",
+    vip_status: "0",
+    conduit_id: "",
+    pcv: "13.082.22866",
+    app_version: "13.082.22866",
+    ext: "",
+    app_mode: "standard",
+    scale: "100",
+    timestamp: String(Date.now()),
+    src: "pca_tvg",
+    os: "",
+    ad_ext: '{"r":"2.2.0-ares6-pure"}',
+  };
+  params.sign = signIqiyiLwParams(params);
+  const page = await fetchIqiyiJson(
+    `${IQIYI_LW_BASE_INFO_API}?${new URLSearchParams(params).toString()}`,
+    outbound,
+  );
+  if (!page.ok) {
+    return { status: "transient_error", reason: page.reason };
+  }
+  if (page.data.status_code !== 0) {
+    return {
+      status: "transient_error",
+      reason: `iqiyi_lw_status_${String(page.data.status_code)}`,
+    };
+  }
+
+  const tabs = asRecord(asRecord(page.data.data)?.template)?.tabs;
+  const blocks = (Array.isArray(tabs) ? tabs : []).flatMap((tab) => {
+    const b = asRecord(tab)?.blocks;
+    return Array.isArray(b) ? b : [];
+  });
+  const selector = blocks.map(asRecord).find((b) => b?.bk_id === "source_selector_bk");
+  const groups = asRecord(selector?.data)?.data;
+  const group = (Array.isArray(groups) ? groups : [])
+    .map(asRecord)
+    .find((g) => g !== null && String(g.entity_id) === albumId);
+  if (!group) {
+    return { status: "ok", episodes: [] };
+  }
+
+  let rows: unknown = group.videos;
+  if (typeof rows === "string") {
+    const groupPage = await fetchIqiyiJson(rows, outbound);
+    if (!groupPage.ok) {
+      return { status: "transient_error", reason: groupPage.reason };
+    }
+    rows = asRecord(groupPage.data.data)?.videos;
+  }
+
+  const episodes: FeatureEpisode[] = [];
+  const seen = new Set<string>();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const items = asRecord(row)?.data;
+    for (const raw of Array.isArray(items) ? items : []) {
+      const item = asRecord(raw);
+      const id = parsePositiveIdString(item?.qipu_id);
+      if (!item || !id || seen.has(id) || item.mark_type_show === IQIYI_PREVIEW_MARK) {
+        continue;
+      }
+      seen.add(id);
+      const label = nonEmptyString(item.phase_title) ?? nonEmptyString(item.short_display_name);
+      const longTitle = nonEmptyString(item.title);
+      const date = nonEmptyString(item.publish_date)?.match(/^(\d{4})(\d{2})(\d{2})$/);
+      episodes.push({
+        index: episodes.length + 1,
+        nativeEpisodeId: id,
+        ...(label ? { title: label } : {}),
+        ...(longTitle ? { longTitle } : {}),
+        airDate: date ? `${date[1]}-${date[2]}-${date[3]}` : null,
+      });
+    }
+  }
+  return { status: "ok", episodes };
+}
+
 async function fetchAlbumFeatureEpisodes(
   albumId: string,
   outbound: OutboundClient,
@@ -786,7 +932,19 @@ async function fetchAlbumCollection(
     return { status: "transient_error", reason: avListResult.reason };
   }
 
-  const featureEpisodes = avListResult.episodes ?? [];
+  let featureEpisodes = avListResult.episodes ?? [];
+  // Variety albums list no feature episodes here; their broadcasts live in the source selector.
+  const sampleTvId =
+    parsePositiveIdString(firstVideo?.tvId) ??
+    parsePositiveIdString(asRecord(data.latestVideo)?.tvId);
+  if (featureEpisodes.length === 0 && mediaType !== "movie" && sampleTvId) {
+    const variety = await fetchVarietySelectorEpisodes(canonicalId, sampleTvId, outbound);
+    if (variety.status === "transient_error") {
+      return { status: "transient_error", reason: variety.reason };
+    }
+    featureEpisodes = variety.episodes;
+  }
+  featureEpisodes = selectBroadcastEpisodes(featureEpisodes);
   const featureEpisodeCount = featureEpisodes.length > 0 ? featureEpisodes.length : null;
   const aliases = collectAliases(data, title);
   const originalTitle = nonEmptyString(data.originName) ?? nonEmptyString(data.originalName);

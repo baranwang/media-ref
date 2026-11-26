@@ -643,4 +643,51 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
       expect(headers["x-proxy-token"]).toBe("tencent-proxy-secret");
     }
   });
+
+  test("variety: keeps 第N期 broadcast parts (non-numeric titles) and drops extras", async () => {
+    const titles = [
+      "先导片：喜人超前集结！",
+      "第1期上：喜人初亮相",
+      "第1期下：高圆圆落泪",
+      "第1期纯享版：《小品的世界》",
+      "第1期陪看：唱嗨全场",
+      "第2期上：高能预警！",
+      "第2期下：《八十一难》",
+    ];
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const body = JSON.parse(request.body ?? "{}") as { page_params?: { page_id?: string } };
+        if (body.page_params?.page_id === "detail_page_introduction") {
+          return jsonResponse(
+            request.url,
+            makeIntroPayload({ title: "喜人奇妙夜", year: "2024", type: "10", type_name: "综艺" }),
+          );
+        }
+        return jsonResponse(
+          request.url,
+          makeEpisodePagePayload(
+            titles.map((title, i) => ({
+              vid: `v${i}`,
+              title,
+              c_title_output: title,
+              play_title: title,
+              is_trailer: "0",
+              publish_date: "2024-06-28",
+            })),
+          ),
+        );
+      },
+    });
+
+    const result = await tencentAdapter.fetchCollection("mzc00200vyot3cs", outbound);
+    expect(result.status).toBe("found");
+    if (result.status !== "found") return;
+    expect(result.info.featureEpisodes.map((e) => [e.index, e.title])).toEqual([
+      [1, "第1期上：喜人初亮相"],
+      [2, "第1期下：高圆圆落泪"],
+      [3, "第2期上：高能预警！"],
+      [4, "第2期下：《八十一难》"],
+    ]);
+    expect(result.info.featureEpisodeCount).toBe(4);
+  });
 });

@@ -1,5 +1,6 @@
 import type { MediaType } from "@media-ref/client";
 import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
+import { selectBroadcastEpisodes } from "./variety.ts";
 import {
   AdapterTransientError,
   InvalidNativeIdError,
@@ -548,7 +549,8 @@ export const bilibiliAdapter: Tier3Adapter<"bilibili"> = {
       parseFourDigitYear(publish?.pub_time) ?? parseFourDigitYear(publish?.pub_time_show);
 
     const mediaType = mapBilibiliMediaType(result.type);
-    const featureEpisodes = extractFeatureEpisodes(result.episodes);
+    const extracted = extractFeatureEpisodes(result.episodes);
+    const featureEpisodes = extracted !== null ? selectBroadcastEpisodes(extracted) : null;
     const aliases = collectAliases(result, title);
     const originalTitle = nonEmptyString(result.jp_title);
 

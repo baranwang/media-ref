@@ -1147,4 +1147,108 @@ describe("iQIYI Tier 3 search (#30)", () => {
       }
     }
   });
+
+  test("variety: an album with no list episodes falls back to the signed source selector", async () => {
+    const albumId = "2657274641350501";
+    const item = (qipu: number, phase: string, title: string, mark = 0) => ({
+      qipu_id: qipu,
+      phase_title: phase,
+      title,
+      mark_type_show: mark,
+      publish_date: "20250607",
+    });
+    let signed: URLSearchParams | null = null;
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (request.url === `https://pcw-api.iqiyi.com/album/album/baseinfo/${albumId}`) {
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: {
+              albumId: Number(albumId),
+              name: "新说唱2025",
+              channelId: 6,
+              firstVideo: { tvId: 1920084229702900, period: "2025-06-07" },
+            },
+          });
+        }
+        if (url.pathname === "/albums/album/avlistinfo") {
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: { epsodelist: [{ tvId: 8572445604693100, contentType: 28, name: "发布会" }] },
+          });
+        }
+        if (url.pathname === "/prelw/tvg/v2/lw/base_info") {
+          signed = url.searchParams;
+          return jsonResponse(request.url, {
+            status_code: 0,
+            data: {
+              template: {
+                tabs: [
+                  {
+                    blocks: [
+                      {
+                        bk_id: "source_selector_bk",
+                        data: {
+                          data: [
+                            { entity_id: 4016143587352901, videos: "https://mesh.if.iqiyi.com/x" },
+                            {
+                              entity_id: Number(albumId),
+                              videos: [
+                                {
+                                  title: "2025",
+                                  data: [
+                                    item(1, "发布会", "明星制作人齐立FLAG"),
+                                    item(2, "第1期上", "第1期上 超燃魔王秀"),
+                                    item(3, "第1期下", "第1期下 莆田Rap"),
+                                    item(4, "第1期纯享", "第1期纯享 说唱OG"),
+                                    item(5, "第2期上", "下期预告", 17),
+                                    item(6, "第2期上", "第2期上 锐评刘海哥"),
+                                  ],
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+
+    const result = await iqiyiAdapter.fetchCollection(albumId, outbound);
+    expect(result.status).toBe("found");
+    if (result.status !== "found") return;
+    expect(result.info.featureEpisodes).toEqual([
+      {
+        index: 1,
+        nativeEpisodeId: "2",
+        title: "第1期上",
+        longTitle: "第1期上 超燃魔王秀",
+        airDate: "2025-06-07",
+      },
+      {
+        index: 2,
+        nativeEpisodeId: "3",
+        title: "第1期下",
+        longTitle: "第1期下 莆田Rap",
+        airDate: "2025-06-07",
+      },
+      {
+        index: 3,
+        nativeEpisodeId: "6",
+        title: "第2期上",
+        longTitle: "第2期上 锐评刘海哥",
+        airDate: "2025-06-07",
+      },
+    ]);
+    expect(signed!.get("entity_id")).toBe("1920084229702900");
+    expect(signed!.get("sign")).toMatch(/^[0-9A-F]{32}$/);
+  });
 });

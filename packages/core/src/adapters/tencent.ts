@@ -1,5 +1,6 @@
 import type { MediaType } from "@media-ref/client";
 import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
+import { isBroadcastLabel, selectBroadcastEpisodes } from "./variety.ts";
 import {
   InvalidNativeIdError,
   type CollectionEvidenceResult,
@@ -343,7 +344,11 @@ function isFeatureEpisodeItem(
 
   const titleIsNumeric = title !== null && NUMERIC_EPISODE_LABEL_PATTERN.test(title);
   const outputIsNumeric = cTitleOutput !== null && NUMERIC_EPISODE_LABEL_PATTERN.test(cTitleOutput);
-  return titleIsNumeric || outputIsNumeric;
+  // Variety broadcasts are labelled "第N期上：…"; selectBroadcastEpisodes drops the extras later.
+  const isBroadcast =
+    (title !== null && isBroadcastLabel(title)) ||
+    (cTitleOutput !== null && isBroadcastLabel(cTitleOutput));
+  return titleIsNumeric || outputIsNumeric || isBroadcast;
 }
 
 function appendFilteredFeatureEpisodes(
@@ -672,6 +677,7 @@ export const tencentAdapter: Tier2Adapter<"tencent"> = {
       }
     }
 
+    const broadcast = selectBroadcastEpisodes(featureEpisodes);
     return {
       status: "found",
       info: {
@@ -682,8 +688,8 @@ export const tencentAdapter: Tier2Adapter<"tencent"> = {
         ...(aliases.length > 0 ? { aliases } : {}),
         year,
         mediaType,
-        featureEpisodeCount: featureEpisodes.length > 0 ? featureEpisodes.length : null,
-        featureEpisodes,
+        featureEpisodeCount: broadcast.length > 0 ? broadcast.length : null,
+        featureEpisodes: broadcast,
       },
     };
   },
