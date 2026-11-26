@@ -315,7 +315,32 @@ describe("Evidence Gate Step 1", () => {
     expect(gate.step1.fieldChecks.title).toBe("mismatch");
   });
 
-  test("invokes pluggable Step 2 hook only after Step 1 passes", () => {
+  test("records Step 2 conflicts alongside Step 1 conflicts when Step 1 fails", () => {
+    const gate = evaluateEvidenceGate({
+      catalog: makeTvCatalog(),
+      collection: makeBilibiliCollection({ title: "进击的巨人", originalTitle: null }),
+      segments: [
+        {
+          season: 9,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(gate.decision).toBe("needs_review");
+    expect(gate.step1.decision).toBe("needs_review");
+    expect(gate.step2?.conflicts.map((c) => c.code)).toEqual(["segment_season_not_found"]);
+    // Step 1 conflicts come first, so the primary conflict code is still Step 1's
+    expect(gate.conflicts[0]?.step).toBe(1);
+    expect(gate.conflicts.map((c) => c.step)).toContain(2);
+    expect(gate.reasons).toHaveLength(gate.conflicts.length);
+  });
+
+  test("invokes pluggable Step 2 hook whether or not Step 1 passes", () => {
     let step2Called = 0;
     const step2Hook: EvidenceGateStep2Evaluator = (ctx) => {
       step2Called += 1;
@@ -335,7 +360,7 @@ describe("Evidence Gate Step 1", () => {
       };
     };
 
-    // When Step 1 fails, Step 2 is NOT called
+    // When Step 1 fails, Step 2 still runs and is recorded; the verdict stays needs_review
     const failedStep1 = evaluateEvidenceGate({
       catalog: makeTvCatalog(),
       collection: makeBilibiliCollection({ year: 1999 }),
@@ -343,8 +368,8 @@ describe("Evidence Gate Step 1", () => {
       evaluateStep2: step2Hook,
     });
     expect(failedStep1.decision).toBe("needs_review");
-    expect(failedStep1.step2).toBeNull();
-    expect(step2Called).toBe(0);
+    expect(failedStep1.step2).toEqual({ decision: "pass", conflicts: [], reasons: [] });
+    expect(step2Called).toBe(1);
 
     // When Step 1 passes, Step 2 runs and its decision determines final outcome
     const vetoedByStep2 = evaluateEvidenceGate({
@@ -363,7 +388,7 @@ describe("Evidence Gate Step 1", () => {
       ],
       evaluateStep2: step2Hook,
     });
-    expect(step2Called).toBe(1);
+    expect(step2Called).toBe(2);
     expect(vetoedByStep2.step1.decision).toBe("pass");
     expect(vetoedByStep2.step2?.decision).toBe("needs_review");
     expect(vetoedByStep2.decision).toBe("needs_review");

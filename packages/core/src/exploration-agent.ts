@@ -938,6 +938,12 @@ async function runAgentSession(
     tmdb: ctx.tmdbGateway,
     collectionNamespaces: targets.map((t) => t.namespace),
     seasons: ctx.media.snapshot.seasons,
+    tmdbTvId:
+      ctx.media.baseline === "tmdb"
+        ? (ctx.media.externalIds
+            .find((e) => e.namespace === "tmdb")
+            ?.nativeId.match(/^tv:(\d+)$/)?.[1] ?? null)
+        : null,
     register: (info, source) => {
       const target = byNamespace.get(info.namespace);
       if (target) {

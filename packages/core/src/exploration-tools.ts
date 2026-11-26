@@ -34,6 +34,8 @@ export interface ToolContext {
   /** An upstream outage on a namespace: its "not found" is then inconclusive. */
   noteTransient(namespace: Namespace, reason: string): void;
   seasons: ReadonlyArray<{ season: number; episodeCount: number; airYear?: number | null }>;
+  /** TMDB TV ID when TMDB is the baseline catalog: `get_catalog_season` lists its episodes. */
+  tmdbTvId: string | null;
 }
 
 /** The query tools; the executor adds `submit_mapping` and `mark_not_found`. */
@@ -97,10 +99,10 @@ export function buildQueryTools(ctx: ToolContext): ModelToolDefinition[] {
     {
       name: "get_catalog_season",
       description:
-        "Get the target media's season from the baseline catalog: episode count and air year.",
+        "Get the target media's season from the baseline catalog: episode count, air year and, when available, each episode's number, title and air date.",
       parameters: {
         type: "object",
-        properties: { season: { type: "integer" } },
+        properties: { season: { type: "integer", description: "0 = specials." } },
         required: ["season"],
       },
     },
@@ -181,7 +183,7 @@ export async function runQueryTool(
       case "get_collection":
         return await getCollection(ctx, str("namespace") as Namespace, str("id"));
       case "get_catalog_season":
-        return ctx.seasons.find((s) => s.season === args.season) ?? { error: "UNKNOWN_SEASON" };
+        return await getCatalogSeason(ctx, args.season);
       case "search_platform":
         return await searchPlatform(ctx, str("platform") as Namespace, str("keyword"));
       case "web_search":
@@ -274,6 +276,19 @@ async function getCatalogEntry(ctx: ToolContext, source: string, id: string): Pr
   return { error: "UNKNOWN_SOURCE" };
 }
 
+async function getCatalogSeason(ctx: ToolContext, season: unknown): Promise<unknown> {
+  const known = ctx.seasons.find((s) => s.season === season);
+  if (!known) {
+    return { error: "UNKNOWN_SEASON" };
+  }
+  if (!ctx.tmdbTvId) {
+    return known;
+  }
+  // The episode list is extra context: without it the count and year still answer.
+  const episodes = await ctx.tmdb.fetchSeasonEpisodes(ctx.tmdbTvId, known.season).catch(() => null);
+  return episodes ? { ...known, episodes } : known;
+}
+
 async function resolveLink(
   ctx: ToolContext,
   url: string,
@@ -324,8 +339,10 @@ async function getCollection(ctx: ToolContext, namespace: Namespace, id: string)
     passesAutomaticCheckWithDefaultMapping: passes,
     episodes: info.featureEpisodes.slice(0, MAX_EPISODES_IN_TOOL_RESULT).map((ep) => ({
       index: ep.index,
-      title: ep.longTitle ?? ep.title ?? null,
+      title: ep.title ?? null,
+      longTitle: ep.longTitle ?? null,
       airDate: ep.airDate ?? null,
+      durationSeconds: ep.durationSeconds ?? null,
     })),
   };
 }
