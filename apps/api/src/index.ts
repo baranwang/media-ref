@@ -1,5 +1,5 @@
 import type { ExecutionContext } from "@cloudflare/workers-types";
-import { createLiveOutboundClient, DOUBAN_API, parseOutboundProxyConfig } from "@media-ref/core";
+import { createLiveOutboundClient, parseOutboundProxyConfig } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import { createApiApp } from "./app.ts";
 import { createWorkersBrowseCache } from "./browse-cache.ts";
@@ -37,7 +37,6 @@ export async function handleWorkerRequest(
   ctx: ExecutionContext,
   internal: boolean,
 ): Promise<Response> {
-  DOUBAN_API.apiKey = env.DOUBAN_API_KEY?.trim() || undefined;
   const dbRead = createDb(env.HYPERDRIVE_READ.connectionString, { max: 5 });
   const dbWrite = createDb(env.HYPERDRIVE_WRITE.connectionString, { max: 5 });
   const backgroundTasks: Promise<unknown>[] = [];

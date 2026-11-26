@@ -25,8 +25,6 @@ export interface ApiWorkerEnv {
   TVDB_BEARER_TOKEN?: string;
   TVDB_API_BASE_URL?: string;
   DOUBAN_API_BASE_URL?: string;
-  /** frodo / IMDb-lookup apiKey (secret), as douban-bridge uses it. */
-  DOUBAN_API_KEY?: string;
   BANGUMI_API_BASE_URL?: string;
   IMDB_API_BASE_URL?: string;
   TRAKT_API_BASE_URL?: string;

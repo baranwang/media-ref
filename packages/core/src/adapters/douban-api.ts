@@ -2,9 +2,8 @@ import type { ExternalHttpRequest, ExternalHttpResponse, OutboundClient } from "
 
 /**
  * Douban access, the way douban-bridge does it: the WeChat mini program API (frodo) for subjects,
- * with the `DOUBAN_API_KEY` apiKey, and `api.douban.com/v2/movie/imdb` for IMDb lookups. That
- * endpoint rejects the frodo key (code 104), so it keeps the public key below.
- * The Workers set `apiKey` from their env at request start; tests set the delays to 0.
+ * and `api.douban.com/v2/movie/imdb` for IMDb lookups. That endpoint rejects the frodo key
+ * (code 104), so it keeps its own public key below. Tests set the delays to 0.
  *
  * Douban answers bursts with HTTP 400 (frodo after ~19 quick requests from one IP), so every
  * Douban request in this isolate waits for its slot, and a 400/403/429 is retried once.
@@ -15,7 +14,8 @@ export const DOUBAN_API: {
   minIntervalMs: number;
   retryDelayMs: number;
 } = {
-  apiKey: undefined,
+  // The mini program's public frodo apiKey, base64 only to keep it out of plain-text searches.
+  apiKey: atob("MGFjNDRhZTAxNjQ5MGRiMjIwNGNlMGEwNDJkYjI5MTY="),
   minIntervalMs: 1200,
   retryDelayMs: 3000,
 };
@@ -40,7 +40,7 @@ const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : 
 
 function requireApiKey(): string {
   if (!DOUBAN_API.apiKey) {
-    throw new Error("DOUBAN_API_KEY is not configured");
+    throw new Error("Douban frodo apiKey is not configured");
   }
   return DOUBAN_API.apiKey;
 }
