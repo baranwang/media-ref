@@ -85,13 +85,16 @@ export function buildQueryTools(ctx: ToolContext): ModelToolDefinition[] {
     },
     {
       name: "get_collection",
-      description:
-        "Fetch one collection (by ID or URL) with its feature episodes. Only collections fetched here can be submitted.",
+      description: `Fetch one collection (by ID or URL) with its feature episodes by position (at most ${MAX_EPISODES_IN_TOOL_RESULT} per call; episodesTruncated tells where the next window starts). Only collections fetched here can be submitted.`,
       parameters: {
         type: "object",
         properties: {
           namespace: { type: "string", enum: [...ctx.collectionNamespaces] },
           id: { type: "string", description: "Collection ID or URL." },
+          fromPosition: {
+            type: "integer",
+            description: "List feature episodes from this position (default 1).",
+          },
         },
         required: ["namespace", "id"],
       },
@@ -187,7 +190,12 @@ export async function runQueryTool(
         return resolved ?? { error: "UNSUPPORTED_LINK" };
       }
       case "get_collection":
-        return await getCollection(ctx, str("namespace") as Namespace, str("id"));
+        return await getCollection(
+          ctx,
+          str("namespace") as Namespace,
+          str("id"),
+          args.fromPosition,
+        );
       case "get_catalog_season":
         return await getCatalogSeason(ctx, args.season, args.fromEpisode);
       case "search_platform":
@@ -323,7 +331,12 @@ async function resolveLink(
   return null;
 }
 
-async function getCollection(ctx: ToolContext, namespace: Namespace, id: string): Promise<unknown> {
+async function getCollection(
+  ctx: ToolContext,
+  namespace: Namespace,
+  id: string,
+  fromPosition: unknown,
+): Promise<unknown> {
   const adapter = ctx.collectionNamespaces.includes(namespace)
     ? ctx.registry.get(namespace)
     : undefined;
@@ -349,6 +362,11 @@ async function getCollection(ctx: ToolContext, namespace: Namespace, id: string)
   }
   const { info } = evidence;
   const passes = ctx.register(info, "agent_fetch");
+  const from = typeof fromPosition === "number" ? fromPosition : 1;
+  const listed = info.featureEpisodes.filter((ep) => ep.index >= from);
+  const episodes = listed.slice(0, MAX_EPISODES_IN_TOOL_RESULT);
+  const next = listed[MAX_EPISODES_IN_TOOL_RESULT];
+  const total = info.featureEpisodes.length;
   return {
     namespace,
     canonicalId: info.canonicalId,
@@ -358,13 +376,14 @@ async function getCollection(ctx: ToolContext, namespace: Namespace, id: string)
     mediaType: info.mediaType,
     featureEpisodeCount: info.featureEpisodes.length,
     passesAutomaticCheckWithDefaultMapping: passes,
-    episodes: info.featureEpisodes.slice(0, MAX_EPISODES_IN_TOOL_RESULT).map((ep) => ({
+    episodes: episodes.map((ep) => ({
       index: ep.index,
       title: ep.title ?? null,
       longTitle: ep.longTitle ?? null,
       airDate: ep.airDate ?? null,
       durationSeconds: ep.durationSeconds ?? null,
     })),
+    ...(next ? { episodesTruncated: { total, nextFromPosition: next.index } } : {}),
   };
 }
 

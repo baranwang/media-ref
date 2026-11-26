@@ -86,6 +86,16 @@ const BILIBILI_SEASONS: Record<string, Record<string, unknown>> = {
     publish: { pub_time: "2023-07-06 23:56:00" },
     episodes: bilibiliEpisodes(23, 750100),
   },
+  // A long collection: get_collection lists it in windows of 80.
+  "34500": {
+    season_id: 34500,
+    title: "咒术回战 合集",
+    jp_title: "呪術廻戦",
+    type: 1,
+    total: 100,
+    publish: { pub_time: "2020-10-03 01:25:00" },
+    episodes: bilibiliEpisodes(100, 345000),
+  },
 };
 
 interface StubOptions {
@@ -877,6 +887,50 @@ describe("Exploration agent: discover → judge → gate", () => {
     );
     expect(head!.episodesTruncated).toEqual({ total: 100, nextFromEpisode: 81 });
     expect(rest!.episodes.map((e) => e.episode)).toEqual(
+      Array.from({ length: 20 }, (_, i) => i + 81),
+    );
+    expect(rest!.episodesTruncated).toBeUndefined();
+  });
+
+  test("get_collection lists at most 80 positions, says so, and fromPosition lists the rest", async () => {
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      if (request.messages.some((m) => m.role === "assistant")) {
+        return markAllNotFound(request);
+      }
+      return {
+        content: null,
+        toolCalls: [
+          {
+            id: "call_a",
+            name: "get_collection",
+            arguments: { namespace: "bilibili", id: "ss34500" },
+          },
+          {
+            id: "call_b",
+            name: "get_collection",
+            arguments: { namespace: "bilibili", id: "ss34500", fromPosition: 81 },
+          },
+        ],
+        model: "test-model",
+      };
+    };
+    const { outbound, explore } = await setup({ kan360Rows: [] }, invokeModel);
+
+    await explore();
+
+    const replies = outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool");
+    const [head, rest] = replies.map(
+      (m) =>
+        JSON.parse(m.content) as {
+          featureEpisodeCount: number;
+          episodes: Array<{ index: number }>;
+          episodesTruncated?: unknown;
+        },
+    );
+    expect(head!.featureEpisodeCount).toBe(100);
+    expect(head!.episodes.map((e) => e.index)).toEqual(Array.from({ length: 80 }, (_, i) => i + 1));
+    expect(head!.episodesTruncated).toEqual({ total: 100, nextFromPosition: 81 });
+    expect(rest!.episodes.map((e) => e.index)).toEqual(
       Array.from({ length: 20 }, (_, i) => i + 81),
     );
     expect(rest!.episodesTruncated).toBeUndefined();
