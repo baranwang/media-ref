@@ -196,6 +196,8 @@ service ReviewerService {
   rpc ListChangeRequests(ListChangeRequestsRequest) returns (ListChangeRequestsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // People no longer decide change requests (ADR 0003 amendment 2): both answer FailedPrecondition
+  // DECIDED_BY_REVIEW_AGENT. Comment with ChangeRequestService.CreateChangeRequestComment instead.
   rpc ApproveChangeRequest(ApproveChangeRequestRequest) returns (ApproveChangeRequestResponse);
   rpc RejectChangeRequest(RejectChangeRequestRequest) returns (RejectChangeRequestResponse);
   rpc SetAssociationLock(SetAssociationLockRequest) returns (SetAssociationLockResponse);
