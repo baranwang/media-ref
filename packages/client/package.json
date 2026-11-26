@@ -3,6 +3,11 @@
   "version": "0.0.0",
   "description": "Typed HTTP client, canonical domain types, episode resolution, and segment validation for media-ref.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baranwang/media-ref.git",
+    "directory": "packages/client"
+  },
   "files": [
     "dist"
   ],
