@@ -641,15 +641,37 @@ function platformCandidates(discovery: DiscoveryResult, namespace: Namespace): N
  * Platform discovery reads its "where to watch" without the rate-limited IMDb lookup; the links
  * found there are still only candidates.
  */
-async function knownDoubanSubjectId(db: Db, mediaId: string): Promise<string | null> {
+async function knownDoubanSubjectId(
+  db: Db,
+  mediaId: string,
+  season: number | null,
+): Promise<string | null> {
   const rows = await db
     .selectFrom("associations")
-    .select(["native_id", "status"])
+    .select(["id", "native_id", "status"])
     .where("media_id", "=", mediaId)
     .where("namespace", "=", "douban")
     .where("status", "in", ["confirmed", "seed_unconfirmed"])
     .execute();
-  return (rows.find((r) => r.status === "confirmed") ?? rows[0])?.native_id ?? null;
+  if (rows.length === 0) {
+    return null;
+  }
+  // Douban has one subject per TV season: only an association covering the season (or the whole
+  // media, i.e. no segments) is this season's subject.
+  const segments = await db
+    .selectFrom("segments")
+    .select(["association_id", "season"])
+    .where(
+      "association_id",
+      "in",
+      rows.map((r) => r.id),
+    )
+    .execute();
+  const covering = rows.filter((r) => {
+    const own = segments.filter((seg) => seg.association_id === r.id);
+    return season === null || own.length === 0 || own.some((seg) => seg.season === season);
+  });
+  return (covering.find((r) => r.status === "confirmed") ?? covering[0])?.native_id ?? null;
 }
 
 async function doubanCandidates(
@@ -1129,7 +1151,11 @@ export function createExplorationAgentExecutor(
     }
     const discovery = targets.some((a) => isPlatformNamespace(a.namespace))
       ? await discover(
-          toDiscoveryInput(ctx.media, ctx.season, await knownDoubanSubjectId(ctx.db, ctx.media.id)),
+          toDiscoveryInput(
+            ctx.media,
+            ctx.season,
+            await knownDoubanSubjectId(ctx.db, ctx.media.id, ctx.season),
+          ),
           { outbound: ctx.outbound },
         )
       : null;

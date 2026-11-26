@@ -134,6 +134,9 @@ function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
         },
       });
     }
+    if (url.hostname === "frodo.douban.com" && url.pathname.startsWith("/api/v2/subject/")) {
+      return jsonResponse(request.url, { title: "咒术回战", year: "2020", vendors: [] });
+    }
     if (url.hostname === "frodo.douban.com" && url.pathname === "/api/v2/search/weixin") {
       return jsonResponse(request.url, { items: [] });
     }
@@ -468,5 +471,50 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(outbound.modelRequests).toHaveLength(0);
     const crs = await testDb.readDb.selectFrom("change_requests").select("native_id").execute();
     expect(crs).toEqual([{ native_id: "ss34430" }]);
+  });
+
+  test("discovery reads the known Douban subject of the requested season, not another season's", async () => {
+    const { testDb, mediaId, outbound, explore } = await setup({ kan360Rows: [] });
+    for (const [subject, season] of [
+      ["35000002", 2],
+      ["35000001", 1],
+    ] as const) {
+      const assoc = await testDb.writeDb
+        .insertInto("associations")
+        .values({
+          media_id: mediaId,
+          namespace: "douban",
+          native_id: subject,
+          status: "seed_unconfirmed",
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await testDb.writeDb
+        .insertInto("segments")
+        .values({
+          association_id: assoc.id,
+          season: 1,
+          episode_start: 1,
+          episode_end: null,
+          target_episode_start: 1,
+          baseline: "tmdb",
+        })
+        .execute();
+      if (season === 2) {
+        await testDb.writeDb
+          .updateTable("segments")
+          .set({ season: 2 })
+          .where("association_id", "=", assoc.id)
+          .execute();
+      }
+    }
+
+    await explore();
+
+    const subjects = outbound.httpRequests
+      .map((r) => new URL(r.url))
+      .filter((u) => u.hostname === "frodo.douban.com" && u.pathname.startsWith("/api/v2/subject/"))
+      .map((u) => u.pathname.split("/").pop());
+    expect(subjects).toEqual(["35000001"]);
   });
 });
