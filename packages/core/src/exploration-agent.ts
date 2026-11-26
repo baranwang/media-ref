@@ -43,7 +43,7 @@ import {
   type DiscoveryResult,
 } from "./discovery/candidates.ts";
 import {
-  evaluateEvidenceGateStep1,
+  evaluateEvidenceGate,
   isNonOriginalVariantDescription,
   type CatalogEvidence,
 } from "./evidence-gate.ts";
@@ -468,9 +468,56 @@ export function checkSegmentsFitCollection(
   return null;
 }
 
-function summarizeCandidate(run: JobRun, candidate: FetchedCandidate) {
+/**
+ * Seasons each collection of this media on `namespace` already covers, for collections that do
+ * not cover `season`. Whole-media requests (season null) are not checked.
+ */
+async function loadMappedSeasons(
+  db: Db,
+  mediaId: string,
+  namespace: Namespace,
+  season: number | null,
+): Promise<Map<string, number[]>> {
+  const mapped = new Map<string, number[]>();
+  if (season === null) {
+    return mapped;
+  }
+  const rows = await db
+    .selectFrom("associations")
+    .innerJoin("segments", "segments.association_id", "associations.id")
+    .select(["associations.native_id", "segments.season"])
+    .where("associations.media_id", "=", mediaId)
+    .where("associations.namespace", "=", namespace)
+    .where("associations.status", "=", "confirmed")
+    .execute();
+  for (const row of rows) {
+    mapped.set(row.native_id, [...new Set([...(mapped.get(row.native_id) ?? []), row.season])]);
+  }
+  for (const [id, seasons] of mapped) {
+    if (seasons.includes(season)) {
+      mapped.delete(id);
+    } else {
+      seasons.sort((a, b) => a - b);
+    }
+  }
+  return mapped;
+}
+
+/** Seasons a submission would drop from the collection's existing association. */
+function lostSeasons(
+  target: Pick<OpenTarget, "mappedSeasons">,
+  canonicalId: string,
+  segments: readonly SegmentInput[],
+): number[] {
+  const kept = new Set(segments.map((s) => s.season));
+  return (target.mappedSeasons.get(canonicalId) ?? []).filter((s) => !kept.has(s));
+}
+
+function summarizeCandidate(run: JobRun, target: OpenTarget, candidate: FetchedCandidate) {
   const { info, suggestedSegments } = candidate;
+  const mappedTo = target.mappedSeasons.get(info.canonicalId);
   return {
+    ...(mappedTo ? { alreadyMappedToSeasons: mappedTo } : {}),
     canonicalId: info.canonicalId,
     title: info.title,
     originalTitle: info.originalTitle ?? null,
@@ -478,7 +525,7 @@ function summarizeCandidate(run: JobRun, candidate: FetchedCandidate) {
     mediaType: info.mediaType,
     featureEpisodeCount: info.featureEpisodes.length,
     sources: candidate.sources,
-    passesAutomaticCheckWithDefaultMapping: run.passesStep1(info, run.baseSegments),
+    passesAutomaticCheckWithDefaultMapping: run.passesGate(info, run.baseSegments),
     ...(suggestedSegments
       ? {
           suggestedMapping: {
@@ -488,7 +535,7 @@ function summarizeCandidate(run: JobRun, candidate: FetchedCandidate) {
               episodeEnd: s.episodeEnd,
               targetEpisodeStart: s.targetEpisodeStart,
             })),
-            passesAutomaticCheck: run.passesStep1(info, suggestedSegments),
+            passesAutomaticCheck: run.passesGate(info, suggestedSegments),
             variantDescription: candidate.suggestedVariantDescription ?? null,
           },
         }
@@ -508,6 +555,8 @@ function buildAgentSystemPrompt(namespaces: readonly Namespace[]): string {
     "4. Check title, year, media type and episode count against the target. Prefer original audio over dubs or recuts.",
     "5. A collection may hold several seasons, or a season may be split; express that with segments.",
     "6. passesAutomaticCheckWithDefaultMapping is a hint from a deterministic check, not a decision.",
+    "   alreadyMappedToSeasons means the collection is already this media's collection for those seasons:",
+    "   it is not this season's unless it really holds both, and then segments must cover all of them.",
     "   suggestedMapping comes from a review that rejected an earlier submission of that collection: submit its segments unless the evidence says otherwise.",
     "7. mark_not_found only after you looked: the platform may simply not carry it, which is common.",
     "8. Steps and tokens are limited; stop searching a namespace once the evidence is clear.",
@@ -641,6 +690,11 @@ interface OpenTarget {
   adapter: CollectionAdapter;
   taskId: string;
   fetched: Map<string, FetchedCandidate>;
+  /**
+   * Collections this media already has on the namespace for other seasons, by canonical ID. Approving
+   * a mapping replaces an association's segments, so a submission must keep those seasons.
+   */
+  mappedSeasons: Map<string, number[]>;
   /** A failing source or fetch: "not found" is then not evidence of absence. */
   discoveryErrored: boolean;
   transient: PlatformTransient | null;
@@ -650,7 +704,7 @@ interface OpenTarget {
 interface JobRun {
   ctx: ExplorationExecutionContext;
   budget: SessionBudget;
-  passesStep1(info: CollectionInfo, segments: readonly SegmentInput[]): boolean;
+  passesGate(info: CollectionInfo, segments: readonly SegmentInput[]): boolean;
   segmentMisfit(info: CollectionInfo, segments: readonly SegmentInput[]): string | null;
   baseSegments: SegmentInput[];
 }
@@ -669,11 +723,11 @@ function createJobRun(
     ctx,
     budget,
     segmentMisfit,
-    // Step 1 alone accepts year and episode counts from any season, so the fetched-range check
-    // also has to hold before a candidate counts as passing.
-    passesStep1: (info, segments) =>
+    // The whole gate, not Step 1 alone: Step 1 accepts the year and episode count of any season,
+    // so another season's collection (same count, its own year) would pass as this season.
+    passesGate: (info, segments) =>
       segmentMisfit(info, segments) === null &&
-      evaluateEvidenceGateStep1(catalog, info, { segments: normalizeSegments(segments) })
+      evaluateEvidenceGate({ catalog, collection: info, segments: normalizeSegments(segments) })
         .decision === "pass",
     baseSegments: defaultSegments(ctx.media, ctx.season),
   };
@@ -797,6 +851,7 @@ async function prepareTarget(
     adapter,
     taskId,
     fetched: new Map(),
+    mappedSeasons: await loadMappedSeasons(ctx.db, ctx.media.id, namespace, ctx.season),
     discoveryErrored: candidates.sourceErrored,
     transient: null,
   };
@@ -861,7 +916,11 @@ async function prepareTarget(
   // Fast path: the others failed the same check (title, year, type or episode count). A
   // candidate a review corrected is checked, and submitted, with its corrected segments.
   const mapping = (c: FetchedCandidate) => c.suggestedSegments ?? run.baseSegments;
-  const passing = [...target.fetched.values()].filter((c) => run.passesStep1(c.info, mapping(c)));
+  const passing = [...target.fetched.values()].filter(
+    (c) =>
+      lostSeasons(target, c.info.canonicalId, mapping(c)).length === 0 &&
+      run.passesGate(c.info, mapping(c)),
+  );
   if (passing.length === 1) {
     const result = await submitMapping(
       run,
@@ -923,7 +982,10 @@ async function runAgentSession(
             : [...(known?.sources ?? []), source],
         });
       }
-      return run.passesStep1(info, run.baseSegments);
+      return (
+        (!target || lostSeasons(target, info.canonicalId, run.baseSegments).length === 0) &&
+        run.passesGate(info, run.baseSegments)
+      );
     },
     noteTransient: (namespace, reason) => {
       const target = byNamespace.get(namespace);
@@ -986,7 +1048,7 @@ async function runAgentSession(
         ctx.season,
         targets.map((t) => ({
           namespace: t.namespace,
-          candidates: [...t.fetched.values()].map((c) => summarizeCandidate(run, c)),
+          candidates: [...t.fetched.values()].map((c) => summarizeCandidate(run, t, c)),
         })),
       ),
     },
@@ -1027,6 +1089,14 @@ async function runAgentSession(
     const misfit = run.segmentMisfit(candidate.info, segments);
     if (misfit) {
       return { ok: false, error: "SEGMENTS_OUTSIDE_COLLECTION", message: misfit };
+    }
+    const lost = lostSeasons(target, candidate.info.canonicalId, segments);
+    if (lost.length > 0) {
+      return {
+        ok: false,
+        error: "ALREADY_MAPPED_TO_OTHER_SEASON",
+        message: `${candidate.info.canonicalId} is already mapped to season ${lost.join(", ")} of this media. A collection holding only another season is not this season; if it really holds both, submit segments for all of them.`,
+      };
     }
     const result = await submitMapping(
       run,
