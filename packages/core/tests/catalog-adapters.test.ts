@@ -14,6 +14,12 @@ import {
   selectBaseline,
   type ExternalHttpResponse,
 } from "../src/index.ts";
+import { DOUBAN_API } from "../src/index.ts";
+
+// A test key, and no pacing delays against the fake Douban.
+DOUBAN_API.apiKey = "test-douban-key";
+DOUBAN_API.minIntervalMs = 0;
+DOUBAN_API.retryDelayMs = 0;
 
 function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttpResponse {
   return {
@@ -78,13 +84,13 @@ describe("Douban Tier 1 & Tier 2 adapter", () => {
     }
   });
 
-  test("fetches movie and TV metadata via rexxar API with required Referer header", async () => {
+  test("fetches movie and TV metadata via frodo with the apiKey", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
         expect(request.kind).toBe("catalog");
         expect(request.namespace).toBe("douban");
-        if (request.url === "https://m.douban.com/rexxar/api/v2/movie/35465232") {
-          expect(request.headers?.referer).toBe("https://m.douban.com/movie/subject/35465232/");
+        if (new URL(request.url).pathname === "/api/v2/subject/35465232") {
+          expect(new URL(request.url).searchParams.get("apiKey")).toBe("test-douban-key");
           return jsonResponse(request.url, {
             id: "35465232",
             title: "狂飙",
@@ -98,8 +104,8 @@ describe("Douban Tier 1 & Tier 2 adapter", () => {
             episodes_count: 39,
           });
         }
-        if (request.url === "https://m.douban.com/rexxar/api/v2/movie/1292052") {
-          expect(request.headers?.referer).toBe("https://m.douban.com/movie/subject/1292052/");
+        if (new URL(request.url).pathname === "/api/v2/subject/1292052") {
+          expect(request.headers?.referer).toContain("servicewechat.com");
           return jsonResponse(request.url, {
             id: "1292052",
             title: "肖申克的救赎",
@@ -153,21 +159,21 @@ describe("Douban Tier 1 & Tier 2 adapter", () => {
   test("maps Douban 404 to not_found and 403/5xx/timeout to transient_error", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
-        if (request.url.endsWith("/404404")) {
+        if (new URL(request.url).pathname.endsWith("/404404")) {
           return jsonResponse(
             request.url,
             { code: 404, msg: "traversal_error", localized_message: "要访问的内容不存在" },
             404,
           );
         }
-        if (request.url.endsWith("/403403")) {
+        if (new URL(request.url).pathname.endsWith("/403403")) {
           return { status: 403, headers: {}, body: "Forbidden", url: request.url };
         }
-        if (request.url.endsWith("/503503")) {
+        if (new URL(request.url).pathname.endsWith("/503503")) {
           return { status: 503, headers: {}, body: "Service Unavailable", url: request.url };
         }
-        if (request.url.endsWith("/408408")) {
-          throw new Error("ETIMEDOUT connecting to m.douban.com");
+        if (new URL(request.url).pathname.endsWith("/408408")) {
+          throw new Error("ETIMEDOUT connecting to frodo.douban.com");
         }
         throw new Error(`Unexpected URL: ${request.url}`);
       },
@@ -510,7 +516,10 @@ describe("Catalog gateway & baseline priority (selectBaseline + resolveCatalogTa
             infobox: [],
           });
         }
-        if (request.namespace === "douban" && request.url.endsWith("/movie/600002")) {
+        if (
+          request.namespace === "douban" &&
+          new URL(request.url).pathname.endsWith("/subject/600002")
+        ) {
           return jsonResponse(request.url, {
             id: "600002",
             title: "豆瓣独有短剧",
@@ -602,5 +611,25 @@ describe("Catalog gateway & baseline priority (selectBaseline + resolveCatalogTa
 
     const missing = await resolveCatalogTargetSnapshot("imdb:tt9999999", outbound);
     expect(missing.status).toBe("not_found");
+  });
+
+  test("a Douban rate-limit answer (400) is retried once", async () => {
+    let calls = 0;
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        calls += 1;
+        return calls === 1
+          ? jsonResponse(request.url, { code: 1, msg: "rate limited" }, 400)
+          : jsonResponse(request.url, {
+              id: "1292000",
+              title: "搏击俱乐部",
+              year: "1999",
+              is_tv: false,
+            });
+      },
+    });
+    const result = await doubanAdapter.fetchCollection("1292000", outbound);
+    expect(result.status).toBe("found");
+    expect(calls).toBe(2);
   });
 });

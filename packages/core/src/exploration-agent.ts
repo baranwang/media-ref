@@ -396,10 +396,14 @@ interface FetchedCandidate {
 function toDiscoveryInput(
   media: ExplorationTargetMedia,
   season: number | null,
+  doubanId: string | null,
 ): DiscoveryMediaInput {
   const externalIds: Partial<Record<Namespace, string>> = {};
   for (const ext of media.externalIds) {
     externalIds[ext.namespace] ??= ext.nativeId;
+  }
+  if (doubanId) {
+    externalIds.douban = doubanId;
   }
   return {
     title: media.snapshot.title,
@@ -632,6 +636,44 @@ function platformCandidates(discovery: DiscoveryResult, namespace: Namespace): N
 }
 
 /** Douban candidates: the subject Douban lists for the media's IMDb ID. */
+/**
+ * The media's Douban subject when the library already names one, confirmed or seeded (unverified).
+ * Platform discovery reads its "where to watch" without the rate-limited IMDb lookup; the links
+ * found there are still only candidates.
+ */
+async function knownDoubanSubjectId(
+  db: Db,
+  mediaId: string,
+  season: number | null,
+): Promise<string | null> {
+  const rows = await db
+    .selectFrom("associations")
+    .select(["id", "native_id", "status"])
+    .where("media_id", "=", mediaId)
+    .where("namespace", "=", "douban")
+    .where("status", "in", ["confirmed", "seed_unconfirmed"])
+    .execute();
+  if (rows.length === 0) {
+    return null;
+  }
+  // Douban has one subject per TV season: only an association covering the season (or the whole
+  // media, i.e. no segments) is this season's subject.
+  const segments = await db
+    .selectFrom("segments")
+    .select(["association_id", "season"])
+    .where(
+      "association_id",
+      "in",
+      rows.map((r) => r.id),
+    )
+    .execute();
+  const covering = rows.filter((r) => {
+    const own = segments.filter((seg) => seg.association_id === r.id);
+    return season === null || own.length === 0 || own.some((seg) => seg.season === season);
+  });
+  return (covering.find((r) => r.status === "confirmed") ?? covering[0])?.native_id ?? null;
+}
+
 async function doubanCandidates(
   media: ExplorationTargetMedia,
   outbound: OutboundClient,
@@ -799,9 +841,11 @@ async function explorePlatform(
       }
     };
 
-    // 3. Fast path: one fetched candidate that the gate would already accept.
-    const only = fetched.size === 1 ? [...fetched.values()][0]! : null;
-    if (only && passesStep1(only.info, baseSegments)) {
+    // 3. Fast path: exactly one fetched candidate that the gate would already accept. The others
+    //    failed the same check (title, year, type or episode count), so there is nothing to judge.
+    const passing = [...fetched.values()].filter((c) => passesStep1(c.info, baseSegments));
+    const only = passing.length === 1 ? passing[0]! : null;
+    if (only) {
       const result = await submit(only.info, baseSegments, undefined);
       if ("status" in result) {
         return result;
@@ -1106,7 +1150,14 @@ export function createExplorationAgentExecutor(
       return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
     }
     const discovery = targets.some((a) => isPlatformNamespace(a.namespace))
-      ? await discover(toDiscoveryInput(ctx.media, ctx.season), { outbound: ctx.outbound })
+      ? await discover(
+          toDiscoveryInput(
+            ctx.media,
+            ctx.season,
+            await knownDoubanSubjectId(ctx.db, ctx.media.id, ctx.season),
+          ),
+          { outbound: ctx.outbound },
+        )
       : null;
 
     for (const adapter of targets) {

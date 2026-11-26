@@ -1,5 +1,6 @@
 import type { MediaType, Namespace } from "@media-ref/client";
 import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
+import { DOUBAN_FRODO_BASE_URL, fetchDoubanFrodo } from "./douban-api.ts";
 import {
   InvalidNativeIdError,
   type CollectionEvidenceResult,
@@ -15,7 +16,7 @@ const DOUBAN_DESKTOP_PATH_PATTERN = /^\/subject\/([1-9]\d*)\/?$/;
 const DOUBAN_MOBILE_PATH_PATTERN = /^\/(?:movie\/)?subject\/([1-9]\d*)\/?$/;
 const IMDB_ID_PATTERN = /\b(tt\d+)\b/i;
 
-export const DEFAULT_DOUBAN_API_BASE_URL = "https://m.douban.com/rexxar/api/v2/movie";
+export const DEFAULT_DOUBAN_API_BASE_URL = DOUBAN_FRODO_BASE_URL;
 
 export interface DoubanFetchOptions {
   apiBaseUrl?: string;
@@ -199,22 +200,12 @@ export async function fetchDoubanCollection(
     return { status: "not_found", reason: "invalid_canonical_id" };
   }
 
-  const baseUrl = (options.apiBaseUrl ?? DEFAULT_DOUBAN_API_BASE_URL).replace(/\/+$/, "");
-  const url = `${baseUrl}/${encodeURIComponent(subjectId)}`;
-  const referer = `https://m.douban.com/movie/subject/${encodeURIComponent(subjectId)}/`;
-
   let response: ExternalHttpResponse;
   try {
-    response = await outbound.fetchExternal({
+    response = await fetchDoubanFrodo(outbound, `/subject/${encodeURIComponent(subjectId)}`, {
       kind: "catalog",
-      namespace: "douban",
-      url,
-      method: "GET",
-      headers: {
-        referer,
-        accept: "application/json",
-      },
-      timeoutMs: options.timeoutMs,
+      ...(options.apiBaseUrl ? { baseUrl: options.apiBaseUrl } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     });
   } catch (error) {
     return {

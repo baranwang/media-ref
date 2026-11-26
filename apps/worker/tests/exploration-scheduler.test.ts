@@ -33,6 +33,12 @@ import {
   parseWorkerConfig,
   type BackgroundWorkerEnv,
 } from "../src/index.ts";
+import { DOUBAN_API } from "@media-ref/core";
+
+// A test key, and no pacing delays against the fake Douban.
+DOUBAN_API.apiKey = "test-douban-key";
+DOUBAN_API.minIntervalMs = 0;
+DOUBAN_API.retryDelayMs = 0;
 
 function createScheduledController(scheduledTime: Date): ScheduledController {
   return {

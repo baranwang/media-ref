@@ -393,6 +393,7 @@ export {
   type WikidataSparqlBindingValue,
   type WikidataSparqlResponse,
 } from "./seeds.ts";
+export { DOUBAN_API } from "./adapters/douban-api.ts";
 export {
   createFakeOutboundClient,
   createLiveOutboundClient,

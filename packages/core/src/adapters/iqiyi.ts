@@ -1017,6 +1017,13 @@ async function fetchMovieVideoCollection(
     return { status: "transient_error", reason: "missing_title" };
   }
 
+  // User uploads (compilations, commentary clips) are not the work itself: official videos have
+  // userId 0 and a non-UGC videoType ("PPC"), uploads carry the uploader's id and "RUGC"/"UGC".
+  const videoType = nonEmptyString(data.videoType)?.toUpperCase() ?? "";
+  if (videoType.includes("UGC") || parseQipuId(data.userId) !== null) {
+    return { status: "not_found", reason: "user_upload" };
+  }
+
   const mediaType = mapIqiyiMediaType(data.channelId);
   const year = parseFourDigitYear(data.period) ?? parseTimestampYearCst(data.publishTime);
 

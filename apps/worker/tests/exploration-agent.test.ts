@@ -17,6 +17,12 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import { DOUBAN_API } from "@media-ref/core";
+
+// A test key, and no pacing delays against the fake Douban.
+DOUBAN_API.apiKey = "test-douban-key";
+DOUBAN_API.minIntervalMs = 0;
+DOUBAN_API.retryDelayMs = 0;
 
 // Exploration agent (ADR 0002): discovery → fast path / model judge → gate.
 
@@ -57,6 +63,16 @@ const BILIBILI_SEASONS: Record<string, Record<string, unknown>> = {
     total: 24,
     publish: { pub_time: "2020-10-03 01:25:00" },
     episodes: bilibiliEpisodes(24, 341200),
+  },
+  // A dubbed copy of season 1: passes the same automatic check, so only the judge can choose.
+  "34431": {
+    season_id: 34431,
+    title: "咒术回战（中配）",
+    jp_title: "呪術廻戦",
+    type: 1,
+    total: 24,
+    publish: { pub_time: "2020-10-03 01:25:00" },
+    episodes: bilibiliEpisodes(24, 343200),
   },
   "45574": {
     season_id: 45574,
@@ -118,8 +134,11 @@ function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
         },
       });
     }
-    if (url.hostname === "api.douban.com") {
-      return jsonResponse(request.url, { msg: "movie_not_found", code: 5000 });
+    if (url.hostname === "frodo.douban.com" && url.pathname.startsWith("/api/v2/subject/")) {
+      return jsonResponse(request.url, { title: "咒术回战", year: "2020", vendors: [] });
+    }
+    if (url.hostname === "frodo.douban.com" && url.pathname === "/api/v2/search/weixin") {
+      return jsonResponse(request.url, { items: [] });
     }
     if (url.hostname === "search.video.iqiyi.com") {
       if (failIqiyiSearch) {
@@ -350,7 +369,7 @@ describe("Exploration agent: discover → judge → gate", () => {
       {
         kan360Rows: [
           ["咒术回战", "2020", "34430"],
-          ["咒术回战 第二季", "2023", "45574"],
+          ["咒术回战（中配）", "2020", "34431"],
         ],
       },
       invokeModel,
@@ -361,7 +380,7 @@ describe("Exploration agent: discover → judge → gate", () => {
     // Two fetched candidates → no fast path; the prompt lists exactly those two.
     const prompt = outbound.modelRequests[0]!.messages.find((m) => m.role === "user")!.content;
     expect(prompt).toContain('"canonicalId": "ss34430"');
-    expect(prompt).toContain('"canonicalId": "ss45574"');
+    expect(prompt).toContain('"canonicalId": "ss34431"');
     expect(outbound.modelRequests).toHaveLength(3);
     expect(replies).toMatchObject([
       { ok: false, error: "UNKNOWN_CANDIDATE" },
@@ -437,5 +456,65 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(outbound.modelRequests).toHaveLength(1);
     const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
     expect(checks.map((c) => c.platform)).not.toContain("bilibili");
+  });
+
+  test("fast path: of several fetched candidates, the only one passing the gate is submitted without the model", async () => {
+    const { testDb, outbound, explore } = await setup({
+      kan360Rows: [
+        ["咒术回战", "2020", "34430"],
+        ["咒术回战 第二季", "2023", "45574"],
+      ],
+    });
+
+    await explore();
+
+    expect(outbound.modelRequests).toHaveLength(0);
+    const crs = await testDb.readDb.selectFrom("change_requests").select("native_id").execute();
+    expect(crs).toEqual([{ native_id: "ss34430" }]);
+  });
+
+  test("discovery reads the known Douban subject of the requested season, not another season's", async () => {
+    const { testDb, mediaId, outbound, explore } = await setup({ kan360Rows: [] });
+    for (const [subject, season] of [
+      ["35000002", 2],
+      ["35000001", 1],
+    ] as const) {
+      const assoc = await testDb.writeDb
+        .insertInto("associations")
+        .values({
+          media_id: mediaId,
+          namespace: "douban",
+          native_id: subject,
+          status: "seed_unconfirmed",
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await testDb.writeDb
+        .insertInto("segments")
+        .values({
+          association_id: assoc.id,
+          season: 1,
+          episode_start: 1,
+          episode_end: null,
+          target_episode_start: 1,
+          baseline: "tmdb",
+        })
+        .execute();
+      if (season === 2) {
+        await testDb.writeDb
+          .updateTable("segments")
+          .set({ season: 2 })
+          .where("association_id", "=", assoc.id)
+          .execute();
+      }
+    }
+
+    await explore();
+
+    const subjects = outbound.httpRequests
+      .map((r) => new URL(r.url))
+      .filter((u) => u.hostname === "frodo.douban.com" && u.pathname.startsWith("/api/v2/subject/"))
+      .map((u) => u.pathname.split("/").pop());
+    expect(subjects).toEqual(["35000001"]);
   });
 });
