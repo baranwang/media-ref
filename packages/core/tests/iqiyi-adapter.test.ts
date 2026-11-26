@@ -1251,4 +1251,27 @@ describe("iQIYI Tier 3 search (#30)", () => {
     expect(signed!.get("entity_id")).toBe("1920084229702900");
     expect(signed!.get("sign")).toMatch(/^[0-9A-F]{32}$/);
   });
+
+  test("user uploads (RUGC, with an uploader id) are not collections", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        return jsonResponse(request.url, {
+          code: "A00000",
+          data: {
+            albumId: 8699989972402700,
+            name: "豆瓣8.2，若尾文子经典电影【清作之妻】",
+            channelId: 1,
+            contentType: 1,
+            videoType: "RUGC",
+            userId: 990892323,
+            period: "2020-05-01",
+          },
+        });
+      },
+    });
+    expect(await iqiyiAdapter.fetchCollection("8699989972402700", outbound)).toEqual({
+      status: "not_found",
+      reason: "user_upload",
+    });
+  });
 });

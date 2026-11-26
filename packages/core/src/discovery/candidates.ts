@@ -8,6 +8,7 @@ import {
   type PlatformAdapter,
   type Tier3Adapter,
 } from "../adapters/types.ts";
+import { fetchDoubanFrodo, fetchDoubanImdbLookup } from "../adapters/douban-api.ts";
 import { youkuAdapter } from "../adapters/youku.ts";
 import { normalizeTitleForComparison } from "../evidence-gate.ts";
 import type { ExternalHttpRequest, ExternalHttpResponse, OutboundClient } from "../outbound.ts";
@@ -83,13 +84,6 @@ export interface DiscoverCandidatesOptions {
 export const DEFAULT_DISCOVERY_TIMEOUT_MS = 10_000;
 
 const KAN360_INDEX_API = "https://api.so.360kan.com/index";
-const DOUBAN_REXXAR_API = "https://m.douban.com/rexxar/api/v2";
-const DOUBAN_IMDB_API = "https://api.douban.com/v2/movie/imdb";
-// Public Douban API key the mobile web client ships with.
-const DOUBAN_API_KEY = "0ac44ae016490db2204ce0a042db2916";
-const MOBILE_UA =
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
-
 const MAX_360KAN_ROWS = 6;
 
 // Workers keep at most 6 connections open; timeouts start at call time, so queue here instead.
@@ -369,19 +363,10 @@ async function fetchDoubanVendors(
     doubanId = found;
   }
 
-  // `/movie/<id>` works for both subtypes (TV subjects 301 to `/tv/<id>`, and redirects are followed).
+  // frodo `/subject/<id>` serves movies and TV alike.
   const detail = asRecord(
-    await fetchJson(
-      outbound,
-      {
-        kind: "platform",
-        namespace: "douban",
-        url: `${DOUBAN_REXXAR_API}/movie/${doubanId}?for_mobile=1`,
-        headers: {
-          "user-agent": MOBILE_UA,
-          referer: `https://m.douban.com/movie/subject/${doubanId}/?dt_dapp=1`,
-        },
-      },
+    parseJsonResponse(
+      await fetchDoubanFrodo(outbound, `/subject/${doubanId}`, { kind: "platform" }),
       [404],
     ),
   );
@@ -414,18 +399,7 @@ export async function lookupDoubanSubjectByImdb(
   outbound: OutboundClient,
 ): Promise<string | null> {
   const lookup = asRecord(
-    await fetchJson(
-      outbound,
-      {
-        kind: "platform",
-        namespace: "douban",
-        url: `${DOUBAN_IMDB_API}/${imdbId}`,
-        method: "POST",
-        headers: { "content-type": "application/json", "user-agent": MOBILE_UA },
-        body: JSON.stringify({ apikey: DOUBAN_API_KEY }),
-      },
-      [404],
-    ),
+    parseJsonResponse(await fetchDoubanImdbLookup(outbound, imdbId, { kind: "platform" }), [404]),
   );
   // Unknown IMDb IDs come back as HTTP 200 `{"msg":"movie_not_found","code":5000}` (or a 404).
   const idMatch = stringOrNull(lookup?.id)?.match(/\/(\d+)\/?$/);
@@ -477,7 +451,13 @@ async function fetchJson(
   request: ExternalHttpRequest,
   nullStatuses: readonly number[] = [],
 ): Promise<unknown> {
-  const response: ExternalHttpResponse = await outbound.fetchExternal(request);
+  return parseJsonResponse(await outbound.fetchExternal(request), nullStatuses);
+}
+
+function parseJsonResponse(
+  response: ExternalHttpResponse,
+  nullStatuses: readonly number[] = [],
+): unknown {
   if (nullStatuses.includes(response.status)) {
     return null;
   }

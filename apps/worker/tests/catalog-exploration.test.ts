@@ -11,6 +11,12 @@ import {
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
+import { DOUBAN_API } from "@media-ref/core";
+
+// A test key, and no pacing delays against the fake Douban.
+DOUBAN_API.apiKey = "test-douban-key";
+DOUBAN_API.minIntervalMs = 0;
+DOUBAN_API.retryDelayMs = 0;
 
 // Catalog-group exploration (ADR 0002 step 4): the TMDB external ID is written directly when the
 // IMDb chain holds; a missing Douban association goes through a change request.
@@ -74,7 +80,7 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
   if (url.hostname === "api.douban.com" && url.pathname === "/v2/movie/imdb/tt0137523") {
     return json(request.url, { id: "https://api.douban.com/movie/1292000" });
   }
-  if (url.hostname === "m.douban.com" && url.pathname.endsWith("/movie/1292000")) {
+  if (url.hostname === "frodo.douban.com" && url.pathname.endsWith("/subject/1292000")) {
     return json(request.url, {
       title: "搏击俱乐部",
       original_title: "Fight Club",

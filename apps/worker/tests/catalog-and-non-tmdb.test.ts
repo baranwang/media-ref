@@ -22,6 +22,12 @@ import {
   TEST_BASE_URL,
   toProtoSegmentInput,
 } from "./rpc-helpers.ts";
+import { DOUBAN_API } from "@media-ref/core";
+
+// A test key, and no pacing delays against the fake Douban.
+DOUBAN_API.apiKey = "test-douban-key";
+DOUBAN_API.minIntervalMs = 0;
+DOUBAN_API.retryDelayMs = 0;
 
 const TEST_AUTH_SECRET = "test-secret-for-catalog-and-non-tmdb-integration-tests-0123456789";
 
@@ -163,7 +169,7 @@ function createCatalogAndPlatformStub() {
     }
 
     if (request.kind === "catalog" && request.namespace === "douban") {
-      if (request.url.endsWith("/movie/1001")) {
+      if (new URL(request.url).pathname.endsWith("/subject/1001")) {
         return jsonResponse(request.url, {
           id: "1001",
           title: "咒术回战",
@@ -174,7 +180,7 @@ function createCatalogAndPlatformStub() {
           episodes_count: 24,
         });
       }
-      if (request.url.endsWith("/movie/1002")) {
+      if (new URL(request.url).pathname.endsWith("/subject/1002")) {
         return jsonResponse(request.url, {
           id: "1002",
           title: "咒术回战 第二季",
@@ -185,7 +191,7 @@ function createCatalogAndPlatformStub() {
           episodes_count: 23,
         });
       }
-      if (request.url.endsWith("/movie/600002")) {
+      if (new URL(request.url).pathname.endsWith("/subject/600002")) {
         return jsonResponse(request.url, {
           id: "600002",
           title: "豆瓣独有短剧",
@@ -196,7 +202,7 @@ function createCatalogAndPlatformStub() {
           episodes_count: 8,
         });
       }
-      if (request.url.endsWith("/movie/777001")) {
+      if (new URL(request.url).pathname.endsWith("/subject/777001")) {
         return jsonResponse(request.url, {
           id: "777001",
           title: "Trakt Indie Drama",

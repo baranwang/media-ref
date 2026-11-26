@@ -9,6 +9,12 @@ import kan360Kuangbiao from "./fixtures/discovery/360kan-kuangbiao.json" with { 
 import doubanLiulangDiqiu from "./fixtures/discovery/douban-26266893.json" with { type: "json" };
 import doubanKuangbiao from "./fixtures/discovery/douban-35465232.json" with { type: "json" };
 import doubanImdbLookup from "./fixtures/discovery/douban-imdb-tt7605074.json" with { type: "json" };
+import { DOUBAN_API } from "../src/index.ts";
+
+// A test key, and no pacing delays against the fake Douban.
+DOUBAN_API.apiKey = "test-douban-key";
+DOUBAN_API.minIntervalMs = 0;
+DOUBAN_API.retryDelayMs = 0;
 
 // Fixtures were recorded from the live endpoints (trimmed to the fields the module reads).
 
@@ -49,11 +55,9 @@ describe("discoverCandidates", () => {
           expect(url.searchParams.get("kw")).toBe("狂飙");
           return json(request, kan360Kuangbiao);
         }
-        if (url.hostname === "m.douban.com") {
-          expect(url.pathname).toBe("/rexxar/api/v2/movie/35465232");
-          expect(request.headers?.referer).toBe(
-            "https://m.douban.com/movie/subject/35465232/?dt_dapp=1",
-          );
+        if (url.hostname === "frodo.douban.com") {
+          expect(url.pathname).toBe("/api/v2/subject/35465232");
+          expect(url.searchParams.get("apiKey")).toBe("test-douban-key");
           return json(request, doubanKuangbiao);
         }
         if (url.hostname === "search.video.iqiyi.com") {
@@ -125,8 +129,8 @@ describe("discoverCandidates", () => {
           });
           return json(request, doubanImdbLookup);
         }
-        if (url.hostname === "m.douban.com") {
-          expect(url.pathname).toBe("/rexxar/api/v2/movie/26266893");
+        if (url.hostname === "frodo.douban.com") {
+          expect(url.pathname).toBe("/api/v2/subject/26266893");
           return json(request, doubanLiulangDiqiu);
         }
         if (url.hostname === "api.so.360kan.com") {
@@ -166,12 +170,12 @@ describe("discoverCandidates", () => {
     expect(outbound.httpRequests.map((r) => new URL(r.url).hostname).sort()).toEqual([
       "api.douban.com",
       "api.so.360kan.com",
-      "m.douban.com",
+      "frodo.douban.com",
       "search.video.iqiyi.com",
     ]);
   });
 
-  test("Douban rexxar 404 is not_found, other failures are errors; odd platform keys are dropped", async () => {
+  test("Douban subject 404 is not_found, other failures are errors; odd platform keys are dropped", async () => {
     const run = (status: number) =>
       discoverCandidates(
         { title: "x", mediaType: "tv", externalIds: { douban: "1" } },
@@ -179,7 +183,7 @@ describe("discoverCandidates", () => {
           outbound: createFakeOutboundClient({
             fetchExternal(request) {
               const host = new URL(request.url).hostname;
-              if (host === "m.douban.com") {
+              if (host === "frodo.douban.com") {
                 return json(request, {}, status);
               }
               if (host === "api.so.360kan.com") {

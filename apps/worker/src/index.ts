@@ -8,6 +8,7 @@ import type {
 } from "@cloudflare/workers-types";
 import {
   createLiveOutboundClient,
+  DOUBAN_API,
   DEFAULT_AI_MODEL,
   DEFAULT_AI_PROVIDER,
   DEFAULT_EXPLORATION_BATCH_SIZE,
@@ -67,6 +68,8 @@ export interface BackgroundWorkerEnv {
   TVDB_BEARER_TOKEN?: string;
   TVDB_API_BASE_URL?: string;
   DOUBAN_API_BASE_URL?: string;
+  /** frodo / IMDb-lookup apiKey (secret), as douban-bridge uses it. */
+  DOUBAN_API_KEY?: string;
   BANGUMI_API_BASE_URL?: string;
   IMDB_API_BASE_URL?: string;
   TRAKT_CLIENT_ID?: string;
@@ -151,6 +154,7 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
 }
 
 function createWorkerOutboundClient(env: BackgroundWorkerEnv) {
+  DOUBAN_API.apiKey = parseOptionalString(env.DOUBAN_API_KEY);
   return createLiveOutboundClient({
     proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
     egressFetcher: env.EGRESS,

@@ -23,6 +23,12 @@ import {
   signUpAndVerifyUser,
   TEST_BASE_URL,
 } from "./rpc-helpers.ts";
+import { DOUBAN_API } from "@media-ref/core";
+
+// A test key, and no pacing delays against the fake Douban.
+DOUBAN_API.apiKey = "test-douban-key";
+DOUBAN_API.minIntervalMs = 0;
+DOUBAN_API.retryDelayMs = 0;
 
 const TEST_AUTH_SECRET = "test-secret-for-seed-evidence-check-e2e-tests-0123456789abcdef";
 
@@ -157,7 +163,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
             external_ids: { imdb_id: "tt0111161" },
           });
         }
-        if (req.namespace === "douban" && req.url.endsWith("/1292052")) {
+        if (req.namespace === "douban" && new URL(req.url).pathname.endsWith("/1292052")) {
           return jsonResponse(req.url, {
             id: "1292052",
             title: "肖申克的救赎",
@@ -456,7 +462,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
           });
         }
         // Wrong movie on Douban -> Step 1 fails!
-        if (req.namespace === "douban" && req.url.endsWith("/9990001")) {
+        if (req.namespace === "douban" && new URL(req.url).pathname.endsWith("/9990001")) {
           return jsonResponse(req.url, {
             id: "9990001",
             title: "完全不同的电影",
@@ -686,7 +692,7 @@ describe("seed first-read evidence check end-to-end (#32)", () => {
             external_ids: { imdb_id: "tt0468569" },
           });
         }
-        if (req.namespace === "douban" && req.url.endsWith("/1851857")) {
+        if (req.namespace === "douban" && new URL(req.url).pathname.endsWith("/1851857")) {
           doubanCallCount += 1;
           if (doubanCallCount === 1) {
             return jsonResponse(req.url, { error: "upstream_unavailable" }, 503);

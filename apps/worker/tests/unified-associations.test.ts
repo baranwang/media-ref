@@ -22,6 +22,12 @@ import {
   toProtoSegmentInput,
 } from "./rpc-helpers.ts";
 import { NamespaceGroup } from "@media-ref/client/proto";
+import { DOUBAN_API } from "@media-ref/core";
+
+// A test key, and no pacing delays against the fake Douban.
+DOUBAN_API.apiKey = "test-douban-key";
+DOUBAN_API.minIntervalMs = 0;
+DOUBAN_API.retryDelayMs = 0;
 
 const TEST_AUTH_SECRET = "test-secret-for-unified-associations-tests-0123456789abcdef";
 const t0 = new Date("2026-11-24T10:00:00.000Z");
@@ -56,7 +62,7 @@ function stub(request: ExternalHttpRequest): ExternalHttpResponse {
     });
   }
   if (request.kind === "catalog" && request.namespace === "douban") {
-    const id = request.url.match(/\/movie\/(\d+)$/)?.[1];
+    const id = new URL(request.url).pathname.match(/\/subject\/(\d+)$/)?.[1];
     const entry = id ? DOUBAN_ENTRIES[id] : undefined;
     if (entry) {
       return jsonResponse(request.url, {
