@@ -12,6 +12,7 @@ import {
   isTier2Adapter,
   isTier3Adapter,
   type AdapterRegistry,
+  type CollectionEvidenceResult,
   type CollectionInfo,
 } from "./adapters/index.ts";
 import { fetchDoubanFrodo } from "./adapters/douban-api.ts";
@@ -331,6 +332,15 @@ async function resolveLink(
   return null;
 }
 
+/**
+ * Collection fetches of a session, in flight or done, so paging through a long collection (often
+ * several windows in one turn, run side by side) fetches it once. Failed fetches are not kept.
+ */
+const collectionFetches = new WeakMap<
+  ToolContext,
+  Map<string, Promise<CollectionEvidenceResult>>
+>();
+
 async function getCollection(
   ctx: ToolContext,
   namespace: Namespace,
@@ -343,10 +353,23 @@ async function getCollection(
   if (!adapter || !isTier2Adapter(adapter)) {
     return { error: "UNKNOWN_NAMESPACE" };
   }
+  const fetches =
+    collectionFetches.get(ctx) ?? new Map<string, Promise<CollectionEvidenceResult>>();
+  collectionFetches.set(ctx, fetches);
   let evidence;
   try {
     const canonicalId = await adapter.canonicalize(id, ctx.outbound);
-    evidence = await adapter.fetchCollection(canonicalId, ctx.outbound);
+    const key = `${namespace}:${canonicalId}`;
+    let pending = fetches.get(key);
+    if (!pending) {
+      pending = adapter.fetchCollection(canonicalId, ctx.outbound);
+      fetches.set(key, pending);
+      void pending.then(
+        (result) => result.status !== "found" && fetches.delete(key),
+        () => fetches.delete(key),
+      );
+    }
+    evidence = await pending;
   } catch (error) {
     if (error instanceof AdapterTransientError) {
       ctx.noteTransient(namespace, error.reason);
