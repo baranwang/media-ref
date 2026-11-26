@@ -136,21 +136,34 @@ test("review agent rejection with a correction shows the corrected season and se
   });
 });
 
-test("a change request the agent kept for a human keeps its opinion and the human's decision", () => {
+test("a plain review agent rejection shows the agent and its reason", () => {
   const cr = changeRequestFromProto(
     reviewedCr({
-      status: proto.ChangeRequestStatus.APPROVED,
-      reviewerUserId: "u-human",
+      status: proto.ChangeRequestStatus.REJECTED,
+      reviewerUserId: "system:review-agent",
+      decisionReason: "集数对不上",
       evidence: {
-        reviewAgent: { verdict: "keep_for_human", reasons: [], opinion: "集数对不上，需要人看" },
+        reviewAgent: { verdict: "reject", reasons: [], opinion: "集数对不上" },
       },
     }),
   );
 
-  expect(cr.reviewedByAgent).toBe(false);
-  expect(cr.reviewAgent).toMatchObject({
-    verdict: "keep_for_human",
-    opinion: "集数对不上，需要人看",
+  expect(cr.reviewedByAgent).toBe(true);
+  expect(cr.reviewAgent).toMatchObject({ verdict: "reject", opinion: "集数对不上" });
+  expect(cr.timeline.at(-1)).toMatchObject({
+    label: "已驳回",
+    detail: "审核 agent 驳回：集数对不上",
   });
-  expect(cr.timeline.at(-1)?.detail).toBe("审核员已批准，关联已经生效");
+});
+
+test("a change request in needs_review waits for the review agent", () => {
+  const cr = changeRequestFromProto(
+    reviewedCr({ status: proto.ChangeRequestStatus.NEEDS_REVIEW, reviewedAt: undefined }),
+  );
+
+  expect(cr.timeline.map((s) => s.detail)).toEqual([
+    "变更单已提交",
+    "有拿不准的地方，已转交审核 agent",
+    "等审核 agent 判定通过或驳回",
+  ]);
 });

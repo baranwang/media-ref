@@ -55,7 +55,7 @@ const HOW_IT_WORKS = [
   ["有人来查", "API 调用方查到一部作品还缺平台记录，就记下来"],
   ["去平台找", "先看豆瓣「在哪看」和 360 影视，再用平台搜索和网页搜索"],
   ["自动核对", "只能提交真的打开过的合集；片名、年份、集数都要对上"],
-  ["生效", "对上了直接生效，拿不准的交给审核员"],
+  ["生效", "对上了直接生效，拿不准的由审核 agent 判定"],
 ] as const;
 
 function label(ns: Namespace): string {
@@ -91,7 +91,11 @@ function resultText(item: ExplorationItem): string {
   if (approved.length > 0 || review.length > 0) {
     const names = [...approved, ...review].join("、");
     const tail =
-      review.length === 0 ? "已生效" : approved.length === 0 ? "等审核员确认" : "部分等审核员确认";
+      review.length === 0
+        ? "已生效"
+        : approved.length === 0
+          ? "等审核 agent 判定"
+          : "部分等审核 agent 判定";
     return `找到${names}上的${scope}，${tail}`;
   }
   const retry = item.platforms.filter((p) => p.status === "retry");
@@ -426,7 +430,7 @@ function ExplorationPage() {
                     [summary?.explored, "看过的作品"],
                     [summary ? summary.approved + summary.inReview : undefined, "找到的平台页面"],
                     [summary?.approved, "已经生效"],
-                    [summary?.inReview, "等审核员确认"],
+                    [summary?.inReview, "等审核 agent 判定"],
                   ] as const
                 ).map(([value, text]) => (
                   <div key={text} className="flex flex-col gap-0.5">
@@ -441,7 +445,10 @@ function ExplorationPage() {
           </section>
 
           <section className="flex flex-col gap-4">
-            <SectionHeading title="它怎么找" sub="每一条都要过自动核对，拿不准的交给人" />
+            <SectionHeading
+              title="它怎么找"
+              sub="每一条都要过自动核对，拿不准的由审核 agent 判定"
+            />
             <Card>
               <CardContent className="pt-4">
                 <ol className="relative flex flex-col gap-5 before:absolute before:top-2 before:bottom-2 before:left-1.25 before:w-px before:bg-border">
