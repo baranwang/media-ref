@@ -36,6 +36,7 @@ export function TopNav({ hideSearch = false, transparent = false }: TopNavProps)
   const isDiscover = pathname === "/" || pathname.startsWith("/discover");
   const isContribute = pathname.startsWith("/contribute");
   const isReview = pathname.startsWith("/review");
+  const isAgent = pathname.startsWith("/agent");
 
   const handleSignOut = async () => {
     await signOut();
@@ -77,6 +78,17 @@ export function TopNav({ hideSearch = false, transparent = false }: TopNavProps)
               )}
             >
               待贡献
+            </Link>
+            <Link
+              to="/agent"
+              className={cn(
+                "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                isAgent
+                  ? "bg-secondary text-secondary-foreground"
+                  : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+              )}
+            >
+              探索动态
             </Link>
             {user && (user.role === "reviewer" || user.role === "owner") && (
               <Link

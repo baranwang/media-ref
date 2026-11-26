@@ -20,6 +20,8 @@ import type {
   ChangeRequestTimelineStep,
   CoverageSegment,
   DemandItem,
+  ExplorationItem,
+  ExplorationStatus,
   MediaItem,
   MediaSeasonInfo,
   PlatformVariantRow,
@@ -74,6 +76,34 @@ export function demandFromProto(entry: proto.DemandEntry): DemandItem | null {
     demandCount: entry.demandCount,
     season: entry.season ?? null,
     lastDemandedAt: entry.lastDemandedAt,
+  };
+}
+
+const EXPLORATION_STATUSES = new Set<ExplorationStatus>([
+  "approved",
+  "in_review",
+  "rejected",
+  "not_found",
+  "retry",
+  "searching",
+]);
+
+export function explorationFromProto(item: proto.ExplorationActivity): ExplorationItem | null {
+  if (!item.card) return null;
+  return {
+    id: item.id,
+    card: cardFromProto(item.card),
+    season: item.season ?? null,
+    startedAt: item.startedAt,
+    finishedAt: item.finishedAt ?? null,
+    platforms: item.platforms.map((p) => ({
+      namespace: p.namespace as Namespace,
+      status: EXPLORATION_STATUSES.has(p.status as ExplorationStatus)
+        ? (p.status as ExplorationStatus)
+        : "retry",
+      reason: p.reason ?? null,
+      changeRequestId: p.changeRequestId ?? null,
+    })),
   };
 }
 

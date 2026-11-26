@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
+import { Route as AgentRouteImport } from "./routes/agent";
 import { Route as ApiKeysRouteImport } from "./routes/api-keys";
 import { Route as ContributeRouteImport } from "./routes/contribute";
 import { Route as LoginRouteImport } from "./routes/login";
@@ -25,6 +26,11 @@ import { Route as MediaMediaIdRouteImport } from "./routes/media.$mediaId";
 const IndexRoute = IndexRouteImport.update({
   id: "/",
   path: "/",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const AgentRoute = AgentRouteImport.update({
+  id: "/agent",
+  path: "/agent",
   getParentRoute: () => rootRouteImport,
 } as any);
 const ApiKeysRoute = ApiKeysRouteImport.update({
@@ -85,6 +91,7 @@ const MediaMediaIdRoute = MediaMediaIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
+  "/agent": typeof AgentRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/contribute": typeof ContributeRoute;
   "/login": typeof LoginRoute;
@@ -99,6 +106,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
+  "/agent": typeof AgentRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/contribute": typeof ContributeRoute;
   "/login": typeof LoginRoute;
@@ -114,6 +122,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
+  "/agent": typeof AgentRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/contribute": typeof ContributeRoute;
   "/login": typeof LoginRoute;
@@ -130,6 +139,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
   fullPaths:
     | "/"
+    | "/agent"
     | "/api-keys"
     | "/contribute"
     | "/login"
@@ -144,6 +154,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo;
   to:
     | "/"
+    | "/agent"
     | "/api-keys"
     | "/contribute"
     | "/login"
@@ -158,6 +169,7 @@ export interface FileRouteTypes {
   id:
     | "__root__"
     | "/"
+    | "/agent"
     | "/api-keys"
     | "/contribute"
     | "/login"
@@ -173,6 +185,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
+  AgentRoute: typeof AgentRoute;
   ApiKeysRoute: typeof ApiKeysRoute;
   ContributeRoute: typeof ContributeRoute;
   LoginRoute: typeof LoginRoute;
@@ -193,6 +206,13 @@ declare module "@tanstack/react-router" {
       path: "/";
       fullPath: "/";
       preLoaderRoute: typeof IndexRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/agent": {
+      id: "/agent";
+      path: "/agent";
+      fullPath: "/agent";
+      preLoaderRoute: typeof AgentRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/api-keys": {
@@ -277,6 +297,7 @@ declare module "@tanstack/react-router" {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AgentRoute: AgentRoute,
   ApiKeysRoute: ApiKeysRoute,
   ContributeRoute: ContributeRoute,
   LoginRoute: LoginRoute,
