@@ -101,6 +101,17 @@ function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     const url = new URL(request.url);
     const tmdbSeason = url.pathname.match(/\/tv\/95479\/season\/(\d+)$/);
+    if (request.namespace === "tmdb" && tmdbSeason?.[1] === "3") {
+      // A long season: 100 episodes.
+      return jsonResponse(request.url, {
+        season_number: 3,
+        episodes: Array.from({ length: 100 }, (_, i) => ({
+          episode_number: i + 1,
+          name: `第${i + 1}集`,
+          air_date: "2024-01-01",
+        })),
+      });
+    }
     if (request.namespace === "tmdb" && tmdbSeason) {
       // Season 2's episode list is down: the tool falls back to count and year.
       return tmdbSeason[1] === "2"
@@ -695,6 +706,52 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(special).toEqual({ season: 0, episodeCount: 2, airYear: 2021, episodes });
     expect(first).toEqual({ season: 1, episodeCount: 24, airYear: 2020, episodes });
     expect(second).toEqual({ season: 2, episodeCount: 23, airYear: 2023 });
+  });
+
+  test("get_catalog_season lists at most 80 episodes, says so, and fromEpisode lists the rest", async () => {
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      if (request.messages.some((m) => m.role === "assistant")) {
+        return markAllNotFound(request);
+      }
+      return {
+        content: null,
+        toolCalls: [
+          { id: "call_a", name: "get_catalog_season", arguments: { season: 3 } },
+          { id: "call_b", name: "get_catalog_season", arguments: { season: 3, fromEpisode: 81 } },
+        ],
+        model: "test-model",
+      };
+    };
+    const { testDb, mediaId, outbound, explore } = await setup({ kan360Rows: [] }, invokeModel);
+    await testDb.writeDb
+      .updateTable("media")
+      .set({
+        seasons: JSON.stringify([
+          { season: 1, episodeCount: 24, airYear: 2020 },
+          { season: 3, episodeCount: 100, airYear: 2024 },
+        ]),
+      })
+      .where("id", "=", mediaId)
+      .execute();
+
+    await explore();
+
+    const replies = outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool");
+    const [head, rest] = replies.map(
+      (m) =>
+        JSON.parse(m.content) as {
+          episodes: Array<{ episode: number }>;
+          episodesTruncated?: unknown;
+        },
+    );
+    expect(head!.episodes.map((e) => e.episode)).toEqual(
+      Array.from({ length: 80 }, (_, i) => i + 1),
+    );
+    expect(head!.episodesTruncated).toEqual({ total: 100, nextFromEpisode: 81 });
+    expect(rest!.episodes.map((e) => e.episode)).toEqual(
+      Array.from({ length: 20 }, (_, i) => i + 81),
+    );
+    expect(rest!.episodesTruncated).toBeUndefined();
   });
 
   test("web tools reach the agent through the session budget when the transport has them", async () => {

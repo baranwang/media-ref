@@ -98,11 +98,17 @@ export function buildQueryTools(ctx: ToolContext): ModelToolDefinition[] {
     },
     {
       name: "get_catalog_season",
-      description:
-        "Get the target media's season from the baseline catalog: episode count, air year and, when available, each episode's number, title and air date.",
+      description: `Get the target media's season from the baseline catalog: episode count, air year and, when available, each episode's number, title and air date (at most ${MAX_EPISODES_IN_TOOL_RESULT} episodes per call).`,
       parameters: {
         type: "object",
-        properties: { season: { type: "integer", description: "0 = specials." } },
+        properties: {
+          season: { type: "integer", description: "0 = specials." },
+          fromEpisode: {
+            type: "integer",
+            minimum: 1,
+            description: "List episodes from this episode number on (default 1).",
+          },
+        },
         required: ["season"],
       },
     },
@@ -183,7 +189,7 @@ export async function runQueryTool(
       case "get_collection":
         return await getCollection(ctx, str("namespace") as Namespace, str("id"));
       case "get_catalog_season":
-        return await getCatalogSeason(ctx, args.season);
+        return await getCatalogSeason(ctx, args.season, args.fromEpisode);
       case "search_platform":
         return await searchPlatform(ctx, str("platform") as Namespace, str("keyword"));
       case "web_search":
@@ -276,7 +282,11 @@ async function getCatalogEntry(ctx: ToolContext, source: string, id: string): Pr
   return { error: "UNKNOWN_SOURCE" };
 }
 
-async function getCatalogSeason(ctx: ToolContext, season: unknown): Promise<unknown> {
+async function getCatalogSeason(
+  ctx: ToolContext,
+  season: unknown,
+  fromEpisode: unknown,
+): Promise<unknown> {
   const known = ctx.seasons.find((s) => s.season === season);
   if (!known) {
     return { error: "UNKNOWN_SEASON" };
@@ -285,8 +295,19 @@ async function getCatalogSeason(ctx: ToolContext, season: unknown): Promise<unkn
     return known;
   }
   // The episode list is extra context: without it the count and year still answer.
-  const episodes = await ctx.tmdb.fetchSeasonEpisodes(ctx.tmdbTvId, known.season).catch(() => null);
-  return episodes ? { ...known, episodes } : known;
+  const all = await ctx.tmdb.fetchSeasonEpisodes(ctx.tmdbTvId, known.season).catch(() => null);
+  if (!all) {
+    return known;
+  }
+  const from = typeof fromEpisode === "number" ? fromEpisode : 1;
+  const listed = all.filter((e) => e.episode >= from);
+  const episodes = listed.slice(0, MAX_EPISODES_IN_TOOL_RESULT);
+  const next = listed[MAX_EPISODES_IN_TOOL_RESULT];
+  return {
+    ...known,
+    episodes,
+    ...(next ? { episodesTruncated: { total: all.length, nextFromEpisode: next.episode } } : {}),
+  };
 }
 
 async function resolveLink(

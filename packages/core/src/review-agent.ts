@@ -493,9 +493,16 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
               episodes?: Array<{ episode: number; airDate: string | null }>;
             };
             if (episodes) {
-              episodeAirYears[args.season] = Object.fromEntries(
-                episodes.map((e) => [e.episode, e.airDate ? Number(e.airDate.slice(0, 4)) : null]),
-              );
+              // A long season comes in windows (fromEpisode): keep the episodes of every call.
+              episodeAirYears[args.season] = {
+                ...episodeAirYears[args.season],
+                ...Object.fromEntries(
+                  episodes.map((e) => [
+                    e.episode,
+                    e.airDate ? Number(e.airDate.slice(0, 4)) : null,
+                  ]),
+                ),
+              };
             }
           }
           return result;
