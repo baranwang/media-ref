@@ -85,13 +85,17 @@ export function buildQueryTools(ctx: ToolContext): ModelToolDefinition[] {
     },
     {
       name: "get_collection",
-      description:
-        "Fetch one collection (by ID or URL) with its feature episodes. Only collections fetched here can be submitted.",
+      description: `Fetch one collection (by ID or URL) with its feature episodes, at most ${MAX_EPISODES_IN_TOOL_RESULT} per call: a longer list says where to continue (episodesTruncated.nextFromIndex). Only collections fetched here can be submitted.`,
       parameters: {
         type: "object",
         properties: {
           namespace: { type: "string", enum: [...ctx.collectionNamespaces] },
           id: { type: "string", description: "Collection ID or URL." },
+          fromIndex: {
+            type: "integer",
+            minimum: 1,
+            description: "List feature episodes from this position on (default 1).",
+          },
         },
         required: ["namespace", "id"],
       },
@@ -187,7 +191,7 @@ export async function runQueryTool(
         return resolved ?? { error: "UNSUPPORTED_LINK" };
       }
       case "get_collection":
-        return await getCollection(ctx, str("namespace") as Namespace, str("id"));
+        return await getCollection(ctx, str("namespace") as Namespace, str("id"), args.fromIndex);
       case "get_catalog_season":
         return await getCatalogSeason(ctx, args.season, args.fromEpisode);
       case "search_platform":
@@ -323,17 +327,30 @@ async function resolveLink(
   return null;
 }
 
-async function getCollection(ctx: ToolContext, namespace: Namespace, id: string): Promise<unknown> {
+/** Collections fetched in a session, so paging through a long one fetches it once. */
+const fetchedCollections = new WeakMap<ToolContext, Map<string, CollectionInfo>>();
+
+async function getCollection(
+  ctx: ToolContext,
+  namespace: Namespace,
+  id: string,
+  fromIndex: unknown,
+): Promise<unknown> {
   const adapter = ctx.collectionNamespaces.includes(namespace)
     ? ctx.registry.get(namespace)
     : undefined;
   if (!adapter || !isTier2Adapter(adapter)) {
     return { error: "UNKNOWN_NAMESPACE" };
   }
+  const cache = fetchedCollections.get(ctx) ?? new Map<string, CollectionInfo>();
+  fetchedCollections.set(ctx, cache);
   let evidence;
   try {
     const canonicalId = await adapter.canonicalize(id, ctx.outbound);
-    evidence = await adapter.fetchCollection(canonicalId, ctx.outbound);
+    const cached = cache.get(`${namespace}:${canonicalId}`);
+    evidence = cached
+      ? ({ status: "found", info: cached } as const)
+      : await adapter.fetchCollection(canonicalId, ctx.outbound);
   } catch (error) {
     if (error instanceof AdapterTransientError) {
       ctx.noteTransient(namespace, error.reason);
@@ -348,7 +365,11 @@ async function getCollection(ctx: ToolContext, namespace: Namespace, id: string)
     return { error: "UPSTREAM_UNAVAILABLE", message: evidence.reason };
   }
   const { info } = evidence;
+  cache.set(`${namespace}:${info.canonicalId}`, info);
   const passes = ctx.register(info, "agent_fetch");
+  const from = typeof fromIndex === "number" && fromIndex >= 1 ? Math.floor(fromIndex) : 1;
+  const listed = info.featureEpisodes.filter((ep) => ep.index >= from);
+  const next = listed[MAX_EPISODES_IN_TOOL_RESULT];
   return {
     namespace,
     canonicalId: info.canonicalId,
@@ -358,13 +379,21 @@ async function getCollection(ctx: ToolContext, namespace: Namespace, id: string)
     mediaType: info.mediaType,
     featureEpisodeCount: info.featureEpisodes.length,
     passesAutomaticCheckWithDefaultMapping: passes,
-    episodes: info.featureEpisodes.slice(0, MAX_EPISODES_IN_TOOL_RESULT).map((ep) => ({
+    episodes: listed.slice(0, MAX_EPISODES_IN_TOOL_RESULT).map((ep) => ({
       index: ep.index,
       title: ep.title ?? null,
       longTitle: ep.longTitle ?? null,
       airDate: ep.airDate ?? null,
       durationSeconds: ep.durationSeconds ?? null,
     })),
+    ...(next
+      ? {
+          episodesTruncated: {
+            total: info.featureEpisodes.length,
+            nextFromIndex: next.index,
+          },
+        }
+      : {}),
   };
 }
 
