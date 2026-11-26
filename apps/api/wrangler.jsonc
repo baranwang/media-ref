@@ -34,10 +34,11 @@
     // Bilibili answers HTTP 412 to Cloudflare egress IPs; send it out of greencloud-hk instead.
     "OUTBOUND_PROXY_CONFIG": "{\"bilibili\":{\"mode\":\"egress\"}}",
   },
-  // greencloud-hk-egress: HTTPS relay on the HK machine, through the greencloud-hk tunnel.
+  // greencloud-hk-gateway: the HK machine's Caddy, through the greencloud-hk tunnel. It relays
+  // outbound HTTPS (x-egress-host) and serves magpie (x-hk-service: magpie).
   "vpc_services": [
     {
-      "binding": "EGRESS",
+      "binding": "HK",
       "service_id": "01a213a3-59c6-7e81-a8b6-ad2102f53bbd",
       "remote": true,
     },

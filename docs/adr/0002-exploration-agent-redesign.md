@@ -158,7 +158,8 @@ Cloudflare 上跑了两轮。每个接口只测了一个样本。
   `/opt/stacks/greencloud-hk-tunnel`，以外部网络接入各服务的网络。
 - 代理是单独的 Caddy 容器（`/opt/stacks/egress-proxy`），只在 `greencloud-egress` 网络上，不映射端口。
   调用方用 `x-egress-host` 指定目标域名，代理以 HTTPS 转发；拒绝 IP 字面量、单段名和内网后缀。
-- Cloudflare 侧是 HTTP 类型的 VPC 服务 `greencloud-hk-egress`，Worker 以 `EGRESS` 绑定使用。
+- Cloudflare 侧是 HTTP 类型的 VPC 服务 `greencloud-hk-gateway`（原名 `greencloud-hk-egress`），Worker 以 `HK` 绑定使用。
+  同一个 Caddy 也按 `x-hk-service: magpie` 把请求转给香港机器上的 magpie（模型网关和搜索）。
   `OUTBOUND_PROXY_CONFIG` 里设 `{"bilibili":{"mode":"egress"}}` 的命名空间走它，重定向在代码里逐跳经代理跟随。
 - 部署用的 build token 需要 Connectivity Directory Bind 权限才能发布带 VPC 绑定的版本。
 

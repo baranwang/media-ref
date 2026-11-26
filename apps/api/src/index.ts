@@ -52,7 +52,7 @@ export async function handleWorkerRequest(
     dbWrite,
     outbound: createLiveOutboundClient({
       proxyConfig: parseOutboundProxyConfig(env.OUTBOUND_PROXY_CONFIG),
-      egressFetcher: env.EGRESS,
+      egressFetcher: env.HK,
       emailBinding: env.EMAIL,
       defaultEmailFrom: env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM,
     }),
