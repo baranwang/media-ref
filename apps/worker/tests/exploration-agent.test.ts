@@ -658,6 +658,43 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(checks).toHaveLength(platformCount - 1);
   });
 
+  test("a failed platform search during the session keeps that platform transient", async () => {
+    let iqiyiSearches = 0;
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      const turn = request.messages.filter((m) => m.role === "assistant").length;
+      if (turn === 0) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_p",
+              name: "search_platform",
+              arguments: { platform: "iqiyi", keyword: "呪術廻戦" },
+            },
+          ],
+          model: "test-model",
+        };
+      }
+      return markAllNotFound(request);
+    };
+    const { testDb, outbound, explore } = await setup({ kan360Rows: [] }, invokeModel);
+    // Discovery's iQIYI search answers; the agent's later one hits an outage.
+    const original = outbound.fetchExternal.bind(outbound);
+    outbound.fetchExternal = async (request) => {
+      if (new URL(request.url).hostname === "search.video.iqiyi.com" && ++iqiyiSearches > 1) {
+        return jsonResponse(request.url, {}, 500);
+      }
+      return original(request);
+    };
+
+    await explore();
+
+    expect(iqiyiSearches).toBe(2);
+    const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
+    expect(checks.map((c) => c.platform)).not.toContain("iqiyi");
+    expect(checks).toHaveLength(platformCount - 1);
+  });
+
   test("a session over its token budget stops and backs off instead of looping", async () => {
     const search = (): ModelInvocationResponse => ({
       content: null,

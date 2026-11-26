@@ -339,10 +339,21 @@ async function searchPlatform(
   if (!adapter || !isTier3Adapter(adapter)) {
     return { error: "SEARCH_UNAVAILABLE" };
   }
-  const result = await adapter.search({ title: keyword }, ctx.outbound);
-  return result.status === "ok"
-    ? { results: result.candidates }
-    : { error: "UPSTREAM_UNAVAILABLE", message: result.reason };
+  let result;
+  try {
+    result = await adapter.search({ title: keyword }, ctx.outbound);
+  } catch (error) {
+    if (error instanceof AdapterTransientError) {
+      ctx.noteTransient(platform, error.reason);
+    }
+    throw error;
+  }
+  if (result.status !== "ok") {
+    // A failed search may have hidden the match: the platform's "not found" is then inconclusive.
+    ctx.noteTransient(platform, result.reason);
+    return { error: "UPSTREAM_UNAVAILABLE", message: result.reason };
+  }
+  return { results: result.candidates };
 }
 
 /** frodo's mini program search; Douban rate-limits it per IP, so failures are expected. */
