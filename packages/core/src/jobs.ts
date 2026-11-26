@@ -104,6 +104,8 @@ export interface JobExecutionContext {
     jobType: string;
     leaseGeneration: number;
     payload: Record<string, unknown>;
+    /** When this lease ends; writes after that are fenced out. */
+    leaseExpiresAt: Date | null;
   };
   now: Date;
 }

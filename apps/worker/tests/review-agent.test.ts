@@ -636,6 +636,36 @@ describe("review agent (#75)", () => {
     expect((await changeRequest(id)).status).toBe("approved");
   });
 
+  test("a review whose job lease cannot fit a session is put back, without a session, a daily slot or an attempt", async () => {
+    // A 1-minute lease for 2-minute sessions: the session could be fenced out after spending.
+    const ctx = track(
+      await setup(approvesLikeLinglong, {}, createDefaultAdapterRegistry(), {
+        leaseDurationMs: 60_000,
+      }),
+    );
+    const id = await ctx.submit();
+
+    await ctx.tick(); // evidence_check
+    const ran = await ctx.tick();
+
+    expect(ran.map((m) => m.jobType)).toEqual(["review_agent"]);
+    expect(ctx.outbound.modelRequests).toHaveLength(0);
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("needs_review");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toBeUndefined();
+    const budget = await ctx.testDb.readDb
+      .selectFrom("exploration_daily_budget")
+      .select("review_consumed")
+      .executeTakeFirst();
+    expect(budget?.review_consumed ?? 0).toBe(0);
+    const job = await ctx.testDb.readDb
+      .selectFrom("background_jobs")
+      .select(["status", "attempts", "run_after"])
+      .where("job_type", "=", "review_agent")
+      .executeTakeFirstOrThrow();
+    expect(job).toEqual({ status: "pending", attempts: 0, run_after: T0 });
+  });
+
   test("with a daily review budget of 0, the review job runs no session", async () => {
     const { testDb, submit, drain, changeRequest, outbound } = track(
       await setup(approvesLikeLinglong, { dailyBudget: 0 }),

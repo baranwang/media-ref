@@ -45,7 +45,12 @@ import {
   recordExplorationTokens,
 } from "./exploration-scheduler.ts";
 import { buildQueryTools, runQueryTool, type ToolContext } from "./exploration-tools.ts";
-import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
+import {
+  enqueueJob,
+  releaseLeaseOnDispatchFailure,
+  type JobExecutionOutcome,
+  type JobHandler,
+} from "./jobs.ts";
 import { MAX_LEAD_NOTES_LENGTH, recordLead } from "./leads.ts";
 import {
   approveChangeRequestInTransaction,
@@ -69,6 +74,8 @@ export const REVIEW_AGENT_KEY_ID = REVIEW_AGENT_USER_ID;
 export const DEFAULT_REVIEW_AGENT_MAX_STEPS = 16;
 export const DEFAULT_REVIEW_AGENT_MAX_DURATION_MS = 2 * 60_000;
 export const DEFAULT_REVIEW_AGENT_MAX_TASK_TOKENS = 300_000;
+/** Lease time a review needs beyond its session: the outcome's fenced write and its commit. */
+const LEASE_MARGIN_MS = 30_000;
 
 /** Gate conflicts the review agent may never approve over (ADR 0003 §1). */
 const NON_OVERRIDABLE_CONFLICT_CODES: ReadonlySet<string> = new Set(["shared_id_conflict"]);
@@ -404,6 +411,21 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
     }
     if (cr.evidence?.reviewAgent) {
       return skip("already_reviewed");
+    }
+    const leaseLeftMs = ctx.job.leaseExpiresAt
+      ? ctx.job.leaseExpiresAt.getTime() - ctx.now.getTime()
+      : Infinity;
+    if (leaseLeftMs < config.maxDurationMs + LEASE_MARGIN_MS) {
+      // Started late in a batch: the outcome would be fenced out after the session spent tokens
+      // and a daily slot. Hand the job back with its attempt refunded; the worker's own
+      // reschedule of this retry is then a fenced no-op.
+      await releaseLeaseOnDispatchFailure(ctx.db, {
+        jobId: ctx.job.id,
+        leaseGeneration: ctx.job.leaseGeneration,
+        retryAt: ctx.now,
+        now: ctx.now,
+      });
+      return { status: "retry", runAfter: ctx.now, errorMessage: "lease_too_short_for_review" };
     }
     if (!(await claimDailyReview(ctx.db, ctx.now, dailyBudget, dailyTokenBudget))) {
       return skip("daily_budget_exhausted");

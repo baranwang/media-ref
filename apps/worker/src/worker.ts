@@ -339,6 +339,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
               jobType: body.jobType,
               leaseGeneration: body.leaseGeneration,
               payload: body.payload,
+              leaseExpiresAt: currentJob.leaseExpiresAt,
             },
             now: resolveNow(deps.now),
           });
