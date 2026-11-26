@@ -1,17 +1,17 @@
 /**
  * Exploration agent model usage, submitted to tokens.ci as client "pi" on its own device
- * "MediaRef" (same format as douban-bridge's agent-match report).
+ * "MediaRef" (same payload as douban-bridge's agent-match report).
  *
- * Usage is summed per tokens.ci day and model in `pi_token_usage`, and the whole history is
- * submitted each time, so a retried or lost submission never double-counts.
+ * tokens.ci keeps the latest value per device, day and client (a smaller one is rejected as a
+ * regression), so every submission carries the day's running total. That total lives on the day's
+ * `exploration_daily_budget` row (`pi_usage`, per model); earlier days are already on tokens.ci.
+ * shortcut: days are UTC (the budget row's day), so 00:00–08:00 Asia/Singapore lands on the
+ * previous tokens.ci day; give pi_usage its own day key if that split matters.
  */
 
-import { sql } from "kysely";
 import type { Db } from "@media-ref/db";
 import type { ModelInvocationResponse, OutboundClient } from "./outbound.ts";
 
-// shortcut: day buckets follow the tokens.ci account's time zone (Asia/Singapore); change with it.
-const TOKENS_DAY_TIME_ZONE = "Asia/Singapore";
 const TOKENS_SUBMIT_URL = "https://tokens.ci/api/submit";
 // A device of its own, so this never replaces what the laptop CLI or douban-bridge submitted.
 const TOKENS_DEVICE_ID = "dev_1c17a68e84f942955ffbc1db2d2e5c0c";
@@ -26,28 +26,12 @@ export interface PiUsageBucket {
   messages: number;
 }
 
-interface StoredPiUsage {
-  day: string;
-  model: string;
-  input: string;
-  output: string;
-  cache_read: string;
-  cache_write: string;
-  messages: string;
-}
+/** `pi_usage` on the budget row: model → totals. */
+export type PiUsageTotals = Record<string, Omit<PiUsageBucket, "model">>;
 
 function whole(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), Number.MAX_SAFE_INTEGER) : 0;
-}
-
-export function tokensDay(now: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: TOKENS_DAY_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(now);
 }
 
 /** Adds one model response to the per-model totals. */
@@ -80,105 +64,73 @@ export function addPiUsage(
   buckets.set(model, b);
 }
 
-type Tokens = {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  reasoning: 0;
-};
-const total = (t: Tokens) => t.input + t.output + t.cacheRead + t.cacheWrite;
-
 // shortcut: cost is reported as 0 (magpie returns no price); add per-model pricing if cost matters.
-export function buildPiSubmission(rows: readonly StoredPiUsage[], now: Date) {
-  const days = new Map<
-    string,
-    {
-      tokens: Tokens;
-      messages: number;
-      clients: Array<{ model: string; tokens: Tokens; messages: number }>;
-    }
-  >();
-  for (const row of rows) {
-    const tokens: Tokens = {
-      input: whole(row.input),
-      output: whole(row.output),
-      cacheRead: whole(row.cache_read),
-      cacheWrite: whole(row.cache_write),
-      reasoning: 0,
-    };
-    if (total(tokens) === 0) {
-      continue;
-    }
-    const day = days.get(row.day) ?? {
-      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
-      messages: 0,
-      clients: [],
-    };
-    day.tokens.input += tokens.input;
-    day.tokens.output += tokens.output;
-    day.tokens.cacheRead += tokens.cacheRead;
-    day.tokens.cacheWrite += tokens.cacheWrite;
-    day.messages += whole(row.messages);
-    day.clients.push({ model: row.model || "unknown", tokens, messages: whole(row.messages) });
-    days.set(row.day, day);
-  }
-  const dates = [...days.keys()].sort();
-  if (dates.length === 0) {
+/** One day's tokens.ci submission. */
+export function buildPiSubmission(date: string, totals: PiUsageTotals, now: Date) {
+  const clients = Object.entries(totals)
+    .map(([model, t]) => ({
+      client: "pi" as const,
+      modelId: model,
+      tokens: {
+        input: whole(t.input),
+        output: whole(t.output),
+        cacheRead: whole(t.cacheRead),
+        cacheWrite: whole(t.cacheWrite),
+        reasoning: 0,
+      },
+      cost: 0,
+      messages: whole(t.messages),
+    }))
+    .filter((c) => c.tokens.input + c.tokens.output + c.tokens.cacheRead + c.tokens.cacheWrite > 0)
+    .sort((a, b) => a.modelId.localeCompare(b.modelId));
+  if (clients.length === 0) {
     return undefined;
   }
-
-  const contributions = dates.map((date) => {
-    const day = days.get(date)!;
-    return {
-      date,
-      totals: { tokens: total(day.tokens), cost: 0, messages: day.messages },
-      intensity: 1,
-      tokenBreakdown: day.tokens,
-      clients: day.clients.map((c) => ({
-        client: "pi" as const,
-        modelId: c.model,
-        tokens: c.tokens,
-        cost: 0,
-        messages: c.messages,
-      })),
-    };
-  });
-  const totalTokens = contributions.reduce((sum, d) => sum + d.totals.tokens, 0);
-  const years = [...new Set(dates.map((d) => d.slice(0, 4)))].map((year) => {
-    const yearDays = contributions.filter((d) => d.date.startsWith(year));
-    return {
-      year,
-      totalTokens: yearDays.reduce((sum, d) => sum + d.totals.tokens, 0),
-      totalCost: 0,
-      range: { start: yearDays[0]!.date, end: yearDays[yearDays.length - 1]!.date },
-    };
-  });
-
+  const sum = (key: "input" | "output" | "cacheRead" | "cacheWrite") =>
+    clients.reduce((n, c) => n + c.tokens[key], 0);
+  const tokens = {
+    input: sum("input"),
+    output: sum("output"),
+    cacheRead: sum("cacheRead"),
+    cacheWrite: sum("cacheWrite"),
+    reasoning: 0,
+  };
+  const totalTokens = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+  const messages = clients.reduce((n, c) => n + c.messages, 0);
   return {
     meta: {
       generatedAt: now.toISOString(),
       version: "media-ref",
-      dateRange: { start: dates[0]!, end: dates[dates.length - 1]! },
+      dateRange: { start: date, end: date },
     },
     device: { id: TOKENS_DEVICE_ID, name: TOKENS_DEVICE_NAME },
     summary: {
       totalTokens,
       totalCost: 0,
-      totalDays: contributions.length,
-      activeDays: contributions.length,
-      averagePerDay: totalTokens / contributions.length,
+      totalDays: 1,
+      activeDays: 1,
+      averagePerDay: totalTokens,
       maxCostInSingleDay: 0,
       clients: ["pi"],
-      models: [...new Set(contributions.flatMap((d) => d.clients.map((c) => c.modelId)))].sort(),
+      models: clients.map((c) => c.modelId),
     },
-    years,
-    contributions,
+    years: [
+      { year: date.slice(0, 4), totalTokens, totalCost: 0, range: { start: date, end: date } },
+    ],
+    contributions: [
+      {
+        date,
+        totals: { tokens: totalTokens, cost: 0, messages },
+        intensity: 1,
+        tokenBreakdown: tokens,
+        clients,
+      },
+    ],
   };
 }
 
 /**
- * Stores one session's usage and, with a token, submits the full history to tokens.ci.
+ * Adds one session's usage to the day's totals and, with a token, submits that day to tokens.ci.
  * Never throws: a failed report must not fail the exploration job.
  */
 export async function reportPiUsage(
@@ -191,40 +143,48 @@ export async function reportPiUsage(
     return;
   }
   try {
-    const day = tokensDay(options.now);
-    for (const e of entries) {
-      await db
-        .insertInto("pi_token_usage")
-        .values({
-          day,
-          model: e.model,
-          input: String(e.input),
-          output: String(e.output),
-          cache_read: String(e.cacheRead),
-          cache_write: String(e.cacheWrite),
-          messages: String(e.messages),
-        })
-        .onConflict((oc) =>
-          oc.columns(["day", "model"]).doUpdateSet({
-            input: sql`pi_token_usage.input + excluded.input`,
-            output: sql`pi_token_usage.output + excluded.output`,
-            cache_read: sql`pi_token_usage.cache_read + excluded.cache_read`,
-            cache_write: sql`pi_token_usage.cache_write + excluded.cache_write`,
-            messages: sql`pi_token_usage.messages + excluded.messages`,
-          }),
-        )
+    const date = options.now.toISOString().slice(0, 10);
+    // Row lock: concurrent sessions must not overwrite each other's additions.
+    const totals = await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("exploration_daily_budget")
+        .values({ budget_date: date, consumed: 0, updated_at: options.now })
+        .onConflict((oc) => oc.column("budget_date").doNothing())
         .execute();
-    }
+      const row = await trx
+        .selectFrom("exploration_daily_budget")
+        .select("pi_usage")
+        .where("budget_date", "=", date)
+        .forUpdate()
+        .executeTakeFirstOrThrow();
+      const merged = { ...(row.pi_usage as PiUsageTotals) };
+      for (const e of entries) {
+        const t = merged[e.model] ?? {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          messages: 0,
+        };
+        merged[e.model] = {
+          input: whole(t.input) + e.input,
+          output: whole(t.output) + e.output,
+          cacheRead: whole(t.cacheRead) + e.cacheRead,
+          cacheWrite: whole(t.cacheWrite) + e.cacheWrite,
+          messages: whole(t.messages) + e.messages,
+        };
+      }
+      await trx
+        .updateTable("exploration_daily_budget")
+        .set({ pi_usage: JSON.stringify(merged), updated_at: options.now })
+        .where("budget_date", "=", date)
+        .execute();
+      return merged;
+    });
     if (!options.token) {
       return;
     }
-    const rows = await db
-      .selectFrom("pi_token_usage")
-      .selectAll()
-      .orderBy("day")
-      .orderBy("model")
-      .execute();
-    const payload = buildPiSubmission(rows, options.now);
+    const payload = buildPiSubmission(date, totals, options.now);
     if (!payload) {
       return;
     }

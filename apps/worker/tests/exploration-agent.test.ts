@@ -549,20 +549,29 @@ describe("Exploration agent: discover → judge → gate", () => {
     // Session tokens land in today's budget row.
     const budget = await testDb.readDb
       .selectFrom("exploration_daily_budget")
-      .select("tokens_used")
+      .select(["tokens_used", "pi_usage"])
       .executeTakeFirstOrThrow();
     expect(Number(budget.tokens_used)).toBe(1050);
     // Per-model totals for tokens.ci (no token configured, so nothing is submitted).
-    const piUsage = await testDb.readDb.selectFrom("pi_token_usage").selectAll().execute();
-    expect(piUsage).toMatchObject([
-      { model: "test-model", input: "1000", output: "50", messages: "1" },
-    ]);
+    expect(budget.pi_usage).toEqual({
+      "test-model": { input: 1000, output: 50, cacheRead: 0, cacheWrite: 0, messages: 1 },
+    });
   });
 
-  test("with a tokens.ci token, session usage is submitted as pi on device MediaRef", async () => {
+  test("with a tokens.ci token, the day's running total is submitted as pi on device MediaRef", async () => {
     const { testDb, outbound, explore } = await setup({ kan360Rows: [] }, markAllNotFound, {
       tokensApiToken: "tok",
     });
+    // An earlier session today: tokens.ci keeps the latest value per day, so it must be included.
+    await testDb.writeDb
+      .updateTable("exploration_daily_budget")
+      .set({
+        pi_usage: JSON.stringify({
+          "test-model": { input: 400, output: 100, cacheRead: 0, cacheWrite: 0, messages: 2 },
+        }),
+      })
+      .where("budget_date", "=", "2026-11-24")
+      .execute();
     const submitted: unknown[] = [];
     const original = outbound.fetchExternal.bind(outbound);
     outbound.fetchExternal = async (request) => {
@@ -579,12 +588,15 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toMatchObject({
       device: { name: "MediaRef" },
-      summary: { totalTokens: 1050, clients: ["pi"], models: ["test-model"] },
-      contributions: [{ date: "2026-11-24", clients: [{ client: "pi", modelId: "test-model" }] }],
+      summary: { totalTokens: 1550, clients: ["pi"], models: ["test-model"] },
+      contributions: [
+        {
+          date: "2026-11-24",
+          totals: { tokens: 1550, messages: 3 },
+          clients: [{ client: "pi", modelId: "test-model" }],
+        },
+      ],
     });
-    expect(await testDb.readDb.selectFrom("pi_token_usage").select("day").execute()).toEqual([
-      { day: "2026-11-24" },
-    ]);
   });
 
   test("a session over its token budget stops and backs off instead of looping", async () => {

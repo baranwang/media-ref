@@ -106,8 +106,9 @@ AI Gateway（`AI_GATEWAY_ID`）。同一任务的所有调用带同一个会话�
 200 万 token（输入加输出，`EXPLORATION_MAX_TASK_TOKENS`）。步数或 token 用完时，没结论的平台
 按未找到退避，不会马上重跑。
 
-用量按天（tokens.ci 的时区）和模型累计在 `pi_token_usage`，配了 `TOKENS_API_TOKEN` 时每次会话后
-把全部历史提交到 tokens.ci，客户端记为 pi，设备名 MediaRef（和 douban-bridge 同一格式）。
+当天按模型的用量累计在 `exploration_daily_budget.pi_usage`（UTC 日）。配了 `TOKENS_API_TOKEN` 时，
+每次会话后把当天的累计提交到 tokens.ci，客户端记为 pi，设备名 MediaRef（和 douban-bridge 同一格式）。
+tokens.ci 对同一设备、同一天只保留最新值，所以每次都要提交当天全量，不能只报增量。
 
 2026-11-26 用平台方向 6 个样本冒烟：上一轮的命中都还在，另外找到一部片名不同的
 （《血意少年》在 B 站叫《热血少年》）；每个样本约 10 次调用、3–4 万 token、30 秒。
