@@ -35,9 +35,9 @@ import {
 } from "./catalog-gateway.ts";
 import { ensureDemandExplorableNowInTx } from "./demands.ts";
 import {
+  evaluateEvidenceGateStep1,
   evaluateEvidenceGateStep2,
   type CatalogEvidence,
-  type EvidenceGateStep1Result,
 } from "./evidence-gate.ts";
 import { resolveExplorationAgentConfig, type ExplorationAgentConfig } from "./exploration-agent.ts";
 import {
@@ -74,6 +74,11 @@ export const DEFAULT_REVIEW_AGENT_MAX_TASK_TOKENS = 300_000;
 const NON_OVERRIDABLE_CONFLICT_CODES: ReadonlySet<string> = new Set(["shared_id_conflict"]);
 /** Platform search finds other collections; a review judges the submitted one (ADR 0003 §6). */
 const OMITTED_QUERY_TOOLS: ReadonlySet<string> = new Set(["search_platform"]);
+/** Step 1 conflicts a correction may keep: a split season differs in count, not identity. */
+const EPISODE_COUNT_CONFLICT_CODES: ReadonlySet<string> = new Set([
+  "episode_count_mismatch",
+  "episode_count_missing",
+]);
 
 export interface ReviewAgentConfig extends Omit<ExplorationAgentConfig, "discover"> {
   /** Reviews per UTC day; 0 (the default) runs none. */
@@ -737,20 +742,27 @@ function correctionBlocker(
   }
   const evidence = cr.evidence ?? {};
   const baseline = cr.segments[0]?.baseline ?? "tmdb";
+  const catalog = { ...(evidence.catalog as unknown as CatalogEvidence), episodeAirYears };
+  const collection = fetched.fetchedCollections.get(`${cr.namespace}:${cr.nativeId}`)!;
+  const segments = correction.segments.map((s): NormalizedSegment => ({
+    ...s,
+    baseline,
+    nonLinear: false,
+    needsReview: false,
+  }));
+  // Step 1 on the correction: only an episode count may differ, never the collection's identity.
+  const step1 = evaluateEvidenceGateStep1(catalog, collection, { segments });
+  const identity = step1.conflicts.filter((c) => !EPISODE_COUNT_CONFLICT_CODES.has(c.code));
+  if (identity.length > 0) {
+    return `correction_failed_step1: ${[...new Set(identity.map((c) => c.code))].join(", ")}`;
+  }
   const step2 = evaluateEvidenceGateStep2({
-    catalog: { ...(evidence.catalog as unknown as CatalogEvidence), episodeAirYears },
-    collection: fetched.fetchedCollections.get(`${cr.namespace}:${cr.nativeId}`)!,
-    segments: correction.segments.map((s): NormalizedSegment => ({
-      ...s,
-      baseline,
-      nonLinear: false,
-      needsReview: false,
-    })),
+    catalog,
+    collection,
+    segments,
     setDefaultVariant: cr.setDefaultVariant,
     variantDescription: cr.variantDescription,
-    // Step 2 reads step 1 only for whole-media mappings; a correction always has segments.
-    step1: ((evidence.gate as JsonObject | undefined)?.step1 ??
-      {}) as unknown as EvidenceGateStep1Result,
+    step1,
   });
   return step2.conflicts.length > 0
     ? `correction_failed_step2: ${[...new Set(step2.conflicts.map((c) => c.code))].join(", ")}`

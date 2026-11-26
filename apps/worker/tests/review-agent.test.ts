@@ -810,6 +810,32 @@ describe("review agent: reject with correction (#76)", () => {
     expect(await demands(ctx)).toEqual([]);
   });
 
+  test("a correction on a collection of another show fails step 1: only the episode count may differ", async () => {
+    const otherShow = createAdapterRegistry([
+      {
+        ...bilibiliAdapter,
+        async fetchCollection(id, outbound) {
+          const result = await bilibiliAdapter.fetchCollection(id, outbound);
+          return result.status === "found"
+            ? { ...result, info: { ...result.info, title: "爸爸去哪儿2026" } }
+            : result;
+        },
+      },
+    ]);
+    const ctx = track(await setup(correctsTo(8), {}, otherShow));
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("needs_review");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "keep_for_human",
+      fallback: "correction_failed_step1: title_mismatch",
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
   test("the same media and platform ID is corrected only once: the second review cannot reject", async () => {
     const ctx = track(await setup(correctsTo(8)));
     await submitAsHuman(ctx);
