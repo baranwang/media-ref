@@ -49,6 +49,18 @@ export interface TmdbChangesResult {
   pagesFetched: number;
 }
 
+/** One search or lookup hit from TMDB or Trakt; ids are our native ID formats. */
+export interface CatalogSearchHit {
+  /** TMDB `tv:123` / `movie:123`, or Trakt `show:123` / `movie:123`. */
+  nativeId: string;
+  type: MediaType;
+  title: string;
+  originalTitle: string | null;
+  year: number | null;
+  /** Cross-catalog IDs the hit itself carries (Trakt returns TMDB and IMDb IDs). */
+  externalIds?: { tmdb?: string; imdb?: string };
+}
+
 export interface TmdbGateway {
   fetchMediaSnapshotAndExternalIds(
     tmdbType: MediaType,
@@ -58,6 +70,12 @@ export interface TmdbGateway {
   fetchChanges(mediaType: MediaType, options: TmdbChangesOptions): Promise<TmdbChangesResult>;
   /** TMDB entries whose IMDb ID is `imdbId` (`/find`); empty when there are none. */
   findByImdbId(imdbId: string): Promise<Array<{ type: MediaType; id: string }>>;
+  /** TMDB title search (`/search/{tv,movie,multi}`), at most 10 hits. */
+  search(query: string, options?: { type?: MediaType; year?: number }): Promise<CatalogSearchHit[]>;
+  /** Trakt title search, at most 10 hits. */
+  searchTrakt(query: string, options?: { type?: MediaType }): Promise<CatalogSearchHit[]>;
+  /** One Trakt entry by native ID (`show:123` / `movie:123`); null when Trakt does not have it. */
+  lookupTrakt(nativeId: string): Promise<CatalogSearchHit | null>;
 }
 
 export type TmdbGatewayErrorCode =
@@ -191,15 +209,7 @@ function extractExternalIdsBlock(
   return { imdb, tvdb, trakt };
 }
 
-async function lookupTraktId(
-  outbound: OutboundClient,
-  config: TmdbGatewayConfig,
-  tmdbType: MediaType,
-  tmdbId: string,
-): Promise<string | null> {
-  const traktType = tmdbType === "movie" ? "movie" : "show";
-  const baseUrl = trimTrailingSlash(config.traktApiBaseUrl ?? DEFAULT_TRAKT_API_BASE_URL);
-  const url = `${baseUrl}/search/tmdb/${encodeURIComponent(tmdbId)}?type=${traktType}`;
+function traktHeaders(config: TmdbGatewayConfig): Record<string, string> {
   const headers: Record<string, string> = {
     accept: "application/json",
     "trakt-api-version": "2",
@@ -209,6 +219,67 @@ async function lookupTraktId(
   if (config.traktClientId) {
     headers["trakt-api-key"] = config.traktClientId;
   }
+  return headers;
+}
+
+/** A Trakt API GET: parsed JSON, null on 404, throws on other failures. */
+async function fetchTraktJson(
+  outbound: OutboundClient,
+  config: TmdbGatewayConfig,
+  path: string,
+): Promise<unknown> {
+  const baseUrl = trimTrailingSlash(config.traktApiBaseUrl ?? DEFAULT_TRAKT_API_BASE_URL);
+  const response = await outbound.fetchExternal({
+    kind: "catalog",
+    namespace: "trakt",
+    url: `${baseUrl}${path}`,
+    method: "GET",
+    headers: traktHeaders(config),
+    timeoutMs: config.timeoutMs,
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`Trakt returned HTTP ${response.status} for ${path}`);
+  }
+  return JSON.parse(response.body);
+}
+
+function traktHit(type: "movie" | "show", raw: unknown): CatalogSearchHit | null {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  const ids = record?.ids as Record<string, unknown> | undefined;
+  const traktId = parsePositiveIdString(ids?.trakt);
+  const title = nonEmptyString(record?.title);
+  if (!record || !traktId || !title) {
+    return null;
+  }
+  const mediaType: MediaType = type === "movie" ? "movie" : "tv";
+  const tmdbId = parsePositiveIdString(ids?.tmdb);
+  const imdbId = nonEmptyString(ids?.imdb);
+  return {
+    nativeId: `${type}:${traktId}`,
+    type: mediaType,
+    title,
+    originalTitle: nonEmptyString(record.original_title),
+    year: typeof record.year === "number" ? record.year : null,
+    externalIds: {
+      ...(tmdbId ? { tmdb: `${mediaType}:${tmdbId}` } : {}),
+      ...(imdbId ? { imdb: imdbId } : {}),
+    },
+  };
+}
+
+async function lookupTraktId(
+  outbound: OutboundClient,
+  config: TmdbGatewayConfig,
+  tmdbType: MediaType,
+  tmdbId: string,
+): Promise<string | null> {
+  const traktType = tmdbType === "movie" ? "movie" : "show";
+  const baseUrl = trimTrailingSlash(config.traktApiBaseUrl ?? DEFAULT_TRAKT_API_BASE_URL);
+  const url = `${baseUrl}/search/tmdb/${encodeURIComponent(tmdbId)}?type=${traktType}`;
+  const headers = traktHeaders(config);
 
   try {
     const response = await outbound.fetchExternal({
@@ -331,6 +402,69 @@ export function createTmdbGateway(
   }
 
   return {
+    async search(query, options = {}) {
+      const kind = options.type ?? "multi";
+      const params: Record<string, string> = { query, language };
+      if (options.year !== undefined) {
+        params[kind === "movie" ? "year" : "first_air_date_year"] = String(options.year);
+      }
+      const fetched = await fetchTmdbJson(
+        buildTmdbUrl(`/search/${kind}`, params),
+        `search:${query}`,
+      );
+      const rows = fetched.ok && Array.isArray(fetched.data.results) ? fetched.data.results : [];
+      return rows
+        .slice(0, 20)
+        .flatMap((raw): CatalogSearchHit[] => {
+          const row = raw as Record<string, unknown>;
+          const type = (kind === "multi" ? row.media_type : kind) as string;
+          const id = parsePositiveIdString(row.id);
+          if ((type !== "movie" && type !== "tv") || !id) {
+            return [];
+          }
+          const title = nonEmptyString(type === "movie" ? row.title : row.name);
+          return title
+            ? [
+                {
+                  nativeId: `${type}:${id}`,
+                  type,
+                  title,
+                  originalTitle: nonEmptyString(
+                    type === "movie" ? row.original_title : row.original_name,
+                  ),
+                  year: parseYear(type === "movie" ? row.release_date : row.first_air_date),
+                },
+              ]
+            : [];
+        })
+        .slice(0, 10);
+    },
+
+    async searchTrakt(query, options = {}) {
+      const types = options.type ? (options.type === "movie" ? "movie" : "show") : "movie,show";
+      const parsed = await fetchTraktJson(
+        outbound,
+        config,
+        `/search/${types}?query=${encodeURIComponent(query)}&limit=10`,
+      );
+      return (Array.isArray(parsed) ? parsed : []).flatMap((raw): CatalogSearchHit[] => {
+        const row = raw as Record<string, unknown>;
+        const type = row.type === "movie" ? "movie" : row.type === "show" ? "show" : null;
+        const hit = type ? traktHit(type, row[type]) : null;
+        return hit ? [hit] : [];
+      });
+    },
+
+    async lookupTrakt(nativeId) {
+      const match = nativeId.match(/^(movie|show):(\d+)$/);
+      if (!match) {
+        return null;
+      }
+      const type = match[1] as "movie" | "show";
+      const parsed = await fetchTraktJson(outbound, config, `/${type}s/${match[2]}?extended=full`);
+      return traktHit(type, parsed);
+    },
+
     async findByImdbId(imdbId) {
       const fetched = await fetchTmdbJson(
         buildTmdbUrl(`/find/${encodeURIComponent(imdbId)}`, { external_source: "imdb_id" }),

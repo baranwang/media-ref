@@ -365,6 +365,63 @@ describe("OutboundClient live HTTP routing", () => {
     });
   });
 
+  test("with magpie configured, model calls and web tools go through the HK binding to magpie", async () => {
+    const sent: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = [];
+    const fetcher = {
+      async fetch(input: string, init?: RequestInit) {
+        const headers = new Headers(init?.headers);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        sent.push({ url: input, headers, body });
+        if (input.endsWith("/mcp/magpie/web-search")) {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { content: [{ type: "text", text: "found it" }], isError: false },
+          });
+        }
+        const chunk = {
+          id: "c1",
+          model: "group/cheap-first",
+          choices: [
+            { index: 0, delta: { role: "assistant", content: "hi" }, finish_reason: "stop" },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+        };
+        return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      },
+    };
+    const outbound = createLiveOutboundClient({
+      magpie: { fetcher, apiKey: "test-key" },
+      aiModel: "group/cheap-first",
+    });
+
+    const response = await outbound.invokeModel({
+      messages: [{ role: "user", content: "hi" }],
+      webSearch: true,
+      sessionId: "task-1",
+    });
+    expect(response).toMatchObject({ text: "hi", usage: { inputTokens: 10, outputTokens: 2 } });
+    expect(sent[0]!.url).toBe("http://magpie/v1/chat/completions");
+    expect(sent[0]!.headers.get("x-hk-service")).toBe("magpie");
+    expect(sent[0]!.headers.get("authorization")).toBe("Bearer test-key");
+    expect(sent[0]!.body).toMatchObject({
+      model: "group/cheap-first",
+      stream: true,
+      web_search_options: {},
+    });
+
+    expect(await outbound.callWebTool!("web_search", { query: "咒术回战 腾讯视频" })).toBe(
+      "found it",
+    );
+    expect(sent[1]!.headers.get("x-hk-service")).toBe("magpie");
+    expect(sent[1]!.body).toMatchObject({
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "咒术回战 腾讯视频" } },
+    });
+  });
+
   test("a gateway error surfaces as a thrown error, not an empty answer", async () => {
     const outbound = createLiveOutboundClient({
       aiBinding: {

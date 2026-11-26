@@ -1247,9 +1247,11 @@ describe("Exploration scheduler (#28)", () => {
       EXPLORATION_BATCH_SIZE: "5",
       EXPLORATION_LEASE_DURATION_MS: "600000",
       EXPLORATION_BACKOFF_SECONDS: "600,1800,7200",
+      EXPLORATION_DAILY_TOKEN_BUDGET: "5000000",
     } as unknown as BackgroundWorkerEnv);
     expect(parsedConfig.exploration).toEqual({
       dailyBudget: 42,
+      dailyTokenBudget: 5_000_000,
       batchSize: 5,
       leaseDurationMs: 600_000,
       notFoundBackoffSeconds: [600, 1800, 7200],

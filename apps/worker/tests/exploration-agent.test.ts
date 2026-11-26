@@ -8,6 +8,7 @@ import {
   getExplorationTargetNamespaces,
   createDefaultAdapterRegistry,
   listDemands,
+  scheduleExplorationJobs,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -181,6 +182,27 @@ function createQueueBatch(bodies: JobQueueMessage[]): MessageBatch<JobQueueMessa
   };
 }
 
+/** Namespaces the agent session still has to conclude, read from the mark_not_found tool. */
+function openNamespaces(request: ModelInvocationRequest): string[] {
+  const tool = request.tools?.find((t) => t.name === "mark_not_found");
+  return (tool?.parameters as { properties: { namespace: { enum: string[] } } }).properties
+    .namespace.enum;
+}
+
+/** A model that concludes every open namespace as not found in one turn. */
+function markAllNotFound(request: ModelInvocationRequest): ModelInvocationResponse {
+  return {
+    content: null,
+    toolCalls: openNamespaces(request).map((namespace, i) => ({
+      id: `call_nf_${i}`,
+      name: "mark_not_found",
+      arguments: { namespace, reason: "no match" },
+    })),
+    model: "test-model",
+    usage: { inputTokens: 1000, outputTokens: 50 },
+  };
+}
+
 describe("Exploration agent: discover → judge → gate", () => {
   const handles: TestDbHandle[] = [];
 
@@ -193,7 +215,8 @@ describe("Exploration agent: discover → judge → gate", () => {
   /** JJK media with TMDB + IMDb IDs and an open season-1 platform demand. */
   async function setup(
     stub: StubOptions,
-    invokeModel?: (request: ModelInvocationRequest) => ModelInvocationResponse,
+    invokeModel: (request: ModelInvocationRequest) => ModelInvocationResponse = markAllNotFound,
+    explorationAgent: Record<string, unknown> = {},
   ) {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -245,7 +268,7 @@ describe("Exploration agent: discover → judge → gate", () => {
 
     const outbound = createFakeOutboundClient({
       fetchExternal: createHttpStub(stub),
-      ...(invokeModel ? { invokeModel } : {}),
+      invokeModel,
     });
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -256,7 +279,7 @@ describe("Exploration agent: discover → judge → gate", () => {
           emitted.push(message);
         },
       },
-      config: { enableDailyTmdbSync: false, exploration: { dailyBudget: 10 } },
+      config: { enableDailyTmdbSync: false, exploration: { dailyBudget: 10 }, explorationAgent },
       now: () => T0,
     });
 
@@ -291,7 +314,14 @@ describe("Exploration agent: discover → judge → gate", () => {
     );
 
     expect((await explore()).completed).toBe(1);
-    expect(outbound.modelRequests).toHaveLength(0);
+    // bilibili is settled without the model; one session turn concludes the other platforms.
+    expect(outbound.modelRequests).toHaveLength(1);
+    expect(openNamespaces(outbound.modelRequests[0]!)).toEqual([
+      "iqiyi",
+      "mgtv",
+      "tencent",
+      "youku",
+    ]);
 
     const taskId = await deriveExplorationTaskId(
       explorationMessage.jobId,
@@ -309,7 +339,7 @@ describe("Exploration agent: discover → judge → gate", () => {
       status: "pending_evidence",
     });
 
-    // The other platforms had no candidates while every source answered: confirmed absence.
+    // The agent found nothing on the other platforms while every source answered: absence.
     const checks = await testDb.readDb
       .selectFrom("platform_checks")
       .select(["platform", "status"])
@@ -351,7 +381,13 @@ describe("Exploration agent: discover → judge → gate", () => {
       replies.splice(0, replies.length, ...toolMessages.map((m) => JSON.parse(m.content)));
       const submit = (args: Record<string, unknown>) => ({
         content: null,
-        toolCalls: [{ id: `call_${toolMessages.length}`, name: "submit_mapping", arguments: args }],
+        toolCalls: [
+          {
+            id: `call_${toolMessages.length}`,
+            name: "submit_mapping",
+            arguments: { namespace: "bilibili", ...args },
+          },
+        ],
         model: "test-model",
       });
       if (toolMessages.length === 0) {
@@ -363,7 +399,10 @@ describe("Exploration agent: discover → judge → gate", () => {
           segments: [{ season: 1, episodeStart: 1, episodeEnd: 30, targetEpisodeStart: 1 }],
         });
       }
-      return submit({ canonicalId: "ss34430" });
+      if (toolMessages.length === 2) {
+        return submit({ canonicalId: "ss34430" });
+      }
+      return markAllNotFound(request);
     };
     const { testDb, outbound, explore } = await setup(
       {
@@ -381,14 +420,15 @@ describe("Exploration agent: discover → judge → gate", () => {
     const prompt = outbound.modelRequests[0]!.messages.find((m) => m.role === "user")!.content;
     expect(prompt).toContain('"canonicalId": "ss34430"');
     expect(prompt).toContain('"canonicalId": "ss34431"');
-    expect(outbound.modelRequests).toHaveLength(3);
-    // All judge turns of one platform task share one session (routing stickiness).
+    expect(outbound.modelRequests).toHaveLength(4);
+    // All turns of one job share one session (routing stickiness).
     const sessions = new Set(outbound.modelRequests.map((r) => r.sessionId));
     expect(sessions.size).toBe(1);
     expect([...sessions][0]).toMatch(/^[0-9a-f-]{36}$/);
-    expect(replies).toMatchObject([
+    expect(replies.slice(0, 3)).toMatchObject([
       { ok: false, error: "UNKNOWN_CANDIDATE" },
       { ok: false, error: "SEGMENTS_OUTSIDE_COLLECTION" },
+      { ok: true },
     ]);
     const crs = await testDb.readDb.selectFrom("change_requests").select("native_id").execute();
     expect(crs).toEqual([{ native_id: "ss34430" }]);
@@ -399,7 +439,8 @@ describe("Exploration agent: discover → judge → gate", () => {
 
     await explore();
 
-    expect(outbound.modelRequests).toHaveLength(0);
+    // The agent still looks, but its "not found" while a source failed is not evidence.
+    expect(outbound.modelRequests).toHaveLength(1);
     expect(await testDb.readDb.selectFrom("platform_checks").select("id").execute()).toEqual([]);
     expect(await testDb.readDb.selectFrom("change_requests").select("id").execute()).toEqual([]);
     const demand = (await listDemands(testDb.readDb, { mediaId }))[0]!;
@@ -429,18 +470,12 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(checks).toHaveLength(platformCount - 1);
   });
 
-  const markNotFound = (): ModelInvocationResponse => ({
-    content: null,
-    toolCalls: [{ id: "call_nf", name: "mark_not_found", arguments: { reason: "no match" } }],
-    model: "test-model",
-  });
-
   test("fast path also needs the default mapping to fit the fetched episodes", async () => {
     // Season 2's 23-episode collection passes Step 1 (title, year and count of *a* season match),
     // but mapping season 1's 24 episodes onto it does not fit, so the model decides instead.
     const { testDb, outbound, explore } = await setup(
       { kan360Rows: [["咒术回战 第二季", "2023", "45574"]] },
-      markNotFound,
+      markAllNotFound,
     );
 
     await explore();
@@ -452,7 +487,7 @@ describe("Exploration agent: discover → judge → gate", () => {
   test("a negative judgement while a discovery source failed stays transient", async () => {
     const { testDb, outbound, explore } = await setup(
       { kan360Rows: [["咒术回战 第二季", "2023", "45574"]], failIqiyiSearch: true },
-      markNotFound,
+      markAllNotFound,
     );
 
     await explore();
@@ -472,9 +507,69 @@ describe("Exploration agent: discover → judge → gate", () => {
 
     await explore();
 
-    expect(outbound.modelRequests).toHaveLength(0);
+    expect(outbound.modelRequests).toHaveLength(1);
+    expect(openNamespaces(outbound.modelRequests[0]!)).not.toContain("bilibili");
     const crs = await testDb.readDb.selectFrom("change_requests").select("native_id").execute();
     expect(crs).toEqual([{ native_id: "ss34430" }]);
+  });
+
+  test("open tools: the agent fetches a collection nobody discovered and submits it", async () => {
+    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+      const turn = request.messages.filter((m) => m.role === "assistant").length;
+      const call = (name: string, args: Record<string, unknown>) => ({
+        content: null,
+        toolCalls: [{ id: `call_${turn}`, name, arguments: args }],
+        model: "test-model",
+      });
+      if (turn === 0) {
+        return call("get_collection", {
+          namespace: "bilibili",
+          id: "https://www.bilibili.com/bangumi/play/ss34430",
+        });
+      }
+      if (turn === 1) {
+        return call("submit_mapping", { namespace: "bilibili", canonicalId: "ss34430" });
+      }
+      return markAllNotFound(request);
+    };
+    const { testDb, outbound, explore } = await setup({ kan360Rows: [] }, invokeModel);
+
+    await explore();
+
+    const fetched = JSON.parse(
+      outbound.modelRequests[1]!.messages.find((m) => m.role === "tool")!.content,
+    ) as Record<string, unknown>;
+    expect(fetched).toMatchObject({
+      canonicalId: "ss34430",
+      featureEpisodeCount: 24,
+      passesAutomaticCheckWithDefaultMapping: true,
+    });
+    const crs = await testDb.readDb.selectFrom("change_requests").select("native_id").execute();
+    expect(crs).toEqual([{ native_id: "ss34430" }]);
+    // Session tokens land in today's budget row.
+    const budget = await testDb.readDb
+      .selectFrom("exploration_daily_budget")
+      .select("tokens_used")
+      .executeTakeFirstOrThrow();
+    expect(Number(budget.tokens_used)).toBe(1050);
+  });
+
+  test("a session over its token budget stops and backs off instead of looping", async () => {
+    const search = (): ModelInvocationResponse => ({
+      content: null,
+      toolCalls: [{ id: "call_s", name: "get_catalog_season", arguments: { season: 1 } }],
+      model: "test-model",
+      usage: { inputTokens: 900, outputTokens: 100 },
+    });
+    const { testDb, mediaId, outbound, explore } = await setup({ kan360Rows: [] }, search, {
+      maxTaskTokens: 2500,
+    });
+
+    await explore();
+
+    expect(outbound.modelRequests).toHaveLength(3);
+    const demand = (await listDemands(testDb.readDb, { mediaId }))[0]!;
+    expect(demand.status).toBe("not_found");
   });
 
   test("discovery reads the known Douban subject of the requested season, not another season's", async () => {
@@ -520,5 +615,40 @@ describe("Exploration agent: discover → judge → gate", () => {
       .filter((u) => u.hostname === "frodo.douban.com" && u.pathname.startsWith("/api/v2/subject/"))
       .map((u) => u.pathname.split("/").pop());
     expect(subjects).toEqual(["35000001"]);
+  });
+
+  test("scheduling stops for the day once the agent's token budget is spent", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const media = await testDb.writeDb
+      .insertInto("media")
+      .values({ type: "movie", baseline: "tmdb", title: "x", year: 2020, seasons: "[]" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: media.id,
+        season: null,
+        namespace_group: "platform",
+        status: "open",
+        next_eligible_at: T0,
+        last_demanded_at: T0,
+      })
+      .execute();
+    await testDb.writeDb
+      .insertInto("exploration_daily_budget")
+      .values({ budget_date: "2026-11-24", consumed: 0, tokens_used: "1000", updated_at: T0 })
+      .execute();
+    const config = { dailyBudget: 10, dailyTokenBudget: 1000 };
+
+    const spent = await scheduleExplorationJobs(testDb.writeDb, { now: T0, config });
+    expect(spent.scheduledCount).toBe(0);
+
+    const room = await scheduleExplorationJobs(testDb.writeDb, {
+      now: T0,
+      config: { ...config, dailyTokenBudget: 1001 },
+    });
+    expect(room.scheduledCount).toBe(1);
   });
 });

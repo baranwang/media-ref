@@ -352,6 +352,8 @@ export interface InvalidationReportsTable {
 export interface ExplorationDailyBudgetTable {
   budget_date: string;
   consumed: Generated<number>;
+  /** bigint: comes back as a string. */
+  tokens_used: Generated<string>;
   updated_at: Generated<Date>;
 }
 

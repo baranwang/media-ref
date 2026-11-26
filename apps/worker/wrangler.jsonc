@@ -20,8 +20,9 @@
   "vars": {
     "EXPLORATION_DAILY_BUDGET": "0",
     "ENABLE_DAILY_TMDB_EXPORTS_SYNC": "false",
-    // Exploration judge model: AI Gateway dynamic route, called through the AI binding.
-    "AI_MODEL": "dynamic/cheap",
+    // Exploration agent model: a magpie routing group, through HK (MAGPIE_GATEWAY_KEY secret).
+    // Without that secret the worker falls back to AI Gateway (AI_GATEWAY_ID) over the AI binding.
+    "AI_MODEL": "group/cheap-first",
     "AI_GATEWAY_ID": "gateway",
     // Bilibili answers HTTP 412 to Cloudflare egress IPs; send it out of greencloud-hk instead.
     "OUTBOUND_PROXY_CONFIG": "{\"bilibili\":{\"mode\":\"egress\"}}",

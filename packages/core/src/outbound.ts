@@ -124,6 +124,8 @@ export interface ModelInvocationRequest {
   sessionId?: string;
   /** Extra AI Gateway log metadata (string values), e.g. demand and task ids. */
   metadata?: Record<string, string>;
+  /** Let the model use its provider's built-in web search (magpie: `web_search_options`). */
+  webSearch?: boolean;
 }
 
 export interface ModelInvocationResponse {
@@ -139,10 +141,25 @@ export interface ModelInvocationResponse {
   };
 }
 
+/** magpie's search MCP tools (`/mcp/magpie/web-search`). */
+export type WebToolName = "web_search" | "web_fetch";
+
 export interface OutboundClient {
   fetchExternal(request: ExternalHttpRequest): Promise<ExternalHttpResponse>;
   sendEmail(message: EmailMessage): Promise<void>;
   invokeModel(request: ModelInvocationRequest): Promise<ModelInvocationResponse>;
+  /** Runs a magpie search MCP tool and returns its text; absent when magpie is not configured. */
+  callWebTool?(
+    name: WebToolName,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<string>;
+}
+
+/** magpie on the HK machine, reached through the `HK` binding (`x-hk-service: magpie`). */
+export interface MagpieConfig {
+  fetcher: EgressFetcher;
+  apiKey: string;
 }
 
 export interface LiveOutboundClientOptions {
@@ -158,6 +175,8 @@ export interface LiveOutboundClientOptions {
   aiProvider?: string;
   aiModel?: string;
   aiHeaders?: Record<string, string>;
+  /** When set, model calls and web tools go to magpie instead of AI Gateway. */
+  magpie?: MagpieConfig;
 }
 
 function headersToRecord(headers: Headers): Record<string, string> {
@@ -318,6 +337,76 @@ const FINISH_REASONS: Partial<Record<AssistantMessage["stopReason"], ModelFinish
   length: "length",
 };
 
+/** One streamed OpenAI chat-completions call through pi, mapped back to our response shape. */
+async function invokeOpenAiCompatible(
+  model: Model<"openai-completions">,
+  request: ModelInvocationRequest,
+  streamOptions: Parameters<typeof streamOpenAiCompletions>[2],
+  provider: string,
+  signal: AbortSignal | undefined,
+  /** Names the transport in errors. */
+  label: string,
+): Promise<ModelInvocationResponse> {
+  const message = await streamOpenAiCompletions(model, toPiContext(request, model), {
+    ...streamOptions,
+    ...(request.webSearch
+      ? {
+          onPayload: (payload: unknown) => ({
+            ...(payload as Record<string, unknown>),
+            web_search_options: {},
+          }),
+        }
+      : {}),
+    ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+    ...(request.maxTokens !== undefined ? { maxTokens: request.maxTokens } : {}),
+    ...(signal ? { signal } : {}),
+  }).result();
+
+  if (message.stopReason === "error" || message.stopReason === "aborted") {
+    throw new Error(
+      `${label} (${model.id}) ${message.stopReason}: ${message.errorMessage ?? "no details"}`,
+    );
+  }
+  const text = message.content
+    .flatMap((block) => (block.type === "text" ? [block.text] : []))
+    .join("");
+  const toolCalls = message.content.flatMap((block) =>
+    block.type === "toolCall"
+      ? [{ id: block.id, name: block.name, arguments: block.arguments ?? {} }]
+      : [],
+  );
+  return {
+    content: text || null,
+    text: text || null,
+    toolCalls,
+    model: message.responseModel ?? model.id,
+    provider,
+    finishReason: FINISH_REASONS[message.stopReason] ?? "unknown",
+    usage: { inputTokens: message.usage.input, outputTokens: message.usage.output },
+  };
+}
+
+function openAiModel(
+  id: string,
+  baseUrl: string,
+  request: ModelInvocationRequest,
+): Model<"openai-completions"> {
+  return {
+    id,
+    name: id,
+    api: "openai-completions",
+    provider: "openai-compatible",
+    baseUrl,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: request.maxTokens ?? 1024,
+    compat: { sendSessionAffinityHeaders: true, sessionAffinityFormat: "openai" },
+  };
+}
+
 /**
  * One model call through AI Gateway's OpenAI-compatible endpoint over the AI binding, streamed
  * by pi. The model id is a gateway route (`dynamic/cheap`) or `provider/model`.
@@ -336,62 +425,120 @@ async function invokeViaAiGateway(
   }
   const modelId =
     rawModel.includes("/") && !rawModel.startsWith("@") ? rawModel : `${provider}/${rawModel}`;
-  const model: Model<"openai-completions"> = {
-    id: modelId,
-    name: modelId,
-    api: "openai-completions",
-    provider: "ai-gateway",
-    baseUrl: `https://workers-binding.ai/ai-gateway/gateways/${encodeURIComponent(gatewayId)}/compat`,
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
-    maxTokens: request.maxTokens ?? 1024,
-    compat: { sendSessionAffinityHeaders: true, sessionAffinityFormat: "openai" },
-  };
+  const model = openAiModel(
+    modelId,
+    `https://workers-binding.ai/ai-gateway/gateways/${encodeURIComponent(gatewayId)}/compat`,
+    request,
+  );
   const metadata = {
     ...request.metadata,
     ...(request.sessionId ? { "session.id": request.sessionId } : {}),
   };
-
-  const message = await streamOpenAiCompletions(model, toPiContext(request, model), {
-    fetch: createAiBindingFetch(aiBinding),
-    headers: {
-      // Binding calls are pre-authenticated; the sentinel only satisfies pi's auth check.
-      "cf-aig-authorization": `Bearer ${CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL}`,
-      Authorization: null,
-      "x-api-key": null,
-      ...(Object.keys(metadata).length > 0 ? { "cf-aig-metadata": JSON.stringify(metadata) } : {}),
-      ...options.aiHeaders,
+  return invokeOpenAiCompatible(
+    model,
+    request,
+    {
+      fetch: createAiBindingFetch(aiBinding),
+      headers: {
+        // Binding calls are pre-authenticated; the sentinel only satisfies pi's auth check.
+        "cf-aig-authorization": `Bearer ${CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL}`,
+        Authorization: null,
+        "x-api-key": null,
+        ...(Object.keys(metadata).length > 0
+          ? { "cf-aig-metadata": JSON.stringify(metadata) }
+          : {}),
+        ...options.aiHeaders,
+      },
     },
-    ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-    ...(request.maxTokens !== undefined ? { maxTokens: request.maxTokens } : {}),
-    ...(signal ? { signal } : {}),
-  }).result();
-
-  if (message.stopReason === "error" || message.stopReason === "aborted") {
-    throw new Error(
-      `AI Gateway (${modelId}) ${message.stopReason}: ${message.errorMessage ?? "no details"}`,
-    );
-  }
-  const text = message.content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("");
-  const toolCalls = message.content.flatMap((block) =>
-    block.type === "toolCall"
-      ? [{ id: block.id, name: block.name, arguments: block.arguments ?? {} }]
-      : [],
-  );
-  return {
-    content: text || null,
-    text: text || null,
-    toolCalls,
-    model: message.responseModel ?? modelId,
     provider,
-    finishReason: FINISH_REASONS[message.stopReason] ?? "unknown",
-    usage: { inputTokens: message.usage.input, outputTokens: message.usage.output },
+    signal,
+    "AI Gateway",
+  );
+}
+
+/** The HK binding routes by service, so the host is a placeholder; Caddy picks magpie by header. */
+const MAGPIE_ORIGIN = "http://magpie";
+
+function magpieFetch(magpie: MagpieConfig): typeof fetch {
+  return async (input, init) => {
+    const request = new Request(input, init);
+    const headers = new Headers(request.headers);
+    headers.set("x-hk-service", "magpie");
+    headers.set("authorization", `Bearer ${magpie.apiKey}`);
+    const url = new URL(request.url);
+    return magpie.fetcher.fetch(`${MAGPIE_ORIGIN}${url.pathname}${url.search}`, {
+      method: request.method,
+      headers,
+      ...(request.method !== "GET" && request.method !== "HEAD"
+        ? { body: await request.text() }
+        : {}),
+      signal: init?.signal ?? request.signal,
+    });
   };
+}
+
+/** One model call to magpie's OpenAI-compatible gateway; the model id is a magpie model or group. */
+async function invokeViaMagpie(
+  magpie: MagpieConfig,
+  request: ModelInvocationRequest,
+  options: LiveOutboundClientOptions,
+  signal: AbortSignal | undefined,
+): Promise<ModelInvocationResponse> {
+  const modelId = (request.model ?? options.aiModel ?? DEFAULT_AI_MODEL).trim();
+  return invokeOpenAiCompatible(
+    openAiModel(modelId, `${MAGPIE_ORIGIN}/v1`, request),
+    request,
+    { fetch: magpieFetch(magpie), apiKey: magpie.apiKey },
+    "magpie",
+    signal,
+    "magpie",
+  );
+}
+
+/** A magpie search MCP tool call (stateless JSON-RPC `tools/call`). */
+async function callMagpieWebTool(
+  magpie: MagpieConfig,
+  name: WebToolName,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const response = await magpieFetch(magpie)(`${MAGPIE_ORIGIN}/mcp/magpie/web-search`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    }),
+    ...(signal ? { signal } : {}),
+  });
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(`magpie ${name} HTTP ${response.status}: ${raw.slice(0, 200)}`);
+  }
+  // A streamable-HTTP server may answer as SSE; the JSON-RPC reply is then the last data line.
+  const body = raw.trimStart().startsWith("{")
+    ? raw
+    : (raw
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .pop()
+        ?.slice(5) ?? "");
+  const parsed = JSON.parse(body) as {
+    result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean };
+    error?: { message?: string };
+  };
+  if (parsed.error) {
+    throw new Error(`magpie ${name}: ${parsed.error.message ?? "error"}`);
+  }
+  const text = (parsed.result?.content ?? [])
+    .flatMap((c) => (c.type === "text" && c.text ? [c.text] : []))
+    .join("\n");
+  if (parsed.result?.isError) {
+    throw new Error(`magpie ${name}: ${text.slice(0, 200)}`);
+  }
+  return text;
 }
 
 export function combineAbortSignals(
@@ -529,6 +676,13 @@ export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}
           "Model invocation aborted",
         );
       }
+      if (options.magpie) {
+        return raceWithAbortSignal(
+          invokeViaMagpie(options.magpie, request, options, signal),
+          signal,
+          "Model invocation aborted",
+        );
+      }
       if (options.aiBinding) {
         return raceWithAbortSignal(
           invokeViaAiGateway(options.aiBinding, request, options, signal),
@@ -538,6 +692,13 @@ export function createLiveOutboundClient(options: LiveOutboundClientOptions = {}
       }
       throw new Error("Outbound model transport is not configured");
     },
+
+    ...(options.magpie
+      ? {
+          callWebTool: (name: WebToolName, args: Record<string, unknown>, signal?: AbortSignal) =>
+            callMagpieWebTool(options.magpie!, name, args, signal),
+        }
+      : {}),
   };
 }
 
@@ -549,6 +710,7 @@ export interface FakeOutboundHandlers {
   invokeModel?: (
     request: ModelInvocationRequest,
   ) => ModelInvocationResponse | Promise<ModelInvocationResponse>;
+  callWebTool?: (name: WebToolName, args: Record<string, unknown>) => string | Promise<string>;
 }
 
 export interface FakeOutboundClient extends OutboundClient {
@@ -598,6 +760,13 @@ export function createFakeOutboundClient(handlers: FakeOutboundHandlers = {}): F
       }
       return handlers.invokeModel(request);
     },
+
+    ...(handlers.callWebTool
+      ? {
+          callWebTool: async (name: WebToolName, args: Record<string, unknown>) =>
+            handlers.callWebTool!(name, args),
+        }
+      : {}),
   };
 }
 
