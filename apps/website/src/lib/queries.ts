@@ -5,6 +5,7 @@ import type { BrowseSlug } from "./catalogs";
 import {
   apiKeyFromProto,
   changeRequestFromProto,
+  commentThreadFrom,
   REVIEW_AGENT_USER_ID,
   reviewAlertFromProto,
 } from "./mappers";
@@ -85,6 +86,19 @@ export const changeRequestQuery = (id: string) =>
       const res = await browserClients().changeRequest.getChangeRequest({ id });
       return res.changeRequest ? changeRequestFromProto(res.changeRequest) : null;
     },
+  });
+
+export const changeRequestCommentsQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["change-request-comments", id],
+    queryFn: async () => {
+      const res = await browserClients().changeRequest.listChangeRequestComments({
+        changeRequestId: id,
+      });
+      return commentThreadFrom(res.comments);
+    },
+    // The review agent answers within minutes: look again while a comment waits for it.
+    refetchInterval: (query) => (query.state.data?.some((c) => c.waiting) ? 15_000 : false),
   });
 
 export const reviewQueueQuery = () =>

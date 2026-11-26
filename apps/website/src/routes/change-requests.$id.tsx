@@ -24,6 +24,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { NAMESPACE_LABELS, NamespaceLogo } from "#/components/brand-logos";
 import { CheckItemRow } from "#/components/check-item-row";
+import { CommentComposer, CommentThread } from "#/components/comment-thread";
 import { ReviewAgentNote } from "#/components/review-agent-note";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
@@ -313,7 +314,11 @@ function ChangeRequestDetailPage() {
           {cr.reviewedByAgent && cr.reviewAgent ? (
             <section className="flex flex-col gap-3">
               <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
-                {cr.reviewAgent.verdict === "approve" ? "审核 agent 的理由" : "审核 agent 驳回"}
+                {cr.reviewAgent.verdict === "approve" || cr.reviewAgent.verdict === "keep"
+                  ? "审核 agent 的理由"
+                  : cr.reviewAgent.verdict.startsWith("revoke")
+                    ? "审核 agent 撤下"
+                    : "审核 agent 驳回"}
               </h2>
               <Card>
                 <CardContent className="pt-4">
@@ -356,6 +361,22 @@ function ChangeRequestDetailPage() {
               </section>
             )
           )}
+
+          {/* 留言：人和审核 agent 的对话 */}
+          <section className="flex flex-col gap-3">
+            <div>
+              <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">留言</h2>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                觉得哪里不对，或者想让它通过、驳回，就在这里说。留言是给审核 agent 的线索，不是决定
+              </p>
+            </div>
+            <Card>
+              <CardContent className="flex flex-col gap-6 pt-4">
+                <CommentThread changeRequestId={cr.id} />
+                <CommentComposer changeRequestId={cr.id} />
+              </CardContent>
+            </Card>
+          </section>
         </div>
 
         {/* Right column: Timeline */}

@@ -15,10 +15,8 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@media-ref/ui/components/empty";
-import { Label } from "@media-ref/ui/components/label";
 import { Skeleton } from "@media-ref/ui/components/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@media-ref/ui/components/tabs";
-import { Textarea } from "@media-ref/ui/components/textarea";
 import { cn } from "@media-ref/ui/lib/utils";
 import { RiArrowRightUpLine } from "@remixicon/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -26,6 +24,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { NAMESPACE_LABELS, NamespaceLogo } from "#/components/brand-logos";
 import { CheckItemRow } from "#/components/check-item-row";
+import { CommentComposer, CommentThread } from "#/components/comment-thread";
 import { CoverageLegend, CoverageRuler, CoverageTrack } from "#/components/coverage-bar";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
@@ -114,11 +113,6 @@ function ReviewWorkbenchPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const selectedCr = pendingQueue.find((c) => c.id === selectedId) ?? pendingQueue[0] ?? null;
-
-  const selectNextAfter = (id: string) => {
-    const index = pendingQueue.findIndex((c) => c.id === id);
-    setSelectedId(pendingQueue[index + 1]?.id ?? pendingQueue[index - 1]?.id ?? null);
-  };
 
   let body: ReactNode;
   if (!sessionChecked) {
@@ -255,7 +249,6 @@ function ReviewWorkbenchPage() {
                   key={selectedCr.id}
                   cr={selectedCr}
                   card={cards[selectedCr.targetKey]}
-                  onDecided={() => selectNextAfter(selectedCr.id)}
                 />
               )}
             </div>
@@ -471,41 +464,13 @@ function ReviewWorkbenchPage() {
   );
 }
 
-function ReviewDetail({
-  cr,
-  card,
-  onDecided,
-}: {
-  cr: ChangeRequestItem;
-  card: CardItem | undefined;
-  onDecided: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const [decisionNote, setDecisionNote] = useState("");
-
+function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | undefined }) {
   // The catalog key also resolves on the detail route, so new titles still get a season length.
   const mediaQuery = useQuery({
     ...mediaDetailQuery(cr.mediaId ?? cr.targetKey),
     enabled: Boolean(cr.mediaId ?? cr.targetKey),
   });
   const media = mediaQuery.data;
-
-  const decide = useMutation({
-    mutationFn: async (approve: boolean) => {
-      const reviewer = browserClients().reviewer;
-      const reason = decisionNote.trim();
-      const input = { id: cr.id, ...(reason ? { reason } : {}) };
-      await (approve ? reviewer.approveChangeRequest(input) : reviewer.rejectChangeRequest(input));
-    },
-    onSuccess: async () => {
-      onDecided();
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: reviewQueueQuery().queryKey }),
-        cr.mediaId &&
-          queryClient.invalidateQueries({ queryKey: mediaDetailQuery(cr.mediaId).queryKey }),
-      ]);
-    },
-  });
 
   const primary = cr.segments[0];
   const season = primary?.season ?? 1;
@@ -697,54 +662,20 @@ function ReviewDetail({
         </Card>
       </section>
 
-      {/* 你的决定 */}
+      {/* 留言：人不直接决定，审核 agent 核实后照做 */}
       <section className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
-          <h3 className="text-xl leading-7 font-bold tracking-tight text-foreground">你的决定</h3>
+          <h3 className="text-xl leading-7 font-bold tracking-tight text-foreground">留言</h3>
           <p className="text-sm text-muted-foreground">
-            通过后这条记录立即生效；驳回时请写明原因，提交人会看到
+            变更单由证据门和审核 agent 判定。点「通过」「驳回」会发一条以它开头的留言，审核 agent
+            核实后照做，并在变更单页回复
           </p>
         </div>
 
         <Card>
-          <CardContent className="flex flex-col gap-3 pt-4">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="review-note">审核备注</Label>
-              <Textarea
-                id="review-note"
-                value={decisionNote}
-                onChange={(e) => setDecisionNote(e.target.value)}
-                placeholder="写明通过依据或驳回原因…"
-                rows={3}
-              />
-            </div>
-
-            {decide.isError && <ErrorAlert title="提交审核结果失败" error={decide.error} />}
-
-            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-              <span className="text-xs text-muted-foreground">
-                {primary &&
-                  `通过后，${platformLabel}的第 ${season} 季会新增${formatEpisodeRange(primary.start, primary.end)}`}
-              </span>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="default"
-                  disabled={decide.isPending}
-                  onClick={() => decide.mutate(false)}
-                >
-                  驳回
-                </Button>
-                <Button
-                  variant="default"
-                  size="default"
-                  disabled={decide.isPending}
-                  onClick={() => decide.mutate(true)}
-                >
-                  通过
-                </Button>
-              </div>
-            </div>
+          <CardContent className="flex flex-col gap-6 pt-4">
+            <CommentThread changeRequestId={cr.id} />
+            <CommentComposer changeRequestId={cr.id} />
           </CardContent>
         </Card>
       </section>

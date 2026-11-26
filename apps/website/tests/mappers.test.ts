@@ -1,6 +1,11 @@
 import { proto, type MediaDocument } from "@media-ref/client";
 import { expect, test } from "vite-plus/test";
-import { changeRequestFromProto, mediaItemFrom } from "../src/lib/mappers.ts";
+import {
+  changeRequestFromProto,
+  commentContent,
+  commentThreadFrom,
+  mediaItemFrom,
+} from "../src/lib/mappers.ts";
 
 test("whole-media platform associations span every season in the all-seasons view", () => {
   // Only the fields the mapper reads.
@@ -166,4 +171,69 @@ test("a change request in needs_review waits for the review agent", () => {
     "有拿不准的地方，已转交审核 agent",
     "等审核 agent 判定通过或驳回",
   ]);
+});
+
+test("comments and the review agent's replies read as one thread, oldest first; a comment no reply answers is still waiting", () => {
+  const comment = (fields: Partial<proto.ChangeRequestComment>) =>
+    fields as unknown as proto.ChangeRequestComment;
+  const thread = commentThreadFrom([
+    comment({
+      id: "r1",
+      authorUserId: "system:review-agent",
+      authorName: "Review Agent",
+      content: "结论：通过，关联已生效。",
+      replyToIds: ["c1"],
+      createdAt: "2026-11-27T08:05:00.000Z",
+    }),
+    comment({
+      id: "c2",
+      authorUserId: "u2",
+      authorName: "小王",
+      content: "驳回：第 7 集起错开一位",
+      replyToIds: [],
+      createdAt: "2026-11-27T09:00:00.000Z",
+    }),
+    comment({
+      id: "c1",
+      authorUserId: "u1",
+      authorName: "小李",
+      content: "通过：多出来的是中章",
+      replyToIds: [],
+      createdAt: "2026-11-27T08:00:00.000Z",
+    }),
+  ]);
+
+  expect(thread).toEqual([
+    {
+      id: "c1",
+      byAgent: false,
+      author: "小李",
+      content: "通过：多出来的是中章",
+      createdAt: "2026-11-27T08:00:00.000Z",
+      waiting: false,
+    },
+    {
+      id: "r1",
+      byAgent: true,
+      author: "审核 agent",
+      content: "结论：通过，关联已生效。",
+      createdAt: "2026-11-27T08:05:00.000Z",
+      waiting: false,
+    },
+    {
+      id: "c2",
+      byAgent: false,
+      author: "小王",
+      content: "驳回：第 7 集起错开一位",
+      createdAt: "2026-11-27T09:00:00.000Z",
+      waiting: true,
+    },
+  ]);
+});
+
+test("the 通过 and 驳回 shortcuts send a comment that starts with 「通过：」 or 「驳回：」", () => {
+  expect(commentContent("  多出来的是中章 ", "approve")).toBe("通过：多出来的是中章");
+  expect(commentContent("", "reject")).toBe("驳回：");
+  expect(commentContent("驳回：季号错了", "reject")).toBe("驳回：季号错了");
+  expect(commentContent("  这是第二季 ")).toBe("这是第二季");
 });
