@@ -136,8 +136,11 @@ export interface ModelInvocationResponse {
   provider?: string;
   finishReason?: ModelFinishReason;
   usage?: {
+    /** Uncached input tokens. */
     inputTokens?: number;
     outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
   };
 }
 
@@ -383,7 +386,12 @@ async function invokeOpenAiCompatible(
     model: message.responseModel ?? model.id,
     provider,
     finishReason: FINISH_REASONS[message.stopReason] ?? "unknown",
-    usage: { inputTokens: message.usage.input, outputTokens: message.usage.output },
+    usage: {
+      inputTokens: message.usage.input,
+      outputTokens: message.usage.output,
+      cacheReadTokens: message.usage.cacheRead,
+      cacheWriteTokens: message.usage.cacheWrite,
+    },
   };
 }
 

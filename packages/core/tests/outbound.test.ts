@@ -361,7 +361,7 @@ describe("OutboundClient live HTTP routing", () => {
       model: "gpt-6-luna",
       provider: "workers-ai",
       finishReason: "tool_calls",
-      usage: { inputTokens: 120, outputTokens: 24 },
+      usage: { inputTokens: 120, outputTokens: 24, cacheReadTokens: 0, cacheWriteTokens: 0 },
     });
   });
 

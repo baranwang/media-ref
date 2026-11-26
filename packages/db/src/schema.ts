@@ -357,6 +357,17 @@ export interface ExplorationDailyBudgetTable {
   updated_at: Generated<Date>;
 }
 
+/** tokens.ci usage per day (tokens.ci's time zone) and model; bigint columns come back as strings. */
+export interface PiTokenUsageTable {
+  day: string;
+  model: string;
+  input: Generated<string>;
+  output: Generated<string>;
+  cache_read: Generated<string>;
+  cache_write: Generated<string>;
+  messages: Generated<string>;
+}
+
 export interface TmdbDailyExportIdsTable {
   media_type: MediaTypeRow;
   tmdb_id: string;
@@ -385,5 +396,6 @@ export interface Database {
   demands: DemandsTable;
   invalidation_reports: InvalidationReportsTable;
   exploration_daily_budget: ExplorationDailyBudgetTable;
+  pi_token_usage: PiTokenUsageTable;
   tmdb_daily_export_ids: TmdbDailyExportIdsTable;
 }

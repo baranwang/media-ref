@@ -60,6 +60,7 @@ import { listLeadsForTarget, type Lead } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { createChangeRequest, MediaServiceError } from "./media-service.ts";
 import { recordExplorationTokens } from "./exploration-scheduler.ts";
+import { addPiUsage, reportPiUsage, type PiUsageBucket } from "./tokens-report.ts";
 import {
   buildQueryTools,
   QUERY_TOOL_NAMES,
@@ -100,6 +101,8 @@ export interface ExplorationAgentConfig {
   maxTaskTokens?: number;
   /** Let the model use its provider's built-in web search too (default true). */
   webSearch?: boolean;
+  /** tokens.ci API token: session usage is submitted there as client "pi", device MediaRef. */
+  tokensApiToken?: string;
   adapterRegistry?: AdapterRegistry;
   clockMs?: () => number;
   /** Test seam; defaults to `discoverCandidates`. */
@@ -116,6 +119,7 @@ export interface ResolvedExplorationAgentConfig {
   maxTokens: number;
   maxTaskTokens: number;
   webSearch: boolean;
+  tokensApiToken?: string;
 }
 
 export function resolveExplorationAgentConfig(
@@ -168,6 +172,7 @@ export function resolveExplorationAgentConfig(
     maxTokens,
     maxTaskTokens,
     webSearch: partial.webSearch !== false,
+    ...(partial.tokensApiToken?.trim() ? { tokensApiToken: partial.tokensApiToken.trim() } : {}),
   };
 }
 
@@ -867,6 +872,8 @@ async function prepareTarget(
 /** Totals for one agent session. */
 interface SessionUsage {
   tokens: number;
+  /** Per routed model, for the tokens.ci report. */
+  byModel: Map<string, PiUsageBucket>;
 }
 
 /**
@@ -1001,7 +1008,13 @@ async function runAgentSession(
       const reason = error instanceof Error ? error.message : "model_invocation_failed";
       return settleRest((t) => transientOutcome(run, t, reason));
     }
-    usage.tokens += (response.usage?.inputTokens ?? 0) + (response.usage?.outputTokens ?? 0);
+    const u = response.usage;
+    usage.tokens +=
+      (u?.inputTokens ?? 0) +
+      (u?.outputTokens ?? 0) +
+      (u?.cacheReadTokens ?? 0) +
+      (u?.cacheWriteTokens ?? 0);
+    addPiUsage(usage.byModel, response);
 
     const toolCalls = response.toolCalls ?? [];
     messages.push({
@@ -1290,13 +1303,17 @@ export function createExplorationAgentExecutor(
       }
       if (open.length > 0) {
         const sessionStartMs = clockMs();
-        const usage = { tokens: 0 };
+        const usage: SessionUsage = { tokens: 0, byModel: new Map() };
         try {
           const outcomes = await runAgentSession(run, open, config, usage);
           const durationMs = Math.max(0, clockMs() - sessionStartMs);
           platformOutcomes.push(...outcomes.map((o) => ({ ...o, durationMs })));
         } finally {
           await recordExplorationTokens(ctx.db, ctx.now, usage.tokens);
+          await reportPiUsage(ctx.db, ctx.outbound, [...usage.byModel.values()], {
+            now: ctx.now,
+            ...(config.tokensApiToken ? { token: config.tokensApiToken } : {}),
+          });
         }
       }
     } finally {

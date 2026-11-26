@@ -552,6 +552,39 @@ describe("Exploration agent: discover → judge → gate", () => {
       .select("tokens_used")
       .executeTakeFirstOrThrow();
     expect(Number(budget.tokens_used)).toBe(1050);
+    // Per-model totals for tokens.ci (no token configured, so nothing is submitted).
+    const piUsage = await testDb.readDb.selectFrom("pi_token_usage").selectAll().execute();
+    expect(piUsage).toMatchObject([
+      { model: "test-model", input: "1000", output: "50", messages: "1" },
+    ]);
+  });
+
+  test("with a tokens.ci token, session usage is submitted as pi on device MediaRef", async () => {
+    const { testDb, outbound, explore } = await setup({ kan360Rows: [] }, markAllNotFound, {
+      tokensApiToken: "tok",
+    });
+    const submitted: unknown[] = [];
+    const original = outbound.fetchExternal.bind(outbound);
+    outbound.fetchExternal = async (request) => {
+      if (request.url === "https://tokens.ci/api/submit") {
+        expect(request.headers?.authorization).toBe("Bearer tok");
+        submitted.push(JSON.parse(request.body!));
+        return jsonResponse(request.url, { ok: true });
+      }
+      return original(request);
+    };
+
+    await explore();
+
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toMatchObject({
+      device: { name: "MediaRef" },
+      summary: { totalTokens: 1050, clients: ["pi"], models: ["test-model"] },
+      contributions: [{ date: "2026-11-24", clients: [{ client: "pi", modelId: "test-model" }] }],
+    });
+    expect(await testDb.readDb.selectFrom("pi_token_usage").select("day").execute()).toEqual([
+      { day: "2026-11-24" },
+    ]);
   });
 
   test("a session over its token budget stops and backs off instead of looping", async () => {

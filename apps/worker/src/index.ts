@@ -52,6 +52,8 @@ export interface BackgroundWorkerEnv {
   AI_MODEL?: string;
   // magpie's gateway key: model calls and web search go to magpie through HK when set.
   MAGPIE_GATEWAY_KEY?: string;
+  // tokens.ci API token: the agent's model usage is submitted there as pi, device MediaRef.
+  TOKENS_API_TOKEN?: string;
   OUTBOUND_PROXY_CONFIG?: string;
   // Workers VPC service: the greencloud-hk egress relay.
   HK?: EgressFetcher;
@@ -149,6 +151,7 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
         env.EXPLORATION_MAX_TASK_TOKENS,
         DEFAULT_EXPLORATION_MAX_TASK_TOKENS,
       ),
+      tokensApiToken: parseOptionalString(env.TOKENS_API_TOKEN),
     },
     tmdb,
     catalog: {
