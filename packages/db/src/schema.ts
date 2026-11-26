@@ -110,7 +110,7 @@ export interface ApiKeyTable {
 export type MediaTypeRow = "movie" | "tv";
 export type BaselineSourceRow = "tmdb" | "tvdb" | "imdb" | "bangumi" | "douban";
 export type ExternalIdNamespaceRow = "tmdb" | "imdb" | "tvdb" | "trakt";
-export type ExternalIdSourceRow = "sync" | "reviewer" | "submission";
+export type ExternalIdSourceRow = "sync" | "reviewer" | "submission" | "agent";
 export type PlatformNamespaceRow = "tencent" | "iqiyi" | "youku" | "bilibili" | "mgtv";
 export type PlatformCheckStatusRow = "not_found";
 export type AssociationNamespaceRow =

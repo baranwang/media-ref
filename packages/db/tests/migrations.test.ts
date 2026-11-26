@@ -92,6 +92,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0015_agent_external_ids",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb

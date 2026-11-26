@@ -19,7 +19,6 @@ import { sql, type Transaction } from "kysely";
 import {
   createDefaultAdapterRegistry,
   isTier2Adapter,
-  isTier3Adapter,
   type AdapterRegistry,
 } from "./adapters/index.ts";
 import {
@@ -173,6 +172,8 @@ export interface ExplorationExecutionContext {
   season: number | null;
   namespaceGroup: NamespaceGroup;
   targetNamespaces: readonly Namespace[];
+  /** For catalog exploration: TMDB `/find` and detail lookups. */
+  tmdbGateway: TmdbGateway;
   now: Date;
 }
 
@@ -182,6 +183,8 @@ export type PlatformExplorationOutcome =
       status: "submitted";
       changeRequestId?: string;
       nativeId?: string;
+      /** Written straight into the library (agent external ID), no change request to wait for. */
+      directWrite?: boolean;
       durationMs?: number;
     }
   | {
@@ -419,17 +422,25 @@ export function resolveExplorationSchedulerConfig(
 }
 
 /**
+ * Catalog namespaces the agent has a candidate source for: Douban via IMDb lookup (change request)
+ * and the TMDB external ID via TMDB `/find` (written directly). Bangumi has no source yet.
+ */
+const CATALOG_EXPLORATION_NAMESPACES: ReadonlySet<Namespace> = new Set(["douban"]);
+
+/**
  * Namespaces exploration can target. Platforms only need `fetchCollection` (Tier 2+): candidates
- * come from the discovery sources, not platform search. Catalog exploration still needs search.
+ * come from the discovery sources, not platform search. Catalog targets are the namespaces in
+ * `CATALOG_EXPLORATION_NAMESPACES` with a Tier 2+ adapter, plus `tmdb` (an external ID, no adapter).
  */
 export function getExplorationTargetNamespaces(
   adapterRegistry: AdapterRegistry,
   namespaceGroup: NamespaceGroup,
 ): Namespace[] {
-  const targets = new Set<Namespace>();
+  const targets = new Set<Namespace>(namespaceGroup === "catalog" ? ["tmdb"] : []);
   for (const adapter of adapterRegistry.list()) {
     const explorable =
-      namespaceGroup === "platform" ? isTier2Adapter(adapter) : isTier3Adapter(adapter);
+      isTier2Adapter(adapter) &&
+      (namespaceGroup === "platform" || CATALOG_EXPLORATION_NAMESPACES.has(adapter.namespace));
     if (explorable && getNamespaceGroup(adapter.namespace) === namespaceGroup) {
       targets.add(adapter.namespace);
     }
@@ -1843,12 +1854,17 @@ export function createExplorationJobHandler(
       season: activeSeason,
       namespaceGroup: payload.namespaceGroup,
       targetNamespaces: effectiveTargetNamespaces,
+      tmdbGateway:
+        options.tmdbGateway ??
+        options.catalogConfig?.tmdbGateway ??
+        createTmdbGateway(ctx.outbound, options.catalogConfig?.tmdb ?? options.tmdbConfig),
       now: ctx.now,
     });
     const durationMs = execResult.durationMs ?? Math.max(0, Date.now() - execStartMs);
 
     const outcomes = execResult.platformOutcomes;
-    const hasSubmitted = outcomes.some((o) => o.status === "submitted");
+    const hasDirectWrite = outcomes.some((o) => o.status === "submitted" && o.directWrite);
+    const hasSubmitted = outcomes.some((o) => o.status === "submitted" && !o.directWrite);
     const hasTransientError = outcomes.some((o) => o.status === "transient_error");
     const hasNotFound = outcomes.some((o) => o.status === "not_found");
 
@@ -1936,6 +1952,29 @@ export function createExplorationJobHandler(
               })
               .execute();
           }
+        }
+
+        if (
+          hasDirectWrite &&
+          (await isMediaDemandCoveredInTx(trx, {
+            mediaId: targetMedia.id,
+            season: activeSeason,
+            namespaceGroup: payload.namespaceGroup,
+          }))
+        ) {
+          await trx
+            .updateTable("demands")
+            .set({
+              status: "fulfilled",
+              last_explored_at: ctx.now,
+              lease_expires_at: null,
+              updated_at: ctx.now,
+            })
+            .where("id", "=", lockedDemand.id)
+            .where("status", "=", "leased")
+            .where("lease_generation", "=", activeDemandLeaseGeneration)
+            .execute();
+          return;
         }
 
         if (demandOutcome === "submitted") {

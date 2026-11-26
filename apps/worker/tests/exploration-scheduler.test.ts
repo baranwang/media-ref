@@ -1177,7 +1177,8 @@ describe("Exploration scheduler (#28)", () => {
       .selectFrom("exploration_daily_budget")
       .selectAll()
       .execute();
-    expect(budgetWhenNoTier3).toHaveLength(0);
+    // The catalog group (TMDB external ID) is always explorable, so a budget row may exist, unused.
+    expect(budgetWhenNoTier3.reduce((sum, row) => sum + row.consumed, 0)).toBe(0);
 
     // 2. Mixed registry: Tier 1 (youku), Tier 2 (bilibili stub, tencent), Tier 3 (iqiyi) -> all but youku
     const tier2Tencent: Tier2Adapter<"tencent"> = {

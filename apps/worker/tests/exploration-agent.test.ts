@@ -76,9 +76,11 @@ interface StubOptions {
    * null = 360kan answers HTTP 500.
    */
   kan360Rows: Array<[string, string, string]> | null;
+  /** iQIYI search answers HTTP 500 (a failing discovery source). */
+  failIqiyiSearch?: boolean;
 }
 
-function createHttpStub({ kan360Rows }: StubOptions) {
+function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     const url = new URL(request.url);
     if (request.namespace === "tmdb" && request.url.includes("/tv/95479")) {
@@ -120,6 +122,9 @@ function createHttpStub({ kan360Rows }: StubOptions) {
       return jsonResponse(request.url, { msg: "movie_not_found", code: 5000 });
     }
     if (url.hostname === "search.video.iqiyi.com") {
+      if (failIqiyiSearch) {
+        return jsonResponse(request.url, {}, 500);
+      }
       return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
     }
     if (request.url.startsWith("https://api.bilibili.com/pgc/view/web/season?ep_id=")) {
@@ -399,5 +404,38 @@ describe("Exploration agent: discover → judge → gate", () => {
     const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
     expect(checks.map((c) => c.platform)).not.toContain("bilibili");
     expect(checks).toHaveLength(platformCount - 1);
+  });
+
+  const markNotFound = (): ModelInvocationResponse => ({
+    content: null,
+    toolCalls: [{ id: "call_nf", name: "mark_not_found", arguments: { reason: "no match" } }],
+    model: "test-model",
+  });
+
+  test("fast path also needs the default mapping to fit the fetched episodes", async () => {
+    // Season 2's 23-episode collection passes Step 1 (title, year and count of *a* season match),
+    // but mapping season 1's 24 episodes onto it does not fit, so the model decides instead.
+    const { testDb, outbound, explore } = await setup(
+      { kan360Rows: [["咒术回战 第二季", "2023", "45574"]] },
+      markNotFound,
+    );
+
+    await explore();
+
+    expect(outbound.modelRequests).toHaveLength(1);
+    expect(await testDb.readDb.selectFrom("change_requests").select("id").execute()).toEqual([]);
+  });
+
+  test("a negative judgement while a discovery source failed stays transient", async () => {
+    const { testDb, outbound, explore } = await setup(
+      { kan360Rows: [["咒术回战 第二季", "2023", "45574"]], failIqiyiSearch: true },
+      markNotFound,
+    );
+
+    await explore();
+
+    expect(outbound.modelRequests).toHaveLength(1);
+    const checks = await testDb.readDb.selectFrom("platform_checks").select("platform").execute();
+    expect(checks.map((c) => c.platform)).not.toContain("bilibili");
   });
 });
