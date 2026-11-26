@@ -58,6 +58,11 @@ export interface TmdbGateway {
   fetchChanges(mediaType: MediaType, options: TmdbChangesOptions): Promise<TmdbChangesResult>;
   /** TMDB entries whose IMDb ID is `imdbId` (`/find`); empty when there are none. */
   findByImdbId(imdbId: string): Promise<Array<{ type: MediaType; id: string }>>;
+  /** Episode numbers and air dates (YYYY-MM-DD) of one TV season; empty when unknown. */
+  fetchSeasonEpisodes(
+    tvId: string,
+    season: number,
+  ): Promise<Array<{ episode: number; airDate: string | null }>>;
 }
 
 export type TmdbGatewayErrorCode =
@@ -331,6 +336,29 @@ export function createTmdbGateway(
   }
 
   return {
+    async fetchSeasonEpisodes(tvId, season) {
+      const fetched = await fetchTmdbJson(
+        buildTmdbUrl(`/tv/${encodeURIComponent(tvId)}/season/${season}`, { language }),
+        `tv:${tvId}:season:${season}`,
+      );
+      if (!fetched.ok) {
+        return [];
+      }
+      const rows = fetched.data.episodes;
+      const episodes: Array<{ episode: number; airDate: string | null }> = [];
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const rec = (row ?? {}) as Record<string, unknown>;
+        if (typeof rec.episode_number === "number" && Number.isInteger(rec.episode_number)) {
+          const airDate = nonEmptyString(rec.air_date);
+          episodes.push({
+            episode: rec.episode_number,
+            airDate: airDate && /^\d{4}-\d{2}-\d{2}$/.test(airDate) ? airDate : null,
+          });
+        }
+      }
+      return episodes.toSorted((a, b) => a.episode - b.episode);
+    },
+
     async findByImdbId(imdbId) {
       const fetched = await fetchTmdbJson(
         buildTmdbUrl(`/find/${encodeURIComponent(imdbId)}`, { external_source: "imdb_id" }),
