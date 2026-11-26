@@ -120,16 +120,10 @@ describe("discoverCandidates", () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
         const url = new URL(request.url);
-        if (url.hostname === "frodo.douban.com" && url.pathname === "/api/v2/search/weixin") {
-          expect(url.searchParams.get("q")).toBe("tt7605074");
-          // The first hit is another subject: only the one whose desc lists the IMDb ID counts.
-          return json(request, {
-            items: [{ target: { id: "1" } }, { target: { id: "26266893" } }],
-          });
-        }
-        if (url.hostname === "frodo.douban.com" && url.pathname.endsWith("/desc")) {
-          const imdb = url.pathname === "/api/v2/subject/26266893/desc" ? "tt7605074" : "tt0000002";
-          return json(request, { html: `<tr> <td>IMDb</td> <td>${imdb}</td> </tr>` });
+        if (url.hostname === "api.douban.com") {
+          expect(request.method).toBe("POST");
+          expect(url.pathname).toBe("/v2/movie/imdb/tt7605074");
+          return json(request, { id: "https://api.douban.com/movie/26266893" });
         }
         if (url.hostname === "frodo.douban.com") {
           expect(url.pathname).toBe("/api/v2/subject/26266893");
@@ -170,10 +164,8 @@ describe("discoverCandidates", () => {
     ]);
     // Douban vendor IDs come from the app URI, so no platform page was fetched.
     expect(outbound.httpRequests.map((r) => new URL(r.url).hostname).sort()).toEqual([
+      "api.douban.com",
       "api.so.360kan.com",
-      "frodo.douban.com",
-      "frodo.douban.com",
-      "frodo.douban.com",
       "frodo.douban.com",
       "search.video.iqiyi.com",
     ]);
@@ -221,15 +213,8 @@ describe("discoverCandidates", () => {
     const withImdb = createFakeOutboundClient({
       fetchExternal(request) {
         const host = new URL(request.url).hostname;
-        if (host === "frodo.douban.com") {
-          // A search hit whose own IMDb ID differs is not this media.
-          const { pathname } = new URL(request.url);
-          return json(
-            request,
-            pathname.endsWith("/desc")
-              ? { html: "<td>IMDb</td><td>tt9999999</td>" }
-              : { items: [{ target: { id: "123" } }] },
-          );
+        if (host === "api.douban.com") {
+          return json(request, { msg: "movie_not_found", code: 5000 });
         }
         if (host === "api.so.360kan.com") {
           return json(request, { code: 0, msg: "ok", data: { longData: { rows: [] } } });

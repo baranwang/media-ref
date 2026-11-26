@@ -1,7 +1,8 @@
 import type { ExternalHttpRequest, ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 
 /**
- * Douban access through the WeChat mini program API (frodo), the way douban-bridge does it.
+ * Douban access through the WeChat mini program API (frodo), the way douban-bridge does it,
+ * except IMDb lookups (see fetchDoubanImdbLookup).
  * Tests set the delays to 0.
  *
  * Douban answers bursts with HTTP 400 (frodo after ~19 quick requests from one IP), so every
@@ -77,7 +78,26 @@ export function fetchDoubanFrodo(
   });
 }
 
-/** The IMDb ID a Douban subject lists in its info table (frodo `/subject/<id>/desc` HTML). */
-export function parseDoubanDescImdbId(html: string): string | null {
-  return html.match(/<td>\s*IMDb\s*<\/td>\s*<td>\s*(tt\d+)\s*<\/td>/i)?.[1] ?? null;
+// frodo search needs a login after ~18 queries, so IMDb lookups use the older v2 endpoint. It
+// rejects the frodo key and the mini program referer, so it keeps its own public key and a mobile UA.
+const DOUBAN_IMDB_API = "https://api.douban.com/v2/movie/imdb";
+const DOUBAN_IMDB_LOOKUP_KEY = "0ac44ae016490db2204ce0a042db2916";
+const MOBILE_UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+
+/** POST the IMDb lookup (`tt…` → `{ id: "https://api.douban.com/movie/<subject>" }`), paced. */
+export function fetchDoubanImdbLookup(
+  outbound: OutboundClient,
+  imdbId: string,
+  options: { kind: ExternalHttpRequest["kind"]; timeoutMs?: number },
+): Promise<ExternalHttpResponse> {
+  return fetchDoubanPaced(outbound, {
+    kind: options.kind,
+    namespace: "douban",
+    url: `${DOUBAN_IMDB_API}/${encodeURIComponent(imdbId)}`,
+    method: "POST",
+    headers: { "content-type": "application/json", "user-agent": MOBILE_UA },
+    body: JSON.stringify({ apikey: DOUBAN_IMDB_LOOKUP_KEY }),
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+  });
 }
