@@ -47,7 +47,9 @@ import {
  *     year from `firstVideo.period` or CST (`UTC+8`) year of `publishTime` (never `data.period`
  *     on TV albums, because `data.period` holds the latest episode air date).
  *   - `GET https://pcw-api.iqiyi.com/albums/album/avlistinfo?aid=<id>&page=<p>&size=50` paginating
- *     `data.epsodelist` and keeping only `contentType === 1` feature episodes.
+ *     `data.epsodelist` and keeping only `contentType === 1` feature episodes. When every episode
+ *     has a distinct positive `order` (its episode number) the list is sorted by it, and a gap in
+ *     those numbers (a taken-down episode) leaves `featureEpisodeCount` null.
  * - Movies (`id` ending in `00`, or fallback when `album/album/baseinfo` returns `A00001`):
  *   - `GET https://pcw-api.iqiyi.com/video/video/baseinfo/<id>` for title, `channelId`, release
  *     year (`period` / `publishTime`), and 1 feature item.
@@ -632,7 +634,7 @@ async function resolveVideoPageToCanonicalId(
 }
 
 type FetchAvListResult =
-  | { status: "ok"; episodes: FeatureEpisode[] | null }
+  | { status: "ok"; episodes: FeatureEpisode[] | null; numberingGap: boolean }
   | { status: "transient_error"; reason: string };
 
 const IQIYI_LW_BASE_INFO_API = "https://www.iqiyi.com/prelw/tvg/v2/lw/base_info";
@@ -777,6 +779,7 @@ async function fetchAlbumFeatureEpisodes(
   outbound: OutboundClient,
 ): Promise<FetchAvListResult> {
   const episodes: FeatureEpisode[] = [];
+  const orders: (number | null)[] = [];
   const seenEpisodeIds = new Set<string>();
   let totalRawItemsSeen = 0;
   let sawValidEpisodeList = false;
@@ -804,7 +807,7 @@ async function fetchAlbumFeatureEpisodes(
       return { status: "transient_error", reason: envelope.transientReason };
     }
     if (isIqiyiNotFoundCode(envelope.code)) {
-      return { status: "ok", episodes: null };
+      return { status: "ok", episodes: null, numberingGap: false };
     }
     if (envelope.code !== "A00000") {
       return { status: "transient_error", reason: `iqiyi_code_${envelope.code}` };
@@ -812,7 +815,7 @@ async function fetchAlbumFeatureEpisodes(
 
     const data = asRecord(envelope.data);
     if (!data) {
-      return { status: "ok", episodes: null };
+      return { status: "ok", episodes: null, numberingGap: false };
     }
 
     const rawList = Array.isArray(data.epsodelist)
@@ -821,7 +824,7 @@ async function fetchAlbumFeatureEpisodes(
         ? data.episodelist
         : null;
     if (!rawList) {
-      return { status: "ok", episodes: sawValidEpisodeList ? episodes : null };
+      break;
     }
 
     sawValidEpisodeList = true;
@@ -844,12 +847,14 @@ async function fetchAlbumFeatureEpisodes(
         seenEpisodeIds.add(nativeEpisodeId);
       }
 
+      const order = parsePositiveInt(ep.order);
       const title =
         nonEmptyString(ep.shortTitle) ??
         nonEmptyString(ep.name) ??
-        (parsePositiveInt(ep.order) !== null ? String(parsePositiveInt(ep.order)) : null);
+        (order !== null ? String(order) : null);
       const longTitle = nonEmptyString(ep.name);
 
+      orders.push(order);
       episodes.push({
         index: episodes.length + 1,
         ...(nativeEpisodeId ? { nativeEpisodeId } : {}),
@@ -871,7 +876,24 @@ async function fetchAlbumFeatureEpisodes(
     }
   }
 
-  return { status: "ok", episodes: sawValidEpisodeList ? episodes : null };
+  if (!sawValidEpisodeList) {
+    return { status: "ok", episodes: null, numberingGap: false };
+  }
+  // `order` is the episode number ("第N集") only when every episode has a distinct positive one;
+  // otherwise (all 0, or one value shared by the parts of one episode) the API order stands.
+  if (orders.some((order) => order === null) || new Set(orders).size !== orders.length) {
+    return { status: "ok", episodes, numberingGap: false };
+  }
+  const numbered = episodes
+    .map((episode, i) => ({ episode, order: orders[i]! }))
+    .toSorted((a, b) => a.order - b.order);
+  return {
+    status: "ok",
+    episodes: numbered.map(({ episode }, i) => ({ ...episode, index: i + 1 })),
+    // A taken-down episode keeps its number out of the list (熊出没全集 skips 第523集), so the
+    // episodes after it no longer sit at their own number.
+    numberingGap: numbered.some(({ order }, i) => i > 0 && order !== numbered[i - 1]!.order + 1),
+  };
 }
 
 async function fetchAlbumCollection(
@@ -947,7 +969,8 @@ async function fetchAlbumCollection(
     featureEpisodes = variety.episodes;
   }
   featureEpisodes = selectBroadcastEpisodes(featureEpisodes);
-  const featureEpisodeCount = featureEpisodes.length > 0 ? featureEpisodes.length : null;
+  const featureEpisodeCount =
+    featureEpisodes.length > 0 && !avListResult.numberingGap ? featureEpisodes.length : null;
   const aliases = collectAliases(data, title);
   const originalTitle = nonEmptyString(data.originName) ?? nonEmptyString(data.originalName);
 

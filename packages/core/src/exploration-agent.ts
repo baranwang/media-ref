@@ -1244,6 +1244,7 @@ async function runAgentSession(
     registry: ctx.adapterRegistry,
     tmdb: ctx.tmdbGateway,
     collectionNamespaces: targets.map((t) => t.namespace),
+    now: ctx.now,
     seasons: ctx.media.snapshot.seasons,
     tmdbTvId:
       ctx.media.baseline === "tmdb"

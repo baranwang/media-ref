@@ -78,7 +78,7 @@ import {
   type ChangeRequestRecord,
 } from "./media-service.ts";
 import type { ModelToolCall, ModelToolDefinition } from "./outbound.ts";
-import { lastAiredEpisode, seasonCoverageConflict, type SeasonEpisode } from "./season-coverage.ts";
+import { seasonCoverageConflict, type SeasonEpisode } from "./season-coverage.ts";
 import { createTmdbGateway, type TmdbGateway, type TmdbGatewayConfig } from "./tmdb.ts";
 import { formatUtcDate } from "./tmdb-sync.ts";
 import { reportPiUsage } from "./tokens-report.ts";
@@ -509,6 +509,7 @@ function buildSystemPrompt(
     "   Example: 灵笼 season 1 on Bilibili has 16 entries: 001–006, 中章, 007–012, 终章上, 终章下, 特别篇. TMDB season 1 has 12 episodes; 中章, 终章 and 特别篇 are in TMDB season 0. Mapping the whole season from position 1 puts TMDB 7–12 on positions 7–12, one off. The right segments are episodes 1–6 at positions 1–6 and 7–12 at positions 8–13. Extras at the end of the list need no split.",
     "   Platform publication dates and intermediate installments do not verify a whole season. Check the final broadcast installment or its distinctive subtitle; use a finite range for a partial collection.",
     "   For variety shows or collections covering a complete season whose episode count diverges from TMDB because broadcast parts (第N期上/下) and extras/prologues are grouped differently (e.g. 20 broadcast parts covering the whole run while TMDB lists 47 with extras), do NOT truncate episodeEnd to a shorter linear prefix like 1..20; approve or correct with { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.",
+    "   A season still airing (get_catalog_season reports stillAiring) is mapped open-ended: episodeEnd: null covers the episodes aired so far and grows with the season. A collection that reaches stillAiring.lastAiredEpisode covers that season: do not reject it for holding fewer positions than episodeCount, and do not cut episodeEnd to the aired count.",
     "5. Long lists come in windows of 80. When a result has episodesTruncated, fetch the rest with get_collection fromPosition and get_catalog_season fromEpisode before judging positions you have not seen; request all the windows you need in one turn.",
     mode === "approved"
       ? "6. If you cannot confirm the mapping is wrong, keep it and say what you found."
@@ -1021,7 +1022,12 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
     // re-checked against them (§4).
     const collected = new Map<string, CollectionInfo>();
     const fetchedCollections = new Map<string, { info: CollectionInfo; step: number }>();
-    const seasonWindows: Array<{ season: number; step: number; episodes: SeasonEpisode[] }> = [];
+    const seasonWindows: Array<{
+      season: number;
+      step: number;
+      episodes: SeasonEpisode[];
+      lastAired: number | null;
+    }> = [];
     const queries: Array<{ tool: string; arguments: Record<string, unknown> }> = [];
     let conclusion: ReviewConclusion | null = null;
     let conclusionStep = 0;
@@ -1036,6 +1042,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         tmdb: tmdbGateway,
         collectionNamespaces: [cr.namespace],
         reportLiveFetch: true,
+        now: ctx.now,
         seasons: catalog.seasons ?? [],
         tmdbTvId:
           catalog.namespace === "tmdb"
@@ -1120,10 +1127,16 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             }
           }
           if (call.name === "get_catalog_season" && typeof args.season === "number") {
+            const airing =
+              "stillAiring" in result
+                ? (result.stillAiring as { lastAiredEpisode?: unknown })
+                : null;
             seasonWindows.push({
               season: args.season,
               step,
               episodes: result.episodes as SeasonEpisode[],
+              lastAired:
+                typeof airing?.lastAiredEpisode === "number" ? airing.lastAiredEpisode : null,
             });
           }
         },
@@ -1160,8 +1173,11 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
     }
     // Only what the model saw before the turn it concluded in counts.
     const seasonEpisodes: Record<number, SeasonEpisode[]> = {};
-    for (const { season, step, episodes } of seasonWindows) {
+    const lastAired: Record<number, number> = {};
+    for (const { season, step, episodes, lastAired: aired } of seasonWindows) {
       if (step >= conclusionStep) continue;
+      // From the whole TMDB list, as the model was told, not only the windows it read.
+      if (aired !== null) lastAired[season] = aired;
       const byEpisode = new Map((seasonEpisodes[season] ?? []).map((e) => [e.episode, e]));
       for (const episode of episodes) byEpisode.set(episode.episode, episode);
       seasonEpisodes[season] = [...byEpisode.values()];
@@ -1173,7 +1189,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           .map(([key, f]) => [key, f.info]),
       ),
       seasonEpisodes,
-      now: ctx.now,
+      lastAired,
     };
     let correction = concluded?.correction ?? null;
     const record = (verdict: ReviewVerdict, fallback: string | null, extra: JsonObject = {}) =>
@@ -1511,7 +1527,8 @@ async function rejectPlainlyInTx(
 interface SessionFetches {
   fetchedCollections: ReadonlyMap<string, CollectionInfo>;
   seasonEpisodes: Record<number, SeasonEpisode[]>;
-  now: Date;
+  /** Seasons get_catalog_season reported as still airing, by their last aired episode. */
+  lastAired: Record<number, number>;
 }
 
 /** Whether the session fetched the collection and every season of these segments. */
@@ -1581,8 +1598,8 @@ function boundToCollection(
         return s;
       }
       const lastSeen = s.episodeStart + available - s.targetEpisodeStart;
-      const aired = lastAiredEpisode(fetched.seasonEpisodes[s.season] ?? [], fetched.now);
-      if (aired !== null && lastSeen >= aired) {
+      const aired = fetched.lastAired[s.season];
+      if (aired !== undefined && lastSeen >= aired) {
         return s;
       }
       const count = seasons.find((x) => x.season === s.season)?.episodeCount ?? null;

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { CollectionInfo } from "../src/adapters/index.ts";
 import { checkSegmentsFitCollection } from "../src/exploration-agent.ts";
+import { runQueryTool, type ToolContext } from "../src/exploration-tools.ts";
 import {
   lastAiredEpisode,
   seasonCoverageConflict,
@@ -540,5 +541,40 @@ describe("season coverage", () => {
         { ...three[2]!, title: "Special Delivery" },
       ]),
     ).toBeNull();
+  });
+});
+
+describe("get_catalog_season stillAiring", () => {
+  const now = new Date("2026-11-27T12:00:00Z");
+  // Every season has an aired episode and one scheduled ahead.
+  const ctx = {
+    seasons: [
+      { season: 0, episodeCount: 2 },
+      { season: 1, episodeCount: 2 },
+      { season: 2, episodeCount: 2 },
+    ],
+    tmdbTvId: "1",
+    now,
+    tmdb: {
+      fetchSeasonEpisodes: async () => [
+        { episode: 1, title: null, airDate: "2026-11-20" },
+        { episode: 2, title: null, airDate: "2026-12-04" },
+      ],
+    },
+  } as unknown as ToolContext;
+  const read = (season: number) =>
+    runQueryTool(ctx, "get_catalog_season", { season }) as Promise<Record<string, unknown>>;
+
+  test("marks only the latest regular season, as exploration does", async () => {
+    expect(await read(2)).toMatchObject({ stillAiring: { lastAiredEpisode: 1 } });
+    expect(await read(1)).not.toHaveProperty("stillAiring");
+    expect(await read(0)).not.toHaveProperty("stillAiring");
+  });
+
+  test("without today it says nothing", async () => {
+    const undated = { ...ctx, now: undefined } as ToolContext;
+    expect(await runQueryTool(undated, "get_catalog_season", { season: 2 })).not.toHaveProperty(
+      "stillAiring",
+    );
   });
 });

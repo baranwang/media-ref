@@ -1,0 +1,219 @@
+{
+  "ret": 0,
+  "msg": "",
+  "data": {
+    "errcode": 0,
+    "errmsg": "",
+    "normalList": {
+      "errcode": 0,
+      "itemList": [
+        {
+          "doc": {
+            "id": "mzc00200whsp9r6",
+            "dataType": 2
+          },
+          "videoInfo": {
+            "title": "繁花",
+            "typeName": "电视剧",
+            "year": 2023,
+            "videoType": 2,
+            "playSites": [
+              {
+                "enName": "qq",
+                "showName": "腾讯视频"
+              }
+            ],
+            "subjectDoc": {
+              "videoNum": 30
+            }
+          }
+        },
+        {
+          "doc": {
+            "id": "mzc00200zm78rjz",
+            "dataType": 2
+          },
+          "videoInfo": {
+            "title": "繁花剧场版",
+            "typeName": "电视剧",
+            "year": 2024,
+            "videoType": 2,
+            "playSites": [
+              {
+                "enName": "qq",
+                "showName": "腾讯视频"
+              }
+            ],
+            "subjectDoc": {
+              "videoNum": 6
+            }
+          }
+        },
+        {
+          "doc": {
+            "id": "g00470yki2y",
+            "dataType": 1
+          },
+          "videoInfo": {
+            "title": "纯享：胡歌唐嫣再现沪语版《<em>繁花</em>》",
+            "typeName": "综艺",
+            "year": 0,
+            "videoType": 10,
+            "playSites": []
+          }
+        },
+        {
+          "doc": {
+            "id": "d3536u1hsol",
+            "dataType": 1
+          },
+          "videoInfo": {
+            "title": "【花絮】胡歌辛芷蕾告别入戏太深",
+            "typeName": "电视剧",
+            "year": 0,
+            "videoType": 2,
+            "playSites": []
+          }
+        },
+        {
+          "doc": {
+            "id": "rec_query",
+            "dataType": 54
+          },
+          "videoInfo": null
+        }
+      ]
+    },
+    "areaBoxList": [
+      {
+        "boxId": "3505",
+        "boxTitle": {
+          "boxTitles": ["相关影视"]
+        },
+        "itemList": [
+          {
+            "doc": {
+              "id": "mzc002006wiw7ll",
+              "dataType": 2
+            },
+            "videoInfo": {
+              "title": "繁花",
+              "typeName": "电视剧",
+              "year": 2023,
+              "videoType": 2,
+              "playSites": [
+                {
+                  "enName": "qq",
+                  "showName": "腾讯视频"
+                }
+              ],
+              "subjectDoc": {
+                "videoNum": 30
+              }
+            }
+          },
+          {
+            "doc": {
+              "id": "mzc003csayenbd6",
+              "dataType": 2
+            },
+            "videoInfo": {
+              "title": "从《繁花》读懂上海的巨变密码",
+              "typeName": "纪录片",
+              "year": 0,
+              "videoType": 9,
+              "playSites": [
+                {
+                  "enName": "qq",
+                  "showName": "腾讯视频"
+                }
+              ],
+              "subjectDoc": {
+                "videoNum": 0
+              }
+            }
+          },
+          {
+            "doc": {
+              "id": "f7q4utz4ns1e80g",
+              "dataType": 2
+            },
+            "videoInfo": {
+              "title": "东方华尔街",
+              "typeName": "电视剧",
+              "year": 2018,
+              "videoType": 2,
+              "playSites": [
+                {
+                  "enName": "qq",
+                  "showName": "腾讯视频"
+                }
+              ],
+              "subjectDoc": {
+                "videoNum": 5
+              }
+            }
+          },
+          {
+            "doc": {
+              "id": "ebs95dw6bk6e0z3",
+              "dataType": 2
+            },
+            "videoInfo": {
+              "title": "风云天地",
+              "typeName": "电视剧",
+              "year": 2015,
+              "videoType": 2,
+              "playSites": [
+                {
+                  "enName": "qiyi",
+                  "showName": "播放源"
+                }
+              ],
+              "subjectDoc": {
+                "videoNum": 34
+              }
+            }
+          },
+          {
+            "doc": {
+              "id": "oqb2silovbd7zpv",
+              "dataType": 2
+            },
+            "videoInfo": {
+              "title": "大时代",
+              "typeName": "电视剧",
+              "year": 1992,
+              "videoType": 2,
+              "playSites": [],
+              "subjectDoc": {
+                "videoNum": 40
+              }
+            }
+          },
+          {
+            "doc": {
+              "id": "mzc0039z05l7leh",
+              "dataType": 2
+            },
+            "videoInfo": {
+              "title": "繁花1997",
+              "typeName": "短剧",
+              "year": 0,
+              "videoType": 2,
+              "playSites": [
+                {
+                  "enName": "qq",
+                  "showName": "腾讯视频"
+                }
+              ],
+              "subjectDoc": {
+                "videoNum": 85
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

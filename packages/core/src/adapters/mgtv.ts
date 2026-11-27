@@ -28,7 +28,11 @@ import {
  *
  * Tier 2 data sources (unauthenticated public endpoints via `OutboundClient`):
  * - `GET https://pcweb.api.mgtv.com/episode/list?collection_id=<id>&page=<p>&size=50`
- *   Paginated episode list; feature episodes strictly filtered by `isIntact === "1"` (`"3"` = trailer/preview).
+ *   Paginated episode list; feature episodes strictly filtered by `isIntact === "1"` (`"3"` = trailer/preview,
+ *   always paired with `isnew === "2"`). Variety lists also carry other collections' clips, all `isIntact === "1"`,
+ *   so items whose `src_clip_id` is not the requested collection are dropped (2026-11-28: 13 of 45 in 快乐大本营 2021,
+ *   4 of 57 in 大侦探 第十一季; none in dramas). Variety extras of the collection itself (加更, 纯享, 沉浸版…) are
+ *   `isIntact === "1"` too; `selectBroadcastEpisodes` removes them only where broadcasts are labelled "第N期".
  * - `GET https://pcweb.api.mgtv.com/video/info?cid=<id>&vid=<firstVid>`
  *   Extracts `clipName` (title), `fstlvlType` (mediaType), and `detail.releaseTime` (4-digit premiere year).
  *
@@ -37,8 +41,12 @@ import {
  *   - `GET https://mobileso.bz.mgtv.com/msite/search/v2` returns HTTP 403 (`Forbidden`).
  *   - `GET https://mobileso.bz.mgtv.com/pc/search/v1` returns HTTP 401 (`{"code":200,"data":{"listItems":[],"totalHits":0,"forbidden":2}}`).
  *   - `GET https://so.mgtv.com/so?k=...` returns an empty Nuxt SPA shell that loads results client-side from those gated APIs.
- * - Therefore `mgtvAdapter` intentionally remains `tier: 2` (no `search` method) and is excluded
- *   from automated exploration job target lists.
+ * - The Android app's `GET https://mobileso.bz.mgtv.com/aphone/search/rebirth/v2` (Dalvik UA, app device params)
+ *   answers without a sign, but is geo-filtered (2026-11-28): from Cloudflare Workers (SIN) and the HK egress relay,
+ *   mainland-licensed dramas and films get no `mediaRebirthV2` card (去有风的地方, 小巷人家: none; 长安的荔枝: only
+ *   Tencent's), while Mango variety still does. Empty results there would read as "not on Mango TV", so it is not used.
+ * - Therefore `mgtvAdapter` intentionally remains `tier: 2` (no `search` method): exploration still targets it
+ *   through `get_collection`, but `search_platform` does not offer it.
  */
 
 const MGTV_ALLOWED_HOSTS = new Set(["mgtv.com", "www.mgtv.com", "m.mgtv.com", "w.mgtv.com"]);
@@ -430,6 +438,12 @@ export const mgtvAdapter: Tier2Adapter<"mgtv"> = {
     const collectPageItems = (rawList: unknown[]) => {
       for (const rawItem of rawList) {
         if (!isRecord(rawItem)) {
+          continue;
+        }
+        // Variety lists lend in side collections' clips (慢直播, 直拍, 纯享…) as isIntact "1";
+        // only `src_clip_id` tells them apart (`clip_id` is always the requested collection).
+        const srcClipId = parseNumericIdString(rawItem.src_clip_id);
+        if (srcClipId !== null && srcClipId !== collectionId) {
           continue;
         }
         const vid = parseNumericIdString(rawItem.video_id);
