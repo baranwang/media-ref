@@ -147,6 +147,8 @@ describe("catalog-group exploration", () => {
     invokeModel?: FakeOutboundHandlers["invokeModel"];
     explorationAgent?: ExplorationAgentConfig;
     tmdbExternalIds?: Record<string, string>;
+    /** The catalog demand's season (default: the whole media). */
+    season?: number;
   }) {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -201,7 +203,7 @@ describe("catalog-group exploration", () => {
       .insertInto("demands")
       .values({
         media_id: row.id,
-        season: null,
+        season: media.season ?? null,
         namespace_group: "catalog",
         status: "open",
         next_eligible_at: T0,
@@ -1050,6 +1052,73 @@ describe("catalog-group exploration", () => {
       .executeTakeFirstOrThrow();
     expect(approved.status).toBe("approved");
     expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("fulfilled");
+  });
+
+  test("a later season's Douban subject is found via its first episode's IMDb ID", async () => {
+    // Live: Douban files 权力的游戏 S2 under S2E1's IMDb ID; the series ID finds 「第一季」.
+    const subjects: Record<string, { id: string; title: string; year: string }> = {
+      tt0944947: { id: "3016187", title: "权力的游戏 第一季", year: "2011" },
+      tt1971833: { id: "6558062", title: "权力的游戏 第二季", year: "2012" },
+    };
+    const { testDb, outbound, runJobs } = await setup({
+      baseline: "tmdb",
+      type: "tv",
+      title: "权力的游戏",
+      originalTitle: "Game of Thrones",
+      year: 2011,
+      seasons: [
+        { season: 1, episodeCount: 10, airYear: 2011 },
+        { season: 2, episodeCount: 10, airYear: 2012 },
+        { season: 3, episodeCount: 10, airYear: 2013 },
+      ],
+      externalIds: [
+        ["tmdb", "tv:1399"],
+        ["imdb", "tt0944947"],
+      ],
+      season: 2,
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/tv/1399/season/2/episode/1/external_ids")) {
+          return json(request.url, { imdb_id: "tt1971833" });
+        }
+        const imdb = url.pathname.match(/^\/v2\/movie\/imdb\/(tt\d+)$/)?.[1];
+        if (url.hostname === "api.douban.com" && imdb) {
+          const subject = subjects[imdb];
+          return json(
+            request.url,
+            subject ? { id: `https://api.douban.com/movie/${subject.id}` } : { code: 5000 },
+          );
+        }
+        const subjectId = url.pathname.match(/\/subject\/(\d+)$/)?.[1];
+        const subject = Object.values(subjects).find((s) => s.id === subjectId);
+        if (url.hostname === "frodo.douban.com" && subject) {
+          return json(request.url, {
+            title: subject.title,
+            original_title: "Game of Thrones",
+            year: subject.year,
+            is_tv: true,
+            subtype: "tv",
+            episodes_count: 10,
+          });
+        }
+        return null;
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    const crs = await testDb.readDb
+      .selectFrom("change_requests")
+      .select(["namespace", "native_id", "status"])
+      .execute();
+    expect(crs).toEqual([
+      { namespace: "douban", native_id: "6558062", status: "pending_evidence" },
+    ]);
+    // The series ID (season 1's subject) is not asked once the season's own subject is found.
+    expect(
+      outbound.httpRequests
+        .filter((r) => r.url.includes("/v2/movie/imdb/"))
+        .map((r) => r.url.split("/").at(-1)),
+    ).toEqual(["tt1971833"]);
   });
 
   test("catalog coverage needs the TMDB ID: a Douban association alone does not fulfill the demand", async () => {

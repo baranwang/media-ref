@@ -48,7 +48,7 @@ import {
 } from "./season-coverage.ts";
 import {
   discoverCandidates,
-  lookupDoubanSubjectByImdb,
+  lookupDoubanSeasonSubject,
   type DiscoveryMediaInput,
   type DiscoveryResult,
 } from "./discovery/candidates.ts";
@@ -404,6 +404,7 @@ function toDiscoveryInput(
   media: ExplorationTargetMedia,
   season: number | null,
   doubanId: string | null,
+  seasonImdbId: string | null,
 ): DiscoveryMediaInput {
   const externalIds: Partial<Record<Namespace, string>> = {};
   for (const ext of media.externalIds) {
@@ -419,6 +420,7 @@ function toDiscoveryInput(
     mediaType: media.type,
     season,
     externalIds,
+    seasonImdbId,
   };
 }
 
@@ -775,7 +777,6 @@ function platformCandidates(
   };
 }
 
-/** Douban candidates: the subject Douban lists for the media's IMDb ID. */
 /**
  * The media's Douban subject when the library already names one, confirmed or seeded (unverified).
  * Platform discovery reads its "where to watch" without the rate-limited IMDb lookup; the links
@@ -815,21 +816,25 @@ async function knownDoubanSubject(
   return row ? { nativeId: row.native_id, confirmed: row.status === "confirmed" } : null;
 }
 
+/**
+ * Douban candidates: the season's subject found by IMDb ID (see lookupDoubanSeasonSubject).
+ * `seasonImdbId` undefined: TMDB failed, so the season's own subject may have been missed.
+ */
 async function doubanCandidates(
   media: ExplorationTargetMedia,
   outbound: OutboundClient,
+  seasonImdbId: string | null | undefined,
 ): Promise<NamespaceCandidates> {
   const imdbId = media.externalIds.find((e) => e.namespace === "imdb")?.nativeId;
   const sourcesById = new Map<string, string[]>();
-  if (!imdbId) {
-    return { sourcesById, sourceErrored: false };
-  }
   try {
-    const subjectId = await lookupDoubanSubjectByImdb(imdbId, outbound);
-    if (subjectId) {
-      sourcesById.set(subjectId, ["douban_imdb"]);
+    const found = await lookupDoubanSeasonSubject({ imdbId, seasonImdbId }, outbound);
+    if (found) {
+      sourcesById.set(found.subjectId, [
+        found.via === "season_imdb" ? "douban_season_imdb" : "douban_imdb",
+      ]);
     }
-    return { sourcesById, sourceErrored: false };
+    return { sourcesById, sourceErrored: seasonImdbId === undefined };
   } catch {
     return { sourcesById, sourceErrored: true };
   }
@@ -869,6 +874,28 @@ interface JobRun {
 interface AiringSeason {
   season: number;
   aired: number;
+}
+
+/**
+ * IMDb ID of the requested season's first episode, under which Douban files that season's subject
+ * (seasons > 1; season 1 is under the series ID). null when there is none, undefined when TMDB failed.
+ */
+async function loadSeasonImdbId(
+  ctx: ExplorationExecutionContext,
+  catalog: CatalogEvidence,
+  budget: SessionBudget,
+): Promise<string | null | undefined> {
+  const tmdbTvId = catalog.namespace === "tmdb" && catalog.canonicalId.match(/^tv:(\d+)$/)?.[1];
+  if (!tmdbTvId || ctx.season === null || ctx.season < 2) return null;
+  try {
+    return await raceWithAbortSignal(
+      ctx.tmdbGateway.fetchEpisodeImdbId(tmdbTvId, ctx.season, 1, budget.signal),
+      budget.signal,
+      BUDGET_EXCEEDED,
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 async function loadAiringSeason(
@@ -2510,10 +2537,22 @@ export function createExplorationAgentExecutor(
         return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
       }
       const doubanSubject = await knownDoubanSubject(ctx.db, ctx.media.id, ctx.season);
-      const discovery = targets.some((a) => isPlatformNamespace(a.namespace))
-        ? await discover(toDiscoveryInput(ctx.media, ctx.season, doubanSubject?.nativeId ?? null), {
-            outbound: ctx.outbound,
-          })
+      const needsPlatforms = targets.some((a) => isPlatformNamespace(a.namespace));
+      // Only needed to look the season's Douban subject up by IMDb ID.
+      const seasonImdbId =
+        targets.some((a) => a.namespace === "douban") || (needsPlatforms && !doubanSubject)
+          ? await loadSeasonImdbId(ctx, catalog, budget)
+          : null;
+      const discovery = needsPlatforms
+        ? await discover(
+            toDiscoveryInput(
+              ctx.media,
+              ctx.season,
+              doubanSubject?.nativeId ?? null,
+              seasonImdbId ?? null,
+            ),
+            { outbound: ctx.outbound },
+          )
         : null;
 
       const run = createJobRun(ctx, catalog, budget, await loadAiringSeason(ctx, catalog, budget));
@@ -2521,7 +2560,7 @@ export function createExplorationAgentExecutor(
       for (const adapter of targets) {
         const candidates =
           adapter.namespace === "douban"
-            ? await doubanCandidates(ctx.media, ctx.outbound)
+            ? await doubanCandidates(ctx.media, ctx.outbound, seasonImdbId)
             : platformCandidates(discovery!, adapter.namespace, doubanSubject?.confirmed ?? false);
         const platformStartMs = clockMs();
         const prepared = await prepareTarget(run, adapter, candidates);

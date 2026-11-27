@@ -215,6 +215,68 @@ describe("discoverCandidates", () => {
     });
   });
 
+  test("finds a later season's Douban subject by its first episode's IMDb ID", async () => {
+    // Live: 权力的游戏 S3 E1 tt2178782 → subject 10590706 「权力的游戏 第三季」; the series ID
+    // tt0944947 → 3016187 「第一季」.
+    const subjects: Record<string, string> = { tt2178782: "10590706", tt0944947: "3016187" };
+    const outboundFor = (seasonKnown: boolean) =>
+      createFakeOutboundClient({
+        fetchExternal(request) {
+          const url = new URL(request.url);
+          if (url.hostname === "api.douban.com") {
+            const imdb = url.pathname.split("/").at(-1)!;
+            const id = imdb === "tt2178782" && !seasonKnown ? undefined : subjects[imdb];
+            return json(
+              request,
+              id ? { id: `https://api.douban.com/movie/${id}` } : { code: 5000 },
+            );
+          }
+          if (url.hostname === "frodo.douban.com") {
+            const id = url.pathname.split("/").at(-1)!;
+            const cid = id === "10590706" ? "gotseason3cover" : "gotseason1cover";
+            return json(request, {
+              title: id === "10590706" ? "权力的游戏 第三季" : "权力的游戏 第一季",
+              year: id === "10590706" ? "2013" : "2011",
+              vendors: [
+                {
+                  id: "qq",
+                  is_ad: false,
+                  uri: `txvideo://v.qq.com/VideoDetailActivity?cid=${cid}`,
+                  url: `douban://douban.com/goToWXMiniProgram?path=play?cid=${cid}`,
+                },
+              ],
+            });
+          }
+          return json(request, {}, 503);
+        },
+      });
+    const media = {
+      title: "权力的游戏",
+      mediaType: "tv" as const,
+      season: 3,
+      externalIds: { imdb: "tt0944947" },
+      seasonImdbId: "tt2178782",
+    };
+    const douban = (r: Awaited<ReturnType<typeof discoverCandidates>>) =>
+      r.candidates.filter((c) => c.sources.some((s) => s.source === "douban"));
+    const lookups = (o: ReturnType<typeof createFakeOutboundClient>) =>
+      o.httpRequests.filter((r) => r.url.includes("/v2/movie/imdb/")).map((r) => r.url.slice(-9));
+
+    const seasonHit = outboundFor(true);
+    const hit = await discoverCandidates(media, { outbound: seasonHit });
+    expect(douban(hit).map((c) => [c.namespace, c.canonicalId, c.title])).toEqual([
+      ["tencent", "gotseason3cover", "权力的游戏 第三季"],
+    ]);
+    // The series ID is not asked once the season's own subject is found.
+    expect(lookups(seasonHit)).toEqual(["tt2178782"]);
+
+    // Douban not knowing the season's ID falls back to the series ID, as before.
+    const seasonMiss = outboundFor(false);
+    const miss = await discoverCandidates(media, { outbound: seasonMiss });
+    expect(douban(miss).map((c) => c.canonicalId)).toEqual(["gotseason1cover"]);
+    expect(lookups(seasonMiss)).toEqual(["tt2178782", "tt0944947"]);
+  });
+
   test("tells 'source has nothing' apart from errors", async () => {
     const withImdb = createFakeOutboundClient({
       fetchExternal(request) {

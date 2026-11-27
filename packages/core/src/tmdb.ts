@@ -108,6 +108,13 @@ export interface TmdbGateway {
     season: number,
     signal?: AbortSignal,
   ): Promise<Array<{ episode: number; title: string | null; airDate: string | null }> | null>;
+  /** IMDb ID of one TV episode (`/tv/{id}/season/{n}/episode/{e}/external_ids`), or null. */
+  fetchEpisodeImdbId(
+    tmdbId: string,
+    season: number,
+    episode: number,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
 }
 
 export type TmdbGatewayErrorCode =
@@ -783,6 +790,19 @@ export function createTmdbGateway(
             ]
           : [];
       });
+    },
+
+    async fetchEpisodeImdbId(tmdbId, season, episode, signal) {
+      const fetched = await fetchTmdbJson(
+        buildTmdbUrl(
+          `/tv/${encodeURIComponent(tmdbId)}/season/${season}/episode/${episode}/external_ids`,
+          {},
+        ),
+        `tv:${tmdbId}:season:${season}:episode:${episode}`,
+        signal,
+      );
+      const imdbId = fetched.ok ? nonEmptyString(fetched.data.imdb_id) : null;
+      return imdbId && /^tt\d+$/.test(imdbId) ? imdbId : null;
     },
 
     findByImdbId(imdbId, reportCount, signal) {
