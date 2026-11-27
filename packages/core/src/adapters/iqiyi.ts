@@ -25,7 +25,9 @@ import {
  *     whose digits end in `00` (e.g. `923452300` for 流浪地球, `7292991076670500` for 流浪地球2).
  *
  * Tier 1 URL & ID Conversion Rules:
- * - Bare numeric `qipuId` / `albumId` (`/^[1-9]\d{5,}$/`) -> canonical directly (no outbound call).
+ * - Bare numeric `albumId` (`/^[1-9]\d{5,}$/`, not ending in `00`) -> canonical directly (no
+ *   outbound call). A bare `00` tvId may be one TV episode, so it is normalized via
+ *   `video/video/baseinfo` -> `data.albumId` (a movie returns its own tvId).
  * - Album URLs (`https://www.iqiyi.com/a_<hash>.html`, `https://m.iqiyi.com/a_<hash>.html`,
  *   `http://iqiyi.com/a_<hash>.html`, or bare `a_<hash>`):
  *   - Fetch desktop SSR HTML `https://www.iqiyi.com/a_<hash>.html` via `OutboundClient`
@@ -433,7 +435,8 @@ export function parseIqiyiInput(raw: string): ParsedNativeIdInput | null {
   }
 
   if (BARE_QIPU_PATTERN.test(trimmed)) {
-    return { kind: "qipu", id: trimmed, canonicalId: trimmed };
+    // A `00` id is a video tvId: a movie (its own album) or one TV episode, told apart only upstream.
+    return { kind: "qipu", id: trimmed, canonicalId: trimmed.endsWith("00") ? null : trimmed };
   }
 
   const bareAlbumMatch = trimmed.match(BARE_ALBUM_HASH_PATTERN);
@@ -1079,6 +1082,10 @@ export const iqiyiAdapter: Tier3Adapter<"iqiyi"> = {
 
     if (parsed.canonicalId !== null) {
       return parsed.canonicalId;
+    }
+
+    if (parsed.kind === "qipu") {
+      return normalizeVideoQipuIdToAlbumId(raw, parsed.id, outbound);
     }
 
     if (parsed.kind === "album_page") {

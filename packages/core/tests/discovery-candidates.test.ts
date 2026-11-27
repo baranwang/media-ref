@@ -132,6 +132,10 @@ describe("discoverCandidates", () => {
         if (url.hostname === "api.so.360kan.com") {
           throw new Error("The operation timed out.");
         }
+        // A bare `00` aid is a tvId, checked upstream: a movie's album is itself.
+        if (request.url === "https://pcw-api.iqiyi.com/video/video/baseinfo/923452300") {
+          return json(request, { code: "A00000", data: { tvId: 923452300, albumId: 923452300 } });
+        }
         return json(request, {}, 500);
       },
     });
@@ -162,11 +166,13 @@ describe("discoverCandidates", () => {
         reason: "unsupported_platform:miguvideo",
       }),
     ]);
-    // Douban vendor IDs come from the app URI, so no platform page was fetched.
+    // Douban vendor IDs come from the app URI, so no platform page was fetched; only the
+    // iQIYI `00` tvId was checked against its album.
     expect(outbound.httpRequests.map((r) => new URL(r.url).hostname).sort()).toEqual([
       "api.douban.com",
       "api.so.360kan.com",
       "frodo.douban.com",
+      "pcw-api.iqiyi.com",
       "search.video.iqiyi.com",
     ]);
   });
