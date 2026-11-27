@@ -36,7 +36,13 @@ import {
  * - Collection metadata: `page_id: "detail_page_introduction"` (`title`, `year`, `type`/`type_name`, `episode_all`).
  * - Feature episode list: `page_id: "vsite_episode_list"`, paginated across `module_params.tabs[].page_context`.
  *   Strictly filters feature episodes (`is_trailer === "0"` and numeric `title`/`c_title_output` for series,
- *   excluding trailers and bonus `彩蛋` clips).
+ *   excluding trailers and bonus `彩蛋` clips; the collection title is ignored when looking for those
+ *   markers, so the film 幕后玩家 keeps its feature).
+ * - Chaptered cids: some variety cids hold several seasons as chapters (毛雪汪 `mzc00200xkb43kw`:
+ *   2021冬 … 2026秋). The episode list then returns only the first chapter, with a numeric
+ *   `episode_on_chapter` on its items, and the chapter names appear only in search results. Such a cid keeps the
+ *   episodes it listed but reports `featureEpisodeCount: null`, so the Evidence Gate never approves
+ *   one chapter's count as the whole cid's.
  * ## Tier 3 Search (`search`)
  * - Endpoint: `POST https://pbaccess.video.qq.com/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2`
  *   with body `{version:"25071701", clientType:1, query, pagenum, pagesize:30, isPrefetch:true,
@@ -333,6 +339,7 @@ function extractIntroItemParams(
 function isFeatureEpisodeItem(
   params: Record<string, unknown>,
   mediaType: MediaType | null,
+  collectionTitle: string,
 ): boolean {
   const isTrailer = params.is_trailer;
   if (isTrailer !== "0" && isTrailer !== 0) {
@@ -341,11 +348,11 @@ function isFeatureEpisodeItem(
 
   const title = nonEmptyString(params.title);
   const cTitleOutput = nonEmptyString(params.c_title_output);
+  // The collection's own name is no extra marker: the film 幕后玩家 lists its feature as "幕后玩家".
+  const isExtraLabel = (label: string | null) =>
+    label !== null && BONUS_OR_TRAILER_LABEL_PATTERN.test(label.replaceAll(collectionTitle, ""));
 
-  if (
-    (title && BONUS_OR_TRAILER_LABEL_PATTERN.test(title)) ||
-    (cTitleOutput && BONUS_OR_TRAILER_LABEL_PATTERN.test(cTitleOutput))
-  ) {
+  if (isExtraLabel(title) || isExtraLabel(cTitleOutput)) {
     return false;
   }
 
@@ -365,11 +372,12 @@ function isFeatureEpisodeItem(
 function appendFilteredFeatureEpisodes(
   rawItems: readonly Record<string, unknown>[],
   mediaType: MediaType | null,
+  collectionTitle: string,
   seenVids: Set<string>,
   target: FeatureEpisode[],
 ): void {
   for (const params of rawItems) {
-    if (!isFeatureEpisodeItem(params, mediaType)) {
+    if (!isFeatureEpisodeItem(params, mediaType, collectionTitle)) {
       continue;
     }
 
@@ -685,15 +693,16 @@ export const tencentAdapter: Tier3Adapter<"tencent"> = {
     // Finish each module's cursor chain before the next tab/module takes its place in the list.
     pages.reverse();
     let fetchedPages = 0;
+    let chaptered = false;
     while (pages.length) {
       const { context, module } = pages.pop()!;
       if (module) {
-        appendFilteredFeatureEpisodes(
-          extractModuleItemParams(module),
-          mediaType,
-          seenVids,
-          featureEpisodes,
+        const items = extractModuleItemParams(module);
+        // A position within a season chapter; sub-category chapters label items "正片" instead.
+        chaptered ||= items.some((params) =>
+          NUMERIC_EPISODE_LABEL_PATTERN.test(nonEmptyString(params.episode_on_chapter) ?? ""),
         );
+        appendFilteredFeatureEpisodes(items, mediaType, title, seenVids, featureEpisodes);
         const next = nextPageContext(asRecord(module.module_params), context);
         if (next && !tabContexts.has(next)) pages.push({ context: next });
         continue;
@@ -721,7 +730,8 @@ export const tencentAdapter: Tier3Adapter<"tencent"> = {
         ...(aliases.length > 0 ? { aliases } : {}),
         year,
         mediaType,
-        featureEpisodeCount: broadcast.length > 0 ? broadcast.length : null,
+        // A chaptered cid lists only its first chapter here, so this count is not the whole cid's.
+        featureEpisodeCount: broadcast.length > 0 && !chaptered ? broadcast.length : null,
         featureEpisodes: broadcast,
       },
     };
