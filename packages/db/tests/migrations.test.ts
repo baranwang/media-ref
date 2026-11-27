@@ -128,6 +128,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0022_association_listed_platforms",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb

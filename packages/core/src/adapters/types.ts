@@ -65,6 +65,8 @@ export interface CollectionInfo {
    * NEVER populated from submission input.
    */
   externalIds?: Partial<Record<Namespace, string>>;
+  /** Douban only: platforms its "where to watch" lists (ads and unsupported platforms dropped). */
+  listedPlatforms?: readonly PlatformNamespace[];
 }
 
 export type CollectionEvidenceResult =

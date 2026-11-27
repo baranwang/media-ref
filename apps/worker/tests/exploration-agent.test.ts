@@ -1,10 +1,12 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import {
+  createChangeRequest,
   createFakeOutboundClient,
   deriveExplorationTaskId,
   EVIDENCE_CHECK_JOB_TYPE,
   EXPLORATION_AGENT_USER_ID,
   EXPLORATION_JOB_TYPE,
+  ensureExplorationAgentUser,
   getExplorationTargetNamespaces,
   createDefaultAdapterRegistry,
   ensureReviewAgentUser,
@@ -177,6 +179,8 @@ function createHttpStub({ kan360Rows, failIqiyiSearch, doubanBilibili = [] }: St
       return jsonResponse(request.url, {
         title: "咒术回战",
         year: "2020",
+        is_tv: true,
+        episodes_count: 24,
         vendors: doubanBilibili.map((ssid) => ({
           id: "bilibili",
           url: `https://www.bilibili.com/bangumi/play/ss${ssid}`,
@@ -1353,6 +1357,95 @@ describe("Exploration agent: discover → judge → gate", () => {
       })
       .execute();
   }
+
+  test("a season one platform covers is still explored for the platforms its Douban subject lists (#130)", async () => {
+    const { testDb, mediaId, outbound, explore } = await setup({ kan360Rows: [] });
+    await confirmBilibiliSeasonOne(testDb, mediaId);
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: mediaId,
+        namespace: "douban",
+        native_id: "33376700",
+        status: "confirmed",
+        listed_platforms: ["bilibili", "iqiyi"],
+      })
+      .execute();
+
+    await explore();
+
+    // Only iQIYI is still wanted; the agent finds nothing there, so the demand waits and retries.
+    expect(outbound.modelRequests.map(openNamespaces)).toEqual([["iqiyi"]]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("not_found");
+  });
+
+  test("approving one platform does not fulfill a season its Douban subject also lists elsewhere (#130)", async () => {
+    const { testDb, mediaId, worker, emitted, explore } = await setup({
+      kan360Rows: [["咒术回战", "2020", "34430"]],
+    });
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: mediaId,
+        namespace: "douban",
+        native_id: "33376700",
+        status: "confirmed",
+        listed_platforms: ["bilibili", "iqiyi"],
+      })
+      .execute();
+
+    await explore();
+    await worker.scheduled(createScheduledController(T0));
+    expect((await worker.queue(createQueueBatch(emitted))).completed).toBe(1);
+
+    const statuses = await testDb.readDb
+      .selectFrom("change_requests")
+      .select(["namespace", "status"])
+      .execute();
+    expect(statuses).toEqual([{ namespace: "bilibili", status: "approved" }]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).not.toBe("fulfilled");
+  });
+
+  test("an approved Douban subject stores the platforms its where-to-watch lists (#130)", async () => {
+    const { testDb, worker, emitted } = await setup({
+      kan360Rows: [],
+      doubanBilibili: ["34430"],
+    });
+    await ensureExplorationAgentUser(testDb.writeDb);
+    await createChangeRequest(
+      testDb.writeDb,
+      {
+        submitterUserId: EXPLORATION_AGENT_USER_ID,
+        submitterKeyId: null,
+        submitterType: "agent",
+        taskId: null,
+        demandId: null,
+        targetExternalKey: "tmdb:tv:95479",
+        namespace: "douban",
+        nativeId: "33376700",
+        variantId: null,
+        variantDescription: null,
+        setDefaultVariant: false,
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+        now: T0,
+      },
+      { adapterRegistry: createDefaultAdapterRegistry(), now: T0 },
+    );
+
+    await worker.scheduled(createScheduledController(T0));
+    await worker.queue(
+      createQueueBatch(emitted.filter((m) => m.jobType === EVIDENCE_CHECK_JOB_TYPE)),
+    );
+
+    const douban = await testDb.readDb
+      .selectFrom("associations")
+      .select(["status", "listed_platforms"])
+      .where("namespace", "=", "douban")
+      .executeTakeFirstOrThrow();
+    expect(douban).toEqual({ status: "confirmed", listed_platforms: ["bilibili"] });
+  });
 
   test("skips platforms that already have a confirmed association for the target season without creating duplicate change requests", async () => {
     const { testDb, mediaId, explore } = await setup({

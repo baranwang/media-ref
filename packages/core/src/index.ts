@@ -64,6 +64,8 @@ export {
   isMediaDemandCoveredInTx,
   isNamespaceCoveredInTx,
   listDemands,
+  missingListedPlatforms,
+  missingListedPlatformsInTx,
   mergeExternalKeyDemandsIntoMedia,
   enqueueTmdbLookupDemands,
   recordDemandForRead,

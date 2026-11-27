@@ -3,6 +3,7 @@ import { createTestDb } from "@media-ref/db/testing";
 import {
   computeDemandTargetsForRead,
   mergeExternalKeyDemandsIntoMedia,
+  missingListedPlatforms,
   scheduleExplorationJobs,
 } from "../src/index.ts";
 import type { QueryMediaByKeyResult } from "../src/read-media.ts";
@@ -55,6 +56,62 @@ describe("catalog-group demand", () => {
         namespaceGroup: "catalog",
       }),
     ).toEqual([]);
+  });
+});
+
+describe("platform coverage with a Douban subject (#130)", () => {
+  const row = (namespace: string, seasons: number[], listedPlatforms: string[] | null = null) => ({
+    namespace,
+    seasons,
+    listedPlatforms,
+  });
+
+  test("no platform covering the season wants every platform", () => {
+    expect(missingListedPlatforms([row("douban", [4], ["tencent", "iqiyi"])], 4)).toBeNull();
+  });
+
+  test("a covered season still wants the platforms its Douban subject lists", () => {
+    const rows = [row("douban", [4], ["tencent", "iqiyi"]), row("tencent", [4])];
+    expect(missingListedPlatforms(rows, 4)).toEqual(["iqiyi"]);
+    expect(missingListedPlatforms([...rows, row("iqiyi", [4])], 4)).toEqual([]);
+  });
+
+  test("another season's subject, an unfetched list and unknown vendors add nothing", () => {
+    expect(missingListedPlatforms([row("douban", [3], ["iqiyi"]), row("tencent", [4])], 4)).toEqual(
+      [],
+    );
+    expect(missingListedPlatforms([row("douban", [4], null), row("tencent", [4])], 4)).toEqual([]);
+    expect(missingListedPlatforms([row("douban", [4], ["sohu"]), row("tencent", [4])], 4)).toEqual(
+      [],
+    );
+  });
+
+  test("a read of a season Douban says is also on iQIYI records a demand", () => {
+    const queryResult = {
+      kind: "ok",
+      key: "tmdb:tv:68809",
+      items: [
+        {
+          document: {
+            media: { id: "m1", type: "tv", snapshot: { seasons: [] } },
+            externalIds: [],
+            associations: [
+              {
+                namespace: "douban",
+                status: "confirmed",
+                segments: [{ season: 4 }],
+                listedPlatforms: ["tencent", "iqiyi"],
+              },
+              { namespace: "tencent", status: "confirmed", segments: [{ season: 4 }] },
+            ],
+          },
+          matchedAssociationId: null,
+        },
+      ],
+    } as unknown as QueryMediaByKeyResult;
+    expect(
+      computeDemandTargetsForRead({ rawKey: "tmdb:tv:68809", queryResult, season: 4 }),
+    ).toEqual([{ kind: "media", mediaId: "m1", season: 4, namespaceGroup: "platform", delta: 1 }]);
   });
 });
 

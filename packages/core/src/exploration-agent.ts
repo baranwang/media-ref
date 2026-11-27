@@ -70,6 +70,7 @@ import type {
 import {
   fulfillCoveredCatalogDemandsInTx,
   isCoveredByAssociationsInTx,
+  missingListedPlatformsInTx,
   isNamespaceCoveredInTx,
 } from "./demands.ts";
 import {
@@ -2479,9 +2480,16 @@ export function createExplorationAgentExecutor(
           season: ctx.season,
           namespaceGroup: "catalog",
         }));
+      // A season some platform already covers is only explored for what its Douban subject lists.
+      const wanted =
+        ctx.namespaceGroup === "platform"
+          ? await missingListedPlatformsInTx(ctx.db, { mediaId: ctx.media.id, season: ctx.season })
+          : null;
       const targets = catalogAssociationCovered
         ? []
         : ctx.targetNamespaces.flatMap((namespace) => {
+            if (wanted?.length && isPlatformNamespace(namespace) && !wanted.includes(namespace))
+              return [];
             const adapter = registry.get(namespace);
             return adapter && isTier2Adapter(adapter) ? [adapter] : [];
           });
