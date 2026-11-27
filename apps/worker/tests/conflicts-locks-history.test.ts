@@ -129,14 +129,15 @@ function createQueueBatch(bodies: JobQueueMessage[], timestamp: Date = new Date(
 
 function createConflictTestStub(
   customBilibili?: (seasonId: string, url: string) => ExternalHttpResponse | undefined,
+  finaleTitle?: string,
 ) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     if (request.kind === "catalog" && request.namespace === "tmdb") {
-      if (new URL(request.url).pathname.endsWith("/tv/95479/season/1")) {
+      if (finaleTitle && new URL(request.url).pathname.endsWith("/tv/95479/season/1")) {
         return jsonResponse(request.url, {
           episodes: Array.from({ length: 24 }, (_, i) => ({
             episode_number: i + 1,
-            name: i === 23 ? "命运交汇之夜" : `故事章节 ${i + 1}`,
+            name: i === 23 ? finaleTitle : `故事章节 ${i + 1}`,
           })),
         });
       }
@@ -182,7 +183,7 @@ function createConflictTestStub(
             type: 1,
             publish: { pub_time: "2020-10-03 01:25:00" },
             episodes: makeBilibiliEpisodes(24).map((ep, i) =>
-              i === 23 ? { ...ep, long_title: "命运交汇之夜" } : ep,
+              finaleTitle && i === 23 ? { ...ep, long_title: finaleTitle } : ep,
             ),
           },
         });
@@ -1554,7 +1555,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
 
     const t0 = new Date("2026-11-27T10:00:00.000Z");
     const outbound = createFakeOutboundClient({
-      fetchExternal: createConflictTestStub(),
+      fetchExternal: createConflictTestStub(undefined, "命运交汇之夜"),
     });
     const app = createApiApp({
       dbRead: testDb.readDb,
