@@ -673,6 +673,8 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
               play_title: title,
               is_trailer: "0",
               publish_date: "2024-06-28",
+              // Live 奔跑吧 第10季 tags a stray item with its sub-category, not a season position.
+              ...(i === titles.length - 1 ? { episode_on_chapter: "正片" } : {}),
             })),
           ),
         );
@@ -868,5 +870,85 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
     expect(result.info.featureEpisodeCount).toBe(40);
     expect(result.info.featureEpisodes[0]?.title).toBe("1");
     expect(result.info.featureEpisodes[30]?.title).toBe("31");
+  });
+
+  test("keeps a film's feature when its title holds an extra marker, but still drops its extras", async () => {
+    // Shape of the live 5sslpewzb2i67ac (幕后玩家, 2018) episode list, plus two extras.
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const body = JSON.parse(request.body ?? "{}") as { page_params?: { page_id?: string } };
+        if (body.page_params?.page_id === "detail_page_introduction") {
+          return jsonResponse(
+            request.url,
+            makeIntroPayload({ title: "幕后玩家", year: "2018", type: "1" }),
+          );
+        }
+        return jsonResponse(
+          request.url,
+          makeEpisodePagePayload([
+            {
+              vid: "h002645h2y1",
+              title: "幕后玩家",
+              c_title_output: "幕后玩家",
+              play_title: "幕后玩家",
+              is_trailer: "0",
+              duration: "6786",
+            },
+            { vid: "x1", title: "幕后玩家 幕后特辑", is_trailer: "0" },
+            { vid: "x2", title: "幕后玩家彩蛋", is_trailer: "0" },
+          ]),
+        );
+      },
+    });
+
+    const result = await tencentAdapter.fetchCollection("5sslpewzb2i67ac", outbound);
+    expect(result.status).toBe("found");
+    if (result.status !== "found") return;
+    expect(result.info.mediaType).toBe("movie");
+    expect(result.info.featureEpisodeCount).toBe(1);
+    expect(result.info.featureEpisodes.map((e) => e.nativeEpisodeId)).toEqual(["h002645h2y1"]);
+  });
+
+  test("withholds the episode count of a chaptered cid, whose list shows only its first chapter", async () => {
+    // Shape of the live mzc00200xkb43kw (毛雪汪): chapters 2021冬 … 2026秋, default view = 2021冬 only.
+    const titles = [
+      "特辑：开播",
+      "第1期：廖俊涛到访",
+      "第2期：杨迪带搬家礼",
+      "第2期加更：省钱绝招",
+    ];
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const body = JSON.parse(request.body ?? "{}") as { page_params?: { page_id?: string } };
+        if (body.page_params?.page_id === "detail_page_introduction") {
+          return jsonResponse(
+            request.url,
+            makeIntroPayload({ title: "毛雪汪", year: "2026", type: "10", episode_all: "10" }),
+          );
+        }
+        return jsonResponse(
+          request.url,
+          makeEpisodePagePayload(
+            titles.map((title, i) => ({
+              vid: `c${i}`,
+              title,
+              c_title_output: title,
+              is_trailer: "0",
+              episode_on_chapter: String(i + 1),
+              publish_date: "2021-11-01 00:00:00",
+            })),
+          ),
+        );
+      },
+    });
+
+    const result = await tencentAdapter.fetchCollection("mzc00200xkb43kw", outbound);
+    expect(result.status).toBe("found");
+    if (result.status !== "found") return;
+    expect(result.info.featureEpisodeCount).toBeNull();
+    expect(result.info.featureEpisodes.map((e) => e.title)).toEqual([
+      "第1期：廖俊涛到访",
+      "第2期：杨迪带搬家礼",
+    ]);
   });
 });
