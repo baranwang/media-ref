@@ -3,7 +3,6 @@ import { queryOptions } from "@tanstack/react-query";
 import { createBrowserClients } from "./api-client";
 import type { BrowseSlug } from "./catalogs";
 import {
-  apiKeyFromProto,
   changeRequestFromGetResponse,
   changeRequestFromProto,
   commentThreadFrom,
@@ -147,31 +146,34 @@ export const reviewAlertsQuery = () =>
     },
   });
 
+export interface ApiUsageData {
+  days: ApiTrendDay[];
+  lastUsed: Record<string, string>;
+}
+
 export const apiKeysQuery = () =>
   queryOptions({
     queryKey: ["api-keys"],
     queryFn: async () => {
-      const clients = browserClients();
-      const [keys, usage] = await Promise.all([
-        clients.account.listApiKeys({}),
-        clients.account.getApiUsage({}).catch(() => null),
-      ]);
-      const lastUsed = new Map((usage?.lastUsed ?? []).map((u) => [u.keyId, u.lastUsedAt]));
-      return keys.apiKeys.map((key) => apiKeyFromProto(key, lastUsed));
+      const res = await browserClients().account.listApiKeys({});
+      return res.apiKeys;
     },
   });
 
 export const apiUsageQuery = (days = 14) =>
   queryOptions({
     queryKey: ["api-usage", days],
-    queryFn: async (): Promise<ApiTrendDay[]> => {
+    queryFn: async (): Promise<ApiUsageData> => {
       const res = await browserClients().account.getApiUsage({ days });
-      return res.days.map((d) => ({
-        date: d.date.slice(5),
-        found: Number(d.found),
-        notFound: Number(d.notFound),
-        submitted: Number(d.submitted),
-      }));
+      return {
+        days: res.days.map((d) => ({
+          date: d.date.slice(5),
+          found: Number(d.found),
+          notFound: Number(d.notFound),
+          submitted: Number(d.submitted),
+        })),
+        lastUsed: Object.fromEntries(res.lastUsed.map((u) => [u.keyId, u.lastUsedAt])),
+      };
     },
   });
 
