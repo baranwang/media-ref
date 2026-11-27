@@ -1430,6 +1430,9 @@ describe("Exploration scheduler (#28)", () => {
     } as unknown as BackgroundWorkerEnv);
     expect(pausedConfig.exploration?.dailyBudget).toBe(0);
     expect(pausedConfig.enableDailyTmdbExportsSync).toBe(true);
+    // Catalog requests must not hang until the invocation hits its wall clock (#153).
+    expect(pausedConfig.tmdb?.timeoutMs).toBe(30_000);
+    expect(pausedConfig.catalog?.tmdb?.timeoutMs).toBe(30_000);
 
     const disabledExportsConfig = parseWorkerConfig({
       ENABLE_DAILY_TMDB_EXPORTS_SYNC: "false",

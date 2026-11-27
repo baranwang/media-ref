@@ -55,6 +55,11 @@ import type { Db } from "@media-ref/db";
 export const DEFAULT_JOB_BATCH_SIZE = 20;
 export const DEFAULT_LEASE_DURATION_MS = 5 * 60 * 1000;
 export const DEFAULT_RETRY_DELAY_MS = 60 * 1000;
+// Per-request cap on catalog calls (TMDB, Trakt, TVDB, Douban, ...). Without it a hung request
+// waits until the platform kills the invocation at its wall-clock limit.
+export const DEFAULT_CATALOG_TIMEOUT_MS = 30 * 1000;
+// Wall clock of one queue consumer or cron invocation (no `limits` in wrangler.jsonc).
+const INVOCATION_WALL_TIME_MS = 15 * 60 * 1000;
 
 export interface BackgroundWorkerConfig {
   batchSize?: number;
@@ -185,6 +190,9 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
   // The job is already leased during queue delivery and discovery, before the session clock starts.
   const leaseDurationMsByType = {
     [EXPLORATION_JOB_TYPE]: Math.max(leaseDurationMs, explorationBudget + 5 * 60_000),
+    // tmdb_sync has no session budget and may use the whole invocation. A shorter lease lets cron
+    // claim a second copy while the first still runs, and fencing then drops the first's result.
+    [TMDB_SYNC_JOB_TYPE]: Math.max(leaseDurationMs, INVOCATION_WALL_TIME_MS + 5 * 60_000),
   };
   const dispatchFailureRetryDelayMs = deps.config?.dispatchFailureRetryDelayMs ?? 0;
   const defaultRetryDelayMs = deps.config?.defaultRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
