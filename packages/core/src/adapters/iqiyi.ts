@@ -1217,8 +1217,10 @@ export const iqiyiAdapter: Tier3Adapter<"iqiyi"> = {
         continue;
       }
 
+      // Old albums keep a legacy `albumId` (爱情公寓4: 616467) whose episode list is empty;
+      // `qipu_id` is the current album ID (151646701) the rest of iQIYI uses.
       const canonicalId =
-        parseQipuId(album.albumId) ?? parseQipuId(album.qipu_id) ?? parseQipuId(doc.qipu_id);
+        parseQipuId(album.qipu_id) ?? parseQipuId(album.albumId) ?? parseQipuId(doc.qipu_id);
       if (!canonicalId || seenCanonicalIds.has(canonicalId)) {
         continue;
       }

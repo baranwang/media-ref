@@ -107,9 +107,11 @@ interface StubOptions {
   kan360Rows: Array<[string, string, string]> | null;
   /** iQIYI search answers HTTP 500 (a failing discovery source). */
   failIqiyiSearch?: boolean;
+  /** bilibili season ids the Douban subject lists under "where to watch". */
+  doubanBilibili?: string[];
 }
 
-function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
+function createHttpStub({ kan360Rows, failIqiyiSearch, doubanBilibili = [] }: StubOptions) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     const url = new URL(request.url);
     const tmdbSeason = url.pathname.match(/\/tv\/95479\/season\/(\d+)$/);
@@ -172,7 +174,14 @@ function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
       });
     }
     if (url.hostname === "frodo.douban.com" && url.pathname.startsWith("/api/v2/subject/")) {
-      return jsonResponse(request.url, { title: "咒术回战", year: "2020", vendors: [] });
+      return jsonResponse(request.url, {
+        title: "咒术回战",
+        year: "2020",
+        vendors: doubanBilibili.map((ssid) => ({
+          id: "bilibili",
+          url: `https://www.bilibili.com/bangumi/play/ss${ssid}`,
+        })),
+      });
     }
     if (url.hostname === "api.douban.com") {
       return jsonResponse(request.url, { msg: "movie_not_found", code: 5000 });
@@ -617,6 +626,39 @@ describe("Exploration agent: discover → judge → gate", () => {
       { ok: true },
     ]);
     const crs = await testDb.readDb.selectFrom("change_requests").select("native_id").execute();
+    expect(crs).toEqual([{ native_id: "ss34430" }]);
+  });
+
+  test("the collection the season's Douban subject lists is fetched first and wins the fast path (#130)", async () => {
+    // Five search-like candidates come first, one of them a dub that passes the gate too.
+    const { testDb, mediaId, outbound, explore } = await setup({
+      kan360Rows: [
+        ["咒术回战（中配）", "2020", "34431"],
+        ["咒术回战", "2020", "45574"],
+        ["咒术回战", "2020", "34500"],
+        ["咒术回战", "2020", "90001"],
+        ["咒术回战", "2020", "90002"],
+      ],
+      doubanBilibili: ["34430"],
+    });
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: mediaId,
+        namespace: "douban",
+        native_id: "33376700",
+        status: "confirmed",
+      })
+      .execute();
+
+    await explore();
+
+    expect(openNamespaces(outbound.modelRequests[0]!)).not.toContain("bilibili");
+    const crs = await testDb.readDb
+      .selectFrom("change_requests")
+      .select("native_id")
+      .where("namespace", "=", "bilibili")
+      .execute();
     expect(crs).toEqual([{ native_id: "ss34430" }]);
   });
 

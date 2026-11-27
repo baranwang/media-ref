@@ -1020,6 +1020,9 @@ async function submitMapping(
   }
 }
 
+const isVouched = (sources: readonly string[]) =>
+  sources.includes("douban") || sources.includes("client_lead");
+
 /**
  * Discovery candidates and client leads are fetched; exactly one that the gate would already
  * accept is submitted without the model (fast path). Anything else stays open for the agent.
@@ -1122,7 +1125,12 @@ async function prepareTarget(
     }
   }
 
-  for (const [id, sources] of [...sourcesById].slice(0, MAX_CANDIDATES_PER_PLATFORM)) {
+  // Douban's "where to watch" (reached by the media's Douban or IMDb ID) and client leads name a
+  // collection directly; search hits only resemble the title, so they must not use up the slots.
+  const ordered = [...sourcesById].sort(
+    ([, a], [, b]) => Number(isVouched(b)) - Number(isVouched(a)),
+  );
+  for (const [id, sources] of ordered.slice(0, MAX_CANDIDATES_PER_PLATFORM)) {
     if (budget.expired()) {
       return { outcome: transientOutcome(run, target, BUDGET_EXCEEDED) };
     }
@@ -1177,13 +1185,16 @@ async function prepareTarget(
     }
     if (run.passesGate(candidate.info, segments)) passing.push(candidate);
   }
-  if (passing.length === 1) {
+  // Several passing (e.g. two albums of one show): the one Douban lists for this media wins.
+  const fromDouban = passing.filter((c) => c.sources.includes("douban"));
+  const chosen = passing.length === 1 ? passing[0] : fromDouban.length === 1 ? fromDouban[0] : null;
+  if (chosen) {
     const result = await submitMapping(
       run,
       target,
-      passing[0]!.info,
-      mapping(passing[0]!),
-      passing[0]!.suggestedVariantDescription ?? undefined,
+      chosen.info,
+      mapping(chosen),
+      chosen.suggestedVariantDescription ?? undefined,
     );
     if ("status" in result) {
       return { outcome: result };

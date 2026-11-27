@@ -1193,6 +1193,33 @@ describe("iQIYI Tier 3 search (#30)", () => {
     }
   });
 
+  test("search prefers the current qipu_id over an old album's legacy albumId (#130)", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (request) =>
+        jsonResponse(request.url, {
+          code: "A00000",
+          data: {
+            docinfos: [
+              {
+                qipu_id: 151646701,
+                albumDocInfo: {
+                  albumId: 616467,
+                  qipu_id: 151646701,
+                  albumTitle: "爱情公寓4",
+                  channel: "电视剧,2",
+                  siteId: "iqiyi",
+                },
+              },
+            ],
+          },
+        }),
+    });
+    const result = await iqiyiAdapter.search({ title: "爱情公寓" }, outbound);
+    expect(result.status === "ok" && result.candidates.map((c) => c.canonicalId)).toEqual([
+      "151646701",
+    ]);
+  });
+
   test("variety: an album with no list episodes falls back to the signed source selector", async () => {
     const albumId = "2657274641350501";
     const item = (qipu: number, phase: string, title: string, mark = 0) => ({
