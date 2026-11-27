@@ -15,6 +15,17 @@ type CoverageScope = {
   targetEnd: number;
 };
 
+/**
+ * Episodes aired before `now` while the season's last catalog episode has not aired (no air date,
+ * or today or later); null once the season has finished airing.
+ */
+export function airedEpisodeCount(episodes: readonly SeasonEpisode[], now: Date): number | null {
+  const today = now.toISOString().slice(0, 10);
+  const aired = (ep: SeasonEpisode) => ep.airDate !== null && ep.airDate < today;
+  const last = episodes.toSorted((a, b) => a.episode - b.episode).at(-1);
+  return last && !aired(last) ? episodes.filter(aired).length : null;
+}
+
 /** Split but contiguous linear segments describe the same prefix as a single segment. */
 export function seasonCoverageScopes(
   catalog: CatalogEvidence,

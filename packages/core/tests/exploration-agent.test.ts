@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { CollectionInfo } from "../src/adapters/index.ts";
-import { airedEpisodeCount, checkSegmentsFitCollection } from "../src/exploration-agent.ts";
-import { seasonCoverageConflict, type SeasonEpisode } from "../src/season-coverage.ts";
+import { checkSegmentsFitCollection } from "../src/exploration-agent.ts";
+import {
+  airedEpisodeCount,
+  seasonCoverageConflict,
+  type SeasonEpisode,
+} from "../src/season-coverage.ts";
 import type { SegmentInput } from "@media-ref/client";
 
 const collection = (episodes: number): CollectionInfo => ({
