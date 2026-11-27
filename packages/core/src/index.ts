@@ -354,6 +354,33 @@ export {
   type TmdbMediaFetchResult,
 } from "./tmdb.ts";
 export {
+  areMediaSnapshotsCompatibleForAutoMerge,
+  doesCatalogTargetMatchMediaSnapshot,
+  parseMediaSeasonsJson,
+  selectCanonicalMergeTarget,
+  verifyAutoMergeEligibilityInTx,
+  type AutoMergeCompatibilityOptions,
+  type AutoMergeCompatibilityResult,
+  type AutoMergeEligibilityResult,
+  type MergeCandidateAssociation,
+  type MergeCandidateExternalId,
+  type MergeCandidateMediaSnapshot,
+  type VerifyAutoMergeEligibilityInput,
+} from "./duplicate-merge-policy.ts";
+export {
+  convergeDuplicateMedia,
+  DUPLICATE_CONVERGENCE_SYNC_KEY,
+  findSharedCatalogDuplicateMediaIdsInTx,
+  isPlausibleCatalogDuplicateOverlapForSubmit,
+  verifyAndAutoMergeDuplicateMedia,
+  verifyAndAutoMergeDuplicateMediaInTx,
+  type AutoMergeDuplicateResult,
+  type ConvergeDuplicateMediaOptions,
+  type ConvergeDuplicateMediaResult,
+  type VerifyAndAutoMergeDuplicateInput,
+  type VerifyAndAutoMergeWithCatalogInput,
+} from "./duplicate-merge.ts";
+export {
   createTmdbSyncJobHandler,
   DEFAULT_TMDB_FULL_REFRESH_BATCH_SIZE,
   detectChangedSeasons,
@@ -364,6 +391,7 @@ export {
   listReviewAlerts,
   MediaSyncError,
   mergeMedia,
+  mergeMediaInTx,
   resolveReviewAlert,
   REVIEW_ALERT_TYPES,
   runTmdbDailySync,

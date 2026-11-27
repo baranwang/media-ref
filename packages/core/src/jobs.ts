@@ -218,7 +218,12 @@ export async function startLeasedJob(
   return row ? mapJobRow(row) : null;
 }
 
-export async function enqueueJob(db: Db, input: EnqueueJobInput): Promise<EnqueueJobResult> {
+export const SEED_EVIDENCE_CHECK_JOB_TYPE = "seed_evidence_check";
+
+export async function enqueueJob(
+  db: Db | Transaction<Database>,
+  input: EnqueueJobInput,
+): Promise<EnqueueJobResult> {
   const jobType = input.jobType.trim();
   if (!jobType) {
     throw new Error("jobType must be a non-empty string");
@@ -299,6 +304,38 @@ export async function enqueueJob(db: Db, input: EnqueueJobInput): Promise<Enqueu
   }
 
   throw new Error(`Failed to enqueue or locate active job for dedupeKey "${dedupeKey}"`);
+}
+
+/**
+ * Enqueues a one-time `seed_evidence_check` job for a `seed_unconfirmed` association when no
+ * prior job (pending, leased, completed, or failed) exists for that association.
+ */
+export async function enqueueSeedEvidenceCheckForAssociation(
+  db: Db | Transaction<Database>,
+  input: { associationId: string; mediaId: string; now?: Date },
+): Promise<boolean> {
+  const dedupeKey = `${SEED_EVIDENCE_CHECK_JOB_TYPE}:${input.associationId}`;
+  const existing = await db
+    .selectFrom("background_jobs")
+    .select("id")
+    .where("job_type", "=", SEED_EVIDENCE_CHECK_JOB_TYPE)
+    .where("dedupe_key", "=", dedupeKey)
+    .executeTakeFirst();
+
+  if (existing) {
+    return false;
+  }
+
+  const res = await enqueueJob(db, {
+    jobType: SEED_EVIDENCE_CHECK_JOB_TYPE,
+    dedupeKey,
+    payload: {
+      associationId: input.associationId,
+      mediaId: input.mediaId,
+    },
+    runAfter: input.now ?? new Date(),
+  });
+  return res.created;
 }
 
 export async function claimDueJobs(db: Db, options: ClaimDueJobsOptions): Promise<BackgroundJob[]> {

@@ -34,7 +34,12 @@ import {
 } from "./catalog-gateway.ts";
 import { fulfillCoveredDemandsForAssociationInTx } from "./demands.ts";
 import { evaluateEvidenceGate, type EvidenceGateStep2Evaluator } from "./evidence-gate.ts";
-import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
+import {
+  enqueueJob,
+  SEED_EVIDENCE_CHECK_JOB_TYPE,
+  type JobExecutionOutcome,
+  type JobHandler,
+} from "./jobs.ts";
 import { recordLead } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { extractCollectionDisplay, isUuid, type AssociationNamespace } from "./media-service.ts";
@@ -46,7 +51,7 @@ import {
   type TmdbGatewayConfig,
 } from "./tmdb.ts";
 
-export const SEED_EVIDENCE_CHECK_JOB_TYPE = "seed_evidence_check";
+export { SEED_EVIDENCE_CHECK_JOB_TYPE };
 export const SEED_EVIDENCE_FAILED_ALERT_TYPE = "seed_evidence_failed";
 export const DEFAULT_SEED_VARIANT_DESCRIPTION = "原声";
 export const SEED_IMPORTER_USER_ID = "system:seed-importer";

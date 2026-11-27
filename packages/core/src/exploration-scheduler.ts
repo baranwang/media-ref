@@ -1,9 +1,12 @@
 import {
   EXTERNAL_ID_NAMESPACES,
   formatExternalKey,
+  getNamespaceCapabilities,
   getNamespaceGroup,
   isPlatformNamespace,
   parseExternalKey,
+  validateSharedCollectionSegments,
+  validateVariantSegments,
   type BaselineSource,
   type ExternalId,
   type ExternalIdNamespace,
@@ -39,13 +42,22 @@ import {
 
 export { computeNotFoundBackoffSeconds, DEFAULT_NOT_FOUND_BACKOFF_SECONDS } from "./demands.ts";
 import {
+  areMediaSnapshotsCompatibleForAutoMerge,
+  parseMediaSeasonsJson,
+} from "./duplicate-merge-policy.ts";
+import {
   enqueueJob,
+  enqueueSeedEvidenceCheckForAssociation,
   type BackgroundJob,
   type JobExecutionOutcome,
   type JobHandler,
 } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
-import { isAssociationNamespace, isUuid } from "./media-service.ts";
+import {
+  isAssociationNamespace,
+  isUuid,
+  loadActiveAssociationsWithSegments,
+} from "./media-service.ts";
 import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
 import { formatUtcDate } from "./tmdb-sync.ts";
 import {
@@ -1191,6 +1203,7 @@ async function resolveCanonicalMediaId(db: DbExecutor, mediaId: string): Promise
 async function findExistingMediaIdByExternalKey(
   db: DbExecutor,
   externalKey: string,
+  options: { includeUnconfirmedCatalog?: boolean } = {},
 ): Promise<string | null> {
   const parsed = parseExternalKey(externalKey);
   if (!parsed) {
@@ -1204,6 +1217,7 @@ async function findExistingMediaIdByExternalKey(
       .select("media_id")
       .where("namespace", "=", parsed.namespace)
       .where("native_id", "=", parsed.nativeId)
+      .where("status", "!=", "delisted")
       .executeTakeFirst();
     if (ext) {
       return resolveCanonicalMediaId(db, ext.media_id);
@@ -1211,17 +1225,30 @@ async function findExistingMediaIdByExternalKey(
   }
 
   if (isAssociationNamespace(parsed.namespace)) {
-    const assoc = await db
+    const statuses: readonly ("confirmed" | "seed_unconfirmed")[] =
+      options.includeUnconfirmedCatalog ? ["confirmed", "seed_unconfirmed"] : ["confirmed"];
+    const assocs = await db
       .selectFrom("associations")
       .where("is_external_id", "=", false)
-      .select("media_id")
+      .select(["media_id", "status", "needs_review"])
       .where("namespace", "=", parsed.namespace)
       .where("native_id", "=", parsed.nativeId)
-      .where("status", "=", "confirmed")
+      .where("status", "in", [...statuses])
+      .orderBy("needs_review", "asc")
       .orderBy("created_at", "asc")
       .orderBy("id", "asc")
-      .executeTakeFirst();
-    return assoc ? resolveCanonicalMediaId(db, assoc.media_id) : null;
+      .execute();
+    const ordered = [
+      ...assocs.filter((a) => a.status === "confirmed"),
+      ...assocs.filter((a) => a.status !== "confirmed" && !a.needs_review),
+      ...assocs.filter((a) => a.status !== "confirmed" && a.needs_review),
+    ];
+    for (const assoc of ordered) {
+      const canonical = await resolveCanonicalMediaId(db, assoc.media_id);
+      if (canonical) {
+        return canonical;
+      }
+    }
   }
 
   return null;
@@ -1531,31 +1558,79 @@ export function createExplorationJobHandler(
 
         await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_KEY, externalKey);
 
+        const parsedCatalogKey = parseCatalogTargetKey(externalKey);
+        const initAssoc: CatalogTargetInitialAssociation | null =
+          verifiedCatalog && verifiedCatalog.initialAssociation !== undefined
+            ? verifiedCatalog.initialAssociation
+            : parsedCatalogKey &&
+                (parsedCatalogKey.namespace === "douban" ||
+                  parsedCatalogKey.namespace === "bangumi")
+              ? {
+                  namespace: parsedCatalogKey.namespace,
+                  nativeId: parsedCatalogKey.nativeId,
+                }
+              : null;
+
+        if (initAssoc) {
+          await acquireAdvisoryLock(
+            trx,
+            ADVISORY_LOCK_CLASSES.COLLECTION,
+            `${initAssoc.namespace}:${initAssoc.nativeId}`,
+          );
+        }
+
         let resolvedMediaId =
-          existingMediaId ?? (await findExistingMediaIdByExternalKey(trx, externalKey));
+          existingMediaId ??
+          (await findExistingMediaIdByExternalKey(trx, externalKey, {
+            includeUnconfirmedCatalog: false,
+          }));
+        let reusedExisting = resolvedMediaId !== null;
         let mediaType: MediaType | undefined;
         let mediaSeasons: readonly SeasonSnapshot[] | undefined;
         const mergeExternalKeys = new Set<string>([externalKey]);
 
-        if (!resolvedMediaId) {
-          if (!verifiedCatalog) {
-            return { kind: "stale" as const };
-          }
-
-          // Also check if any synced external ID already resolves to an existing media
-          if (verifiedCatalog.externalIds) {
-            for (const ns of EXTERNAL_ID_NAMESPACES) {
-              const val = verifiedCatalog.externalIds[ns];
-              if (!val) {
-                continue;
-              }
-              const formatted = formatExternalKey({ namespace: ns, nativeId: val });
-              mergeExternalKeys.add(formatted);
-              if (!resolvedMediaId) {
-                resolvedMediaId = await findExistingMediaIdByExternalKey(trx, formatted);
+        // Collect all external keys for demand merging and prefer matching existing media via
+        // authoritative external IDs before falling back to unconfirmed seed catalog matches.
+        let matchedByAuthoritativeExternalId = false;
+        if (verifiedCatalog?.externalIds) {
+          for (const ns of EXTERNAL_ID_NAMESPACES) {
+            const val = verifiedCatalog.externalIds[ns];
+            if (!val) {
+              continue;
+            }
+            const formatted = formatExternalKey({ namespace: ns, nativeId: val });
+            mergeExternalKeys.add(formatted);
+            if (!resolvedMediaId) {
+              const candidateId = await findExistingMediaIdByExternalKey(trx, formatted, {
+                includeUnconfirmedCatalog: false,
+              });
+              if (candidateId) {
+                const candidateRow = await trx
+                  .selectFrom("media")
+                  .select(["id", "type"])
+                  .where("id", "=", candidateId)
+                  .executeTakeFirst();
+                if (candidateRow && candidateRow.type === verifiedCatalog.mediaType) {
+                  resolvedMediaId = candidateRow.id;
+                  reusedExisting = true;
+                  matchedByAuthoritativeExternalId = true;
+                }
               }
             }
           }
+        }
+
+        if (!resolvedMediaId) {
+          resolvedMediaId = await findExistingMediaIdByExternalKey(trx, externalKey, {
+            includeUnconfirmedCatalog: true,
+          });
+          if (resolvedMediaId) {
+            reusedExisting = true;
+          }
+        }
+
+        if (!resolvedMediaId && !verifiedCatalog) {
+          return { kind: "stale" as const };
         }
 
         if (!resolvedMediaId) {
@@ -1600,19 +1675,6 @@ export function createExplorationJobHandler(
 
           // When lazily created from a Douban or Bangumi catalog entry, establish the initial
           // confirmed catalog association immediately so GET /v1/media/douban:<id> or bangumi:<id> resolves it.
-          const parsedCatalogKey = parseCatalogTargetKey(externalKey);
-          const initAssoc: CatalogTargetInitialAssociation | null =
-            verifiedCatalog!.initialAssociation !== undefined
-              ? verifiedCatalog!.initialAssociation
-              : parsedCatalogKey &&
-                  (parsedCatalogKey.namespace === "douban" ||
-                    parsedCatalogKey.namespace === "bangumi")
-                ? {
-                    namespace: parsedCatalogKey.namespace,
-                    nativeId: parsedCatalogKey.nativeId,
-                  }
-                : null;
-
           if (initAssoc) {
             const createdInitAssoc = await trx
               .insertInto("associations")
@@ -1685,11 +1747,167 @@ export function createExplorationJobHandler(
         } else {
           const mediaRow = await trx
             .selectFrom("media")
-            .select(["type", "seasons"])
+            .select(["id", "type", "baseline", "title", "original_title", "year", "seasons"])
             .where("id", "=", resolvedMediaId)
             .executeTakeFirstOrThrow();
           mediaType = mediaRow.type;
           mediaSeasons = parseSeasonsSnapshotJson(mediaRow.seasons);
+
+          // When reusing an existing media for a Douban/Bangumi external key, NEVER confirm an
+          // existing `seed_unconfirmed` (or `delisted`) association without running `seed_evidence_check`.
+          if (verifiedCatalog && initAssoc) {
+            const existingInitAssoc = await trx
+              .selectFrom("associations")
+              .where("is_external_id", "=", false)
+              .select(["id", "status", "needs_review", "locked"])
+              .where("media_id", "=", resolvedMediaId)
+              .where("namespace", "=", initAssoc.namespace)
+              .where("native_id", "=", initAssoc.nativeId)
+              .forUpdate()
+              .executeTakeFirst();
+
+            if (existingInitAssoc) {
+              if (
+                existingInitAssoc.status === "seed_unconfirmed" &&
+                !existingInitAssoc.needs_review &&
+                !existingInitAssoc.locked
+              ) {
+                await enqueueSeedEvidenceCheckForAssociation(trx, {
+                  associationId: existingInitAssoc.id,
+                  mediaId: resolvedMediaId,
+                  now: ctx.now,
+                });
+              }
+            } else if (reusedExisting && mediaRow.type === verifiedCatalog.mediaType) {
+              const snapshotCompat =
+                matchedByAuthoritativeExternalId ||
+                areMediaSnapshotsCompatibleForAutoMerge(
+                  {
+                    type: mediaRow.type,
+                    title: mediaRow.title,
+                    originalTitle: mediaRow.original_title,
+                    year: mediaRow.year,
+                    seasons: parseMediaSeasonsJson(mediaRow.seasons),
+                  },
+                  {
+                    type: verifiedCatalog.mediaType,
+                    title: verifiedCatalog.snapshot.title,
+                    originalTitle: verifiedCatalog.snapshot.originalTitle,
+                    year: verifiedCatalog.snapshot.year,
+                    seasons: [...verifiedCatalog.snapshot.seasons],
+                  },
+                ).compatible;
+
+              if (snapshotCompat) {
+                const initSegments: NormalizedSegment[] = [];
+                if (mediaRow.type === "tv" && mediaRow.baseline !== null) {
+                  const season1 = verifiedCatalog.snapshot.seasons.find((s) => s.season === 1);
+                  initSegments.push({
+                    season: 1,
+                    episodeStart: 1,
+                    episodeEnd: season1 && season1.episodeCount > 0 ? season1.episodeCount : null,
+                    targetEpisodeStart: 1,
+                    baseline: mediaRow.baseline,
+                    nonLinear: false,
+                    needsReview: false,
+                  });
+                }
+
+                const [siblingAssocs, sharedCollectionAssocs] = await Promise.all([
+                  loadActiveAssociationsWithSegments(trx, {
+                    mediaId: resolvedMediaId,
+                    catalogNamespace: initAssoc.namespace,
+                  }),
+                  loadActiveAssociationsWithSegments(trx, {
+                    collection: { namespace: initAssoc.namespace, nativeId: initAssoc.nativeId },
+                  }),
+                ]);
+
+                const variantCheck = validateVariantSegments(
+                  [
+                    ...siblingAssocs.map((a) => ({ associationId: a.id, segments: a.segments })),
+                    { associationId: "candidate", segments: initSegments },
+                  ],
+                  {
+                    baseline: mediaRow.baseline,
+                    allowHierarchicalScopes: getNamespaceCapabilities(initAssoc.namespace)
+                      .allowHierarchicalScopes,
+                  },
+                );
+                const sharedCheck = validateSharedCollectionSegments([
+                  ...sharedCollectionAssocs.map((a) => ({
+                    mediaId: a.mediaId,
+                    associationId: a.id,
+                    segments: a.segments,
+                  })),
+                  {
+                    mediaId: resolvedMediaId,
+                    associationId: "candidate",
+                    segments: initSegments,
+                  },
+                ]);
+
+                if (variantCheck.valid && sharedCheck.valid) {
+                  const createdInitAssoc = await trx
+                    .insertInto("associations")
+                    .values({
+                      media_id: resolvedMediaId,
+                      namespace: initAssoc.namespace,
+                      native_id: initAssoc.nativeId,
+                      variant_id: null,
+                      status: "confirmed",
+                      needs_review: false,
+                      locked: false,
+                    })
+                    .returning("id")
+                    .executeTakeFirstOrThrow();
+
+                  if (initSegments.length > 0) {
+                    await trx
+                      .insertInto("segments")
+                      .values(
+                        initSegments.map((seg) => ({
+                          association_id: createdInitAssoc.id,
+                          season: seg.season,
+                          episode_start: seg.episodeStart,
+                          episode_end: seg.episodeEnd,
+                          target_episode_start: seg.targetEpisodeStart,
+                          baseline: seg.baseline,
+                          non_linear: seg.nonLinear,
+                          needs_review: seg.needsReview,
+                        })),
+                      )
+                      .execute();
+                  }
+
+                  const initRev = await trx
+                    .insertInto("association_revisions")
+                    .values({
+                      association_id: createdInitAssoc.id,
+                      revision_number: 1,
+                      change_request_id: null,
+                      variant_id: null,
+                      status: "confirmed",
+                      segments: JSON.stringify(initSegments),
+                      actor_user_id: null,
+                      reason: "initial_catalog_target",
+                    })
+                    .returning("id")
+                    .executeTakeFirstOrThrow();
+
+                  await trx
+                    .updateTable("associations")
+                    .set({ current_revision_id: initRev.id })
+                    .where("id", "=", createdInitAssoc.id)
+                    .execute();
+                }
+              }
+            }
+
+            mergeExternalKeys.add(
+              formatExternalKey({ namespace: initAssoc.namespace, nativeId: initAssoc.nativeId }),
+            );
+          }
         }
 
         const regularSeasons = extractRegularTvSeasons(mediaSeasons ?? []);
@@ -1939,6 +2157,9 @@ export function createExplorationJobHandler(
           return;
         }
 
+        const canonicalMediaId =
+          (await resolveCanonicalMediaId(trx, targetMedia.id)) ?? targetMedia.id;
+
         // Write platform_checks ONLY for genuinely searched & confirmed not_found platforms
         for (const outcome of outcomes) {
           if (outcome.status !== "not_found" || !isPlatformNamespace(outcome.namespace)) {
@@ -1948,7 +2169,7 @@ export function createExplorationJobHandler(
           const existingCheck = await trx
             .selectFrom("platform_checks")
             .select(["id", "attempt_count"])
-            .where("media_id", "=", targetMedia.id)
+            .where("media_id", "=", canonicalMediaId)
             .where("platform", "=", outcome.namespace)
             .forUpdate()
             .executeTakeFirst();
@@ -1977,7 +2198,7 @@ export function createExplorationJobHandler(
             await trx
               .insertInto("platform_checks")
               .values({
-                media_id: targetMedia.id,
+                media_id: canonicalMediaId,
                 platform: outcome.namespace,
                 status: "not_found",
                 checked_at: ctx.now,
@@ -1993,7 +2214,7 @@ export function createExplorationJobHandler(
         if (
           (hasDirectWrite || hasAlreadyConfirmed) &&
           (await isMediaDemandCoveredInTx(trx, {
-            mediaId: targetMedia.id,
+            mediaId: canonicalMediaId,
             season: activeSeason,
             namespaceGroup: payload.namespaceGroup,
           }))
@@ -2013,11 +2234,35 @@ export function createExplorationJobHandler(
           return;
         }
 
+        // If exploration merged a duplicate media during TMDB resolution without exploring platforms yet,
+        // reopen the migrated platform demand on canonicalMediaId immediately with zero transient backoff.
+        if (
+          hasDirectWrite &&
+          canonicalMediaId !== targetMedia.id &&
+          !hasSubmitted &&
+          !hasNotFound
+        ) {
+          await trx
+            .updateTable("demands")
+            .set({
+              media_id: canonicalMediaId,
+              status: "open",
+              next_eligible_at: ctx.now,
+              lease_expires_at: null,
+              updated_at: ctx.now,
+            })
+            .where("id", "=", lockedDemand.id)
+            .where("status", "=", "leased")
+            .where("lease_generation", "=", activeDemandLeaseGeneration)
+            .execute();
+          return;
+        }
+
         const corrected = await hasCorrectionForDemandRoundInTx(trx, lockedDemand);
         if (corrected || demandOutcome === "submitted" || demandOutcome === "rejected") {
           await settleDemandAfterSubmissionInTx(
             trx,
-            { ...lockedDemand, media_id: targetMedia.id },
+            { ...lockedDemand, media_id: canonicalMediaId },
             ctx.now,
             corrected,
           );

@@ -65,6 +65,12 @@ import {
   isCoveredByAssociationsInTx,
   isNamespaceCoveredInTx,
 } from "./demands.ts";
+import {
+  findSharedCatalogDuplicateMediaIdsInTx,
+  verifyAndAutoMergeDuplicateMedia,
+  verifyAndAutoMergeDuplicateMediaInTx,
+} from "./duplicate-merge.ts";
+import { resolveCanonicalMediaIdInTx } from "./duplicate-merge-policy.ts";
 import { loadCatalogEvidenceForMedia } from "./invalidation.ts";
 import { listLeadsForTarget, type Lead } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
@@ -1412,12 +1418,11 @@ async function loadDoubanSubjectSummary(
 
 async function loadTmdbLookupSourceContext(
   ctx: ExplorationExecutionContext,
+  externalIds: ReadonlyMap<Namespace, string>,
 ): Promise<TmdbLookupSourceContext> {
-  const ext = (ns: Namespace) =>
-    ctx.media.externalIds.find((e) => e.namespace === ns)?.nativeId ?? null;
-  let imdbId = ext("imdb");
-  const tvdbId = ext("tvdb");
-  const traktId = ext("trakt");
+  let imdbId = externalIds.get("imdb") ?? null;
+  const tvdbId = externalIds.get("tvdb") ?? null;
+  const traktId = externalIds.get("trakt") ?? null;
 
   const catalogRows = await ctx.db
     .selectFrom("associations")
@@ -1697,71 +1702,123 @@ function buildTmdbSearchQueries(
   return queries;
 }
 
+type TmdbExplorationStepResult = PlatformExplorationOutcome & { mergedIntoMediaId?: string };
+
 async function writeTmdbExternalIdsInTx(
   ctx: ExplorationExecutionContext,
-  entry: {
-    type: MediaType;
-    id: string;
-    externalIds: { tvdb?: string | null; trakt?: string | null };
-  },
+  entry: TmdbCandidateDetail,
   matchedBy: Record<string, string>,
-): Promise<PlatformExplorationOutcome> {
+): Promise<TmdbExplorationStepResult> {
   const namespace = "tmdb";
-  const nativeIds: Partial<Record<"tmdb" | "tvdb" | "trakt", string>> = {
-    tmdb: `${entry.type}:${entry.id}`,
+  const submitted = {
+    namespace,
+    status: "submitted",
+    nativeId: `${entry.type}:${entry.id}`,
+    directWrite: true,
+  } as const;
+  const nativeIds = {
+    tmdb: submitted.nativeId,
     ...(entry.externalIds.tvdb ? { tvdb: entry.externalIds.tvdb } : {}),
     ...(entry.externalIds.trakt ? { trakt: entry.externalIds.trakt } : {}),
   };
 
-  const written = await ctx.db.transaction().execute(async (trx) => {
+  return ctx.db.transaction().execute(async (trx): Promise<TmdbExplorationStepResult> => {
     const mediaId = ctx.media.id;
-    let tmdbWritten = false;
     for (const [ns, nativeId] of Object.entries(nativeIds) as Array<
       ["tmdb" | "tvdb" | "trakt", string]
     >) {
       await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE, `${mediaId}:${ns}`);
       const held = await trx
         .selectFrom("associations")
-        .select(["media_id", "native_id"])
+        .select(["id", "media_id", "native_id"])
         .where("is_external_id", "=", true)
         .where("namespace", "=", ns)
         .where((eb) => eb.or([eb("media_id", "=", mediaId), eb("native_id", "=", nativeId)]))
         .execute();
-      if (held.some((row) => row.media_id === mediaId)) {
+      const own = held.find((row) => row.media_id === mediaId);
+      if (own) {
+        if (ns === "tmdb" && own.native_id !== nativeId) {
+          // A concurrent claim wins. The fetched secondary IDs belong to the discarded candidate.
+          return { ...submitted, nativeId: own.native_id };
+        }
         continue; // Only fill empty slots.
       }
       const other = held.find((row) => row.native_id === nativeId);
       if (other) {
-        const existing = await trx
-          .selectFrom("review_alerts")
-          .select("id")
-          .where("alert_type", "=", "agent_external_id_conflict")
-          .where("media_id", "=", mediaId)
-          .where("status", "=", "open")
-          .where((eb) => eb(eb.ref("details", "->>").key("namespace"), "=", ns))
-          .where((eb) => eb(eb.ref("details", "->>").key("nativeId"), "=", nativeId))
-          .executeTakeFirst();
-        if (!existing) {
+        const canonicalOtherId =
+          (await resolveCanonicalMediaIdInTx(trx, other.media_id)) ?? other.media_id;
+        if (canonicalOtherId === mediaId) {
           await trx
-            .insertInto("review_alerts")
-            .values({
-              alert_type: "agent_external_id_conflict",
-              media_id: mediaId,
-              status: "open",
-              details: JSON.stringify({
-                namespace: ns,
-                nativeId,
-                otherMediaId: other.media_id,
-                matchedBy,
-                jobId: ctx.jobId,
-              }),
-            })
+            .updateTable("associations")
+            .where("is_external_id", "=", true)
+            .set({ media_id: mediaId, source: "agent", updated_at: ctx.now })
+            .where("id", "=", other.id)
             .execute();
+          continue;
         }
-        if (ns === "tmdb") {
-          return false; // Probable duplicate recorded; no automatic media merge today (ADR 0004).
+
+        const mergeAttempt = await verifyAndAutoMergeDuplicateMediaInTx(trx, {
+          mediaIdA: mediaId,
+          mediaIdB: canonicalOtherId,
+          actorUserId: EXPLORATION_AGENT_USER_ID,
+          reason: `exploration_external_id_match:${ns}:${nativeId}`,
+          // The lookup verified this entry for the explored media. The holder needs independent titles.
+          extraTitlesByMediaId: new Map([
+            [mediaId, [entry.title, entry.originalTitle, ...entry.aliases]],
+          ]),
+          acquireMergeLocks: true,
+          now: ctx.now,
+        });
+
+        if (mergeAttempt.merged) {
+          if (mergeAttempt.targetMediaId !== mediaId) {
+            return { ...submitted, mergedIntoMediaId: mergeAttempt.targetMediaId };
+          }
+          // `other` merged into `mediaId`; confirm whether `(ns, nativeId)` is now held by `mediaId`
+          const nowHeld = await trx
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
+            .select("id")
+            .where("media_id", "=", mediaId)
+            .where("namespace", "=", ns)
+            .executeTakeFirst();
+          if (nowHeld) {
+            continue;
+          }
+        } else {
+          const existing = await trx
+            .selectFrom("review_alerts")
+            .select("id")
+            .where("alert_type", "=", "agent_external_id_conflict")
+            .where("media_id", "=", mediaId)
+            .where("status", "=", "open")
+            .where((eb) => eb(eb.ref("details", "->>").key("namespace"), "=", ns))
+            .where((eb) => eb(eb.ref("details", "->>").key("nativeId"), "=", nativeId))
+            .executeTakeFirst();
+          if (!existing) {
+            await trx
+              .insertInto("review_alerts")
+              .values({
+                alert_type: "agent_external_id_conflict",
+                media_id: mediaId,
+                status: "open",
+                details: JSON.stringify({
+                  namespace: ns,
+                  nativeId,
+                  otherMediaId: canonicalOtherId,
+                  matchedBy,
+                  autoMergeBlockedReason: mergeAttempt.blockReason,
+                  autoMergeCheckedAt: ctx.now.toISOString(),
+                  jobId: ctx.jobId,
+                }),
+              })
+              .execute();
+          }
+          if (ns === "tmdb") {
+            return { namespace, status: "not_found", reason: "tmdb_id_on_other_media" };
+          }
+          continue;
         }
-        continue;
       }
       await trx
         .insertInto("associations")
@@ -1774,17 +1831,10 @@ async function writeTmdbExternalIdsInTx(
           source: "agent",
         })
         .execute();
-      tmdbWritten ||= ns === "tmdb";
     }
-    if (tmdbWritten) {
-      await fulfillCoveredCatalogDemandsInTx(trx, { mediaId, now: ctx.now });
-    }
-    return tmdbWritten;
+    await fulfillCoveredCatalogDemandsInTx(trx, { mediaId, now: ctx.now });
+    return submitted;
   });
-
-  return written
-    ? { namespace, status: "submitted", nativeId: nativeIds.tmdb, directWrite: true }
-    : { namespace, status: "not_found", reason: "tmdb_id_on_other_media" };
 }
 
 async function runTmdbAgentFallback(
@@ -1794,7 +1844,7 @@ async function runTmdbAgentFallback(
   config: ResolvedExplorationAgentConfig,
   clockMs: () => number,
   fallbackNotFoundReason: string,
-): Promise<PlatformExplorationOutcome> {
+): Promise<TmdbExplorationStepResult> {
   const namespace = "tmdb";
   const fetched = new Map(preFetched);
   const maxDurationMs = Math.min(config.maxDurationMs, 90_000);
@@ -1906,8 +1956,11 @@ async function runTmdbAgentFallback(
       },
     ];
 
-    let outcome: PlatformExplorationOutcome | null = null;
+    let outcome: TmdbExplorationStepResult | null = null;
     const conclude = async (call: ModelToolCall): Promise<unknown> => {
+      if (outcome) {
+        return { ok: false, error: "ALREADY_CONCLUDED" };
+      }
       if (budget.expired()) {
         return { ok: false, error: "TIME_UP", message: "Session budget expired." };
       }
@@ -2025,7 +2078,7 @@ async function runTmdbAgentFallback(
 }
 
 /**
- * Resolves the media's missing TMDB external ID (ADR 0002 §2.1):
+ * Resolves the media's missing TMDB external ID after converging shared catalog duplicates (ADR 0004):
  * 1. Exact chain via IMDb or TVDB (`/find`), verifying the entry's reciprocal ID.
  * 2. Deterministic title / originalTitle / alias search with strict identity corroboration
  *    (multiple distinct script titles, directors/creators/studios/cast, or TV season episode count).
@@ -2035,9 +2088,59 @@ async function exploreTmdbExternalId(
   ctx: ExplorationExecutionContext,
   config: ResolvedExplorationAgentConfig,
   clockMs: () => number,
-): Promise<PlatformExplorationOutcome> {
+): Promise<TmdbExplorationStepResult> {
   const namespace = "tmdb";
-  const source = await loadTmdbLookupSourceContext(ctx);
+  await ensureExplorationAgentUser(ctx.db);
+
+  // Shared catalog duplicates can be verified locally even without an external ID.
+  const sharedCatalogCandidates = await ctx.db
+    .transaction()
+    .execute((trx) => findSharedCatalogDuplicateMediaIdsInTx(trx, ctx.media.id));
+
+  for (const candidate of sharedCatalogCandidates) {
+    const mergeAttempt = await verifyAndAutoMergeDuplicateMedia(ctx.db, {
+      mediaIdA: ctx.media.id,
+      mediaIdB: candidate.otherMediaId,
+      actorUserId: EXPLORATION_AGENT_USER_ID,
+      reason: `exploration_shared_catalog:${candidate.namespace}:${candidate.nativeId}`,
+      outbound: ctx.outbound,
+      tmdbGateway: ctx.tmdbGateway,
+      now: ctx.now,
+    });
+    if (mergeAttempt.merged && mergeAttempt.targetMediaId !== ctx.media.id) {
+      const targetTmdb = await ctx.db
+        .selectFrom("associations")
+        .where("is_external_id", "=", true)
+        .select("native_id")
+        .where("media_id", "=", mergeAttempt.targetMediaId)
+        .where("namespace", "=", "tmdb")
+        .where("status", "!=", "delisted")
+        .executeTakeFirst();
+      return {
+        namespace,
+        status: "submitted",
+        nativeId: targetTmdb?.native_id ?? `${candidate.namespace}:${candidate.nativeId}`,
+        directWrite: true,
+        mergedIntoMediaId: mergeAttempt.targetMediaId,
+      };
+    }
+  }
+
+  // A merge into the explored media can transfer any of its external IDs.
+  const currentExtIds = await ctx.db
+    .selectFrom("associations")
+    .where("is_external_id", "=", true)
+    .select(["namespace", "native_id"])
+    .where("media_id", "=", ctx.media.id)
+    .where("status", "!=", "delisted")
+    .execute();
+  const externalIds = new Map(currentExtIds.map((row) => [row.namespace, row.native_id]));
+  const acquiredTmdb = externalIds.get("tmdb");
+  if (acquiredTmdb) {
+    return { namespace, status: "submitted", nativeId: acquiredTmdb, directWrite: true };
+  }
+
+  const source = await loadTmdbLookupSourceContext(ctx, externalIds);
   let fallbackReason = source.imdbId ? "imdb_not_on_tmdb" : "no_tmdb_candidates";
 
   try {
@@ -2160,17 +2263,17 @@ export function createExplorationAgentExecutor(
   return async (ctx: ExplorationExecutionContext): Promise<ExplorationExecutionResult> => {
     const startMs = clockMs();
     const registry: AdapterRegistry = ctx.adapterRegistry ?? defaultRegistry;
-    const timed = async (run: () => Promise<PlatformExplorationOutcome>) => {
-      const platformStartMs = clockMs();
-      const outcome = await run();
-      return { ...outcome, durationMs: Math.max(0, clockMs() - platformStartMs) };
-    };
     const platformOutcomes: PlatformExplorationOutcome[] = [];
 
     // The TMDB external ID has no adapter: it is looked up and written directly.
     const hasTmdb = ctx.media.externalIds.some((e) => e.namespace === "tmdb");
     if (ctx.targetNamespaces.includes("tmdb") && !hasTmdb) {
-      platformOutcomes.push(await timed(() => exploreTmdbExternalId(ctx, config, clockMs)));
+      const stepStartMs = clockMs();
+      const { mergedIntoMediaId, ...outcome } = await exploreTmdbExternalId(ctx, config, clockMs);
+      platformOutcomes.push({ ...outcome, durationMs: Math.max(0, clockMs() - stepStartMs) });
+      if (mergedIntoMediaId) {
+        return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
+      }
     }
 
     // A season already covered by a Douban/Bangumi association needs no catalog candidate.
