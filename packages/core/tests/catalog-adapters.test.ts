@@ -632,4 +632,105 @@ describe("Catalog gateway & baseline priority (selectBaseline + resolveCatalogTa
     expect(result.status).toBe("found");
     expect(calls).toBe(2);
   });
+
+  test.each([
+    ["imdb:tt0848228", { primaryTitle: "Movie", type: "movie", externalIds: { tmdb: "tv:1429" } }],
+    ["tvdb:267440", { data: { name: "Series", externalIds: { tmdb: "movie:24428" } } }],
+  ] as const)("does not backfill a cross-type TMDB or Trakt ID for %s", async (key, data) => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (request) => jsonResponse(request.url, data),
+    });
+    const result = await resolveCatalogTargetSnapshot(key, outbound, { traktClientId: "test" });
+    expect(result.status).toBe("found");
+    if (result.status === "found") {
+      expect(result.target.externalIds.tmdb).toBeUndefined();
+      expect(result.target.externalIds.trakt).toBeUndefined();
+      expect(result.target.evidence.externalIds.tmdb).toBeUndefined();
+    }
+    expect(outbound.httpRequests).toHaveLength(1);
+  });
+
+  test("resolveCatalogTargetSnapshot forwards catalog traktClientId to TMDB and enriches imdb/tvdb targets with Trakt when tmdb external ID is present", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/movie/24428")) {
+          return jsonResponse(request.url, {
+            id: 24428,
+            title: "复仇者联盟",
+            original_title: "The Avengers",
+            release_date: "2012-04-25",
+            external_ids: { imdb_id: "tt0848228" },
+          });
+        }
+        if (request.namespace === "imdb" && url.pathname.endsWith("/titles/tt0848228")) {
+          return jsonResponse(request.url, {
+            id: "tt0848228",
+            type: "movie",
+            primaryTitle: "The Avengers",
+            startYear: 2012,
+            externalIds: { tmdb: "movie:24428" },
+          });
+        }
+        if (request.namespace === "tvdb" && url.pathname.endsWith("/series/267440/extended")) {
+          return jsonResponse(request.url, {
+            data: {
+              id: 267440,
+              name: "进击的巨人",
+              year: 2013,
+              externalIds: { tmdb: "tv:1429" },
+            },
+          });
+        }
+        if (request.namespace === "trakt" && url.pathname.endsWith("/search/tmdb/24428")) {
+          expect(request.headers?.["trakt-api-key"]).toBe("trakt-from-catalog-config");
+          return jsonResponse(request.url, [
+            { type: "movie", movie: { ids: { trakt: 727, tmdb: 24428 } } },
+          ]);
+        }
+        if (request.namespace === "trakt" && url.pathname.endsWith("/search/tmdb/1429")) {
+          expect(request.headers?.["trakt-api-key"]).toBe("trakt-from-catalog-config");
+          return jsonResponse(request.url, [
+            { type: "show", show: { ids: { trakt: 1417, tmdb: 1429 } } },
+          ]);
+        }
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+
+    const config = {
+      tmdb: { accessToken: "test-tmdb-token" },
+      traktClientId: "trakt-from-catalog-config",
+    };
+
+    const tmdbRes = await resolveCatalogTargetSnapshot("tmdb:movie:24428", outbound, config);
+    expect(tmdbRes.status).toBe("found");
+    if (tmdbRes.status === "found") {
+      expect(tmdbRes.target.externalIds).toEqual({
+        tmdb: "movie:24428",
+        imdb: "tt0848228",
+        trakt: "movie:727",
+      });
+    }
+
+    const imdbRes = await resolveCatalogTargetSnapshot("imdb:tt0848228", outbound, config);
+    expect(imdbRes.status).toBe("found");
+    if (imdbRes.status === "found") {
+      expect(imdbRes.target.externalIds).toEqual({
+        imdb: "tt0848228",
+        tmdb: "movie:24428",
+        trakt: "movie:727",
+      });
+    }
+
+    const tvdbRes = await resolveCatalogTargetSnapshot("tvdb:series:267440", outbound, config);
+    expect(tvdbRes.status).toBe("found");
+    if (tvdbRes.status === "found") {
+      expect(tvdbRes.target.externalIds).toEqual({
+        tvdb: "267440",
+        tmdb: "tv:1429",
+        trakt: "show:1417",
+      });
+    }
+  });
 });

@@ -341,6 +341,8 @@ export {
   DEFAULT_TMDB_API_BASE_URL,
   DEFAULT_TMDB_LANGUAGE,
   DEFAULT_TRAKT_API_BASE_URL,
+  isTraktSyncEnabled,
+  lookupTraktId,
   parseTmdbNativeId,
   TmdbGatewayError,
   type ParsedTmdbNativeId,
