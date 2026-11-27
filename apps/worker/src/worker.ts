@@ -7,6 +7,7 @@ import {
   claimDueJobs,
   startLeasedJob,
   completeJobWithFencing,
+  convergeDuplicateMedia,
   createEvidenceCheckJobHandler,
   createExplorationAgentExecutor,
   createExplorationJobHandler,
@@ -297,6 +298,12 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
         leaseDurationMsByType,
         jobTypes: deps.config?.jobTypes,
       });
+
+      if (shouldScheduleExploration) {
+        await runScheduledStep("duplicate_convergence_failed", EXPLORATION_JOB_TYPE, () =>
+          convergeDuplicateMedia(deps.db, { now }),
+        );
+      }
 
       let dispatched = 0;
       let dispatchFailed = 0;

@@ -213,7 +213,7 @@ describe("catalog-group exploration", () => {
     expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("fulfilled");
   });
 
-  test("a TMDB ID held by another media is not written; a retry reuses the open alert", async () => {
+  test("a TMDB ID held by a compatible duplicate media auto-merges into it and fulfills the demand", async () => {
     const { testDb, mediaId, runJobs } = await setup({
       baseline: "douban",
       externalIds: [["imdb", "tt0137523"]],
@@ -240,6 +240,68 @@ describe("catalog-group exploration", () => {
         is_external_id: true,
         source: "sync",
       })
+      .execute();
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+
+    const mergedRow = await testDb.readDb
+      .selectFrom("media")
+      .select("merged_into_media_id")
+      .where("id", "=", mediaId)
+      .executeTakeFirstOrThrow();
+    expect(mergedRow.merged_into_media_id).toBe(other.id);
+
+    expect(await externalIds(testDb, other.id)).toEqual([
+      { namespace: "imdb", native_id: "tt0137523", source: "sync" },
+      { namespace: "tmdb", native_id: "movie:550", source: "sync" },
+    ]);
+    const conflictAlerts = await testDb.readDb
+      .selectFrom("review_alerts")
+      .selectAll()
+      .where("alert_type", "=", "agent_external_id_conflict")
+      .where("status", "=", "open")
+      .execute();
+    expect(conflictAlerts).toHaveLength(0);
+    expect((await listDemands(testDb.readDb, { mediaId: other.id }))[0]?.status).toBe("fulfilled");
+  });
+
+  test("a TMDB ID held by an incompatible media is not written; a retry reuses the open alert", async () => {
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "douban",
+      externalIds: [["imdb", "tt0137523"]],
+      doubanAssociation: "1292000",
+    });
+    const other = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "tmdb",
+        title: "Incompatible Film",
+        year: 2024,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("associations")
+      .values([
+        {
+          media_id: other.id,
+          namespace: "tmdb",
+          native_id: "movie:550",
+          status: "confirmed",
+          is_external_id: true,
+          source: "sync",
+        },
+        {
+          media_id: other.id,
+          namespace: "imdb",
+          native_id: "tt9999999",
+          status: "confirmed",
+          is_external_id: true,
+          source: "sync",
+        },
+      ])
       .execute();
 
     expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
