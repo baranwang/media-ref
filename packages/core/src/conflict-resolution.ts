@@ -996,25 +996,26 @@ function canAutoMergeSameUnlockedCollection(
   const existingSegs = existing.segments;
   const incomingSegs = cr.segments;
   if (existingSegs.length === incomingSegs.length) {
-    const sortedExisting = [...existingSegs].sort(
-      (a, b) =>
-        a.season - b.season ||
-        a.episodeStart - b.episodeStart ||
-        a.targetEpisodeStart - b.targetEpisodeStart,
-    );
-    const sortedIncoming = [...incomingSegs].sort(
-      (a, b) =>
-        a.season - b.season ||
-        a.episodeStart - b.episodeStart ||
-        a.targetEpisodeStart - b.targetEpisodeStart,
-    );
+    const sortSegs = (segs: readonly NormalizedSegment[]) =>
+      [...segs].sort(
+        (a, b) =>
+          a.season - b.season ||
+          a.episodeStart - b.episodeStart ||
+          a.targetEpisodeStart - b.targetEpisodeStart ||
+          (a.episodeEnd ?? Infinity) - (b.episodeEnd ?? Infinity),
+      );
+    const sortedExisting = sortSegs(existingSegs);
+    const sortedIncoming = sortSegs(incomingSegs);
     const identical = sortedExisting.every((s, idx) => {
       const inc = sortedIncoming[idx]!;
       return (
         s.season === inc.season &&
         s.episodeStart === inc.episodeStart &&
         s.episodeEnd === inc.episodeEnd &&
-        s.targetEpisodeStart === inc.targetEpisodeStart
+        s.targetEpisodeStart === inc.targetEpisodeStart &&
+        s.baseline === inc.baseline &&
+        Boolean(s.nonLinear) === Boolean(inc.nonLinear) &&
+        Boolean(s.needsReview) === Boolean(inc.needsReview)
       );
     });
     if (identical) {
