@@ -11,10 +11,9 @@ export function computeRulerTicks(
     return [{ pos: 0, label: mode === "season" ? "S1" : "E1" }];
   }
   const prefix = mode === "season" ? "S" : "E";
-  let step = 5;
-  if (total > 120) step = 20;
-  else if (total > 60) step = 10;
-  else if (total <= 12) step = 2;
+  // Smallest 1-2-5 step that keeps the ruler at <= 12 labels (1155 episodes -> every 100).
+  const step =
+    total <= 12 ? 2 : ([5, 10, 20, 50, 100, 200, 500, 1000].find((s) => total / s <= 12) ?? 2000);
 
   const ticks: Array<{ pos: number; label: string }> = [{ pos: 0, label: `${prefix}1` }];
   for (let n = step; n < total; n += step) {
