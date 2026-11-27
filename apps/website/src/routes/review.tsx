@@ -478,6 +478,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
     season,
     isMovie,
     totalSeasonEpisodes,
+    variantLabel,
     existingSegments,
     afterSegments,
     otherPendingCount,
@@ -492,7 +493,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
   const title = card?.title ?? media?.title ?? cr.pageTitle ?? cr.nativeId;
   const posterUrl = card?.posterUrl ?? media?.posterUrl;
   const detailId = cr.mediaId ?? card?.id;
-  const platformLabel = `${NAMESPACE_LABELS[cr.namespace]}${cr.variantLabel ?? ""}`;
+  const platformLabel = `${NAMESPACE_LABELS[cr.namespace]}${variantLabel ?? ""}`;
 
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-10">
@@ -519,7 +520,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
               <NamespaceLogo namespace={cr.namespace} className="size-4.5" />
               <span>
                 {NAMESPACE_LABELS[cr.namespace]}
-                {cr.variantLabel ? ` · ${cr.variantLabel}` : ""}
+                {variantLabel ? ` · ${variantLabel}` : ""}
                 {primary && ` · 补充${formatEpisodeRange(primary.start, primary.end)}`}
               </span>
             </div>
