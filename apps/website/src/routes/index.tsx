@@ -51,8 +51,8 @@ function DiscoveryHomePage() {
 
       <TopNav hideSearch transparent />
 
-      {/* Hero Centerpiece */}
-      <section className="relative z-10 container flex flex-col items-center pt-24 pb-10 text-center">
+      {/* Hero Centerpiece — above <main> so the search dropdown overlaps the shelves (#133) */}
+      <section className="relative z-20 container flex flex-col items-center pt-24 pb-10 text-center">
         <h1 className="font-display text-4xl leading-tight font-bold tracking-tight text-foreground sm:text-display">
           这部剧，在哪儿能看？
         </h1>
