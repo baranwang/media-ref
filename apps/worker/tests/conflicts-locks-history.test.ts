@@ -132,6 +132,14 @@ function createConflictTestStub(
 ) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     if (request.kind === "catalog" && request.namespace === "tmdb") {
+      if (new URL(request.url).pathname.endsWith("/tv/95479/season/1")) {
+        return jsonResponse(request.url, {
+          episodes: Array.from({ length: 24 }, (_, i) => ({
+            episode_number: i + 1,
+            name: i === 23 ? "命运交汇之夜" : `故事章节 ${i + 1}`,
+          })),
+        });
+      }
       if (request.url.includes("/tv/95479")) {
         return jsonResponse(request.url, {
           id: 95479,
@@ -173,7 +181,9 @@ function createConflictTestStub(
             jp_title: "呪術廻戦",
             type: 1,
             publish: { pub_time: "2020-10-03 01:25:00" },
-            episodes: makeBilibiliEpisodes(24),
+            episodes: makeBilibiliEpisodes(24).map((ep, i) =>
+              i === 23 ? { ...ep, long_title: "命运交汇之夜" } : ep,
+            ),
           },
         });
       }
