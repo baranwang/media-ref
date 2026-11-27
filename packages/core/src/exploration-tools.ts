@@ -18,7 +18,7 @@ import {
 import { fetchBangumiSubjectMetadata } from "./adapters/bangumi.ts";
 import { fetchDoubanFrodo } from "./adapters/douban-api.ts";
 import type { ModelToolDefinition, OutboundClient } from "./outbound.ts";
-import type { TmdbGateway } from "./tmdb.ts";
+import { parseTmdbNativeId, type TmdbGateway } from "./tmdb.ts";
 
 const MAX_EPISODES_IN_TOOL_RESULT = 80;
 const KAN360_INDEX_API = "https://api.so.360kan.com/index";
@@ -265,15 +265,13 @@ async function searchCatalog(
 
 async function getCatalogEntry(ctx: ToolContext, source: string, id: string): Promise<unknown> {
   if (source === "tmdb") {
-    const match = id.match(/^(movie|tv):(\d+)$/);
-    if (!match) {
+    const parsed = parseTmdbNativeId(id);
+    if (!parsed) {
       return { error: "BAD_ID", message: 'Use "tv:123" or "movie:123".' };
     }
-    const type = match[1] as MediaType;
-    const tmdbId = match[2]!;
     const entry = ctx.tmdb.fetchIdentityDetails
-      ? await ctx.tmdb.fetchIdentityDetails(type, tmdbId)
-      : await ctx.tmdb.fetchMediaSnapshotAndExternalIds(type, tmdbId);
+      ? await ctx.tmdb.fetchIdentityDetails(parsed.type, parsed.id)
+      : await ctx.tmdb.fetchMediaSnapshotAndExternalIds(parsed.type, parsed.id);
     return entry ?? { error: "NOT_FOUND" };
   }
   if (source === "trakt") {

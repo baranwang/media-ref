@@ -66,6 +66,7 @@ import {
   isCoveredByAssociationsInTx,
   isNamespaceCoveredInTx,
 } from "./demands.ts";
+import { parseCatalogTargetKey } from "./catalog-gateway.ts";
 import { loadCatalogEvidenceForMedia } from "./invalidation.ts";
 import { listLeadsForTarget, type Lead } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
@@ -78,7 +79,12 @@ import {
   runQueryTool,
   type ToolContext,
 } from "./exploration-tools.ts";
-import type { TmdbIdentityDetails } from "./tmdb.ts";
+import {
+  parseTmdbNativeId,
+  type ParsedTmdbNativeId,
+  type TmdbGateway,
+  type TmdbIdentityDetails,
+} from "./tmdb.ts";
 import {
   BUDGET_EXCEEDED,
   createSessionBudget,
@@ -1246,43 +1252,21 @@ async function runAgentSession(
   }
 }
 
+type TmdbIdentityId = "imdb" | "tvdb" | "trakt";
+type TmdbIdentityMatch = { matchedBy: TmdbIdentityId | "title" } | { reason: string };
+type TmdbFindResults = Partial<
+  Record<TmdbIdentityId, { hits: readonly ParsedTmdbNativeId[]; count: number }>
+>;
+
 interface TmdbLookupSourceContext {
-  imdbId: string | null;
-  tvdbId: string | null;
-  traktId: string | null;
+  externalIds: Record<TmdbIdentityId, string | null>;
   year: number | null;
   aliases: string[];
   directors: string[];
   studios: string[];
   cast: string[];
-  episodeCount: number | null;
+  seasons: Array<{ airYear?: number | null; episodeCount: number | null }>;
   catalogSources: Array<{ namespace: "douban" | "bangumi"; id: string }>;
-}
-
-interface TmdbCandidateDetail {
-  type: MediaType;
-  id: string;
-  title: string;
-  originalTitle: string | null;
-  aliases: string[];
-  year: number | null;
-  seasons: ReadonlyArray<{ season: number; episodeCount: number; airYear?: number | null }>;
-  directorsAndCreators: string[];
-  productionCompanies: string[];
-  cast: string[];
-  externalIds: { tmdb: string; imdb: string | null; tvdb: string | null; trakt: string | null };
-}
-
-interface TmdbIdentityEvaluation {
-  disqualifiedReason: string | null;
-  matchedTitleCount: number;
-  exactYear: boolean;
-  yearGap: number | null;
-  sharedExternalId: boolean;
-  personOrStudioOverlap: boolean;
-  tvEpisodeCountMatch: boolean;
-  strongMatch: boolean;
-  weakMatch: boolean;
 }
 
 const UNCONFIGURED_MODEL_PATTERN =
@@ -1310,49 +1294,6 @@ function intersectNormalizedNames(a: readonly string[], b: readonly string[]): n
     }
   }
   return hits;
-}
-
-function toTmdbCandidateDetail(
-  type: MediaType,
-  id: string,
-  detail:
-    | TmdbIdentityDetails
-    | Awaited<
-        ReturnType<ExplorationExecutionContext["tmdbGateway"]["fetchMediaSnapshotAndExternalIds"]>
-      >,
-): TmdbCandidateDetail | null {
-  if (!detail) {
-    return null;
-  }
-  const rich = "aliases" in detail ? detail : null;
-  return {
-    type: detail.type ?? type,
-    id,
-    title: detail.snapshot.title,
-    originalTitle: detail.snapshot.originalTitle ?? null,
-    aliases: rich?.aliases ?? [],
-    year: detail.snapshot.year ?? null,
-    seasons: detail.snapshot.seasons ?? [],
-    directorsAndCreators: rich?.directorsAndCreators ?? [],
-    productionCompanies: rich?.productionCompanies ?? [],
-    cast: rich?.cast ?? [],
-    externalIds: detail.externalIds,
-  };
-}
-
-async function fetchTmdbCandidateDetail(
-  tmdb: ExplorationExecutionContext["tmdbGateway"],
-  type: MediaType,
-  id: string,
-): Promise<TmdbCandidateDetail | null> {
-  if (tmdb.fetchIdentityDetails) {
-    const rich = await tmdb.fetchIdentityDetails(type, id);
-    if (rich) {
-      return toTmdbCandidateDetail(type, id, rich);
-    }
-  }
-  const basic = await tmdb.fetchMediaSnapshotAndExternalIds(type, id);
-  return toTmdbCandidateDetail(type, id, basic);
 }
 
 async function loadDoubanSubjectSummary(
@@ -1411,11 +1352,32 @@ async function loadDoubanSubjectSummary(
   }
 }
 
+function comparableExternalId(
+  ns: TmdbIdentityId | "tmdb",
+  raw: string | null,
+  type: MediaType,
+): string | null {
+  if (!raw) return null;
+  const id = raw.trim().toLowerCase();
+  if (ns === "tvdb") {
+    const ref = parseCatalogTargetKey(`tvdb:${id}`);
+    if (ref?.namespace === "tvdb" && (!ref.mediaTypeHint || ref.mediaTypeHint === type))
+      return ref.tvdbId;
+  }
+  if (ns === "trakt" && /^[1-9]\d*$/.test(id))
+    return `${type === "movie" ? "movie" : "show"}:${id}`;
+  return id;
+}
+
 async function loadTmdbLookupSourceContext(
   ctx: ExplorationExecutionContext,
-): Promise<TmdbLookupSourceContext> {
-  const ext = (ns: Namespace) =>
-    ctx.media.externalIds.find((e) => e.namespace === ns)?.nativeId ?? null;
+): Promise<TmdbLookupSourceContext | null> {
+  const ext = (ns: TmdbIdentityId) =>
+    comparableExternalId(
+      ns,
+      ctx.media.externalIds.find((e) => e.namespace === ns)?.nativeId ?? null,
+      ctx.media.type,
+    );
   let imdbId = ext("imdb");
   const tvdbId = ext("tvdb");
   const traktId = ext("trakt");
@@ -1435,10 +1397,9 @@ async function loadTmdbLookupSourceContext(
   const studios: string[] = [];
   const cast: string[] = [];
   let sourceYear: number | null = ctx.media.snapshot.year;
-  let episodeCount: number | null =
-    ctx.media.type === "tv" && ctx.media.snapshot.seasons.length === 1
-      ? (ctx.media.snapshot.seasons[0]!.episodeCount ?? null)
-      : null;
+  const seasons: TmdbLookupSourceContext["seasons"] = ctx.media.snapshot.seasons.filter(
+    (s) => s.season > 0,
+  );
 
   const catalogSources: Array<{ namespace: "douban" | "bangumi"; id: string }> = [];
   for (const row of catalogRows) {
@@ -1453,9 +1414,10 @@ async function loadTmdbLookupSourceContext(
         aliases.push(s.title, ...(s.originalTitle ? [s.originalTitle] : []), ...s.aliases);
         directors.push(...s.directors);
         studios.push(...s.studios);
+        if (imdbId && s.imdbId && imdbId !== s.imdbId) return null;
         imdbId ??= s.imdbId;
         sourceYear ??= s.year;
-        episodeCount ??= s.episodeCount;
+        seasons.push({ airYear: s.year, episodeCount: s.episodeCount });
       }
     } else {
       const douban = await loadDoubanSubjectSummary(row.native_id, ctx.outbound);
@@ -1463,23 +1425,22 @@ async function loadTmdbLookupSourceContext(
         aliases.push(...douban.aliases);
         directors.push(...douban.directors);
         cast.push(...douban.cast);
+        if (imdbId && douban.imdbId && imdbId !== douban.imdbId) return null;
         imdbId ??= douban.imdbId;
         sourceYear ??= douban.year;
-        episodeCount ??= douban.episodeCount;
+        seasons.push({ airYear: douban.year, episodeCount: douban.episodeCount });
       }
     }
   }
 
   return {
-    imdbId,
-    tvdbId,
-    traktId,
+    externalIds: { imdb: imdbId, tvdb: tvdbId, trakt: traktId },
     year: sourceYear,
     aliases: [...new Set(aliases.filter((a) => a.trim().length > 0))],
     directors: [...new Set(directors)],
     studios: [...new Set(studios)],
     cast: [...new Set(cast)],
-    episodeCount,
+    seasons,
     catalogSources,
   };
 }
@@ -1487,7 +1448,7 @@ async function loadTmdbLookupSourceContext(
 function countMatchedIndependentTitles(
   media: ExplorationTargetMedia,
   source: TmdbLookupSourceContext,
-  candidate: TmdbCandidateDetail,
+  candidate: TmdbIdentityDetails,
 ): number {
   const groupByForm = new Map<string, Set<string>>();
   const collect = (titles: readonly (string | null)[], year: number | null) => {
@@ -1511,8 +1472,8 @@ function countMatchedIndependentTitles(
     source.year,
   );
   const candidateForms = collect(
-    [candidate.title, candidate.originalTitle, ...candidate.aliases],
-    candidate.year,
+    [candidate.snapshot.title, candidate.snapshot.originalTitle, ...candidate.aliases],
+    candidate.snapshot.year,
   );
   const matchedGroups = new Set<Set<string>>();
   for (const form of targetForms) {
@@ -1524,127 +1485,63 @@ function countMatchedIndependentTitles(
 function evaluateTmdbIdentityMatch(
   media: ExplorationTargetMedia,
   source: TmdbLookupSourceContext,
-  candidate: TmdbCandidateDetail,
-): TmdbIdentityEvaluation {
-  if (candidate.type !== media.type) {
-    return {
-      disqualifiedReason: "type_mismatch",
-      matchedTitleCount: 0,
-      exactYear: false,
-      yearGap: null,
-      sharedExternalId: false,
-      personOrStudioOverlap: false,
-      tvEpisodeCountMatch: false,
-      strongMatch: false,
-      weakMatch: false,
-    };
+  finds: TmdbFindResults,
+  candidate: TmdbIdentityDetails,
+): TmdbIdentityMatch {
+  if (candidate.type !== media.type) return { reason: "type_mismatch" };
+
+  let sharedId: TmdbIdentityId | undefined;
+  for (const ns of ["imdb", "tvdb", "trakt"] as const) {
+    const expected = source.externalIds[ns];
+    const actual = comparableExternalId(ns, candidate.externalIds[ns], media.type);
+    const found = finds[ns];
+    if (expected && actual && expected !== actual) return { reason: "external_id_conflict" };
+    if (
+      found?.count &&
+      !found.hits.some((ref) => `${ref.type}:${ref.id}` === candidate.externalIds.tmdb)
+    ) {
+      return { reason: "external_id_conflict" };
+    }
+    if (expected && expected === actual && (found?.count ?? 0) <= 1) sharedId ??= ns;
+  }
+  if (sharedId) return { matchedBy: sharedId };
+
+  const titleCount = countMatchedIndependentTitles(media, source, candidate);
+  if (titleCount === 0) return { reason: "title_mismatch" };
+  const { year, seasons } = candidate.snapshot;
+  const targetYears = [source.year, ...source.seasons.map((s) => s.airYear)].filter(
+    (y) => y != null,
+  );
+  const candidateYears = [year, ...seasons.map((s) => s.airYear)].filter((y) => y != null);
+  if (
+    targetYears.length &&
+    candidateYears.length &&
+    !targetYears.some((y) => candidateYears.some((cy) => Math.abs(y - cy) <= 1))
+  ) {
+    return { reason: "year_mismatch" };
   }
 
-  const normalizeId = (v: string | null | undefined) => (v ? v.trim().toLowerCase() : null);
-  const idPairs: Array<[string | null, string | null]> = [
-    [normalizeId(source.imdbId), normalizeId(candidate.externalIds.imdb)],
-    [normalizeId(source.tvdbId), normalizeId(candidate.externalIds.tvdb)],
-    [normalizeId(source.traktId), normalizeId(candidate.externalIds.trakt)],
-  ];
-  let sharedExternalId = false;
-  for (const [srcId, candId] of idPairs) {
-    if (srcId && candId) {
-      if (srcId !== candId) {
-        return {
-          disqualifiedReason: "external_id_conflict",
-          matchedTitleCount: 0,
-          exactYear: false,
-          yearGap: null,
-          sharedExternalId: false,
-          personOrStudioOverlap: false,
-          tvEpisodeCountMatch: false,
-          strongMatch: false,
-          weakMatch: false,
-        };
-      }
-      sharedExternalId = true;
-    }
-  }
-
-  const targetYears = [
-    ...new Set(
-      [
-        media.snapshot.year,
-        source.year,
-        ...media.snapshot.seasons.map((s) => s.airYear ?? null),
-      ].filter((y): y is number => y !== null && Number.isInteger(y)),
-    ),
-  ];
-  const candidateYears = [
-    ...new Set(
-      [candidate.year, ...candidate.seasons.map((s) => s.airYear ?? null)].filter(
-        (y): y is number => y !== null && Number.isInteger(y),
-      ),
-    ),
-  ];
-
-  let yearGap: number | null = null;
-  if (targetYears.length > 0 && candidateYears.length > 0) {
-    for (const ty of targetYears) {
-      for (const cy of candidateYears) {
-        const diff = Math.abs(ty - cy);
-        if (yearGap === null || diff < yearGap) {
-          yearGap = diff;
-        }
-      }
-    }
-    if (!sharedExternalId && yearGap !== null && yearGap > 1) {
-      return {
-        disqualifiedReason: "year_mismatch",
-        matchedTitleCount: 0,
-        exactYear: false,
-        yearGap,
-        sharedExternalId: false,
-        personOrStudioOverlap: false,
-        tvEpisodeCountMatch: false,
-        strongMatch: false,
-        weakMatch: false,
-      };
-    }
-  }
-  const exactYear = yearGap === 0;
-
-  const matchedTitleCount = countMatchedIndependentTitles(media, source, candidate);
-
-  const directorHits = intersectNormalizedNames(source.directors, candidate.directorsAndCreators);
-  const studioHits = intersectNormalizedNames(source.studios, candidate.productionCompanies);
-  const castHits = intersectNormalizedNames(source.cast, candidate.cast);
-  const personOrStudioOverlap = directorHits > 0 || studioHits > 0 || castHits >= 2;
-
-  const tvEpisodeCountMatch =
+  const sameSeason =
     media.type === "tv" &&
-    exactYear &&
-    source.episodeCount !== null &&
-    source.episodeCount >= 4 &&
-    candidate.seasons.some((s) => s.season > 0 && s.episodeCount === source.episodeCount);
-
-  const distinctTitleSignals = matchedTitleCount >= 2;
-  const yearCompatible = yearGap === null || yearGap <= 1;
-  const strongMatch =
-    sharedExternalId ||
-    (matchedTitleCount >= 1 &&
-      yearCompatible &&
-      (distinctTitleSignals || personOrStudioOverlap || tvEpisodeCountMatch));
-  const weakMatch =
-    strongMatch ||
-    (yearCompatible && (matchedTitleCount >= 1 || personOrStudioOverlap || tvEpisodeCountMatch));
-
-  return {
-    disqualifiedReason: matchedTitleCount === 0 && !personOrStudioOverlap ? "title_mismatch" : null,
-    matchedTitleCount,
-    exactYear,
-    yearGap,
-    sharedExternalId,
-    personOrStudioOverlap,
-    tvEpisodeCountMatch,
-    strongMatch,
-    weakMatch,
-  };
+    seasons.some(
+      (s) =>
+        s.season > 0 &&
+        s.airYear != null &&
+        s.episodeCount >= 4 &&
+        source.seasons.some(
+          (target) => target.airYear === s.airYear && target.episodeCount === s.episodeCount,
+        ),
+    );
+  if (
+    titleCount >= 2 ||
+    sameSeason ||
+    intersectNormalizedNames(source.directors, candidate.directorsAndCreators) > 0 ||
+    intersectNormalizedNames(source.studios, candidate.productionCompanies) > 0 ||
+    intersectNormalizedNames(source.cast, candidate.cast) >= 2
+  ) {
+    return { matchedBy: "title" };
+  }
+  return { reason: "insufficient_identity_evidence" };
 }
 
 function buildTmdbSearchQueries(
@@ -1678,21 +1575,11 @@ function buildTmdbSearchQueries(
 
 async function writeTmdbExternalIdsInTx(
   ctx: ExplorationExecutionContext,
-  entry: {
-    type: MediaType;
-    id: string;
-    externalIds: { tvdb?: string | null; trakt?: string | null };
-  },
+  entry: TmdbIdentityDetails,
   matchedBy: Record<string, string>,
   budget?: SessionBudget,
 ): Promise<PlatformExplorationOutcome> {
   const namespace = "tmdb";
-  const nativeIds: Partial<Record<"tmdb" | "tvdb" | "trakt", string>> = {
-    tmdb: `${entry.type}:${entry.id}`,
-    ...(entry.externalIds.tvdb ? { tvdb: entry.externalIds.tvdb } : {}),
-    ...(entry.externalIds.trakt ? { trakt: entry.externalIds.trakt } : {}),
-  };
-
   const write = async (trx: Transaction<Database>) => {
     if (budget) {
       const remaining = Math.ceil(budget.remainingMs());
@@ -1700,10 +1587,11 @@ async function writeTmdbExternalIdsInTx(
       await sql`select set_config('transaction_timeout', ${String(remaining)}, true)`.execute(trx);
     }
     const mediaId = ctx.media.id;
-    let tmdbWritten = false;
-    for (const [ns, nativeId] of Object.entries(nativeIds) as Array<
-      ["tmdb" | "tvdb" | "trakt", string]
-    >) {
+    const missing: Array<["tmdb" | "tvdb" | "trakt", string]> = [];
+    // Recheck all IDs under their locks before writing any part of the match.
+    for (const ns of ["tmdb", "imdb", "tvdb", "trakt"] as const) {
+      const nativeId = entry.externalIds[ns];
+      if (!nativeId) continue;
       await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE, `${mediaId}:${ns}`);
       if (budget?.expired()) throw new Error(BUDGET_EXCEEDED);
       const held = await trx
@@ -1713,8 +1601,14 @@ async function writeTmdbExternalIdsInTx(
         .where("namespace", "=", ns)
         .where((eb) => eb.or([eb("media_id", "=", mediaId), eb("native_id", "=", nativeId)]))
         .execute();
-      if (held.some((row) => row.media_id === mediaId)) {
-        continue; // Only fill empty slots.
+      const current = held.find((row) => row.media_id === mediaId);
+      if (current) {
+        if (
+          comparableExternalId(ns, current.native_id, entry.type) !==
+          comparableExternalId(ns, nativeId, entry.type)
+        )
+          return "external_id_conflict";
+        continue;
       }
       const other = held.find((row) => row.native_id === nativeId);
       if (other) {
@@ -1744,11 +1638,11 @@ async function writeTmdbExternalIdsInTx(
             })
             .execute();
         }
-        if (ns === "tmdb") {
-          break; // Probable duplicate recorded; no automatic media merge today (ADR 0004).
-        }
-        continue;
+        return ns === "tmdb" ? "tmdb_id_on_other_media" : "external_id_conflict";
       }
+      if (ns !== "imdb") missing.push([ns, nativeId]);
+    }
+    for (const [ns, nativeId] of missing) {
       await trx
         .insertInto("associations")
         .values({
@@ -1760,33 +1654,110 @@ async function writeTmdbExternalIdsInTx(
           source: "agent",
         })
         .execute();
-      tmdbWritten ||= ns === "tmdb";
     }
-    if (tmdbWritten) {
-      await fulfillCoveredCatalogDemandsInTx(trx, { mediaId, now: ctx.now });
-    }
-    if (budget?.expired()) throw new Error(BUDGET_EXCEEDED);
-    return tmdbWritten;
+    await fulfillCoveredCatalogDemandsInTx(trx, { mediaId, now: ctx.now });
+    return null;
   };
-  const written = await ctx.db.connection().execute((db) => db.transaction().execute(write), {
-    signal: budget?.signal,
-  });
+  const reason = await ctx.db.connection().execute(
+    (db) =>
+      db.transaction().execute(async (trx) => {
+        const conflict = await write(trx);
+        if (budget?.expired()) throw new Error(BUDGET_EXCEEDED);
+        return conflict;
+      }),
+    { signal: budget?.signal },
+  );
 
-  return written
-    ? { namespace, status: "submitted", nativeId: nativeIds.tmdb, directWrite: true }
-    : { namespace, status: "not_found", reason: "tmdb_id_on_other_media" };
+  return reason
+    ? { namespace, status: "not_found", reason }
+    : { namespace, status: "submitted", nativeId: entry.externalIds.tmdb, directWrite: true };
+}
+
+function createTmdbLookup(
+  ctx: ExplorationExecutionContext,
+  source: TmdbLookupSourceContext,
+  finds: TmdbFindResults,
+) {
+  // Undefined is a known hit still to inspect; null is a fetched 404.
+  const candidates = new Map<string, TmdbIdentityDetails | null | undefined>();
+  let truncated = false;
+  const remember = (nativeId: string) => {
+    if (!candidates.has(nativeId) && parseTmdbNativeId(nativeId)?.type === ctx.media.type) {
+      candidates.set(nativeId, undefined);
+    }
+  };
+  for (const { hits } of Object.values(finds)) {
+    for (const hit of hits) remember(`${hit.type}:${hit.id}`);
+  }
+  const gateway = ctx.tmdbGateway;
+  const tmdb = {
+    ...gateway,
+    async search(query, options) {
+      const hits = await gateway.search(query, {
+        ...options,
+        onTruncated: () => {
+          if (!options?.type || options.type === ctx.media.type) truncated = true;
+        },
+      });
+      for (const hit of hits) remember(hit.nativeId);
+      return hits;
+    },
+    async fetchIdentityDetails(type, id) {
+      const key = `${type}:${id}`;
+      const cached = candidates.get(key);
+      if (cached !== undefined) return cached;
+      if (!parseTmdbNativeId(key)) return null;
+      remember(key);
+      let detail = await gateway.fetchIdentityDetails?.(type, id);
+      if (!detail) {
+        const basic = await gateway.fetchMediaSnapshotAndExternalIds(type, id);
+        detail = basic && {
+          ...basic,
+          aliases: [],
+          directorsAndCreators: [],
+          productionCompanies: [],
+          cast: [],
+        };
+      }
+      if (detail && (detail.type !== type || detail.externalIds.tmdb !== key)) {
+        throw new Error("tmdb_response_id_mismatch");
+      }
+      candidates.set(key, detail);
+      return detail;
+    },
+  } satisfies TmdbGateway;
+
+  const submit = async (candidate: TmdbIdentityDetails, budget?: SessionBudget) => {
+    const match = evaluateTmdbIdentityMatch(ctx.media, source, finds, candidate);
+    if ("reason" in match) return match;
+    const byTitle = match.matchedBy === "title";
+    if (byTitle && truncated) return { reason: "incomplete_tmdb_search" };
+    for (const [key, other] of candidates) {
+      if (byTitle && other === undefined) return { reason: "incomplete_tmdb_search" };
+      if (!other || key === candidate.externalIds.tmdb) continue;
+      const rival = evaluateTmdbIdentityMatch(ctx.media, source, finds, other);
+      if ("matchedBy" in rival && (byTitle || rival.matchedBy !== "title")) {
+        return { reason: "ambiguous_tmdb_find" };
+      }
+    }
+    const evidence =
+      match.matchedBy === "title"
+        ? { identityChain: ctx.media.snapshot.title }
+        : { [match.matchedBy]: source.externalIds[match.matchedBy]! };
+    return writeTmdbExternalIdsInTx(ctx, candidate, evidence, budget);
+  };
+  return { tmdb, candidates, submit };
 }
 
 async function runTmdbAgentFallback(
   ctx: ExplorationExecutionContext,
   source: TmdbLookupSourceContext,
-  preFetched: ReadonlyMap<string, TmdbCandidateDetail>,
+  lookup: ReturnType<typeof createTmdbLookup>,
   config: ResolvedExplorationAgentConfig,
   clockMs: () => number,
   fallbackNotFoundReason: string,
 ): Promise<PlatformExplorationOutcome> {
   const namespace = "tmdb";
-  const fetched = new Map(preFetched);
   const maxDurationMs = Math.min(config.maxDurationMs, 90_000);
   const budget = createSessionBudget(ctx.outbound, clockMs() + maxDurationMs, clockMs);
   const usage: SessionUsage = { tokens: 0, byModel: new Map() };
@@ -1795,24 +1766,7 @@ async function runTmdbAgentFallback(
     const baseToolCtx: ToolContext = {
       outbound: budget.outbound,
       registry,
-      tmdb: {
-        ...ctx.tmdbGateway,
-        async fetchIdentityDetails(type, id) {
-          const detail = await fetchTmdbCandidateDetail(ctx.tmdbGateway, type, id);
-          if (detail) {
-            fetched.set(`${detail.type}:${detail.id}`, detail);
-          }
-          return detail ? (detail as unknown as TmdbIdentityDetails) : null;
-        },
-        async fetchMediaSnapshotAndExternalIds(type, id, opts) {
-          const basic = await ctx.tmdbGateway.fetchMediaSnapshotAndExternalIds(type, id, opts);
-          const detail = toTmdbCandidateDetail(type, id, basic);
-          if (detail) {
-            fetched.set(`${detail.type}:${detail.id}`, detail);
-          }
-          return basic;
-        },
-      },
+      tmdb: lookup.tmdb,
       collectionNamespaces: [],
       register: () => false,
       noteTransient: () => {},
@@ -1833,7 +1787,6 @@ async function runTmdbAgentFallback(
               type: "string",
               description: 'TMDB ID such as "tv:311842" or "movie:550".',
             },
-            rationale: { type: "string" },
           },
           required: ["nativeId"],
         },
@@ -1855,7 +1808,7 @@ async function runTmdbAgentFallback(
         content: [
           "You link a media entry in MediaRef to its exact TMDB entry (`tv:<id>` or `movie:<id>`).",
           'Search TMDB (including original title, Traditional/Simplified variants, English aliases), inspect Douban/Bangumi entries or use web search to find the exact TMDB URL/ID, then ALWAYS call `get_catalog_entry(source="tmdb", id=...)` to inspect the candidate before submitting.',
-          "Only call `submit_tmdb_id` when media type, release/air year, title chain and any external IDs or credits clearly agree. If uncertain, call `mark_not_found` — never guess.",
+          "Verify a reciprocal external ID or a title from the linked catalogs (including TMDB translations and aliases) supported by independent titles, credits or a matching season's air year and episode count. Inspect competing hits before relying on titles. If uncertain, call `mark_not_found`.",
         ].join("\n"),
       },
       {
@@ -1868,27 +1821,25 @@ async function runTmdbAgentFallback(
               originalTitle: ctx.media.snapshot.originalTitle,
               year: ctx.media.snapshot.year ?? source.year,
               seasons: ctx.media.snapshot.seasons,
-              externalIds: {
-                imdb: source.imdbId,
-                tvdb: source.tvdbId,
-                trakt: source.traktId,
-              },
+              externalIds: source.externalIds,
               aliases: source.aliases,
               directors: source.directors,
               studios: source.studios,
               catalogSources: source.catalogSources,
             },
-            preCheckedTmdbCandidates: [...fetched.values()].map((c) => ({
-              id: `${c.type}:${c.id}`,
-              title: c.title,
-              originalTitle: c.originalTitle,
-              aliases: c.aliases.slice(0, 8),
-              year: c.year,
-              seasons: c.seasons,
-              directorsAndCreators: c.directorsAndCreators,
-              productionCompanies: c.productionCompanies,
-              externalIds: c.externalIds,
-            })),
+            preCheckedTmdbCandidates: [...lookup.candidates.values()]
+              .filter((c) => c != null)
+              .map((c) => ({
+                id: c.externalIds.tmdb,
+                ...c.snapshot,
+                aliases: c.aliases.slice(0, 8),
+                directorsAndCreators: c.directorsAndCreators,
+                productionCompanies: c.productionCompanies,
+                externalIds: c.externalIds,
+              })),
+            uncheckedTmdbIds: [...lookup.candidates]
+              .filter(([, detail]) => detail === undefined)
+              .map(([id]) => id),
           },
           null,
           2,
@@ -1898,6 +1849,7 @@ async function runTmdbAgentFallback(
 
     let outcome: PlatformExplorationOutcome | null = null;
     const conclude = async (call: ModelToolCall): Promise<unknown> => {
+      if (outcome) return { ok: false, error: "ALREADY_CONCLUDED" };
       if (budget.expired()) {
         return { ok: false, error: "TIME_UP", message: "Session budget expired." };
       }
@@ -1911,56 +1863,22 @@ async function runTmdbAgentFallback(
         return { ok: true };
       }
       const rawId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
-      const match = rawId.match(/^(movie|tv):(\d+)$/);
-      if (!match) {
+      const parsed = parseTmdbNativeId(rawId);
+      if (!parsed) {
         return { ok: false, error: "BAD_TMDB_ID", message: 'Use "tv:123" or "movie:123".' };
       }
-      const key = `${match[1]}:${match[2]}`;
-      let candidate = fetched.get(key);
-      if (!candidate) {
-        try {
-          candidate =
-            (await raceWithAbortSignal(
-              fetchTmdbCandidateDetail(ctx.tmdbGateway, match[1] as MediaType, match[2]!),
-              budget.signal,
-              BUDGET_EXCEEDED,
-            )) ?? undefined;
-        } catch (error) {
-          if (budget.expired()) {
-            return { ok: false, error: "TIME_UP", message: "Session budget expired." };
-          }
-          throw error;
-        }
-        if (candidate) {
-          fetched.set(key, candidate);
-        }
-      }
-      if (budget.expired()) {
-        return { ok: false, error: "TIME_UP", message: "Session budget expired." };
-      }
-      if (!candidate) {
-        return { ok: false, error: "NOT_FOUND_ON_TMDB" };
-      }
-      const check = evaluateTmdbIdentityMatch(ctx.media, source, candidate);
-      if (
-        !check.weakMatch ||
-        check.disqualifiedReason === "external_id_conflict" ||
-        candidate.type !== ctx.media.type
-      ) {
-        return {
-          ok: false,
-          error: "IDENTITY_CHECK_FAILED",
-          reason: check.disqualifiedReason ?? "insufficient_identity_evidence",
-        };
-      }
-      outcome = await writeTmdbExternalIdsInTx(
-        ctx,
-        candidate,
-        {
-          agentSearch: typeof args.rationale === "string" ? args.rationale.slice(0, 120) : "agent",
-        },
-        budget,
+      const candidate = await raceWithAbortSignal(
+        lookup.tmdb.fetchIdentityDetails(parsed.type, parsed.id),
+        budget.signal,
+        BUDGET_EXCEEDED,
       );
+      if (budget.expired())
+        return { ok: false, error: "TIME_UP", message: "Session budget expired." };
+      if (!candidate) return { ok: false, error: "NOT_FOUND_ON_TMDB" };
+      const result = await lookup.submit(candidate, budget);
+      if (!("status" in result))
+        return { ok: false, error: "IDENTITY_CHECK_FAILED", reason: result.reason };
+      outcome = result;
       return { ok: true };
     };
 
@@ -2036,108 +1954,75 @@ async function exploreTmdbExternalId(
 ): Promise<PlatformExplorationOutcome> {
   const namespace = "tmdb";
   const source = await loadTmdbLookupSourceContext(ctx);
-  let fallbackReason = source.imdbId ? "imdb_not_on_tmdb" : "no_tmdb_candidates";
+  if (!source) return { namespace, status: "not_found", reason: "external_id_conflict" };
+  let fallbackReason = source.externalIds.imdb ? "imdb_not_on_tmdb" : "no_tmdb_candidates";
 
   try {
-    // 1. Exact IMDb / TVDB external ID chains first.
-    if (source.imdbId) {
-      const found = (await ctx.tmdbGateway.findByImdbId(source.imdbId)).filter(
-        (f) => f.type === ctx.media.type,
-      );
-      if (found.length > 1) {
+    // Keep the full cardinality of each reverse lookup for every later submission.
+    const finds: TmdbFindResults = {};
+    for (const ns of ["imdb", "tvdb"] as const) {
+      const id = source.externalIds[ns];
+      if (!id) continue;
+      let count = 0;
+      const reportCount = (total: number) => {
+        count = total;
+      };
+      const hits =
+        ns === "imdb"
+          ? await ctx.tmdbGateway.findByImdbId(id, reportCount)
+          : await ctx.tmdbGateway.findByTvdbId?.(id, reportCount);
+      if (hits) finds[ns] = { hits, count: Math.max(count, hits.length) };
+    }
+    const lookup = createTmdbLookup(ctx, source, finds);
+    for (const ns of ["imdb", "tvdb"] as const) {
+      const found = finds[ns];
+      if (!found?.hits.length) continue;
+      if (found.count > 1) {
         fallbackReason = "ambiguous_tmdb_find";
-      } else if (found.length === 1) {
-        const detail = await fetchTmdbCandidateDetail(
-          ctx.tmdbGateway,
-          found[0]!.type,
-          found[0]!.id,
-        );
-        if (detail && detail.externalIds.imdb?.toLowerCase() === source.imdbId.toLowerCase()) {
-          return await writeTmdbExternalIdsInTx(ctx, detail, { imdb: source.imdbId });
-        }
+        continue;
+      }
+      const ref = found.hits[0]!;
+      if (ref.type !== ctx.media.type) continue;
+      const detail = await lookup.tmdb.fetchIdentityDetails(ref.type, ref.id);
+      if (
+        detail &&
+        comparableExternalId(ns, detail.externalIds[ns], ctx.media.type) === source.externalIds[ns]
+      ) {
+        const result = await lookup.submit(detail);
+        if ("status" in result) return result;
+      } else if (ns === "imdb") {
         fallbackReason = "tmdb_imdb_mismatch";
       }
     }
 
-    if (source.tvdbId && ctx.tmdbGateway.findByTvdbId) {
-      const found = (await ctx.tmdbGateway.findByTvdbId(source.tvdbId)).filter(
-        (f) => f.type === ctx.media.type,
-      );
-      if (found.length === 1) {
-        const detail = await fetchTmdbCandidateDetail(
-          ctx.tmdbGateway,
-          found[0]!.type,
-          found[0]!.id,
-        );
-        const imdbConflict =
-          source.imdbId &&
-          detail?.externalIds.imdb &&
-          detail.externalIds.imdb.toLowerCase() !== source.imdbId.toLowerCase();
-        if (detail && !imdbConflict && detail.externalIds.tvdb === source.tvdbId) {
-          return await writeTmdbExternalIdsInTx(ctx, detail, { tvdb: source.tvdbId });
-        }
-      }
-    }
-
-    // 2. Deterministic TMDB search across localized, original, and alias titles.
     const queries = buildTmdbSearchQueries(ctx.media, source);
     const primaryYear = ctx.media.snapshot.year ?? source.year;
-    const hitMap = new Map<string, { type: MediaType; id: string }>();
-    const collectHits = async (queryList: readonly string[], yearFilter?: number) => {
-      for (const query of queryList) {
-        const hits = await ctx.tmdbGateway.search(query, {
-          type: ctx.media.type,
-          ...(yearFilter !== undefined ? { year: yearFilter } : {}),
-        });
-        for (const hit of hits) {
-          if (hit.type !== ctx.media.type) continue;
-          const m = hit.nativeId.match(/^(movie|tv):(\d+)$/);
-          if (m && !hitMap.has(hit.nativeId)) {
-            hitMap.set(hit.nativeId, { type: m[1] as MediaType, id: m[2]! });
-          }
-          if (hitMap.size >= 5) return;
-        }
-      }
-    };
-
+    let hasYearHits = false;
     if (primaryYear !== null) {
-      await collectHits(queries, primaryYear);
-    }
-    if (hitMap.size === 0) {
-      await collectHits(queries.slice(0, 3), undefined);
-    }
-
-    const candidateDetails = new Map<string, TmdbCandidateDetail>();
-    const strongMatches: TmdbCandidateDetail[] = [];
-    for (const [key, ref] of hitMap) {
-      const detail = await fetchTmdbCandidateDetail(ctx.tmdbGateway, ref.type, ref.id);
-      if (!detail) continue;
-      candidateDetails.set(key, detail);
-      const evaluation = evaluateTmdbIdentityMatch(ctx.media, source, detail);
-      if (evaluation.strongMatch) {
-        strongMatches.push(detail);
+      for (const query of queries) {
+        const hits = await lookup.tmdb.search(query, { type: ctx.media.type, year: primaryYear });
+        if (hits.length) hasYearHits = true;
       }
     }
-
-    if (strongMatches.length === 1) {
-      return await writeTmdbExternalIdsInTx(ctx, strongMatches[0]!, {
-        identityChain: ctx.media.snapshot.title,
-      });
+    if (!hasYearHits) {
+      for (const query of queries.slice(0, 3))
+        await lookup.tmdb.search(query, { type: ctx.media.type });
     }
 
-    if (candidateDetails.size > 0 && fallbackReason === "no_tmdb_candidates") {
+    // Bound detail requests; unchecked hits remain visible to the same gate in the model session.
+    const unchecked = [...lookup.candidates].filter(([, detail]) => detail === undefined);
+    for (const [key] of unchecked.slice(0, 5)) {
+      const ref = parseTmdbNativeId(key)!;
+      await lookup.tmdb.fetchIdentityDetails(ref.type, ref.id);
+    }
+    for (const detail of lookup.candidates.values()) {
+      if (!detail) continue;
+      const result = await lookup.submit(detail);
+      if ("status" in result) return result;
+    }
+    if (lookup.candidates.size && fallbackReason === "no_tmdb_candidates")
       fallbackReason = "tmdb_identity_unverified";
-    }
-
-    // 3. Fall back to bounded model + web search investigation when deterministic signals are missing or ambiguous.
-    return await runTmdbAgentFallback(
-      ctx,
-      source,
-      candidateDetails,
-      config,
-      clockMs,
-      fallbackReason,
-    );
+    return await runTmdbAgentFallback(ctx, source, lookup, config, clockMs, fallbackReason);
   } catch (error) {
     return {
       namespace,
