@@ -26,7 +26,7 @@ describe("TmdbGateway", () => {
             status: 200,
             headers: { "content-type": "application/json" },
             url: request.url,
-            body: JSON.stringify({ imdb_id: "tt0000042", tvdb_id: 4242 }),
+            body: JSON.stringify({ imdb_id: "tt0000042", tvdb_id: 4242, trakt_id: "0042" }),
           };
         }
         if (request.namespace === "tmdb" && request.url.includes("/tv/42")) {
