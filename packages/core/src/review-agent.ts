@@ -466,7 +466,12 @@ function gateConflictCodes(cr: ChangeRequestRecord): string[] {
   return [...new Set(codes)];
 }
 
-function buildSystemPrompt(mode: ReviewMode, conclusions: string, hasComments: boolean): string {
+function buildSystemPrompt(
+  mode: ReviewMode,
+  conclusions: string,
+  hasComments: boolean,
+  movie: boolean,
+): string {
   const correction = conclusions.includes("_with_correction");
   const decide = [
     mode === "rejected"
@@ -494,6 +499,11 @@ function buildSystemPrompt(mode: ReviewMode, conclusions: string, hasComments: b
   ];
   return [
     ...(mode === "approved" ? keepOrRevoke : decide),
+    ...(movie
+      ? [
+          "   The catalog entry is a movie: the collection's feature is the whole film, so the segments are empty, and that is right. There is no season to fetch or to correct; fetching the collection is enough.",
+        ]
+      : []),
     "3. A platform episode number is the position in the collection's feature episode list, counted from 1, not the number in the episode title.",
     "4. Extras (chapters, recaps, specials) mixed into the platform's list shift every later position. Check that each segment's episodes land on the right positions.",
     "   Example: 灵笼 season 1 on Bilibili has 16 entries: 001–006, 中章, 007–012, 终章上, 终章下, 特别篇. TMDB season 1 has 12 episodes; 中章, 终章 and 特别篇 are in TMDB season 0. Mapping the whole season from position 1 puts TMDB 7–12 on positions 7–12, one off. The right segments are episodes 1–6 at positions 1–6 and 7–12 at positions 8–13. Extras at the end of the list need no split.",
@@ -989,9 +999,12 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
     const modeTools =
       mode === "approved" ? APPROVED_CONCLUSION_TOOL_DEFINITIONS : CONCLUSION_TOOL_DEFINITIONS;
     const mediaId = await correctionMediaId(ctx.db, cr.mediaId, cr.targetExternalKey);
-    const conclusionTools = (await correctedBefore(ctx.db, { ...cr, mediaId }))
-      ? modeTools.filter((t) => !t.name.endsWith("_with_correction"))
-      : modeTools;
+    // A movie has no season or episodes a correction could name.
+    const movie = (evidence.catalog as { mediaType?: unknown } | undefined)?.mediaType === "movie";
+    const conclusionTools =
+      movie || (await correctedBefore(ctx.db, { ...cr, mediaId }))
+        ? modeTools.filter((t) => !t.name.endsWith("_with_correction"))
+        : modeTools;
     const conclusionNames = conclusionTools.map((t) => t.name).join(", ");
     const catalog = (evidence.catalog ?? {}) as {
       namespace?: string;
@@ -1063,7 +1076,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         messages: [
           {
             role: "system",
-            content: buildSystemPrompt(mode, conclusionNames, comments.length > 0),
+            content: buildSystemPrompt(mode, conclusionNames, comments.length > 0, movie),
           },
           { role: "user", content: buildUserPrompt(cr, conflictCodes, comments) },
         ],

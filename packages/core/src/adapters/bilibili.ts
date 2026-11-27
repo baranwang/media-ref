@@ -35,6 +35,7 @@ const BILIBILI_API_HEADERS: Record<string, string> = {
 
 const BILIBILI_SEASON_API = "https://api.bilibili.com/pgc/view/web/season";
 const BILIBILI_MEDIA_API = "https://api.bilibili.com/pgc/review/user";
+const BILIBILI_MEDIA_DETAIL_API = "https://api.bilibili.com/pgc/view/web/media";
 const BILIBILI_SEARCH_API = "https://api.bilibili.com/x/web-interface/search/type";
 const BILIBILI_SEARCH_TYPES = ["media_bangumi", "media_ft"] as const;
 const CST_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -447,6 +448,38 @@ async function resolveSeasonIdFromMedia(
   return `ss${seasonId}`;
 }
 
+/**
+ * The premiere year from the media detail (`publish.pub_date`, e.g. 死侍2 2018-05-18), or null.
+ * The season's own `publish.pub_time` is when Bilibili listed it, years later for licensed titles.
+ * Best effort: any failure leaves the season's year in place.
+ */
+async function fetchPremiereYear(
+  mediaId: unknown,
+  outbound: OutboundClient,
+): Promise<number | null> {
+  const id = parsePositiveInt(mediaId);
+  if (id === null) {
+    return null;
+  }
+  try {
+    const response = await outbound.fetchExternal({
+      kind: "platform",
+      namespace: "bilibili",
+      url: `${BILIBILI_MEDIA_DETAIL_API}?media_id=${id}`,
+      method: "GET",
+      headers: BILIBILI_API_HEADERS,
+    });
+    const envelope = parseBilibiliJsonEnvelope(response);
+    if (!envelope.ok || envelope.code !== 0) {
+      return null;
+    }
+    const publish = (envelope.result as { publish?: { pub_date?: unknown } } | null)?.publish;
+    return parseFourDigitYear(publish?.pub_date);
+  } catch {
+    return null;
+  }
+}
+
 export const bilibiliAdapter: Tier3Adapter<"bilibili"> = {
   namespace: "bilibili",
   tier: 3,
@@ -546,7 +579,9 @@ export const bilibiliAdapter: Tier3Adapter<"bilibili"> = {
         ? (result.publish as Record<string, unknown>)
         : null;
     const year =
-      parseFourDigitYear(publish?.pub_time) ?? parseFourDigitYear(publish?.pub_time_show);
+      (await fetchPremiereYear(result.media_id, outbound)) ??
+      parseFourDigitYear(publish?.pub_time) ??
+      parseFourDigitYear(publish?.pub_time_show);
 
     const mediaType = mapBilibiliMediaType(result.type);
     const extracted = extractFeatureEpisodes(result.episodes);
