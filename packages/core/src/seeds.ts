@@ -2419,6 +2419,17 @@ export function createSeedEvidenceCheckJobHandler(
             .where("id", "=", current.id)
             .execute();
 
+          // A read waiting on this seed can retry the now-confirmed key without waiting out its backoff.
+          await trx
+            .updateTable("demands")
+            .set({ status: "open", next_eligible_at: ctx.now, updated_at: ctx.now })
+            .where(
+              "external_key",
+              "=",
+              formatExternalKey({ namespace: current.namespace, nativeId: current.native_id }),
+            )
+            .where("status", "in", ["open", "not_found"])
+            .execute();
           await fulfillCoveredDemandsForAssociationInTx(trx, {
             mediaId: media.id,
             namespace: current.namespace,
