@@ -857,12 +857,11 @@ async function fetchAlbumFeatureEpisodes(
       });
     }
 
+    // iQIYI answers hasMore: false on every page of a long album (航海王: 24 pages), so total wins.
     const hasMore =
-      typeof data.hasMore === "boolean"
-        ? data.hasMore
-        : typeof data.total === "number" && Number.isFinite(data.total)
-          ? totalRawItemsSeen < data.total
-          : false;
+      typeof data.total === "number" && Number.isFinite(data.total)
+        ? totalRawItemsSeen < data.total
+        : data.hasMore === true;
 
     if (!hasMore || rawList.length === 0) {
       break;
