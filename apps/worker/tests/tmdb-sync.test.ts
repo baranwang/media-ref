@@ -4,7 +4,9 @@ import { resolveEpisode, type MediaDocument, type SegmentInput } from "@media-re
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
+  DOUBAN_API,
   enqueueTmdbDailySyncIfDue,
+  runTmdbDailySync,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -19,6 +21,7 @@ import {
   createRpcClients,
   expectRpcError,
   fromProtoReviewAlertStatus,
+  getChangeRequestStateRpc,
   getMediaDocumentRpc,
   issueApiKeyRpc,
   mediaRef,
@@ -1412,5 +1415,521 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       mediaId: media.id,
     });
     expect(needsReviewCleared.total).toBe(0);
+  });
+
+  test("backfills missing Trakt external IDs on existing TMDB-tracked media even when unchanged in daily /changes and rotates backfill cursor across batches (#103)", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    // Seed two existing TMDB-tracked movies (like Wikidata/Douban seed imports) that do NOT yet have Trakt IDs:
+    // movie:24428 has a Trakt entry (movie:727); movie:999001 legitimately has no Trakt entry yet.
+    const mediaRows = await testDb.writeDb
+      .insertInto("media")
+      .values([
+        {
+          type: "movie",
+          baseline: "tmdb",
+          title: "复仇者联盟",
+          original_title: "The Avengers",
+          year: 2012,
+          seasons: "[]",
+        },
+        {
+          type: "movie",
+          baseline: "tmdb",
+          title: "冷门国产片",
+          original_title: "Obscure Film",
+          year: 2020,
+          seasons: "[]",
+        },
+      ])
+      .returning(["id", "title"])
+      .execute();
+
+    // Force deterministic ordering: let Obscure Film sort BEFORE Avengers by media.id so we can verify
+    // batch=1 cursor rotation does not starve Avengers when Obscure Film has no Trakt ID.
+    const sorted = [...mediaRows].sort((a, b) => a.id.localeCompare(b.id));
+    const firstMedia = sorted[0]!;
+    const secondMedia = sorted[1]!;
+
+    await testDb.writeDb
+      .insertInto("associations")
+      .values([
+        {
+          status: "confirmed",
+          is_external_id: true,
+          media_id: firstMedia.id,
+          namespace: "tmdb",
+          native_id: "movie:999001",
+          source: "sync",
+        },
+        {
+          status: "confirmed",
+          is_external_id: true,
+          media_id: secondMedia.id,
+          namespace: "tmdb",
+          native_id: "movie:24428",
+          source: "sync",
+        },
+      ])
+      .execute();
+
+    // Cursor is current yesterday so daily sync runs in "changes" mode, and TMDB /movie/changes is EMPTY.
+    await testDb.writeDb
+      .insertInto("sync_state")
+      .values({
+        sync_key: TMDB_SYNC_KEY_MOVIE,
+        last_synced_date: "2026-11-22",
+      })
+      .execute();
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request: ExternalHttpRequest): ExternalHttpResponse {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/movie/changes")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({ page: 1, total_pages: 1, total_results: 0, results: [] }),
+          };
+        }
+        if (url.pathname.endsWith("/movie/24428")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 24428,
+              title: "复仇者联盟",
+              original_title: "The Avengers",
+              release_date: "2012-04-25",
+              external_ids: { imdb_id: "tt0848228" },
+            }),
+          };
+        }
+        if (url.pathname.endsWith("/movie/999001")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 999001,
+              title: "冷门国产片",
+              original_title: "Obscure Film",
+              release_date: "2020-01-01",
+              external_ids: {},
+            }),
+          };
+        }
+        if (request.namespace === "trakt" && url.pathname.endsWith("/search/tmdb/24428")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify([
+              { type: "movie", movie: { title: "The Avengers", ids: { trakt: 727, tmdb: 24428 } } },
+            ]),
+          };
+        }
+        if (request.namespace === "trakt" && url.pathname.endsWith("/search/tmdb/999001")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify([]),
+          };
+        }
+        throw new Error(`Unexpected outbound request: ${request.url}`);
+      },
+    });
+
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      adapterRegistry: createAdapterRegistry(),
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        tmdb: { accessToken: "test-tmdb-token", traktClientId: "test-trakt-client" },
+      },
+    });
+    const { readKey } = await setupActors(testDb, app, outbound);
+
+    const tmdbConfig = { accessToken: "test-tmdb-token", traktClientId: "test-trakt-client" };
+    // Day 1 with batchSize=1 picks first missing-Trakt item (Obscure Film, no Trakt match).
+    const day1 = await runTmdbDailySync(testDb.writeDb, outbound, {
+      now: new Date("2026-11-23T04:00:00.000Z"),
+      tmdbConfig,
+      fullRefreshBatchSize: 1,
+    });
+    expect(day1.movie.candidateCount).toBe(1);
+    expect((await readMedia(app, readKey.key, "tmdb:movie:24428")).document?.externalIds).toEqual([
+      { namespace: "tmdb", nativeId: "movie:24428" },
+    ]);
+
+    // Day 2 rotates cursor past Obscure Film and picks Avengers, backfilling IMDb + Trakt!
+    const day2 = await runTmdbDailySync(testDb.writeDb, outbound, {
+      now: new Date("2026-11-24T04:00:00.000Z"),
+      tmdbConfig,
+      fullRefreshBatchSize: 1,
+    });
+    expect(day2.movie.candidateCount).toBe(1);
+
+    const avengers = await readMedia(app, readKey.key, "tmdb:movie:24428");
+    expect(avengers.status).toBe(200);
+    expect(avengers.document?.externalIds).toEqual(
+      expect.arrayContaining([
+        { namespace: "tmdb", nativeId: "movie:24428" },
+        { namespace: "imdb", nativeId: "tt0848228" },
+        { namespace: "trakt", nativeId: "movie:727" },
+      ]),
+    );
+
+    // Day 3 (default worker path) does NOT re-fetch Avengers because it already has Trakt.
+    outbound.reset();
+    const emitted: JobQueueMessage[] = [];
+    const day3Now = new Date("2026-11-25T04:00:00.000Z");
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: tmdbConfig },
+      now: () => day3Now,
+    });
+    await worker.scheduled(createScheduledController(day3Now));
+    expect(emitted).toHaveLength(1);
+    await worker.queue(createQueueBatch([emitted.shift()!], day3Now).batch);
+    expect(outbound.httpRequests.some((r) => r.url.includes("24428"))).toBe(false);
+  });
+
+  test.each(["matching", "conflicting"])(
+    "Trakt backfill preserves Bangumi coordinates with a %s IMDb ID",
+    async (identity) => {
+      const handle = await createTestDb();
+      handles.push(handle);
+      const db = handle.writeDb;
+      const media = await db
+        .insertInto("media")
+        .values({
+          type: "tv",
+          baseline: "bangumi",
+          title: "Bangumi title",
+          original_title: "Original",
+          year: 2020,
+          seasons: JSON.stringify([{ season: 1, episodeCount: 12, airYear: 2020 }]),
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const imdbId = identity === "matching" ? "tt0000001" : "tt0000002";
+      await db
+        .insertInto("associations")
+        .values([
+          {
+            media_id: media.id,
+            namespace: "tmdb",
+            native_id: "tv:10",
+            status: "confirmed",
+            is_external_id: true,
+          },
+          {
+            media_id: media.id,
+            namespace: "imdb",
+            native_id: imdbId,
+            status: "confirmed",
+            is_external_id: true,
+          },
+        ])
+        .execute();
+      const bangumi = await db
+        .insertInto("associations")
+        .values({ media_id: media.id, namespace: "bangumi", native_id: "12", status: "confirmed" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const segment = await db
+        .insertInto("segments")
+        .values({
+          association_id: bangumi.id,
+          season: 1,
+          episode_start: 1,
+          episode_end: 12,
+          target_episode_start: 1,
+          baseline: "bangumi",
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("demands")
+        .values({ external_key: "trakt:show:7", namespace_group: "platform", demand_count: 3 })
+        .execute();
+
+      const outbound = createFakeOutboundClient({
+        fetchExternal({ url }) {
+          let data: unknown;
+          switch (new URL(url).pathname) {
+            case "/3/tv/changes":
+              data = { page: 1, total_pages: 1, results: [] };
+              break;
+            case "/3/tv/10":
+              data = {
+                id: 10,
+                name: "TMDB title",
+                first_air_date: "2021-03-01",
+                seasons: [
+                  { season_number: 1, episode_count: 24 },
+                  { season_number: 2, episode_count: 6 },
+                ],
+                external_ids: { imdb_id: "tt0000001" },
+              };
+              break;
+            case "/search/tmdb/10":
+              data = [{ type: "show", show: { ids: { tmdb: 10, trakt: 7 } } }];
+              break;
+            default:
+              throw new Error(`Unexpected URL ${url}`);
+          }
+          return { url, status: 200, headers: {}, body: JSON.stringify(data) };
+        },
+      });
+      const result = await runTmdbDailySync(db, outbound, {
+        tmdbConfig: { accessToken: "test", traktClientId: "test" },
+      });
+      expect(result.transientErrors).toEqual([]);
+      expect(result.tv).toMatchObject({ mode: "changes", candidateCount: 1, cursorAdvanced: true });
+      expect(
+        await db.selectFrom("media").selectAll().where("id", "=", media.id).executeTakeFirst(),
+      ).toEqual(media);
+      expect(
+        await db.selectFrom("segments").selectAll().where("id", "=", segment.id).executeTakeFirst(),
+      ).toEqual(segment);
+      expect(await db.selectFrom("review_alerts").select("id").execute()).toEqual([]);
+      const ids = await db
+        .selectFrom("associations")
+        .select("native_id")
+        .where("is_external_id", "=", true)
+        .orderBy("namespace")
+        .execute();
+      const demands = await db
+        .selectFrom("demands")
+        .select(["media_id", "external_key", "season", "demand_count"])
+        .execute();
+      expect(ids.map((row) => row.native_id)).toEqual(
+        identity === "matching" ? [imdbId, "tv:10", "show:7"] : [imdbId, "tv:10"],
+      );
+      expect(demands).toEqual([
+        {
+          media_id: identity === "matching" ? media.id : null,
+          external_key: identity === "matching" ? null : "trakt:show:7",
+          season: identity === "matching" ? 1 : null,
+          demand_count: 3,
+        },
+      ]);
+    },
+  );
+
+  test.each(["missing", "locked", "foreign"])("approval with a %s IMDb ID", async (imdb) => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const imdbDemand = await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        external_key: "imdb:tt0848228",
+        namespace_group: "platform",
+        demand_count: 3,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    // With a foreign IMDb owner the requested TMDB media is new at approval.
+    const seededMedia = await testDb.writeDb
+      .insertInto("media")
+      .values(
+        imdb === "foreign"
+          ? { type: "movie", title: "Another film", year: 1960 }
+          : {
+              type: "movie",
+              baseline: "tmdb",
+              title: "复仇者联盟",
+              original_title: "The Avengers",
+              year: 2012,
+              seasons: "[]",
+            },
+      )
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        is_external_id: true,
+        media_id: seededMedia.id,
+        namespace: imdb === "foreign" ? "imdb" : "tmdb",
+        native_id: imdb === "foreign" ? "tt0848228" : "movie:24428",
+        source: "sync",
+      })
+      .execute();
+
+    if (imdb === "locked") {
+      await testDb.writeDb
+        .insertInto("associations")
+        .values({
+          media_id: seededMedia.id,
+          namespace: "imdb",
+          native_id: "tt0000001",
+          status: "confirmed",
+          is_external_id: true,
+          locked: true,
+          source: "reviewer",
+        })
+        .execute();
+    }
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request: ExternalHttpRequest): ExternalHttpResponse {
+        const url = new URL(request.url);
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/movie/24428")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 24428,
+              title: "复仇者联盟",
+              original_title: "The Avengers",
+              release_date: "2012-04-25",
+              external_ids: { imdb_id: "tt0848228" },
+            }),
+          };
+        }
+        if (request.namespace === "trakt" && url.pathname.endsWith("/search/tmdb/24428")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify([
+              { type: "movie", movie: { title: "The Avengers", ids: { trakt: 727, tmdb: 24428 } } },
+            ]),
+          };
+        }
+        if (request.namespace === "douban" && url.pathname.endsWith("/subject/1866479")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: "1866479",
+              title: "复仇者联盟",
+              original_title: "The Avengers",
+              year: "2012",
+              type: "movie",
+              imdb_id: "tt0848228",
+            }),
+          };
+        }
+        throw new Error(`Unexpected outbound request: ${request.url}`);
+      },
+    });
+
+    const prevDouban = {
+      apiKey: DOUBAN_API.apiKey,
+      minIntervalMs: DOUBAN_API.minIntervalMs,
+      retryDelayMs: DOUBAN_API.retryDelayMs,
+    };
+    DOUBAN_API.apiKey = "test-douban-key";
+    DOUBAN_API.minIntervalMs = 0;
+    DOUBAN_API.retryDelayMs = 0;
+
+    try {
+      const now = new Date("2026-11-23T05:00:00.000Z");
+      const tmdbConfig = { accessToken: "test-tmdb-token", traktClientId: "test-trakt-client" };
+      const app = createApiApp({
+        dbRead: testDb.readDb,
+        dbWrite: testDb.writeDb,
+        outbound,
+        config: {
+          baseUrl: TEST_BASE_URL,
+          authSecret: TEST_AUTH_SECRET,
+          now: () => now,
+          tmdb: tmdbConfig,
+        },
+      });
+      const { submitKey, readKey } = await setupActors(testDb, app, outbound);
+
+      const submitted = await createRpcClients(app, {
+        apiKey: submitKey.key,
+      }).changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:movie:24428"),
+        namespace: "douban",
+        nativeId: "1866479",
+        segments: [],
+      });
+      expect(submitted.changeRequest?.id).toBeTruthy();
+
+      const emitted: JobQueueMessage[] = [];
+      const worker = createBackgroundWorker({
+        db: testDb.writeDb,
+        outbound,
+        queue: {
+          async send(message) {
+            emitted.push(message);
+          },
+        },
+        config: {
+          tmdb: tmdbConfig,
+          enableDailyTmdbSync: false,
+          enableDailyTmdbExportsSync: false,
+          enableExplorationScheduling: false,
+        },
+        now: () => now,
+      });
+
+      await worker.scheduled(createScheduledController(now));
+      expect(emitted.map((job) => job.jobType)).toContain("evidence_check");
+      const queueResult = await worker.queue(createQueueBatch(emitted.splice(0), now).batch);
+      expect(queueResult.completed).toBeGreaterThanOrEqual(1);
+
+      const crState = await getChangeRequestStateRpc(
+        app,
+        { apiKey: readKey.key },
+        submitted.changeRequest!.id,
+      );
+      expect(crState.status).toBe("approved");
+
+      const after = await readMedia(app, readKey.key, "tmdb:movie:24428");
+      expect(after.status).toBe(200);
+      const tmdbId = { namespace: "tmdb", nativeId: "movie:24428" };
+      if (imdb === "foreign") {
+        expect(after.document?.media.id).not.toBe(seededMedia.id);
+        expect(after.document?.externalIds).toEqual([tmdbId]);
+      } else if (imdb === "locked") {
+        expect(after.document?.externalIds).toEqual([
+          { namespace: "imdb", nativeId: "tt0000001", locked: true },
+          tmdbId,
+        ]);
+      } else {
+        expect(after.document?.externalIds).toEqual([
+          { namespace: "imdb", nativeId: "tt0848228" },
+          tmdbId,
+          { namespace: "trakt", nativeId: "movie:727" },
+        ]);
+      }
+      expect(
+        await testDb.readDb
+          .selectFrom("demands")
+          .select("id")
+          .where("external_key", "=", "imdb:tt0848228")
+          .execute(),
+      ).toEqual(imdb === "missing" ? [] : [imdbDemand]);
+    } finally {
+      DOUBAN_API.apiKey = prevDouban.apiKey;
+      DOUBAN_API.minIntervalMs = prevDouban.minIntervalMs;
+      DOUBAN_API.retryDelayMs = prevDouban.retryDelayMs;
+    }
   });
 });

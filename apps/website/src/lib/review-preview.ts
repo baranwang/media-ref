@@ -97,6 +97,7 @@ export function buildReviewCoveragePreview(
     cr.status === "approved"
       ? existingSegments
       : existingSegments.filter((seg) => {
+          if (seg.isExternalId) return true;
           if (cr.replacesAssociationId && seg.associationId === cr.replacesAssociationId) {
             return false;
           }

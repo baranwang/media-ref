@@ -505,6 +505,126 @@ describe("Exploration scheduler (#28)", () => {
     expect(bySeason.get(2)?.leaseExpiresAt).toBeNull();
   });
 
+  test.each(["two owners", "a local TVDB seed", "a delisted TMDB ID"])(
+    "exploration merges only owned external-key demands with %s",
+    async (scenario) => {
+      const handle = await createTestDb();
+      handles.push(handle);
+      const db = handle.writeDb;
+      const now = new Date("2026-11-23T11:00:00Z");
+      const keys = ["tmdb:movie:10", "imdb:tt0000002", "tvdb:20", "trakt:movie:7"];
+      await db
+        .insertInto("demands")
+        .values(
+          keys.map((external_key, index) => ({
+            external_key,
+            namespace_group: "platform" as const,
+            demand_count: 2 ** index,
+            next_eligible_at: now,
+          })),
+        )
+        .execute();
+      const tvdbDemand = await listDemands(db, { externalKey: "tvdb:20" });
+      const createMovie = (title: string) =>
+        db
+          .insertInto("media")
+          .values({ type: "movie", title })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+      const selected = await createMovie("Selected");
+      const foreign = scenario === "two owners";
+      const tmdbDelisted = scenario === "a delisted TMDB ID";
+      const tvdbOwner = foreign ? await createMovie("Other") : selected;
+      await db
+        .insertInto("associations")
+        .values([
+          {
+            media_id: selected.id,
+            namespace: "tmdb",
+            native_id: "movie:10",
+            status: tmdbDelisted ? "delisted" : "confirmed",
+            is_external_id: true,
+          },
+          {
+            media_id: tvdbOwner.id,
+            namespace: "tvdb",
+            native_id: "20",
+            status: foreign ? "confirmed" : "seed_unconfirmed",
+            is_external_id: foreign,
+          },
+        ])
+        .execute();
+
+      const emitted: JobQueueMessage[] = [];
+      const explored: string[] = [];
+      const worker = createBackgroundWorker({
+        db,
+        outbound: createFakeOutboundClient({
+          fetchExternal(request) {
+            expect(new URL(request.url).pathname).toBe("/movies/7");
+            return {
+              status: 200,
+              headers: {},
+              url: request.url,
+              body: JSON.stringify({
+                title: "Selected",
+                ids: { trakt: 7, tmdb: 10, imdb: "tt0000002", tvdb: 20 },
+              }),
+            };
+          },
+        }),
+        queue: {
+          async send(message) {
+            emitted.push(message);
+          },
+        },
+        adapterRegistry: createTier3PlatformRegistry(),
+        explorationExecutor: async ({ media }) => {
+          explored.push(media.id);
+          return { platformOutcomes: [{ namespace: "bilibili", status: "not_found" }] };
+        },
+        config: { enableDailyTmdbSync: false, exploration: { dailyBudget: 1 } },
+        now: () => now,
+      });
+      await worker.scheduled(createScheduledController(now));
+      expect(emitted).toMatchObject([{ payload: { externalKey: "trakt:movie:7" } }]);
+      expect((await worker.queue(createQueueBatch(emitted, now).batch)).completed).toBe(1);
+
+      expect(await listDemands(db, { externalKey: "tvdb:20" })).toEqual(tvdbDemand);
+      const mediaDemands = await listDemands(db, { mediaId: selected.id });
+      const externalIds = await db
+        .selectFrom("associations")
+        .select(["namespace", "native_id"])
+        .where("media_id", "=", selected.id)
+        .where("is_external_id", "=", true)
+        .orderBy("namespace")
+        .execute();
+      if (foreign || tmdbDelisted) {
+        expect(await db.selectFrom("media").select("id").execute()).toHaveLength(foreign ? 2 : 1);
+        expect(explored).toEqual([]);
+        expect(mediaDemands).toEqual([]);
+        expect(externalIds).toEqual([{ namespace: "tmdb", native_id: "movie:10" }]);
+        expect(await listDemands(db, { externalKey: "trakt:movie:7" })).toMatchObject([
+          {
+            mediaId: null,
+            demandCount: 8,
+            status: "open",
+            leaseExpiresAt: null,
+            nextEligibleAt: "2026-11-23T12:00:00.000Z",
+          },
+        ]);
+      } else {
+        expect(explored).toEqual([selected.id]);
+        expect(mediaDemands).toMatchObject([{ demandCount: 11 }]);
+        expect(externalIds).toEqual([
+          { namespace: "imdb", native_id: "tt0000002" },
+          { namespace: "tmdb", native_id: "movie:10" },
+          { namespace: "trakt", native_id: "movie:7" },
+        ]);
+      }
+    },
+  );
+
   test("enforces global daily budget cap, claims highest demand_count first, and leaves evidence_check unaffected", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

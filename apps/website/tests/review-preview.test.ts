@@ -52,6 +52,7 @@ function mappedMedia(
   type: MediaDocument["media"]["type"],
   associations: Association[],
   variants: MediaDocument["variants"] = [],
+  externalIds: MediaDocument["externalIds"] = [],
 ) {
   return mediaItemFrom(
     "m-1",
@@ -75,7 +76,7 @@ function mappedMedia(
                 ],
         },
       },
-      externalIds: [],
+      externalIds,
       associations,
       variants,
     },
@@ -143,6 +144,71 @@ test.each([
   expect(row.segmentsBySeason?.[season]?.map((s) => s.nativeId) ?? []).toEqual(
     type === "movie" ? [] : ["102"],
   );
+});
+
+test("an authority external ID stays confirmed alongside pending catalog associations", () => {
+  const authority = { namespace: "imdb", nativeId: "tt2560140" } as const;
+  const episodes = [segment(2, 3, 3)];
+  const cr = changeRequestFromProto({
+    ...submitted,
+    ...authority,
+    rawNativeId: authority.nativeId,
+    variantDescription: undefined,
+    segments: episodes.map(toProtoSegment),
+  });
+  const other: Association = {
+    ...authority,
+    id: "change-request:other",
+    title: "待核实的标题",
+    status: "confirmed",
+    variantId: null,
+    segments: [],
+    unconfirmed: true,
+    unconfirmedSource: "change_request",
+    changeRequestId: "other",
+  };
+  const associations = [
+    other,
+    { ...other, id: `change-request:${cr.id}`, changeRequestId: cr.id, segments: episodes },
+  ];
+  const media = mappedMedia("tv", associations, [], [authority]);
+  const [row] = media.catalogRows;
+  expect(row.wholeMediaLabel).toBe("整部 · tt2560140");
+  expect(row.segmentsBySeason?.[2]?.map((bar) => bar.changeRequestId)).toEqual([cr.id]);
+  expect(row.allSeasonSegments).toHaveLength(1);
+  const whole = {
+    id: "external-id:imdb:tt2560140",
+    isExternalId: true,
+    nativeId: authority.nativeId,
+    title: authority.nativeId,
+    status: "confirmed",
+    start: 1,
+    end: 12,
+  };
+  const preview = buildReviewCoveragePreview(cr, media);
+  expect(preview.existingSegments).toEqual([whole]);
+  expect(preview).toMatchObject({
+    otherPendingCount: 1,
+    afterSegments: [whole, { changeRequestId: cr.id, status: "pending", start: 3, end: 3 }],
+  });
+  expect(buildReviewCoveragePreview(cr, mappedMedia("tv", associations))).toMatchObject({
+    existingSegments: [],
+    otherPendingCount: 1,
+  });
+
+  const matching: Association = {
+    ...authority,
+    id: "verified",
+    title: "已核实标题",
+    status: "confirmed",
+    variantId: null,
+    segments: [],
+  };
+  const withMatch = mappedMedia("tv", [...associations, matching], [], [authority]);
+  expect(withMatch.catalogRows[0].wholeMediaLabel).toBe("整部 · 已核实标题");
+  expect(buildReviewCoveragePreview(cr, withMatch).existingSegments).toEqual([
+    { ...whole, title: "已核实标题", associationId: "verified" },
+  ]);
 });
 
 test("previews the submitted variant ID even when the description names another variant", () => {

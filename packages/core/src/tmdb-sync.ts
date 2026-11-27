@@ -19,12 +19,14 @@ import type {
   ExternalIdNamespaceRow,
 } from "@media-ref/db";
 import { sql, type Selectable, type Transaction } from "kysely";
+import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
 import { enqueueJob, type BackgroundJob, type JobHandler } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
-import { isUuid } from "./media-service.ts";
+import { backfillMissingExternalIdsInTx, isUuid } from "./media-service.ts";
 import type { OutboundClient } from "./outbound.ts";
 import {
   createTmdbGateway,
+  isTraktSyncEnabled,
   parseTmdbNativeId,
   TmdbGatewayError,
   type TmdbGateway,
@@ -87,6 +89,7 @@ export interface RunTmdbDailySyncOptions {
   tmdbGateway?: TmdbGateway;
   fullRefreshBatchSize?: number;
   maxChangesWindowDays?: number;
+  backfillMissingTrakt?: boolean;
 }
 
 export interface EnqueueTmdbDailySyncOptions {
@@ -112,6 +115,7 @@ export interface CreateTmdbSyncJobHandlerOptions {
   tmdbGateway?: TmdbGateway;
   fullRefreshBatchSize?: number;
   maxChangesWindowDays?: number;
+  backfillMissingTrakt?: boolean;
 }
 
 export type MediaSyncErrorCode =
@@ -416,6 +420,7 @@ async function syncSingleMediaType(
   now: Date,
   fullRefreshBatchSize: number,
   maxChangesWindowDays: number,
+  traktBackfillEnabled: boolean,
   transientErrors: TmdbSyncTransientError[],
 ): Promise<TmdbMediaTypeSyncSummary> {
   const syncKey = mediaType === "movie" ? TMDB_SYNC_KEY_MOVIE : TMDB_SYNC_KEY_TV;
@@ -425,11 +430,21 @@ async function syncSingleMediaType(
       .selectFrom("media")
       .innerJoin("associations as external_ids", "external_ids.media_id", "media.id")
       .where("external_ids.is_external_id", "=", true)
-      .select([
+      .select((eb) => [
         "media.id as media_id",
         "media.type as type",
         "media.title as title",
         "external_ids.native_id as tmdb_native_id",
+        eb
+          .exists(
+            eb
+              .selectFrom("associations as trakt_ext")
+              .select("trakt_ext.id")
+              .whereRef("trakt_ext.media_id", "=", "media.id")
+              .where("trakt_ext.is_external_id", "=", true)
+              .where("trakt_ext.namespace", "=", "trakt"),
+          )
+          .as("has_trakt"),
       ])
       .where("media.merged_into_media_id", "is", null)
       .where("media.type", "=", mediaType)
@@ -438,7 +453,7 @@ async function syncSingleMediaType(
       .execute(),
     db
       .selectFrom("sync_state")
-      .select(["sync_key", "last_synced_date"])
+      .select(["sync_key", "last_synced_date", "metadata"])
       .where("sync_key", "=", syncKey)
       .executeTakeFirst(),
   ]);
@@ -455,6 +470,8 @@ async function syncSingleMediaType(
         tmdbType: parsed.type,
         tmdbId: parsed.id,
         tmdbNativeId: row.tmdb_native_id,
+        hasTrakt: Boolean(row.has_trakt),
+        backfillOnly: false,
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
@@ -499,12 +516,42 @@ async function syncSingleMediaType(
   const startDate = existingCursor && gapDays >= 0 ? existingCursor.last_synced_date : today;
   const endDate = today;
 
+  const existingMetadata = parseJsonObject(existingCursor?.metadata);
+  const prevBackfillCursor =
+    typeof existingMetadata.traktBackfillAfterMediaId === "string"
+      ? existingMetadata.traktBackfillAfterMediaId
+      : null;
+  let nextBackfillCursor: string | null = prevBackfillCursor;
+  let traktBackfillCount = 0;
+
   let candidates = parsedTracked;
   if (mode === "changes") {
     try {
       const changes = await gateway.fetchChanges(mediaType, { startDate, endDate });
       const changedIdSet = new Set(changes.changedIds);
-      candidates = parsedTracked.filter((entry) => changedIdSet.has(entry.tmdbId));
+      const changedCandidates = parsedTracked.filter((entry) => changedIdSet.has(entry.tmdbId));
+      let backfillCandidates: typeof parsedTracked = [];
+      if (traktBackfillEnabled) {
+        const missingTrakt = parsedTracked.filter(
+          (entry) => !changedIdSet.has(entry.tmdbId) && !entry.hasTrakt,
+        );
+        if (missingTrakt.length > 0) {
+          const tail = prevBackfillCursor
+            ? missingTrakt.filter((entry) => entry.mediaId > prevBackfillCursor)
+            : missingTrakt;
+          const head = prevBackfillCursor
+            ? missingTrakt.filter((entry) => entry.mediaId <= prevBackfillCursor)
+            : [];
+          backfillCandidates = [...tail, ...head]
+            .slice(0, fullRefreshBatchSize)
+            .map((entry) => ({ ...entry, backfillOnly: true }));
+          traktBackfillCount = backfillCandidates.length;
+          nextBackfillCursor = backfillCandidates.at(-1)?.mediaId ?? prevBackfillCursor;
+        } else {
+          nextBackfillCursor = null;
+        }
+      }
+      candidates = [...changedCandidates, ...backfillCandidates];
     } catch (error) {
       transientErrors.push({
         mediaType,
@@ -564,6 +611,7 @@ async function syncSingleMediaType(
 
       if (isNotFound || !fetched) {
         missingCount += 1;
+        if (item.backfillOnly) continue;
         await recordOpenReviewAlert(db, {
           alertType: REVIEW_ALERT_TYPES.TMDB_MISSING_OR_MERGED,
           mediaId: item.mediaId,
@@ -592,6 +640,23 @@ async function syncSingleMediaType(
         }
 
         const oldSeasons = parseSeasonsSnapshot(currentMedia.seasons);
+        if (item.backfillOnly) {
+          const { insertedKeys } = await backfillMissingExternalIdsInTx(trx, {
+            mediaId: currentMedia.id,
+            externalIds: fetched.externalIds,
+            requiredExistingKey: `tmdb:${item.tmdbNativeId}`,
+            now,
+          });
+          await mergeExternalKeyDemandsIntoMedia(trx, {
+            mediaId: currentMedia.id,
+            mediaType,
+            seasons: oldSeasons,
+            externalKeys: insertedKeys,
+            now,
+          });
+          return { refreshed: false, newlyFlagged: 0 };
+        }
+
         const newSeasons = fetched.snapshot.seasons;
         const changedSeasons = detectChangedSeasons(oldSeasons, newSeasons);
 
@@ -740,6 +805,14 @@ async function syncSingleMediaType(
         refreshedCount,
         missingCount,
         flaggedSegmentCount,
+        ...(traktBackfillEnabled
+          ? {
+              traktBackfillCount,
+              traktBackfillAfterMediaId: mode === "full_refresh" ? null : nextBackfillCursor,
+            }
+          : prevBackfillCursor !== null
+            ? { traktBackfillAfterMediaId: prevBackfillCursor }
+            : {}),
         lastRunAt: now.toISOString(),
       },
       now,
@@ -780,6 +853,8 @@ export async function runTmdbDailySync(
     options.maxChangesWindowDays ?? TMDB_CHANGES_MAX_WINDOW_DAYS,
   );
   const gateway = options.tmdbGateway ?? createTmdbGateway(outbound, options.tmdbConfig);
+  const traktBackfillEnabled =
+    options.backfillMissingTrakt ?? isTraktSyncEnabled(options.tmdbConfig);
   const transientErrors: TmdbSyncTransientError[] = [];
 
   const movie = await syncSingleMediaType(
@@ -790,6 +865,7 @@ export async function runTmdbDailySync(
     now,
     fullRefreshBatchSize,
     maxChangesWindowDays,
+    traktBackfillEnabled,
     transientErrors,
   );
 
@@ -801,6 +877,7 @@ export async function runTmdbDailySync(
     now,
     fullRefreshBatchSize,
     maxChangesWindowDays,
+    traktBackfillEnabled,
     transientErrors,
   );
 
@@ -907,6 +984,7 @@ export function createTmdbSyncJobHandler(
       tmdbGateway: options.tmdbGateway,
       fullRefreshBatchSize: options.fullRefreshBatchSize,
       maxChangesWindowDays: options.maxChangesWindowDays,
+      backfillMissingTrakt: options.backfillMissingTrakt,
     });
 
     if (summary.transientErrors.length > 0) {
