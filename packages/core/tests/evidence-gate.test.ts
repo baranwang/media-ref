@@ -222,6 +222,64 @@ describe("Evidence Gate Step 1", () => {
     expect(distinctSubtitleResult.fieldChecks.title).toBe("mismatch");
   });
 
+  test("accepts a later season named as the catalog title plus the submitted season number", () => {
+    // TMDB tv:68809 「爱情公寓」 season 4 vs iQIYI album 151646701 「爱情公寓4」 (#130)
+    const catalog = makeTvCatalog({
+      canonicalId: "tv:68809",
+      title: "爱情公寓",
+      originalTitle: null,
+      aliases: ["iPartment"],
+      year: 2009,
+      seasons: [
+        { season: 1, episodeCount: 20, airYear: 2009 },
+        { season: 2, episodeCount: 22, airYear: 2011 },
+        { season: 3, episodeCount: 24, airYear: 2012 },
+        { season: 4, episodeCount: 24, airYear: 2014 },
+      ],
+      externalIds: { tmdb: "tv:68809" },
+    });
+    const season = (n: number) => ({
+      season: n,
+      episodeStart: 1,
+      episodeEnd: 24,
+      targetEpisodeStart: 1,
+      baseline: "tmdb" as const,
+      nonLinear: false,
+      needsReview: false,
+    });
+    const check = (title: string, seasons: number[]) =>
+      evaluateEvidenceGateStep1(
+        catalog,
+        makeBilibiliCollection({
+          namespace: "iqiyi",
+          canonicalId: "151646701",
+          title,
+          originalTitle: null,
+          aliases: [],
+          year: 2014,
+          featureEpisodeCount: 24,
+        }),
+        { segments: seasons.map(season) },
+      ).fieldChecks.title;
+
+    for (const title of [
+      "爱情公寓4",
+      "爱情公寓 4",
+      "爱情公寓 第四季",
+      "爱情公寓第4季",
+      "iPartment 4",
+    ]) {
+      expect(check(title, [4]), title).toBe("matched");
+    }
+    // Another season's number, no single submitted season, season 1, or an unrelated title
+    expect(check("爱情公寓3", [4])).toBe("mismatch");
+    expect(check("爱情公寓4", [])).toBe("mismatch");
+    expect(check("爱情公寓4", [3, 4])).toBe("mismatch");
+    expect(check("爱情公寓1", [1])).toBe("mismatch");
+    expect(check("爱情公寓外传4", [4])).toBe("mismatch");
+    expect(check("家有儿女4", [4])).toBe("mismatch");
+  });
+
   test("routes to needs_review when any of the 4 fields conflicts or is missing", () => {
     // 1. mediaType conflict
     const badType = evaluateEvidenceGateStep1(

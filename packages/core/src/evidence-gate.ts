@@ -1005,6 +1005,15 @@ export function evaluateEvidenceGateStep1(
         break;
       }
     }
+    // 「爱情公寓4」 for season 4: the catalog title plus the one submitted season's number. 第N季 is
+    // already stripped as a qualifier. A catalog title ending in a digit is skipped: 「X 2」+3 ≠ 「X 23」.
+    const seasons = new Set(segments.map((s) => s.season));
+    const [season] = seasons;
+    if (!matchedTitle && seasons.size === 1 && season !== undefined && season >= 2) {
+      matchedTitle = [...catalogTitles].some(
+        (title) => !/\d$/u.test(title) && collectionTitles.has(`${title}${season}`),
+      );
+    }
     if (matchedTitle) {
       titleStatus = "matched";
     } else {
