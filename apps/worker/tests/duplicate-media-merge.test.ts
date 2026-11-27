@@ -1555,6 +1555,17 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
           last_demanded_at: now,
         },
         {
+          media_id: target.id,
+          season: 1,
+          namespace_group: "platform",
+          demand_count: 1,
+          status: "leased",
+          lease_generation: 3,
+          lease_expires_at: new Date(now.getTime() + 60_000),
+          next_eligible_at: now,
+          last_demanded_at: now,
+        },
+        {
           media_id: source.id,
           season: 1,
           namespace_group: "platform",
@@ -1617,7 +1628,12 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       (d) => d.season === 1 && d.namespaceGroup === "platform",
     );
     expect(catalogDemand?.demandCount).toBe(6);
-    expect(platformDemand?.demandCount).toBe(1);
+    expect(platformDemand).toMatchObject({
+      demandCount: 2,
+      status: "leased",
+      leaseGeneration: 3,
+      leaseExpiresAt: new Date(now.getTime() + 60_000).toISOString(),
+    });
 
     const conflictAlerts = await db
       .selectFrom("review_alerts")

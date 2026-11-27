@@ -1407,10 +1407,14 @@ async function coalesceMediaDemandsInTx(
     if (existingTarget) {
       const nextStatus = isCovered
         ? "fulfilled"
-        : existingTarget.status === "open" || sd.status === "open"
-          ? "open"
-          : existingTarget.status === "fulfilled" || sd.status === "fulfilled"
-            ? "fulfilled"
+        : existingTarget.status === "leased" &&
+            existingTarget.lease_expires_at &&
+            existingTarget.lease_expires_at > input.now
+          ? "leased"
+          : existingTarget.status === "open" ||
+              sd.status === "open" ||
+              existingTarget.status === "leased"
+            ? "open"
             : existingTarget.status;
       const createdAt =
         new Date(existingTarget.created_at) <= new Date(sd.created_at)
@@ -1436,7 +1440,7 @@ async function coalesceMediaDemandsInTx(
           created_at: createdAt,
           last_demanded_at: lastDemandedAt,
           last_explored_at: lastExploredAt,
-          lease_expires_at: nextStatus === "open" ? existingTarget.lease_expires_at : null,
+          lease_expires_at: nextStatus === "leased" ? existingTarget.lease_expires_at : null,
           next_eligible_at:
             nextStatus === "open"
               ? new Date(existingTarget.next_eligible_at) <= new Date(sd.next_eligible_at)
