@@ -1997,7 +1997,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     expect(conflictAlerts[0]!.status).toBe("resolved");
   });
 
-  test("catalog exploration keeps agent_external_id_conflict and refuses auto-merge when type/title/TMDB identity conflicts", async () => {
+  test("an exploration IMDb collision with mismatched snapshots waits for cooldown and merges only after correction", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
     const db = testDb.writeDb;
@@ -2148,10 +2148,267 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       .where("alert_type", "=", "agent_external_id_conflict")
       .where("status", "=", "open")
       .execute();
-    expect(conflictAlerts.length).toBeGreaterThan(0);
+    expect(conflictAlerts).toHaveLength(1);
+    expect(conflictAlerts[0]!.details).toMatchObject({
+      autoMergeCheckedAt: now.toISOString(),
+      matchedBy: { imdb: "tt0137523" },
+    });
+
+    const options = { outbound, tmdbConfig: { accessToken: "test-tmdb-token" } };
+    expect((await convergeDuplicateMedia(db, { ...options, now })).inspectedPairs).toBe(0);
+    const stillBlocked = await convergeDuplicateMedia(db, {
+      ...options,
+      now: new Date("2026-11-25T10:00:00Z"),
+    });
+    expect(stillBlocked).toMatchObject({ inspectedPairs: 1, mergedCount: 0 });
+    await db
+      .updateTable("media")
+      .set({ title: "Fight Club", year: 1999 })
+      .where("id", "=", mismatchTvMedia.id)
+      .execute();
+    const retry = await convergeDuplicateMedia(db, {
+      ...options,
+      now: new Date("2026-12-01T10:00:00Z"),
+    });
+    expect(retry.mergedPairs).toEqual([
+      expect.objectContaining({ sourceMediaId: mismatchTvMedia.id, targetMediaId: movieMedia.id }),
+    ]);
+    expect(
+      await db
+        .selectFrom("review_alerts")
+        .select("status")
+        .where("id", "=", conflictAlerts[0]!.id)
+        .executeTakeFirst(),
+    ).toEqual({ status: "resolved" });
   });
 
-  test("runTmdbDailySync automatically merges compatible Douban+IMDb duplicate when TMDB reports shared secondary imdb_id", async () => {
+  test.each([
+    ["owner moved", 0, "resolved"],
+    ["claimant IMDb changed", 0, "resolved"],
+    ["ambiguous IMDb lookup", 1, "resolved"],
+    ["TMDB withdrew IMDb", 2, "resolved"],
+    ["incomplete upstream IDs", 2, "open"],
+    ["conflicting upstream TVDB", 2, "open"],
+    ["owner moved during fetch", 2, "resolved"],
+    ["alert closed during fetch", 2, "resolved"],
+    ["both redirected to a third film", 0, "resolved"],
+    ["invalid other UUID", 0, "resolved"],
+    ["delisted owner", 0, "resolved"],
+    ["invalid native ID", 0, "resolved"],
+    ["invalid namespace", 0, "resolved"],
+    ["missing proof", 0, "resolved"],
+  ] as const)(
+    "a conflict alert keeps same-name films separate when %s",
+    async (change, requests, status) => {
+      const testDb = await createTestDb();
+      handles.push(testDb);
+      const db = testDb.writeDb;
+      const [claimant, owner, third] = await db
+        .insertInto("media")
+        .values(
+          ["Same Film", "Same Film", "Third Film"].map((title) => ({
+            type: "movie" as const,
+            title,
+            year: 1999,
+          })),
+        )
+        .returning("id")
+        .execute();
+      await db
+        .insertInto("associations")
+        .values([
+          {
+            media_id: claimant!.id,
+            namespace: "imdb",
+            native_id: change === "claimant IMDb changed" ? "tt9999999" : "tt0137523",
+            is_external_id: true,
+            status: "confirmed",
+          },
+          {
+            media_id: change === "owner moved" ? third!.id : owner!.id,
+            namespace: "tmdb",
+            native_id: "movie:550",
+            is_external_id: true,
+            status: change === "delisted owner" ? "delisted" : "confirmed",
+          },
+        ])
+        .execute();
+      if (change === "conflicting upstream TVDB") {
+        await db
+          .insertInto("associations")
+          .values({
+            media_id: claimant!.id,
+            namespace: "tvdb",
+            native_id: "123",
+            is_external_id: true,
+            status: "confirmed",
+          })
+          .execute();
+      }
+      const alert = await db
+        .insertInto("review_alerts")
+        .values({
+          media_id: claimant!.id,
+          alert_type: "agent_external_id_conflict",
+          details: JSON.stringify({
+            namespace: change === "invalid namespace" ? "douban" : "tmdb",
+            nativeId: change === "invalid native ID" ? "movie:bad" : "movie:550",
+            conflictingMediaId: change === "invalid other UUID" ? "bad-id" : owner!.id,
+            ...(change === "missing proof" ? {} : { matchedBy: { imdb: "tt0137523" } }),
+          }),
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      if (change === "both redirected to a third film") {
+        for (const source of [owner!, claimant!])
+          await mergeMedia(db, {
+            sourceMediaId: source.id,
+            targetMediaId: third!.id,
+            actorUserId: null,
+            reason: "prior merge",
+          });
+        expect(
+          await db
+            .selectFrom("review_alerts")
+            .select(["status", "media_id"])
+            .where("id", "=", alert.id)
+            .executeTakeFirst(),
+        ).toEqual({ status: "open", media_id: third!.id });
+      }
+      const outbound = createFakeOutboundClient({
+        async fetchExternal(request) {
+          const lookup = new URL(request.url).pathname.includes("/find/");
+          if (!lookup && change === "owner moved during fetch") {
+            await db
+              .updateTable("associations")
+              .set({ media_id: third!.id })
+              .where("namespace", "=", "tmdb")
+              .execute();
+          }
+          if (!lookup && change === "alert closed during fetch") {
+            await db
+              .updateTable("review_alerts")
+              .set({ status: "resolved", resolved_at: new Date() })
+              .where("id", "=", alert.id)
+              .execute();
+          }
+          const body = lookup
+            ? {
+                movie_results:
+                  change === "ambiguous IMDb lookup" ? [{ id: 550 }, { id: 551 }] : [{ id: 550 }],
+              }
+            : {
+                id: 550,
+                title: "Same Film",
+                release_date: "1999-01-01",
+                external_ids: {
+                  imdb_id:
+                    change === "incomplete upstream IDs"
+                      ? null
+                      : change === "TMDB withdrew IMDb"
+                        ? "tt0000001"
+                        : "tt0137523",
+                  tvdb_id: 456,
+                },
+              };
+          return { status: 200, url: request.url, headers: {}, body: JSON.stringify(body) };
+        },
+      });
+      expect((await convergeDuplicateMedia(db, { outbound })).mergedCount).toBe(0);
+      expect(
+        await db
+          .selectFrom("media")
+          .select("id")
+          .where("merged_into_media_id", "is", null)
+          .execute(),
+      ).toHaveLength(change === "both redirected to a third film" ? 1 : 3);
+      expect(
+        await db
+          .selectFrom("review_alerts")
+          .select("status")
+          .where("id", "=", alert.id)
+          .executeTakeFirst(),
+      ).toEqual({ status });
+      expect(outbound.httpRequests).toHaveLength(requests);
+    },
+  );
+
+  test("unchecked conflicts go first, then the least recently checked; transient failures cool down for at most a day", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    const now = new Date("2026-11-25T10:00:00Z");
+    const hours = (n: number) => new Date(now.getTime() + n * 3_600_000);
+    const [a, b] = await db
+      .insertInto("media")
+      .values(["Claimant", "Owner"].map((title) => ({ title, type: "movie" as const })))
+      .returning("id")
+      .execute();
+    await db
+      .insertInto("associations")
+      .values([
+        {
+          media_id: a!.id,
+          namespace: "imdb",
+          native_id: "tt12345",
+          is_external_id: true,
+          status: "confirmed",
+        },
+        {
+          media_id: b!.id,
+          namespace: "tmdb",
+          native_id: "movie:123",
+          is_external_id: true,
+          status: "confirmed",
+        },
+      ])
+      .execute();
+    const alerts = await db
+      .insertInto("review_alerts")
+      .values(
+        [-2, -4, null, 0].map((h, i) => ({
+          alert_type: "agent_external_id_conflict",
+          media_id: a!.id,
+          created_at: hours(i - 24),
+          details: JSON.stringify({
+            namespace: "tmdb",
+            nativeId: "movie:123",
+            otherMediaId: b!.id,
+            matchedBy: { imdb: "tt12345" },
+            ...(h !== null ? { autoMergeCheckedAt: hours(h).toISOString() } : {}),
+          }),
+        })),
+      )
+      .returning("id")
+      .execute();
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        return { url: request.url, headers: {}, status: 503, body: "" };
+      },
+    });
+    const run = (h: number, batchSize: number) =>
+      convergeDuplicateMedia(db, { now: hours(h), batchSize, outbound });
+    for (const index of [2, 1, 0]) {
+      expect((await run(0, 1)).inspectedPairs).toBe(1);
+      const row = await db
+        .selectFrom("review_alerts")
+        .select(["details", "status"])
+        .where("id", "=", alerts[index]!.id)
+        .executeTakeFirstOrThrow();
+      expect(row.status).toBe("open");
+      expect(row.details).toMatchObject({
+        autoMergeCheckedAt: now.toISOString(),
+        autoMergeBlockedReason: "tmdb_lookup_failed",
+      });
+    }
+    expect((await run(0, 10)).inspectedPairs).toBe(0);
+    expect(outbound.httpRequests).toHaveLength(3);
+    expect((await run(6, 10)).inspectedPairs).toBe(4);
+    expect((await run(29, 10)).inspectedPairs).toBe(2);
+    expect((await run(30, 10)).inspectedPairs).toBe(2);
+  });
+
+  test.each(["immediate", "retry", "withdrawn"])("TMDB sync IMDb collision: %s", async (mode) => {
     const testDb = await createTestDb();
     handles.push(testDb);
     const db = testDb.writeDb;
@@ -2188,8 +2445,8 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       .values({
         type: "tv",
         baseline: "douban",
-        title: "两京十五日",
-        original_title: "两京十五日",
+        title: mode === "immediate" ? "两京十五日" : "未校正的标题",
+        original_title: null,
         year: 2026,
         seasons: JSON.stringify([{ season: 1, episodeCount: 40, airYear: 2026 }]),
       })
@@ -2233,6 +2490,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       })
       .execute();
 
+    let upstreamImdb = "tt9915020";
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
         const url = new URL(request.url);
@@ -2260,7 +2518,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
               original_name: "两京十五日",
               first_air_date: "2026-06-01",
               seasons: [{ season_number: 1, episode_count: 40, air_date: "2026-06-01" }],
-              external_ids: { imdb_id: "tt9915020" },
+              external_ids: { imdb_id: upstreamImdb },
             }),
           };
         }
@@ -2273,11 +2531,58 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       tmdbGateway: createTmdbGateway(outbound, { accessToken: "test-tmdb-token" }),
     });
 
+    if (mode !== "immediate") {
+      const alert = await db
+        .selectFrom("review_alerts")
+        .selectAll()
+        .where("alert_type", "=", "agent_external_id_conflict")
+        .executeTakeFirstOrThrow();
+      expect(alert.details).toMatchObject({
+        source: "tmdb_sync",
+        otherMediaId: doubanMedia.id,
+        autoMergeCheckedAt: now.toISOString(),
+      });
+      await db
+        .updateTable("media")
+        .set({ title: "两京十五日" })
+        .where("id", "=", doubanMedia.id)
+        .execute();
+      if (mode === "withdrawn") upstreamImdb = "tt0000001";
+      outbound.reset();
+      const worker = createBackgroundWorker({
+        db,
+        outbound,
+        queue: { async send() {} },
+        config: {
+          enableDailyTmdbSync: false,
+          tmdb: { apiBaseUrl: "https://tmdb.test/3", accessToken: "configured-token" },
+        },
+      });
+      await worker.scheduled(createScheduledController(new Date("2026-11-26T10:00:00Z")));
+      expect(outbound.httpRequests).toEqual([
+        expect.objectContaining({
+          url: expect.stringContaining("https://tmdb.test/3/tv/203483"),
+          headers: expect.objectContaining({ authorization: "Bearer configured-token" }),
+        }),
+      ]);
+      expect(
+        await db
+          .selectFrom("review_alerts")
+          .select("status")
+          .where("id", "=", alert.id)
+          .executeTakeFirst(),
+      ).toEqual({ status: "resolved" });
+    }
+
     const mergedRow = await db
       .selectFrom("media")
       .select("merged_into_media_id")
       .where("id", "=", doubanMedia.id)
       .executeTakeFirstOrThrow();
+    if (mode === "withdrawn") {
+      expect(mergedRow.merged_into_media_id).toBeNull();
+      return;
+    }
     expect(mergedRow.merged_into_media_id).toBe(tmdbMedia.id);
 
     const movedImdb = await db
@@ -2614,6 +2919,91 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     }
   });
 
+  test.each(["active", "delisted", "flagged"])(
+    "catalog retries are bounded and require live coverage after alias lookup: %s",
+    async (coverage) => {
+      const testDb = await createTestDb();
+      handles.push(testDb);
+      const db = testDb.writeDb;
+      const media = await db
+        .insertInto("media")
+        .values(
+          ["搏击俱乐部", "Fight Club"].map((title) => ({
+            title,
+            type: "movie" as const,
+            year: 1999,
+          })),
+        )
+        .returning("id")
+        .execute();
+      await db
+        .insertInto("associations")
+        .values(
+          media.flatMap((m) =>
+            (["bangumi", "douban"] as const).map((namespace) => ({
+              media_id: m.id,
+              namespace,
+              native_id: "1292000",
+              status: "confirmed" as const,
+            })),
+          ),
+        )
+        .execute();
+      let corrected = false;
+      const outbound = createFakeOutboundClient({
+        async fetchExternal(request) {
+          if (request.namespace === "bangumi")
+            return { status: 404, headers: {}, body: "", url: request.url };
+          if (corrected && coverage !== "active") {
+            await db
+              .updateTable("associations")
+              .set(coverage === "delisted" ? { status: "delisted" } : { needs_review: true })
+              .where("media_id", "=", media[0]!.id)
+              .where("namespace", "=", "douban")
+              .execute();
+          }
+          return createDoubanSubjectResponse(request, {
+            id: "1292000",
+            title: corrected ? "搏击俱乐部" : "另一部电影",
+            originalTitle: corrected ? "Fight Club" : "Another Movie",
+            year: "1999",
+            type: "movie",
+          });
+        },
+      });
+      const worker = createBackgroundWorker({
+        db,
+        outbound,
+        queue: { async send() {} },
+        config: {
+          enableDailyTmdbSync: false,
+          catalog: {
+            doubanApiBaseUrl: "https://catalog.test",
+            bangumiApiBaseUrl: "https://bangumi.test",
+          },
+        },
+      });
+      const tick = (time: string) => worker.scheduled(createScheduledController(new Date(time)));
+      await tick("2026-11-24T10:00:00Z");
+      expect(outbound.httpRequests.map((r) => new URL(r.url).host)).toEqual([
+        "bangumi.test",
+        "catalog.test",
+      ]);
+      await tick("2026-11-24T10:01:00Z");
+      expect(outbound.httpRequests).toHaveLength(2);
+      corrected = true;
+      await tick("2026-11-25T10:00:00Z");
+      expect(outbound.httpRequests).toHaveLength(4);
+      expect(
+        await db
+          .selectFrom("media")
+          .select("id")
+          .where("merged_into_media_id", "is", null)
+          .execute(),
+      ).toHaveLength(coverage === "active" ? 1 : 2);
+    },
+  );
+
   test("convergeDuplicateMedia advances past blocked prefix catalog groups and still inspects open conflict alerts", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -2757,15 +3147,22 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       .executeTakeFirstOrThrow();
     await db
       .insertInto("associations")
-      .values({
-        media_id: alertTarget.id,
-        namespace: "tmdb",
-        native_id: "movie:555666",
-        is_external_id: true,
-        status: "confirmed",
-        needs_review: false,
-        locked: false,
-      })
+      .values([
+        {
+          media_id: alertTarget.id,
+          namespace: "tmdb",
+          native_id: "movie:555666",
+          is_external_id: true,
+          status: "confirmed",
+        },
+        {
+          media_id: alertSource.id,
+          namespace: "imdb",
+          native_id: "tt5556660",
+          is_external_id: true,
+          status: "confirmed",
+        },
+      ])
       .execute();
     await db
       .insertInto("review_alerts")
@@ -2778,14 +3175,31 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
           namespace: "tmdb",
           nativeId: "movie:555666",
           otherMediaId: alertTarget.id,
+          matchedBy: { imdb: "tt5556660" },
         }),
       })
       .execute();
 
+    const tmdbGateway = createTmdbGateway(
+      createFakeOutboundClient({
+        fetchExternal(request) {
+          const body = request.url.includes("/find/")
+            ? { movie_results: [{ id: 555666 }] }
+            : {
+                title: "告警收敛电影",
+                id: 555666,
+                release_date: "2025-01-01",
+                external_ids: { imdb_id: "tt5556660" },
+              };
+          return { status: 200, headers: {}, url: request.url, body: JSON.stringify(body) };
+        },
+      }),
+    );
     // With batchSize=2, blocked groups 100001 & 100002 must not starve either the alert branch or 900001
-    const run1 = await convergeDuplicateMedia(db, { batchSize: 2, now });
-    const run2 = await convergeDuplicateMedia(db, { batchSize: 2, now });
-    const run3 = await convergeDuplicateMedia(db, { batchSize: 2, now });
+    const options = { batchSize: 2, now, tmdbGateway };
+    const run1 = await convergeDuplicateMedia(db, options);
+    const run2 = await convergeDuplicateMedia(db, options);
+    const run3 = await convergeDuplicateMedia(db, options);
 
     expect(run1.mergedCount + run2.mergedCount + run3.mergedCount).toBe(2);
 
@@ -2947,8 +3361,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     const db = testDb.writeDb;
     const now = new Date("2026-11-24T10:00:00.000Z");
 
-    // Create 5 active media sharing douban:555000 (10 distinct pairs total):
-    // 3 incompatible works + 2 compatible duplicates that only appear later in UUID order or after blocked pairs
+    // Six active members, with the mergeable pair anywhere among fifteen pairs in UUID order.
     const blockedIds: string[] = [];
     for (let i = 0; i < 4; i += 1) {
       const m = await db
@@ -3018,10 +3431,26 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     }
 
     // With 6 members (15 pairs) and batchSize=2, every run must inspect <= 2 pairs and eventually merge compatB -> compatA
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        return { status: 404, headers: {}, url: request.url, body: "" };
+      },
+    });
     let totalMerged = 0;
     for (let step = 0; step < 12; step += 1) {
-      const res = await convergeDuplicateMedia(db, { batchSize: 2, now });
+      const batchTime = new Date(now.getTime() + step * 5 * 60_000);
+      const res = await convergeDuplicateMedia(db, { batchSize: 2, outbound, now: batchTime });
       expect(res.inspectedPairs).toBeLessThanOrEqual(2);
+      if (step === 0) {
+        const requests = outbound.httpRequests.length;
+        const minuteLater = await convergeDuplicateMedia(db, {
+          batchSize: 2,
+          outbound,
+          now: new Date(batchTime.getTime() + 60_000),
+        });
+        expect(minuteLater.inspectedPairs).toBe(0);
+        expect(outbound.httpRequests).toHaveLength(requests);
+      }
       totalMerged += res.mergedCount;
       if (totalMerged > 0) {
         break;

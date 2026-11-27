@@ -1,12 +1,18 @@
 import {
   formatExternalKey,
   isCatalogNamespace,
+  isExternalIdNamespace,
   type ExternalIdNamespace,
   type MediaType,
 } from "@media-ref/client";
 import type { AssociationNamespaceRow, Database, Db, JsonObject } from "@media-ref/db";
 import { sql, type Transaction } from "kysely";
-import { resolveCatalogTargetSnapshot, type CatalogGatewayConfig } from "./catalog-gateway.ts";
+import {
+  buildCatalogTargetSnapshotFromTmdb,
+  parseCatalogTargetKey,
+  resolveCatalogTargetSnapshot,
+  type CatalogGatewayConfig,
+} from "./catalog-gateway.ts";
 import {
   areMediaSnapshotsCompatibleForAutoMerge,
   doesCatalogTargetMatchMediaSnapshot,
@@ -16,8 +22,14 @@ import {
   type MergeCandidateMediaSnapshot,
 } from "./duplicate-merge-policy.ts";
 import { fulfillCoveredCatalogDemandsInTx } from "./demands.ts";
+import { isUuid } from "./media-service.ts";
 import type { OutboundClient } from "./outbound.ts";
-import type { TmdbGateway, TmdbGatewayConfig } from "./tmdb.ts";
+import {
+  createTmdbGateway,
+  parseTmdbNativeId,
+  type TmdbGateway,
+  type TmdbGatewayConfig,
+} from "./tmdb.ts";
 import { mergeMediaInTx, REVIEW_ALERT_TYPES, type MergeMediaResult } from "./tmdb-sync.ts";
 
 export interface VerifyAndAutoMergeDuplicateInput {
@@ -51,6 +63,8 @@ export interface VerifyAndAutoMergeWithCatalogInput extends Omit<
   VerifyAndAutoMergeDuplicateInput,
   "acquireMergeLocks"
 > {
+  /** The live catalog association that identified this pair, if applicable. */
+  sharedCatalog?: { namespace: AssociationNamespaceRow; nativeId: string };
   outbound?: OutboundClient;
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
@@ -74,6 +88,16 @@ export interface ConvergeDuplicateMediaResult {
   mergedPairs: Array<{ sourceMediaId: string; targetMediaId: string; reason: string }>;
 }
 
+type MergeGuard = (
+  trx: Transaction<Database>,
+  source: MergeCandidateMediaSnapshot,
+  target: MergeCandidateMediaSnapshot,
+) => Promise<string | null>;
+
+function blocked(blockReason: string) {
+  return { merged: false as const, blockReason, details: {} };
+}
+
 /**
  * Verifies identity + snapshot compatibility and executes `mergeMediaInTx` atomically
  * when two media are confirmed duplicates.
@@ -81,6 +105,7 @@ export interface ConvergeDuplicateMediaResult {
 export async function verifyAndAutoMergeDuplicateMediaInTx(
   trx: Transaction<Database>,
   input: VerifyAndAutoMergeDuplicateInput,
+  guard?: MergeGuard,
 ): Promise<AutoMergeDuplicateResult> {
   const now = input.now ?? new Date();
   const eligibility = await verifyAutoMergeEligibilityInTx(trx, {
@@ -103,6 +128,9 @@ export async function verifyAndAutoMergeDuplicateMediaInTx(
       details: eligibility.details,
     };
   }
+
+  const reason = await guard?.(trx, eligibility.source, eligibility.target);
+  if (reason) return blocked(reason);
 
   const mergeResult = await mergeMediaInTx(trx, {
     sourceMediaId: eligibility.sourceMediaId,
@@ -127,6 +155,24 @@ export async function verifyAndAutoMergeDuplicateMediaInTx(
   };
 }
 
+function attemptAutoMerge(db: Db, input: VerifyAndAutoMergeDuplicateInput, guard?: MergeGuard) {
+  const tx = db.transaction();
+  return (guard ? tx.setIsolationLevel("repeatable read") : tx)
+    .execute((trx) => verifyAndAutoMergeDuplicateMediaInTx(trx, input, guard))
+    .catch((error: unknown) => {
+      // A concurrent change to evidence can abort a locking read. Don't abandon the rest of the batch.
+      if (
+        guard &&
+        error instanceof Error &&
+        "code" in error &&
+        (error.code === "40001" || error.code === "40P01")
+      ) {
+        return blocked("concurrent_update");
+      }
+      throw error;
+    });
+}
+
 /** Finds all active unmerged media sharing any active catalog (`douban` / `bangumi`) collection with `mediaId`. */
 export async function findSharedCatalogDuplicateMediaIdsInTx(
   trx: Transaction<Database>,
@@ -144,6 +190,7 @@ export async function findSharedCatalogDuplicateMediaIdsInTx(
     .where("media_id", "=", canonicalId)
     .where("namespace", "in", ["douban", "bangumi"])
     .where("status", "in", ["confirmed", "seed_unconfirmed"])
+    .where("needs_review", "=", false)
     .execute();
 
   if (ownCatalogRows.length === 0) {
@@ -165,6 +212,7 @@ export async function findSharedCatalogDuplicateMediaIdsInTx(
       .where("a.namespace", "=", row.namespace)
       .where("a.native_id", "=", row.native_id)
       .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
+      .where("a.needs_review", "=", false)
       .where("m.merged_into_media_id", "is", null)
       .where("m.id", "!=", canonicalId)
       .select("m.id as media_id")
@@ -189,15 +237,15 @@ export async function findSharedCatalogDuplicateMediaIdsInTx(
 
 async function fetchExtraAliasesForMerge(
   db: Db,
-  mediaIdA: string,
-  mediaIdB: string,
+  options: VerifyAndAutoMergeWithCatalogInput,
   outbound: OutboundClient,
-  options: {
-    tmdbConfig?: TmdbGatewayConfig;
-    tmdbGateway?: TmdbGateway;
-    catalogConfig?: CatalogGatewayConfig;
-  },
 ): Promise<Map<string, string[]>> {
+  const { mediaIdA, mediaIdB } = options;
+  const catalogConfig = {
+    ...options.catalogConfig,
+    tmdb: options.tmdbConfig ?? options.catalogConfig?.tmdb,
+    tmdbGateway: options.tmdbGateway ?? options.catalogConfig?.tmdbGateway,
+  };
   const extra = new Map<string, string[]>();
   const loaded = await db.transaction().execute(async (trx) => {
     const [snapA, snapB] = await Promise.all([
@@ -226,7 +274,12 @@ async function fetchExtraAliasesForMerge(
     const sharedCatalogKeys: string[] = [];
     const seenShared = new Set<string>();
     for (const aAssoc of snapA.associations) {
-      if (!isCatalogNamespace(aAssoc.namespace)) {
+      if (
+        !isCatalogNamespace(aAssoc.namespace) ||
+        (options.sharedCatalog &&
+          (aAssoc.namespace !== options.sharedCatalog.namespace ||
+            aAssoc.nativeId !== options.sharedCatalog.nativeId))
+      ) {
         continue;
       }
       if (
@@ -269,11 +322,7 @@ async function fetchExtraAliasesForMerge(
   // 1. Fetch each media's own authoritative TMDB titles first so they belong strictly to that media.
   for (const item of loaded.tmdbItems) {
     try {
-      const resolved = await resolveCatalogTargetSnapshot(item.key, outbound, {
-        ...options.catalogConfig,
-        ...(options.tmdbConfig ? { tmdb: options.tmdbConfig } : {}),
-        ...(options.tmdbGateway ? { tmdbGateway: options.tmdbGateway } : {}),
-      });
+      const resolved = await resolveCatalogTargetSnapshot(item.key, outbound, catalogConfig);
       if (resolved.status !== "found") {
         continue;
       }
@@ -304,11 +353,7 @@ async function fetchExtraAliasesForMerge(
 
   for (const key of loaded.sharedCatalogKeys) {
     try {
-      const resolved = await resolveCatalogTargetSnapshot(key, outbound, {
-        ...options.catalogConfig,
-        ...(options.tmdbConfig ? { tmdb: options.tmdbConfig } : {}),
-        ...(options.tmdbGateway ? { tmdbGateway: options.tmdbGateway } : {}),
-      });
+      const resolved = await resolveCatalogTargetSnapshot(key, outbound, catalogConfig);
       if (resolved.status !== "found") {
         continue;
       }
@@ -337,16 +382,29 @@ export async function verifyAndAutoMergeDuplicateMedia(
   db: Db,
   input: VerifyAndAutoMergeWithCatalogInput,
 ): Promise<AutoMergeDuplicateResult> {
-  const firstAttempt = await db.transaction().execute((trx) =>
-    verifyAndAutoMergeDuplicateMediaInTx(trx, {
-      mediaIdA: input.mediaIdA,
-      mediaIdB: input.mediaIdB,
-      actorUserId: input.actorUserId,
-      reason: input.reason,
-      extraTitlesByMediaId: input.extraTitlesByMediaId,
-      now: input.now,
-    }),
-  );
+  const group = input.sharedCatalog;
+  const guard: MergeGuard | undefined =
+    group &&
+    (async (trx) => {
+      const coverage = await trx
+        .selectFrom("associations as a")
+        .innerJoin("media as m", "m.id", "a.media_id")
+        .select("m.id")
+        .where("m.id", "in", [input.mediaIdA, input.mediaIdB])
+        .where("m.merged_into_media_id", "is", null)
+        .where("a.is_external_id", "=", false)
+        .where("a.namespace", "=", group.namespace)
+        .where("a.native_id", "=", group.nativeId)
+        .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
+        .where("a.needs_review", "=", false)
+        .orderBy("m.id")
+        .forUpdate()
+        .execute();
+      return new Set(coverage.map((row) => row.id)).size === 2 ? null : "stale_merge_evidence";
+    });
+  const attempt = (extraTitlesByMediaId = input.extraTitlesByMediaId) =>
+    attemptAutoMerge(db, { ...input, extraTitlesByMediaId }, guard);
+  const firstAttempt = await attempt();
 
   if (
     firstAttempt.merged ||
@@ -356,17 +414,7 @@ export async function verifyAndAutoMergeDuplicateMedia(
     return firstAttempt;
   }
 
-  const fetchedAliases = await fetchExtraAliasesForMerge(
-    db,
-    input.mediaIdA,
-    input.mediaIdB,
-    input.outbound,
-    {
-      tmdbConfig: input.tmdbConfig,
-      tmdbGateway: input.tmdbGateway,
-      catalogConfig: input.catalogConfig,
-    },
-  );
+  const fetchedAliases = await fetchExtraAliasesForMerge(db, input, input.outbound);
   if (fetchedAliases.size === 0) {
     return firstAttempt;
   }
@@ -382,16 +430,7 @@ export async function verifyAndAutoMergeDuplicateMedia(
     combinedTitles.set(k, [...existing, ...v]);
   }
 
-  return db.transaction().execute((trx) =>
-    verifyAndAutoMergeDuplicateMediaInTx(trx, {
-      mediaIdA: input.mediaIdA,
-      mediaIdB: input.mediaIdB,
-      actorUserId: input.actorUserId,
-      reason: input.reason,
-      extraTitlesByMediaId: combinedTitles,
-      now: input.now,
-    }),
-  );
+  return attempt(combinedTitles);
 }
 
 /**
@@ -490,6 +529,157 @@ function parseJsonObject(raw: unknown): JsonObject {
   return {};
 }
 
+interface AlertRow {
+  id: string;
+  media_id: string | null;
+  details: JsonObject;
+}
+
+function parseConflict(row: AlertRow) {
+  const d = row.details;
+  const other = d.otherMediaId ?? d.conflictingMediaId;
+  if (
+    !row.media_id ||
+    typeof other !== "string" ||
+    !isUuid(other) ||
+    other === row.media_id ||
+    (d.conflictingMediaId !== undefined && d.conflictingMediaId !== other) ||
+    typeof d.namespace !== "string" ||
+    !isExternalIdNamespace(d.namespace) ||
+    typeof d.nativeId !== "string" ||
+    parseCatalogTargetKey(`${d.namespace}:${d.nativeId}`)?.nativeId !== d.nativeId
+  ) {
+    return null;
+  }
+  // Exploration starts from the claimant's recorded IMDb; sync starts from its current TMDB ID.
+  let imdb: string | null = null;
+  if (d.source === "tmdb_sync") {
+    if (d.namespace === "tmdb" || d.matchedBy !== undefined) return null;
+  } else {
+    const match = d.matchedBy;
+    if (
+      d.source !== undefined ||
+      d.namespace === "imdb" ||
+      !match ||
+      typeof match !== "object" ||
+      !("imdb" in match) ||
+      typeof match.imdb !== "string" ||
+      parseCatalogTargetKey(`imdb:${match.imdb}`)?.nativeId !== match.imdb
+    ) {
+      return null;
+    }
+    imdb = match.imdb;
+  }
+  return { row, mediaId: row.media_id, other, namespace: d.namespace, nativeId: d.nativeId, imdb };
+}
+
+type Conflict = NonNullable<ReturnType<typeof parseConflict>>;
+
+// Both ends must still be confirmed on the original, unredirected media. Never follow an old alert to a third work.
+async function loadConflictAnchor(db: Db, c: Conflict) {
+  const query = db
+    .selectFrom("associations as a")
+    .innerJoin("media as m", "m.id", "a.media_id")
+    .select(["m.id", "m.type", "a.native_id"])
+    .where("m.merged_into_media_id", "is", null)
+    .where("a.is_external_id", "=", true)
+    .where("a.status", "=", "confirmed")
+    .where("a.needs_review", "=", false)
+    .where((eb) =>
+      eb.or([
+        eb.and([eb("m.id", "=", c.mediaId), eb("a.namespace", "=", c.imdb ? "imdb" : "tmdb")]),
+        eb.and([
+          eb("m.id", "=", c.other),
+          eb("a.namespace", "=", c.namespace),
+          eb("a.native_id", "=", c.nativeId),
+        ]),
+      ]),
+    )
+    .orderBy("m.id");
+  const rows = await (db.isTransaction ? query.forUpdate() : query).execute();
+  const anchor = rows.find((r) => r.id === c.mediaId);
+  return rows.some((r) => r.id === c.other) && anchor && (!c.imdb || anchor.native_id === c.imdb)
+    ? anchor
+    : null;
+}
+
+function sameAlert(row: AlertRow) {
+  return sql<boolean>`id = ${row.id} and status = 'open' and alert_type = ${REVIEW_ALERT_TYPES.AGENT_EXTERNAL_ID_CONFLICT}
+    and media_id is not distinct from ${row.media_id}::uuid and details = ${JSON.stringify(row.details)}::jsonb`;
+}
+
+async function recheckConflict(
+  db: Db,
+  c: Conflict,
+  input: VerifyAndAutoMergeDuplicateInput,
+  gateway: TmdbGateway | undefined,
+) {
+  const anchor = await loadConflictAnchor(db, c);
+  if (!anchor) return blocked("stale_merge_evidence");
+  if (!gateway) return blocked("tmdb_gateway_unavailable");
+
+  let fetched;
+  try {
+    let tmdb = parseTmdbNativeId(anchor.native_id);
+    if (c.imdb) {
+      const hits = (await gateway.findByImdbId(c.imdb)).filter((hit) => hit.type === anchor.type);
+      tmdb = hits.length === 1 ? hits[0]! : null;
+    }
+    if (!tmdb || tmdb.type !== anchor.type) return blocked("stale_merge_evidence");
+    const key = `${tmdb.type}:${tmdb.id}`;
+    if (c.namespace === "tmdb" && key !== c.nativeId) return blocked("stale_merge_evidence");
+    fetched = await gateway.fetchMediaSnapshotAndExternalIds(tmdb.type, tmdb.id);
+    if (!fetched || fetched.type !== anchor.type || fetched.externalIds.tmdb !== key) {
+      return blocked("stale_merge_evidence");
+    }
+    // Secondary ID lookups can be unavailable even when the TMDB detail request succeeded.
+    if (!fetched.externalIds[c.namespace] || (c.imdb && !fetched.externalIds.imdb)) {
+      return blocked("incomplete_catalog_evidence");
+    }
+    if (
+      fetched.externalIds[c.namespace] !== c.nativeId ||
+      (c.imdb && fetched.externalIds.imdb !== c.imdb)
+    ) {
+      return blocked("stale_merge_evidence");
+    }
+  } catch {
+    return blocked("tmdb_lookup_failed");
+  }
+
+  const evidence = buildCatalogTargetSnapshotFromTmdb(fetched);
+  return attemptAutoMerge(
+    db,
+    {
+      ...input,
+      extraTitlesByMediaId: new Map([
+        [c.imdb ? c.other : c.mediaId, [evidence.snapshot.title, evidence.snapshot.originalTitle]],
+      ]),
+    },
+    async (trx, source, target) => {
+      const current = await loadConflictAnchor(trx, c);
+      if (
+        current?.native_id !== anchor.native_id ||
+        current.type !== anchor.type ||
+        !(await trx
+          .selectFrom("review_alerts")
+          .select("id")
+          .where(sameAlert(c.row))
+          .forUpdate()
+          .executeTakeFirst())
+      ) {
+        return "stale_merge_evidence";
+      }
+      if (
+        (!c.imdb && target.id !== c.mediaId) ||
+        ![source, target].every((snap) => doesCatalogTargetMatchMediaSnapshot(snap, [], evidence))
+      ) {
+        return "conflicting_catalog_evidence";
+      }
+      return null;
+    },
+  );
+}
+
 export const DUPLICATE_CONVERGENCE_SYNC_KEY = "duplicate_convergence";
 
 interface CatalogConvergenceCursor {
@@ -536,6 +726,7 @@ async function fetchDuplicateCatalogGroups(
     .where("a.is_external_id", "=", false)
     .where("a.namespace", "in", ["douban", "bangumi"])
     .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
+    .where("a.needs_review", "=", false)
     .where("m.merged_into_media_id", "is", null);
 
   if (afterCursor) {
@@ -565,7 +756,7 @@ async function fetchDuplicateCatalogGroups(
  * Idempotent background sweep converging existing unmerged canonical duplicates sharing
  * active `douban`/`bangumi` entries or open `agent_external_id_conflict` alerts.
  * Advances a keyset cursor in `sync_state` past blocked catalog groups and reserves
- * capacity for unchecked conflict alerts so blocked pairs cannot starve later groups or alerts.
+ * capacity for due conflict alerts so blocked pairs cannot starve later groups or alerts.
  */
 export async function convergeDuplicateMedia(
   db: Db,
@@ -579,92 +770,110 @@ export async function convergeDuplicateMedia(
     mediaIdA: string;
     mediaIdB: string;
     reason: string;
-    alertId?: string;
+    conflict?: Conflict;
+    sharedCatalog?: VerifyAndAutoMergeWithCatalogInput["sharedCatalog"];
   }> = [];
-  const seenPairs = new Set<string>();
-  const seenAlertIds = new Set<string>();
+  const finishAlert = (db: Db, row: AlertRow, reason: string, resolved: boolean) =>
+    db
+      .updateTable("review_alerts")
+      .where(sameAlert(row))
+      .set({
+        details: JSON.stringify({ ...row.details, autoMergeBlockedReason: reason }),
+        ...(resolved
+          ? { status: "resolved" as const, resolved_at: now, resolved_by_user_id: actorUserId }
+          : {}),
+      })
+      .execute();
 
   const collectOpenAlerts = async (limit: number) => {
-    if (limit <= 0) {
-      return;
-    }
-    let query = db
-      .selectFrom("review_alerts")
-      .select(["id", "media_id", "details"])
-      .where("alert_type", "=", REVIEW_ALERT_TYPES.AGENT_EXTERNAL_ID_CONFLICT)
-      .where("status", "=", "open")
-      .where("media_id", "is not", null)
-      .where(sql<boolean>`coalesce(details ->> 'autoMergeCheckedAt', '') = ''`);
-
-    if (seenAlertIds.size > 0) {
-      query = query.where("id", "not in", [...seenAlertIds]);
-    }
-
-    const openAlerts = await query.orderBy("created_at", "asc").limit(limit).execute();
-
-    for (const alert of openAlerts) {
-      seenAlertIds.add(alert.id);
-      if (!alert.media_id) {
-        continue;
-      }
-      const details = parseJsonObject(alert.details);
-      const otherMediaId =
-        typeof details.otherMediaId === "string"
-          ? details.otherMediaId
-          : typeof details.conflictingMediaId === "string"
-            ? details.conflictingMediaId
-            : null;
-      if (!otherMediaId || otherMediaId === alert.media_id) {
-        await db
+    if (limit <= 0) return;
+    // Claim before doing I/O: overlapping crons skip in-flight work; a crashed claim expires by itself.
+    await db.transaction().execute(async (trx) => {
+      const checked = sql<Date | null>`case when details ->> 'autoMergeCheckedAt' ~ '^[0-9]{4}-'
+        and pg_input_is_valid(details ->> 'autoMergeCheckedAt', 'timestamptz')
+        then (details ->> 'autoMergeCheckedAt')::timestamptz end`;
+      // Writers stamp their first attempt without a count. Unchecked historical rows are due immediately.
+      const due = sql<Date>`${checked} + case coalesce(details ->> 'autoMergeAttempts', '1')
+        when '1' then interval '1 hour' when '2' then interval '6 hours' else interval '24 hours' end`;
+      const alerts = await trx
+        .selectFrom("review_alerts")
+        .select(["id", "media_id", "details"])
+        .where("alert_type", "=", REVIEW_ALERT_TYPES.AGENT_EXTERNAL_ID_CONFLICT)
+        .where("status", "=", "open")
+        .where((eb) =>
+          eb.or([
+            eb(checked, "is", null),
+            eb(due, "<=", now),
+            eb(checked, ">", new Date(now.getTime() + 86_400_000)),
+          ]),
+        )
+        .orderBy(checked, (ob) => ob.asc().nullsFirst())
+        .orderBy("created_at")
+        .orderBy("id")
+        .limit(limit)
+        .forUpdate()
+        .skipLocked()
+        .execute();
+      for (const row of alerts) {
+        const prev = parseJsonObject(row.details);
+        const count =
+          typeof prev.autoMergeAttempts === "number" &&
+          Number.isSafeInteger(prev.autoMergeAttempts) &&
+          prev.autoMergeAttempts > 0
+            ? prev.autoMergeAttempts
+            : prev.autoMergeCheckedAt
+              ? 1
+              : 0;
+        row.details = {
+          ...prev,
+          autoMergeCheckedAt: now.toISOString(),
+          autoMergeAttempts: count + 1,
+        };
+        await trx
           .updateTable("review_alerts")
-          .set({
-            details: JSON.stringify({
-              ...details,
-              autoMergeCheckedAt: now.toISOString(),
-              autoMergeBlockedReason: "invalid_alert_target",
-            }),
-          })
-          .where("id", "=", alert.id)
-          .where("status", "=", "open")
+          .where("id", "=", row.id)
+          .set({ details: JSON.stringify(row.details) })
           .execute();
-        continue;
-      }
-      const pairKey = [alert.media_id, otherMediaId].sort().join(":");
-      if (!seenPairs.has(pairKey)) {
-        seenPairs.add(pairKey);
+        const conflict = parseConflict(row);
+        if (!conflict) {
+          await finishAlert(trx, row, "invalid_alert_target", true);
+          continue;
+        }
         candidatePairs.push({
-          mediaIdA: alert.media_id,
-          mediaIdB: otherMediaId,
+          mediaIdA: conflict.mediaId,
+          mediaIdB: conflict.other,
           reason: "converge_external_id_conflict_alert",
-          alertId: alert.id,
+          conflict,
         });
       }
-    }
+    });
   };
 
-  // 1. Reserve capacity for unchecked `agent_external_id_conflict` alerts so blocked catalog groups
-  //    cannot permanently starve alert convergence. When no unchecked alerts exist, catalog gets the full batch.
+  // Unchecked alerts come first; eligible retries rotate oldest-check first within this quota.
   const reservedAlertQuota = batchSize === 1 ? 1 : Math.max(1, Math.floor(batchSize / 4));
   await collectOpenAlerts(reservedAlertQuota);
 
-  // 2. Collect pairs sharing an active exclusive catalog (`douban`/`bangumi`) association starting
-  //    after the persisted keyset cursor, bounded strictly by `batchSize` candidate pairs so
-  //    large multi-member groups never perform quadratic work or starve remaining groups/members.
+  // Collect pairs sharing an active exclusive catalog (`douban`/`bangumi`) association starting
+  // after the persisted keyset cursor, bounded by the remaining pair budget.
   const catalogPairBudget = Math.max(0, batchSize - candidatePairs.length);
   if (catalogPairBudget > 0) {
     const stateRow = await db
       .selectFrom("sync_state")
-      .select("metadata")
+      .select(["metadata", "updated_at"])
       .where("sync_key", "=", DUPLICATE_CONVERGENCE_SYNC_KEY)
       .executeTakeFirst();
     const initialCursor = stateRow ? parseCatalogConvergenceCursor(stateRow.metadata) : null;
 
-    let duplicateCatalogGroups = await fetchDuplicateCatalogGroups(
-      db,
-      catalogPairBudget,
-      initialCursor,
+    // Space outbound catalog batches apart, with a longer cooldown before replaying a finished pass.
+    const cooling = Boolean(
+      options.outbound &&
+      stateRow &&
+      now.getTime() < new Date(stateRow.updated_at).getTime() + (initialCursor ? 5 : 60) * 60_000,
     );
-    if (initialCursor !== null && duplicateCatalogGroups.length === 0) {
+    let duplicateCatalogGroups = cooling
+      ? []
+      : await fetchDuplicateCatalogGroups(db, catalogPairBudget, initialCursor);
+    if (!options.outbound && initialCursor !== null && duplicateCatalogGroups.length === 0) {
       duplicateCatalogGroups = await fetchDuplicateCatalogGroups(db, catalogPairBudget, null);
     }
 
@@ -676,15 +885,13 @@ export async function convergeDuplicateMedia(
       a: string,
       b: string,
     ): boolean => {
-      const pairKey = [a, b].sort().join(":");
-      if (!seenPairs.has(pairKey)) {
-        seenPairs.add(pairKey);
-        candidatePairs.push({
-          mediaIdA: a,
-          mediaIdB: b,
-          reason: `converge_shared_catalog:${group.namespace}:${group.native_id}`,
-        });
-      }
+      // Different keys for the same pair are independent evidence and each uses one batch slot.
+      candidatePairs.push({
+        mediaIdA: a,
+        mediaIdB: b,
+        reason: `converge_shared_catalog:${group.namespace}:${group.native_id}`,
+        sharedCatalog: { namespace: group.namespace, nativeId: group.native_id },
+      });
       if (candidatePairs.length >= batchSize) {
         nextCursor = {
           namespace: group.namespace as "douban" | "bangumi",
@@ -709,6 +916,7 @@ export async function convergeDuplicateMedia(
         .where("a.namespace", "=", group.namespace)
         .where("a.native_id", "=", group.native_id)
         .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
+        .where("a.needs_review", "=", false)
         .where("m.merged_into_media_id", "is", null)
         .select("m.id as media_id")
         .distinct();
@@ -807,7 +1015,12 @@ export async function convergeDuplicateMedia(
       };
     }
 
-    if (initialCursor !== null || nextCursor !== null) {
+    if (
+      !cooling &&
+      (initialCursor !== null ||
+        nextCursor !== null ||
+        (options.outbound && duplicateCatalogGroups.length > 0))
+    ) {
       const syncDate = now.toISOString().slice(0, 10);
       const serializedMeta = JSON.stringify({
         catalogCursor: nextCursor,
@@ -832,7 +1045,7 @@ export async function convergeDuplicateMedia(
     }
   }
 
-  // 3. Fill any remaining capacity with additional unchecked open conflict alerts.
+  // Fill any remaining capacity with due conflict alerts.
   if (candidatePairs.length < batchSize) {
     await collectOpenAlerts(batchSize - candidatePairs.length);
   }
@@ -840,18 +1053,16 @@ export async function convergeDuplicateMedia(
   const mergedPairs: ConvergeDuplicateMediaResult["mergedPairs"] = [];
   let skippedCount = 0;
 
+  const gateway =
+    options.tmdbGateway ??
+    options.catalogConfig?.tmdbGateway ??
+    (options.outbound &&
+      createTmdbGateway(options.outbound, options.tmdbConfig ?? options.catalogConfig?.tmdb));
   for (const candidate of candidatePairs) {
-    const outcome = await verifyAndAutoMergeDuplicateMedia(db, {
-      mediaIdA: candidate.mediaIdA,
-      mediaIdB: candidate.mediaIdB,
-      actorUserId,
-      reason: candidate.reason,
-      outbound: options.outbound,
-      tmdbConfig: options.tmdbConfig,
-      tmdbGateway: options.tmdbGateway,
-      catalogConfig: options.catalogConfig,
-      now,
-    });
+    const input = { ...candidate, actorUserId, now };
+    const outcome = candidate.conflict
+      ? await recheckConflict(db, candidate.conflict, input, gateway)
+      : await verifyAndAutoMergeDuplicateMedia(db, { ...options, ...input });
 
     if (outcome.merged) {
       mergedPairs.push({
@@ -861,27 +1072,18 @@ export async function convergeDuplicateMedia(
       });
     } else {
       skippedCount += 1;
-      if (candidate.alertId) {
-        const existing = await db
-          .selectFrom("review_alerts")
-          .select(["id", "details"])
-          .where("id", "=", candidate.alertId)
-          .where("status", "=", "open")
-          .executeTakeFirst();
-        if (existing) {
-          const prev = parseJsonObject(existing.details);
-          await db
-            .updateTable("review_alerts")
-            .set({
-              details: JSON.stringify({
-                ...prev,
-                autoMergeCheckedAt: now.toISOString(),
-                autoMergeBlockedReason: outcome.blockReason,
-              }),
-            })
-            .where("id", "=", existing.id)
-            .execute();
-        }
+      if (candidate.conflict) {
+        await finishAlert(
+          db,
+          candidate.conflict.row,
+          outcome.blockReason,
+          [
+            "stale_merge_evidence",
+            "already_same_media",
+            "media_not_found",
+            "media_already_merged",
+          ].includes(outcome.blockReason),
+        );
       }
     }
   }
