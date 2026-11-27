@@ -50,7 +50,6 @@ export interface CatalogDirectoryRow {
   wholeMediaLabel?: string;
   /** The directory shows one label. Review needs the evidence state of every whole entry. */
   wholeMediaEntries?: Omit<CoverageSegment, "start" | "end">[];
-  note?: string;
   segmentsBySeason?: Record<number, CoverageSegment[]>;
   allSeasonSegments?: CoverageSegment[];
   externalUrl?: string;

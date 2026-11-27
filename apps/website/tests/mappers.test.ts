@@ -474,7 +474,6 @@ test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with ca
           isExternalId: true,
         },
       ],
-      note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）",
     },
     {
       id: "catalog:trakt",
@@ -616,7 +615,6 @@ test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with ca
     roleLabel: "整部 + 季",
     wholeMediaNativeId: "tt2560140",
     wholeMediaLabel: "整部 · tt2560140",
-    note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）",
   });
   expect(tvItem.catalogRows[2]?.segmentsBySeason?.[1]).toHaveLength(1);
 });
