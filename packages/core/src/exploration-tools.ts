@@ -19,6 +19,7 @@ import { fetchBangumiSubjectMetadata } from "./adapters/bangumi.ts";
 import { fetchDoubanFrodo } from "./adapters/douban-api.ts";
 import type { ModelToolDefinition, OutboundClient } from "./outbound.ts";
 import { parseTmdbNativeId, type TmdbGateway } from "./tmdb.ts";
+import { lastAiredEpisode } from "./season-coverage.ts";
 
 const MAX_EPISODES_IN_TOOL_RESULT = 80;
 const KAN360_INDEX_API = "https://api.so.360kan.com/index";
@@ -40,6 +41,11 @@ export interface ToolContext {
   tmdbTvId: string | null;
   /** Include fetch provenance for the review agent’s verdict checks. */
   reportLiveFetch?: boolean;
+  /**
+   * Today: `get_catalog_season` marks the latest regular season, while it is still airing, with
+   * its last aired episode (the same season exploration treats as airing).
+   */
+  now?: Date;
 }
 
 /** The query tools; the executor adds `submit_mapping` and `mark_not_found`. */
@@ -353,12 +359,15 @@ async function getCatalogSeason(
     return ctx.reportLiveFetch ? { ...known, live: false } : known;
   }
   const from = typeof fromEpisode === "number" ? fromEpisode : 1;
+  const latest = known.season >= 1 && ctx.seasons.every((s) => s.season <= known.season);
+  const lastAired = ctx.now && latest ? lastAiredEpisode(all, ctx.now) : null;
   const listed = all.filter((e) => e.episode >= from);
   const episodes = listed.slice(0, MAX_EPISODES_IN_TOOL_RESULT);
   const next = listed[MAX_EPISODES_IN_TOOL_RESULT];
   return {
     ...known,
     ...(ctx.reportLiveFetch ? { live: true } : {}),
+    ...(lastAired !== null ? { stillAiring: { lastAiredEpisode: lastAired } } : {}),
     episodes,
     ...(next ? { episodesTruncated: { total: all.length, nextFromEpisode: next.episode } } : {}),
   };
