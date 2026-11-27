@@ -24,6 +24,7 @@ import {
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
   enqueuePendingReviews,
+  enqueueTmdbLookupDemands,
   REVIEW_AGENT_JOB_TYPE,
   scheduleExplorationJobs,
   SEED_EVIDENCE_CHECK_JOB_TYPE,
@@ -224,6 +225,8 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
         (!deps.config?.jobTypes || deps.config.jobTypes.includes(EXPLORATION_JOB_TYPE));
 
       if (shouldScheduleExploration) {
+        // Media known only from Douban or Bangumi still need their TMDB ID found.
+        await enqueueTmdbLookupDemands(deps.db, { now });
         await scheduleExplorationJobs(deps.db, {
           now,
           config: deps.config?.exploration,
