@@ -1,4 +1,4 @@
-import type { Hyperdrive, SendEmail } from "@cloudflare/workers-types";
+import type { AnalyticsSQLBinding, Hyperdrive, SendEmail } from "@cloudflare/workers-types";
 import type { EgressFetcher } from "@media-ref/core";
 import type { RateLimitBinding } from "./rate-limit.ts";
 
@@ -38,10 +38,9 @@ export interface ApiWorkerEnv {
   RATE_LIMIT_REPUTATION_TIERS?: string;
   RATE_LIMIT_ROLE_HOURLY_LIMITS?: string;
   INVALIDATION_ANON_THRESHOLD?: string;
-  // Analytics Engine dataset for per-key usage, and the account + token used to query it.
+  // Analytics Engine dataset for per-key usage, and the Analytics SQL binding used to query it.
   API_USAGE?: {
     writeDataPoint(point: { blobs?: string[]; doubles?: number[]; indexes?: string[] }): void;
   };
-  CF_ACCOUNT_ID?: string;
-  ANALYTICS_API_TOKEN?: string;
+  ANALYTICS_SQL?: AnalyticsSQLBinding;
 }
