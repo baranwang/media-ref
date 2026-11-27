@@ -30,6 +30,8 @@ export interface DiscoveryMediaInput {
   season?: number | null;
   /** Already-known External IDs / associations; `douban` and `imdb` feed the Douban source. */
   externalIds?: Partial<Record<Namespace, string>>;
+  /** IMDb ID of the requested season's first episode (season > 1); see lookupDoubanSeasonSubject. */
+  seasonImdbId?: string | null;
 }
 
 export interface DiscoveryCandidateSource {
@@ -350,17 +352,18 @@ async function fetchDoubanVendors(
   }
   if (doubanId === null) {
     const imdbId = media.externalIds?.imdb?.trim();
-    if (!imdbId) {
+    const seasonImdbId = media.seasonImdbId?.trim();
+    if (!imdbId && !seasonImdbId) {
       return { report: { source, status: "skipped", reason: "no_douban_or_imdb_id" }, links: [] };
     }
-    if (!/^tt\d+$/.test(imdbId)) {
+    if ((imdbId && !IMDB_ID.test(imdbId)) || (seasonImdbId && !IMDB_ID.test(seasonImdbId))) {
       return errorOutcome(source, "invalid_imdb_id");
     }
-    const found = await lookupDoubanSubjectByImdb(imdbId, outbound);
+    const found = await lookupDoubanSeasonSubject({ imdbId, seasonImdbId }, outbound);
     if (found === null) {
       return { report: { source, status: "not_found", reason: "imdb_not_on_douban" }, links: [] };
     }
-    doubanId = found;
+    doubanId = found.subjectId;
   }
 
   // frodo `/subject/<id>` serves movies and TV alike.
@@ -388,6 +391,27 @@ async function fetchDoubanVendors(
     }
   }
   return { report: { source, status: "ok", links: links.length }, links };
+}
+
+const IMDB_ID = /^tt\d+$/;
+
+/**
+ * The Douban subject of one TV season. Douban gives every season its own subject and files season
+ * N > 1 under the IMDb ID of that season's first episode; the series IMDb ID finds season 1 (or a
+ * subject spanning the show), which is also the fallback when the season's ID is unknown there.
+ */
+export async function lookupDoubanSeasonSubject(
+  ids: { imdbId?: string | null | undefined; seasonImdbId?: string | null | undefined },
+  outbound: OutboundClient,
+): Promise<{ subjectId: string; via: "season_imdb" | "imdb" } | null> {
+  const fromSeason = ids.seasonImdbId
+    ? await lookupDoubanSubjectByImdb(ids.seasonImdbId, outbound)
+    : null;
+  if (fromSeason) {
+    return { subjectId: fromSeason, via: "season_imdb" };
+  }
+  const fromSeries = ids.imdbId ? await lookupDoubanSubjectByImdb(ids.imdbId, outbound) : null;
+  return fromSeries ? { subjectId: fromSeries, via: "imdb" } : null;
 }
 
 /**
