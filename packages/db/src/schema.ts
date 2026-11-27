@@ -196,6 +196,8 @@ export interface AssociationsTable {
   /** Display snapshot of the collection/entry from evidence check or upstream sync. */
   title: string | null;
   episode_count: number | null;
+  /** Douban only: platforms its "where to watch" lists (null = not fetched yet). */
+  listed_platforms: string[] | null;
   /** The whole-media association on an authority catalog: the media's External ID. */
   is_external_id: Generated<boolean>;
   /** Only set on External IDs. */

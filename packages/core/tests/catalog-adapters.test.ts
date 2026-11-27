@@ -102,6 +102,13 @@ describe("Douban Tier 1 & Tier 2 adapter", () => {
             subtype: "tv",
             is_tv: true,
             episodes_count: 39,
+            // "Where to watch": an ad and an unsupported vendor are not listed platforms.
+            vendors: [
+              { id: "iqiyi", is_ad: false, uri: "iqiyi://mobile/player?aid=5328486914190101" },
+              { id: "qq", is_ad: false, uri: "txvideo://v.qq.com/x?cid=mzc00200agq0com" },
+              { id: "youku", is_ad: true, uri: "youku://play?showid=1" },
+              { id: "migu", is_ad: false, uri: "migu://x" },
+            ],
           });
         }
         if (new URL(request.url).pathname === "/api/v2/subject/1292052") {
@@ -133,6 +140,7 @@ describe("Douban Tier 1 & Tier 2 adapter", () => {
         year: 2023,
         mediaType: "tv",
         featureEpisodeCount: 39,
+        listedPlatforms: ["iqiyi", "tencent"],
       });
       expect(tv.info.featureEpisodes).toHaveLength(39);
       expect(tv.info.aliases).toContain("The Knockout");
@@ -152,6 +160,8 @@ describe("Douban Tier 1 & Tier 2 adapter", () => {
         featureEpisodeCount: 1,
         externalIds: { imdb: "tt0111161" },
       });
+      // No vendors field at all: unknown, so a stored list is kept.
+      expect(movie.info.listedPlatforms).toBeUndefined();
       expect(movie.info.featureEpisodes).toHaveLength(1);
     }
   });

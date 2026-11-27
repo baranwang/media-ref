@@ -956,6 +956,7 @@ function summarizeCollectionInfo(info: CollectionInfo): JsonObject {
     mediaType: info.mediaType,
     featureEpisodeCount: info.featureEpisodeCount,
     externalIds: info.externalIds ?? {},
+    ...(info.listedPlatforms ? { listedPlatforms: [...info.listedPlatforms] } : {}),
   };
 }
 

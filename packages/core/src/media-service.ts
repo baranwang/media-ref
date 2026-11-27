@@ -258,13 +258,21 @@ export function isAssociationNamespace(value: string): value is AssociationNames
 export function extractCollectionDisplay(evidence: unknown): {
   title?: string;
   episode_count?: number;
+  listed_platforms?: string[];
 } {
   const collection = parseJsonObject(evidence)?.collection;
   if (!collection || typeof collection !== "object") {
     return {};
   }
-  const { title, featureEpisodeCount } = collection as Record<string, unknown>;
+  const { title, featureEpisodeCount, listedPlatforms } = collection as Record<string, unknown>;
   return {
+    ...(Array.isArray(listedPlatforms)
+      ? {
+          listed_platforms: listedPlatforms.filter(
+            (p) => typeof p === "string" && isPlatformNamespace(p),
+          ),
+        }
+      : {}),
     ...(typeof title === "string" && title.trim().length > 0 ? { title: title.trim() } : {}),
     ...(typeof featureEpisodeCount === "number" &&
     Number.isInteger(featureEpisodeCount) &&

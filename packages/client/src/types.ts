@@ -246,6 +246,8 @@ export interface Association {
   title?: string;
   /** Episode count of the collection/entry, snapshotted alongside `title`. */
   episodeCount?: number;
+  /** Douban only: the platforms its "where to watch" lists, snapshotted alongside `title`. */
+  listedPlatforms?: readonly PlatformNamespace[];
 }
 
 export interface MediaDocument {

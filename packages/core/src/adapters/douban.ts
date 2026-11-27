@@ -1,4 +1,4 @@
-import type { MediaType, Namespace } from "@media-ref/client";
+import type { MediaType, Namespace, PlatformNamespace } from "@media-ref/client";
 import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 import { DOUBAN_FRODO_BASE_URL, fetchDoubanFrodo } from "./douban-api.ts";
 import {
@@ -131,6 +131,32 @@ function collectDoubanAliases(
   }
 
   return aliases;
+}
+
+/** Douban `vendors[].id` → our namespace; other vendors (migu, sohu, ...) are not ours. */
+const DOUBAN_VENDOR_PLATFORMS: Record<string, PlatformNamespace> = {
+  qq: "tencent",
+  iqiyi: "iqiyi",
+  youku: "youku",
+  bilibili: "bilibili",
+  imgo: "mgtv",
+  mgtv: "mgtv",
+};
+
+/** Platforms the subject's "where to watch" lists, ads excluded; undefined when it sent none. */
+function parseListedPlatforms(record: Record<string, unknown>): PlatformNamespace[] | undefined {
+  if (!Array.isArray(record.vendors)) {
+    return undefined;
+  }
+  const platforms = new Set<PlatformNamespace>();
+  for (const raw of record.vendors) {
+    const vendor = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+    const id = typeof vendor?.id === "string" ? vendor.id.toLowerCase() : "";
+    if (vendor && vendor.is_ad !== true && Object.hasOwn(DOUBAN_VENDOR_PLATFORMS, id)) {
+      platforms.add(DOUBAN_VENDOR_PLATFORMS[id]!);
+    }
+  }
+  return [...platforms].sort();
 }
 
 function buildOrdinalEpisodes(count: number): FeatureEpisode[] {
@@ -267,6 +293,7 @@ export async function fetchDoubanCollection(
   }
 
   const externalIds = extractDoubanExternalIds(record);
+  const listedPlatforms = parseListedPlatforms(record);
 
   return {
     status: "found",
@@ -281,6 +308,7 @@ export async function fetchDoubanCollection(
       featureEpisodeCount,
       featureEpisodes,
       ...(externalIds ? { externalIds } : {}),
+      ...(listedPlatforms ? { listedPlatforms } : {}),
     },
   };
 }

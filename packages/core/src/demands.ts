@@ -1,6 +1,7 @@
 import {
   formatExternalKey,
   getNamespaceGroup,
+  isPlatformNamespace,
   parseExternalKey,
   PLATFORM_NAMESPACES,
   type Association,
@@ -8,6 +9,7 @@ import {
   type MediaType,
   type Namespace,
   type NamespaceGroup,
+  type PlatformNamespace,
   type SeasonSnapshot,
   type Segment,
 } from "@media-ref/client";
@@ -143,6 +145,14 @@ function isSeasonCoveredInGroup(
     !document.externalIds.some((ext) => ext.namespace === "tmdb")
   ) {
     return false;
+  }
+  if (namespaceGroup === "platform") {
+    const rows = document.associations.filter(isConfirmedAssociation).map((assoc) => ({
+      namespace: assoc.namespace,
+      seasons: assoc.segments.map((seg) => seg.season),
+      listedPlatforms: assoc.listedPlatforms ?? null,
+    }));
+    return missingListedPlatforms(rows, targetSeason)?.length === 0;
   }
   const confirmedInGroup = document.associations.filter(
     (assoc) =>
@@ -974,12 +984,8 @@ export async function fulfillCoveredDemandsForAssociationInTx(
   }
 
   let query = executor
-    .updateTable("demands")
-    .set({
-      status: "fulfilled",
-      lease_expires_at: null,
-      updated_at: now,
-    })
+    .selectFrom("demands")
+    .select(["id", "season"])
     .where("media_id", "=", input.mediaId)
     .where("namespace_group", "=", namespaceGroup)
     .where("status", "in", ["open", "not_found", "awaiting_review"]);
@@ -991,8 +997,30 @@ export async function fulfillCoveredDemandsForAssociationInTx(
     );
   }
 
-  const updated = await query.returning("id").execute();
-  return updated.length;
+  const ids: string[] = [];
+  for (const demand of await query.execute()) {
+    // One platform is not enough while the season's Douban subject lists others still missing;
+    // an uncovered demand keeps its state, so a sibling's rejection still settles it.
+    if (
+      namespaceGroup !== "platform" ||
+      (await isCoveredByAssociationsInTx(executor, {
+        mediaId: input.mediaId,
+        season: demand.season,
+        namespaceGroup,
+      }))
+    ) {
+      ids.push(demand.id);
+    }
+  }
+  if (ids.length === 0) {
+    return 0;
+  }
+  await executor
+    .updateTable("demands")
+    .set({ status: "fulfilled", lease_expires_at: null, updated_at: now })
+    .where("id", "in", ids)
+    .execute();
+  return ids.length;
 }
 
 /**
@@ -1122,14 +1150,23 @@ export async function isMediaDemandCoveredInTx(
   return isCoveredByAssociationsInTx(executor, input);
 }
 
-/** The association half of demand coverage: a confirmed association in the group covers the season. */
+/**
+ * The association half of demand coverage: a confirmed association in the group covers the
+ * season. On platforms, so must every platform the season's confirmed Douban subject lists (#130).
+ */
 export async function isCoveredByAssociationsInTx(
   executor: DbExecutor,
   input: CheckMediaDemandCoveredInput,
 ): Promise<boolean> {
-  const namespaces: readonly AssociationNamespaceRow[] =
-    input.namespaceGroup === "platform" ? PLATFORM_NAMESPACES : ASSOCIATION_CATALOG_NAMESPACES;
-  return hasConfirmedAssociationCoveringSeason(executor, input.mediaId, namespaces, input.season);
+  if (input.namespaceGroup === "platform") {
+    return (await missingListedPlatformsInTx(executor, input))?.length === 0;
+  }
+  const rows = await loadConfirmedCoverageRows(
+    executor,
+    input.mediaId,
+    ASSOCIATION_CATALOG_NAMESPACES,
+  );
+  return rows.some((row) => coversSeason(row, input.season));
 }
 
 /** Checks whether a single namespace already has a confirmed association covering `season`. */
@@ -1137,52 +1174,82 @@ export async function isNamespaceCoveredInTx(
   executor: DbExecutor,
   input: { mediaId: string; namespace: AssociationNamespaceRow; season: number | null },
 ): Promise<boolean> {
-  return hasConfirmedAssociationCoveringSeason(
-    executor,
-    input.mediaId,
-    [input.namespace],
-    input.season,
+  const rows = await loadConfirmedCoverageRows(executor, input.mediaId, [input.namespace]);
+  return rows.some((row) => coversSeason(row, input.season));
+}
+
+/** `missingListedPlatforms` over the media's confirmed platform and Douban associations. */
+export async function missingListedPlatformsInTx(
+  executor: DbExecutor,
+  input: { mediaId: string; season: number | null },
+): Promise<PlatformNamespace[] | null> {
+  const rows = await loadConfirmedCoverageRows(executor, input.mediaId, [
+    ...PLATFORM_NAMESPACES,
+    "douban",
+  ]);
+  return missingListedPlatforms(rows, input.season);
+}
+
+interface CoverageRow {
+  namespace: string;
+  /** Seasons of the association's segments; none = the whole media. */
+  seasons: readonly number[];
+  listedPlatforms: readonly string[] | null;
+}
+
+const coversSeason = (row: CoverageRow, season: number | null) =>
+  season === null || row.seasons.length === 0 || row.seasons.includes(season);
+
+/**
+ * Platforms still wanted for a season that some confirmed platform already covers: those its
+ * confirmed Douban subject lists that nothing covers yet. Null while no platform covers the season,
+ * i.e. every platform is still wanted. A season is covered when this is empty.
+ */
+export function missingListedPlatforms(
+  rows: readonly CoverageRow[],
+  season: number | null,
+): PlatformNamespace[] | null {
+  const covering = rows.filter((row) => coversSeason(row, season));
+  if (!covering.some((row) => isPlatformNamespace(row.namespace))) {
+    return null;
+  }
+  const covered = new Set(covering.map((row) => row.namespace));
+  const listed = covering.flatMap((row) =>
+    row.namespace === "douban" ? (row.listedPlatforms ?? []) : [],
+  );
+  return [...new Set(listed)].filter(
+    (ns): ns is PlatformNamespace => isPlatformNamespace(ns) && !covered.has(ns),
   );
 }
 
-async function hasConfirmedAssociationCoveringSeason(
+async function loadConfirmedCoverageRows(
   executor: DbExecutor,
   mediaId: string,
   namespaces: readonly AssociationNamespaceRow[],
-  season: number | null,
-): Promise<boolean> {
-  const confirmedAssociations = await executor
+): Promise<CoverageRow[]> {
+  const rows = await executor
     .selectFrom("associations")
+    .select(["id", "namespace", "listed_platforms"])
     .where("is_external_id", "=", false)
-    .select("id")
     .where("media_id", "=", mediaId)
     .where("status", "=", "confirmed")
     .where("namespace", "in", [...namespaces])
     .execute();
-
-  if (confirmedAssociations.length === 0) {
-    return false;
+  if (rows.length === 0) {
+    return [];
   }
-
-  if (season === null) {
-    return true;
-  }
-
-  const assocIds = confirmedAssociations.map((row) => row.id);
-  const segmentRows = await executor
+  const segments = await executor
     .selectFrom("segments")
     .select(["association_id", "season"])
-    .where("association_id", "in", assocIds)
+    .where(
+      "association_id",
+      "in",
+      rows.map((row) => row.id),
+    )
     .execute();
-
-  const assocIdsWithSegments = new Set<string>();
-  for (const seg of segmentRows) {
-    assocIdsWithSegments.add(seg.association_id);
-    if (seg.season === season) {
-      return true;
-    }
-  }
-
-  // Any confirmed whole-media association (0 segments) covers every season.
-  return assocIds.some((id) => !assocIdsWithSegments.has(id));
+  return rows.map((row) => ({
+    namespace: row.namespace,
+    seasons: segments.filter((seg) => seg.association_id === row.id).map((seg) => seg.season),
+    listedPlatforms: row.listed_platforms,
+  }));
 }

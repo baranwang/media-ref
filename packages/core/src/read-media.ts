@@ -516,6 +516,7 @@ async function hydrateMediaDocuments(
         "locked",
         "title",
         "episode_count",
+        "listed_platforms",
       ])
       .where("media_id", "in", mediaIds)
       .where("status", "in", allowedStatuses)
@@ -768,6 +769,9 @@ async function hydrateMediaDocuments(
         : {}),
       ...(row.title !== null ? { title: row.title } : {}),
       ...(row.episode_count !== null ? { episodeCount: row.episode_count } : {}),
+      ...(row.listed_platforms !== null
+        ? { listedPlatforms: row.listed_platforms.filter(isPlatformNamespace) }
+        : {}),
     }));
 
     if (includeUnconfirmed && mediaChangeRequests.length > 0) {

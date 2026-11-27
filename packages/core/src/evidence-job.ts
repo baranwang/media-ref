@@ -655,6 +655,9 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         mediaType: collectionResult.info.mediaType,
         featureEpisodeCount: collectionResult.info.featureEpisodeCount,
         externalIds: collectionResult.info.externalIds ?? {},
+        ...(collectionResult.info.listedPlatforms
+          ? { listedPlatforms: [...collectionResult.info.listedPlatforms] }
+          : {}),
       },
       gate: {
         decision: gate.decision,
