@@ -14,6 +14,7 @@ import {
   createExplorationJobHandler,
   scheduleExplorationJobs,
   rejectChangeRequest,
+  enqueueJob,
   enqueuePendingReviews,
   ensureExplorationAgentUser,
   EXPLORATION_AGENT_USER_ID,
@@ -283,17 +284,38 @@ function reply(
 const turnOf = (request: ModelInvocationRequest) =>
   request.messages.filter((m) => m.role === "assistant").length;
 
-/** Conflict codes the session is shown, read back from the first user message. */
-function conflictCodes(request: ModelInvocationRequest): string[] {
+/**
+ * Conflict codes the session is shown, read back from the first user message: of its one request,
+ * or of request `number` in a same-work group.
+ */
+function conflictCodes(request: ModelInvocationRequest, number = 1): string[] {
   const prompt = request.messages.find((m) => m.role === "user")!.content;
-  const payload = JSON.parse(prompt.slice(prompt.indexOf("{"))) as {
-    conflicts: Array<{ code: string }>;
+  type Conflicts = { conflicts: Array<{ code: string }> };
+  const payload = JSON.parse(prompt.slice(prompt.indexOf("{"))) as Conflicts & {
+    changeRequests?: Conflicts[];
   };
-  return [...new Set(payload.conflicts.map((c) => c.code))];
+  const shown = payload.changeRequests?.[number - 1] ?? payload;
+  return [...new Set(shown.conflicts.map((c) => c.code))];
 }
 
-function reasonsFor(request: ModelInvocationRequest) {
-  return conflictCodes(request).map((code) => ({
+/** How many requests the session decides: one, or the numbered list of a same-work group. */
+function requestCount(request: ModelInvocationRequest): number {
+  const prompt = request.messages.find((m) => m.role === "user")!.content;
+  const payload = JSON.parse(prompt.slice(prompt.indexOf("{"))) as { changeRequests?: unknown[] };
+  return payload.changeRequests?.length ?? 1;
+}
+
+/** The number a same-work group gives the request for this collection. */
+function requestNumberOf(request: ModelInvocationRequest, nativeId: string): number {
+  const prompt = request.messages.find((m) => m.role === "user")!.content;
+  const payload = JSON.parse(prompt.slice(prompt.indexOf("{"))) as {
+    changeRequests: Array<{ request: number; changeRequest: { nativeId: string } }>;
+  };
+  return payload.changeRequests.find((r) => r.changeRequest.nativeId === nativeId)!.request;
+}
+
+function reasonsFor(request: ModelInvocationRequest, number = 1) {
+  return conflictCodes(request, number).map((code) => ({
     code,
     reason: "平台多出的 4 条是中章、终章上下、特别篇，TMDB 放在第 0 季",
   }));
@@ -474,6 +496,124 @@ describe("review agent (#75)", () => {
     expect(Number(budget.tokens_used)).toBe(2200);
     expect(budget.review_consumed).toBe(1);
     expect(budget.pi_usage).toMatchObject({ "test-model": { input: 2000, output: 200 } });
+  });
+
+  test("two collections of the same work are decided in one session, each with its own verdict", async () => {
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+          ["get_collection", { namespace: "bilibili", id: "ss28889" }],
+          ["get_catalog_season", { season: 1 }],
+          ["get_catalog_season", { season: 0 }],
+        ]);
+      }
+      const full = requestNumberOf(request, "ss28888");
+      return reply(turn, [
+        ["approve", { request: full, reasons: reasonsFor(request, full) }],
+        [
+          "reject",
+          { request: requestNumberOf(request, "ss28889"), opinion: "只有后半季，提交的段对不上" },
+        ],
+      ]);
+    };
+    const { testDb, submit, drain, changeRequest, outbound } = track(await setup(model));
+    const full = await submit();
+    const half = await submit("ss28889", {
+      segments: [
+        { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 2, baseline: "tmdb" },
+      ],
+    });
+
+    const ran = await drain();
+
+    expect(ran.map((m) => m.jobType)).toEqual(["evidence_check", "evidence_check", "review_agent"]);
+    expect(outbound.modelRequests).toHaveLength(2);
+    const first = outbound.modelRequests[0]!;
+    expect(requestCount(first)).toBe(2);
+    const approve = first.tools!.find((t) => t.name === "approve")!;
+    expect(approve.parameters).toMatchObject({ required: ["request", "reasons"] });
+    expect(await changeRequest(full)).toMatchObject({
+      status: "approved",
+      evidence: { reviewAgent: { verdict: "approve", fallback: null } },
+    });
+    expect(await changeRequest(half)).toMatchObject({
+      status: "rejected",
+      evidence: { reviewAgent: { verdict: "reject", opinion: "只有后半季，提交的段对不上" } },
+    });
+    // One session, one of the day's reviews.
+    const budget = await testDb.readDb
+      .selectFrom("exploration_daily_budget")
+      .select("review_consumed")
+      .executeTakeFirstOrThrow();
+    expect(budget.review_consumed).toBe(1);
+  });
+
+  test("a request the group session leaves without a conclusion is rejected; the others keep theirs", async () => {
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+          ["get_catalog_season", { season: 1 }],
+          ["get_catalog_season", { season: 0 }],
+        ]);
+      }
+      // Concludes the full collection twice and never the half one.
+      const full = requestNumberOf(request, "ss28888");
+      return reply(turn, [
+        ["approve", { request: full, reasons: reasonsFor(request, full) }],
+        ["reject", { request: full, opinion: "再来一次" }],
+        ["reject", { request: 3, opinion: "没有这张" }],
+      ]);
+    };
+    const { submit, drain, changeRequest } = track(await setup(model));
+    const full = await submit();
+    const half = await submit("ss28889", {
+      segments: [
+        { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 2, baseline: "tmdb" },
+      ],
+    });
+
+    await drain();
+
+    expect((await changeRequest(full)).status).toBe("approved");
+    expect(await changeRequest(half)).toMatchObject({
+      status: "rejected",
+      evidence: { reviewAgent: { verdict: "reject", concluded: null } },
+    });
+  });
+
+  test("a review waits, without a session or an attempt, for a same-work request still collecting evidence", async () => {
+    const { testDb, worker, emitted, submit, tick, outbound } = track(
+      await setup(approvesLikeLinglong),
+    );
+    const id = await submit();
+    await tick(); // Evidence: needs_review, its review queued.
+    await submit("ss28889"); // Another platform's request, just submitted.
+    emitted.length = 0;
+    await worker.scheduled(createScheduledController(T0));
+    const review = emitted.find((m) => m.jobType === "review_agent")!;
+    await worker.queue(createQueueBatch([review]));
+
+    const job = (await getJobById(testDb.writeDb, review.jobId))!;
+    expect(job).toMatchObject({ status: "pending", attempts: 0 });
+    expect(job.runAfter).toEqual(new Date(T0.getTime() + 60_000));
+    expect(outbound.modelRequests).toHaveLength(0);
+
+    // Past the wait, the request is reviewed without the one still collecting evidence.
+    const later = new Date(T0.getTime() + 11 * 60_000);
+    const handler = createReviewAgentJobHandler({
+      dailyBudget: 10,
+      tmdbConfig: { accessToken: "fixture" },
+    });
+    const outcome = await handler({ db: testDb.writeDb, outbound, job, now: later });
+    expect(outcome).toMatchObject({
+      status: "completed",
+      result: { changeRequestId: id, verdict: "approve" },
+    });
+    expect(requestCount(outbound.modelRequests[0]!)).toBe(1);
   });
 
   test("死侍2: a movie has no season to correct, so the session approves its year conflict with the collection alone", async () => {
@@ -1095,6 +1235,26 @@ const correctsTo =
     return reply(turn, [["reject", { opinion: WIFE_OPINION }]]);
   };
 
+/** Like correctsTo, for a session over several requests: corrects each one, by its number. */
+const correctsEveryRequestTo =
+  (season: number): ScriptedModel =>
+  (request) => {
+    const turn = turnOf(request);
+    if (turn === 0) {
+      return reply(turn, [
+        ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+        ["get_catalog_season", { season }],
+      ]);
+    }
+    return reply(
+      turn,
+      Array.from({ length: requestCount(request) }, (_, i) => [
+        "reject_with_correction",
+        { request: i + 1, opinion: WIFE_OPINION, ...correctionFor(season) },
+      ]),
+    );
+  };
+
 describe("review agent: reject with correction (#76)", () => {
   const handles: TestDbHandle[] = [];
   const track = <T extends { testDb: TestDbHandle }>(ctx: T) => {
@@ -1622,7 +1782,9 @@ describe("review agent: reject with correction (#76)", () => {
   });
 
   test("racing corrections have one durable winner, and an aborted commit consumes no correction", async () => {
-    const ctx = track(await setup(correctsTo(8)));
+    // A job queued per request before same-work reviews were grouped races the group's own job:
+    // both sessions decide both requests.
+    const ctx = track(await setup(correctsEveryRequestTo(8)));
     const { id: mediaId } = await createWifeMedia(ctx);
     const db = ctx.testDb.writeDb;
     const submit = (setDefaultVariant: boolean) =>
@@ -1638,6 +1800,12 @@ describe("review agent: reject with correction (#76)", () => {
       .where("media_id", "=", mediaId)
       .where("is_external_id", "=", true)
       .execute();
+    await enqueueJob(db, {
+      jobType: "review_agent",
+      payload: { changeRequestId: ids[1] },
+      dedupeKey: `review_agent:${ids[1]}`,
+      runAfter: T0,
+    });
     await ctx.worker.scheduled(createScheduledController(T0));
     const handler = createReviewAgentJobHandler({
       dailyBudget: 10,
@@ -1694,9 +1862,11 @@ describe("review agent: reject with correction (#76)", () => {
       });
     }
     const recorded = await Promise.all(reviews.map((r) => getJobById(db, r.jobId)));
-    expect(recorded.map((j) => j!.result?.verdict)).toEqual(
-      expect.arrayContaining(["reject", "reject_with_correction"]),
-    );
+    expect(
+      recorded.flatMap((j) =>
+        (j!.result!.reviews as Array<{ verdict: string }>).map((r) => r.verdict),
+      ),
+    ).toEqual(expect.arrayContaining(["reject", "reject_with_correction"]));
     expect(await leads(ctx)).toEqual([]);
     expect(await demands(ctx)).toHaveLength(1);
   });
