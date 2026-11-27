@@ -1537,6 +1537,23 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
     expect(job.run_after.getTime()).toBe(T0.getTime() + 60 * 60 * 1000);
   });
 
+  /** First review: fetches the collection and season 6, then approves season 6. */
+  const approvesSeason6: ScriptedModel = (request) => {
+    const turn = turnOf(request);
+    if (turn === 0) {
+      return reply(turn, [
+        ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+        ["get_catalog_season", { season: 6 }],
+      ]);
+    }
+    return reply(turn, [
+      [
+        "approve",
+        { reasons: conflictCodes(request).map((code) => ({ code, reason: "看着没问题" })) },
+      ],
+    ]);
+  };
+
   /** Fetches the collection and season 1, then takes the live mapping down. */
   const revokesLinglong: ScriptedModel = (request) => {
     const turn = turnOf(request);
@@ -1576,18 +1593,20 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
 
   test("revoke: a comment says the approved mapping is wrong; the agent verifies, delists the association with a revision, reopens the season's demand and replies", async () => {
     const { ctx, id, associationId, mediaId } = await approvedLinglong(revokesLinglong);
-    // The season 1 demand the approval fulfilled.
+    // The season 1 demand and the whole-media demand the approval fulfilled.
     await ctx.testDb.writeDb
       .insertInto("demands")
-      .values({
-        media_id: mediaId,
-        season: 1,
-        namespace_group: "platform",
-        status: "fulfilled",
-        not_found_count: 0,
-        next_eligible_at: T0,
-        last_demanded_at: T0,
-      })
+      .values(
+        [1, null].map((season) => ({
+          media_id: mediaId,
+          season,
+          namespace_group: "platform" as const,
+          status: "fulfilled",
+          not_found_count: 0,
+          next_eligible_at: T0,
+          last_demanded_at: T0,
+        })),
+      )
       .execute();
 
     const commentId = await comment(ctx, id, "撤下：第 7 集起错开一位");
@@ -1622,14 +1641,21 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
         .where("association_id", "=", associationId)
         .execute(),
     ).toEqual([]);
-    // Wanted again after a not-found round, like a rejection.
+    // Both wanted again after a not-found round, like a rejection.
+    const reopened = {
+      status: "open",
+      not_found_count: 1,
+      next_eligible_at: new Date(T0.getTime() + 86_400_000),
+    };
     expect(
       await ctx.testDb.readDb
         .selectFrom("demands")
-        .select(["status", "not_found_count", "next_eligible_at"])
+        .select(["season", "status", "not_found_count", "next_eligible_at"])
+        .orderBy("season")
         .execute(),
     ).toEqual([
-      { status: "open", not_found_count: 1, next_eligible_at: new Date(T0.getTime() + 86_400_000) },
+      { season: 1, ...reopened },
+      { season: null, ...reopened },
     ]);
     expect(await replyTo(ctx, id, commentId)).toEqual([
       expect.objectContaining({ content: expect.stringMatching(/撤下[\s\S]*已撤下/) }),
@@ -1650,6 +1676,118 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
       expect.objectContaining({
         content: expect.stringMatching(/维持通过[\s\S]*collection_not_fetched/),
       }),
+    ]);
+  });
+
+  test("revoking a whole-media mapping reopens every season's demand it fulfilled, unless another mapping still covers it", async () => {
+    const { ctx, id, associationId, mediaId } = await approvedLinglong(revokesLinglong);
+    // Make the live mapping whole-media (no segments), as a movie or whole-show mapping is.
+    await ctx.testDb.writeDb
+      .deleteFrom("segments")
+      .where("association_id", "=", associationId)
+      .execute();
+    await ctx.testDb.writeDb
+      .updateTable("change_requests")
+      .set({ segments: JSON.stringify([]) })
+      .where("id", "=", id)
+      .execute();
+    // Season 2 is also covered by another platform's mapping, which stays.
+    const variant = await ctx.testDb.writeDb
+      .insertInto("variants")
+      .values({ media_id: mediaId, platform: "iqiyi", description: "原声", is_default: true })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const other = await ctx.testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        media_id: mediaId,
+        namespace: "iqiyi",
+        native_id: "a_2",
+        variant_id: variant.id,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await ctx.testDb.writeDb
+      .insertInto("segments")
+      .values({
+        association_id: other.id,
+        season: 2,
+        episode_start: 1,
+        episode_end: null,
+        target_episode_start: 1,
+        baseline: "tmdb",
+      })
+      .execute();
+    await ctx.testDb.writeDb
+      .insertInto("demands")
+      .values(
+        [1, 2, null].map((season) => ({
+          media_id: mediaId,
+          season,
+          namespace_group: "platform" as const,
+          status: "fulfilled",
+          not_found_count: 0,
+          next_eligible_at: T0,
+          last_demanded_at: T0,
+        })),
+      )
+      .execute();
+
+    await comment(ctx, id, "撤下：第 7 集起错开一位");
+    await ctx.drain();
+
+    expect((await association(ctx, associationId)).status).toBe("delisted");
+    expect(
+      await ctx.testDb.readDb
+        .selectFrom("demands")
+        .select(["season", "status"])
+        .orderBy("season")
+        .execute(),
+    ).toEqual([
+      { season: 1, status: "open" },
+      { season: 2, status: "fulfilled" },
+      { season: null, status: "fulfilled" },
+    ]);
+  });
+
+  test("revoke_with_correction still needs the revoked seasons fetched: a session that only checked the corrected season keeps the mapping", async () => {
+    // Fetches the collection and season 8, never season 6, and takes season 6 down.
+    const correctsUnchecked: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 8 }],
+        ]);
+      }
+      return reply(turn, [
+        ["revoke_with_correction", { opinion: WIFE_OPINION, ...correctionFor(8) }],
+      ]);
+    };
+    const ctx = track(await setup(byComments(approvesSeason6, correctsUnchecked)));
+    const id = await ctx.submit("ss77777", {
+      targetExternalKey: WIFE_KEY,
+      segments: wifeSegments(6),
+    });
+    await ctx.drain();
+    const approved = await ctx.changeRequest(id);
+    expect(approved.status).toBe("approved");
+
+    const commentId = await comment(ctx, id, "这是 2026 年那季，第 8 季");
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("approved");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "keep",
+      concluded: "revoke_with_correction",
+      fallback: "season_not_fetched: 6",
+    });
+    expect((await association(ctx, approved.applied_association_id!)).status).toBe("confirmed");
+    expect(await ctx.testDb.readDb.selectFrom("leads").select("id").execute()).toEqual([]);
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({ content: expect.stringContaining("season_not_fetched: 6") }),
     ]);
   });
 
@@ -1679,21 +1817,6 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
 
   test("revoke_with_correction: 妻子的浪漫旅行 approved as season 6 is taken down, and season 8 handed to exploration without backoff", async () => {
     // The first review approves season 6; the comment session corrects it to season 8.
-    const approvesSeason6: ScriptedModel = (request) => {
-      const turn = turnOf(request);
-      if (turn === 0) {
-        return reply(turn, [
-          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
-          ["get_catalog_season", { season: 6 }],
-        ]);
-      }
-      return reply(turn, [
-        [
-          "approve",
-          { reasons: conflictCodes(request).map((code) => ({ code, reason: "看着没问题" })) },
-        ],
-      ]);
-    };
     const correctsApproved: ScriptedModel = (request) => {
       const turn = turnOf(request);
       if (turn === 0) {

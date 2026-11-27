@@ -975,20 +975,19 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
     await ensureReviewAgentUser(ctx.db);
 
     if (mode === "approved") {
-      // Revoking needs the collection and every season fetched, and a reason; a correction that
-      // does not hold still revokes when those do.
+      // Either revocation needs the collection and every revoked season fetched, and a reason. Only
+      // then is a correction checked on its own; one that does not hold still revokes.
       const revokeBlocker =
         fetchBlocker(cr, cr.segments, fetched) ?? (concluded?.opinion ? null : "no_reason");
       let fallback: string | null = concluded ? null : stopReason(stop);
       let verdict: ReviewVerdict = "keep";
-      if (concluded?.verdict === "revoke") {
+      if (concluded?.verdict === "revoke" || concluded?.verdict === "revoke_with_correction") {
         fallback = revokeBlocker;
         verdict = fallback === null ? "revoke" : "keep";
       }
-      if (concluded?.verdict === "revoke_with_correction") {
+      if (concluded?.verdict === "revoke_with_correction" && revokeBlocker === null) {
         fallback = correctionBlocker(cr, correction, fetched, episodeAirYears);
-        verdict =
-          fallback === null ? "revoke_with_correction" : revokeBlocker === null ? "revoke" : "keep";
+        verdict = fallback === null ? "revoke_with_correction" : "revoke";
       }
       const reviewAgent = record(
         verdict,
@@ -1197,10 +1196,11 @@ async function revokeInTx(
     evidence: input.evidence,
     now: input.now,
   });
-  const seasons = cr.segments.length > 0 ? cr.segments.map((s) => s.season) : [null];
   await reopenDemandsAfterRevokeInTx(trx, {
     mediaId: cr.mediaId!,
-    seasons: seasons.filter((s) => s !== input.correction?.season),
+    seasons: cr.segments.map((s) => s.season),
+    // The corrected season is made explorable now below, with no not-found round.
+    exceptSeason: input.correction?.season ?? null,
     namespaceGroup: getNamespaceGroup(cr.namespace),
     now: input.now,
   });
