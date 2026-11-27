@@ -1937,19 +1937,25 @@ async function writeTmdbExternalIdsInTx(
   );
 }
 
+interface ExplorationTaskBudget {
+  deadlineMs: number;
+  clockMs: () => number;
+  usage: SessionUsage;
+}
+
 async function runTmdbAgentFallback(
   ctx: ExplorationExecutionContext,
   source: TmdbLookupSourceContext,
   preFetched: ReadonlyMap<string, TmdbCandidateDetail>,
   config: ResolvedExplorationAgentConfig,
-  clockMs: () => number,
+  task: ExplorationTaskBudget,
   fallbackNotFoundReason: string,
 ): Promise<TmdbExplorationStepResult> {
   const namespace = "tmdb";
   const fetched = new Map(preFetched);
   const maxDurationMs = Math.min(config.maxDurationMs, 90_000);
-  const budget = createSessionBudget(ctx.outbound, clockMs() + maxDurationMs, clockMs);
-  const usage: SessionUsage = { tokens: 0, byModel: new Map() };
+  const deadlineMs = Math.min(task.deadlineMs, task.clockMs() + maxDurationMs);
+  const budget = createSessionBudget(ctx.outbound, deadlineMs, task.clockMs);
   try {
     const registry = ctx.adapterRegistry ?? createDefaultAdapterRegistry();
     const baseToolCtx: ToolContext = {
@@ -2134,7 +2140,7 @@ async function runTmdbAgentFallback(
         maxDurationMs,
         maxSteps: Math.min(config.maxSteps, 12),
       },
-      usage,
+      usage: task.usage,
       messages,
       tools,
       conclusionToolNames: new Set(["submit_tmdb_id", "mark_not_found"]),
@@ -2175,13 +2181,6 @@ async function runTmdbAgentFallback(
     throw error;
   } finally {
     budget.dispose();
-    if (usage.tokens > 0) {
-      await recordExplorationTokens(ctx.db, ctx.now, usage.tokens);
-      await reportPiUsage(ctx.db, ctx.outbound, [...usage.byModel.values()], {
-        now: ctx.now,
-        ...(config.tokensApiToken ? { token: config.tokensApiToken } : {}),
-      });
-    }
   }
 }
 
@@ -2195,7 +2194,7 @@ async function runTmdbAgentFallback(
 async function exploreTmdbExternalId(
   ctx: ExplorationExecutionContext,
   config: ResolvedExplorationAgentConfig,
-  clockMs: () => number,
+  task: ExplorationTaskBudget,
 ): Promise<TmdbExplorationStepResult> {
   const namespace = "tmdb";
   await ensureExplorationAgentUser(ctx.db);
@@ -2343,14 +2342,7 @@ async function exploreTmdbExternalId(
     }
 
     // 3. Fall back to bounded model + web search investigation when deterministic signals are missing or ambiguous.
-    return await runTmdbAgentFallback(
-      ctx,
-      source,
-      candidateDetails,
-      config,
-      clockMs,
-      fallbackReason,
-    );
+    return await runTmdbAgentFallback(ctx, source, candidateDetails, config, task, fallbackReason);
   } catch (error) {
     return {
       namespace,
@@ -2372,61 +2364,66 @@ export function createExplorationAgentExecutor(
     const startMs = clockMs();
     const registry: AdapterRegistry = ctx.adapterRegistry ?? defaultRegistry;
     const platformOutcomes: PlatformExplorationOutcome[] = [];
+    const task: ExplorationTaskBudget = {
+      deadlineMs: startMs + config.maxDurationMs,
+      clockMs,
+      usage: { tokens: 0, byModel: new Map() },
+    };
+    let budget: SessionBudget | undefined;
+    try {
+      // The TMDB external ID has no adapter: it is looked up and written directly.
+      const hasTmdb = ctx.media.externalIds.some((e) => e.namespace === "tmdb");
+      if (ctx.targetNamespaces.includes("tmdb") && !hasTmdb) {
+        const stepStartMs = clockMs();
+        const { mergedIntoMediaId, ...outcome } = await exploreTmdbExternalId(ctx, config, task);
+        platformOutcomes.push({ ...outcome, durationMs: Math.max(0, clockMs() - stepStartMs) });
+        if (mergedIntoMediaId) {
+          return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
+        }
+      }
 
-    // The TMDB external ID has no adapter: it is looked up and written directly.
-    const hasTmdb = ctx.media.externalIds.some((e) => e.namespace === "tmdb");
-    if (ctx.targetNamespaces.includes("tmdb") && !hasTmdb) {
-      const stepStartMs = clockMs();
-      const { mergedIntoMediaId, ...outcome } = await exploreTmdbExternalId(ctx, config, clockMs);
-      platformOutcomes.push({ ...outcome, durationMs: Math.max(0, clockMs() - stepStartMs) });
-      if (mergedIntoMediaId) {
+      // A season already covered by a Douban/Bangumi association needs no catalog candidate.
+      const catalogAssociationCovered =
+        ctx.namespaceGroup === "catalog" &&
+        (await isCoveredByAssociationsInTx(ctx.db, {
+          mediaId: ctx.media.id,
+          season: ctx.season,
+          namespaceGroup: "catalog",
+        }));
+      const targets = catalogAssociationCovered
+        ? []
+        : ctx.targetNamespaces.flatMap((namespace) => {
+            const adapter = registry.get(namespace);
+            return adapter && isTier2Adapter(adapter) ? [adapter] : [];
+          });
+      if (targets.length === 0) {
         return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
       }
-    }
 
-    // A season already covered by a Douban/Bangumi association needs no catalog candidate.
-    const catalogAssociationCovered =
-      ctx.namespaceGroup === "catalog" &&
-      (await isCoveredByAssociationsInTx(ctx.db, {
-        mediaId: ctx.media.id,
-        season: ctx.season,
-        namespaceGroup: "catalog",
-      }));
-    const targets = catalogAssociationCovered
-      ? []
-      : ctx.targetNamespaces.flatMap((namespace) => {
-          const adapter = registry.get(namespace);
-          return adapter && isTier2Adapter(adapter) ? [adapter] : [];
-        });
-    if (targets.length === 0) {
-      return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
-    }
-
-    // After a TMDB write the snapshot and external IDs changed, so read them fresh.
-    const catalog = await loadCatalogEvidenceForMedia(ctx.db, ctx.media.id);
-    if (!catalog) {
-      for (const a of targets) {
-        platformOutcomes.push({
-          namespace: a.namespace,
-          status: "transient_error",
-          reason: "media_snapshot_unavailable",
-        });
+      // After a TMDB write the snapshot and external IDs changed, so read them fresh.
+      const catalog = await loadCatalogEvidenceForMedia(ctx.db, ctx.media.id);
+      if (!catalog) {
+        for (const a of targets) {
+          platformOutcomes.push({
+            namespace: a.namespace,
+            status: "transient_error",
+            reason: "media_snapshot_unavailable",
+          });
+        }
+        return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
       }
-      return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
-    }
-    const discovery = targets.some((a) => isPlatformNamespace(a.namespace))
-      ? await discover(
-          toDiscoveryInput(
-            ctx.media,
-            ctx.season,
-            await knownDoubanSubjectId(ctx.db, ctx.media.id, ctx.season),
-          ),
-          { outbound: ctx.outbound },
-        )
-      : null;
+      const discovery = targets.some((a) => isPlatformNamespace(a.namespace))
+        ? await discover(
+            toDiscoveryInput(
+              ctx.media,
+              ctx.season,
+              await knownDoubanSubjectId(ctx.db, ctx.media.id, ctx.season),
+            ),
+            { outbound: ctx.outbound },
+          )
+        : null;
 
-    const budget = createSessionBudget(ctx.outbound, clockMs() + config.maxDurationMs, clockMs);
-    try {
+      budget = createSessionBudget(ctx.outbound, task.deadlineMs, clockMs);
       const run = createJobRun(ctx, catalog, budget);
       const open: OpenTarget[] = [];
       for (const adapter of targets) {
@@ -2447,21 +2444,17 @@ export function createExplorationAgentExecutor(
       }
       if (open.length > 0) {
         const sessionStartMs = clockMs();
-        const usage: SessionUsage = { tokens: 0, byModel: new Map() };
-        try {
-          const outcomes = await runAgentSession(run, open, config, usage);
-          const durationMs = Math.max(0, clockMs() - sessionStartMs);
-          platformOutcomes.push(...outcomes.map((o) => ({ ...o, durationMs })));
-        } finally {
-          await recordExplorationTokens(ctx.db, ctx.now, usage.tokens);
-          await reportPiUsage(ctx.db, ctx.outbound, [...usage.byModel.values()], {
-            now: ctx.now,
-            ...(config.tokensApiToken ? { token: config.tokensApiToken } : {}),
-          });
-        }
+        const outcomes = await runAgentSession(run, open, config, task.usage);
+        const durationMs = Math.max(0, clockMs() - sessionStartMs);
+        platformOutcomes.push(...outcomes.map((o) => ({ ...o, durationMs })));
       }
     } finally {
-      budget.dispose();
+      budget?.dispose();
+      await recordExplorationTokens(ctx.db, ctx.now, task.usage.tokens);
+      await reportPiUsage(ctx.db, ctx.outbound, [...task.usage.byModel.values()], {
+        now: ctx.now,
+        ...(config.tokensApiToken ? { token: config.tokensApiToken } : {}),
+      });
     }
     return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
   };

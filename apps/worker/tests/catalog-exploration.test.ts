@@ -986,6 +986,100 @@ describe("catalog-group exploration", () => {
     },
   );
 
+  function concludeCatalogMiss(request: ModelInvocationRequest): ModelInvocationResponse {
+    const tmdb = request.metadata?.namespace === "tmdb";
+    return {
+      content: null,
+      model: "test-model",
+      usage: { inputTokens: 3, outputTokens: 2 },
+      toolCalls: [
+        {
+          id: "done",
+          name: "mark_not_found",
+          arguments: tmdb
+            ? { reason: "no TMDB match" }
+            : { namespace: "douban", reason: "no Douban match" },
+        },
+      ],
+    };
+  }
+
+  test.each([
+    { maxSteps: 1, maxTaskTokens: 5, calls: 1, reason: "max_steps_exhausted" },
+    { maxSteps: 1, maxTaskTokens: 10, calls: 1, reason: "max_steps_exhausted" },
+    { maxSteps: 2, maxTaskTokens: 5, calls: 1, reason: "token_budget_exhausted" },
+    { maxSteps: 2, maxTaskTokens: 10, calls: 2, reason: "no Douban match" },
+  ])(
+    "TMDB and Douban share $maxSteps steps and $maxTaskTokens tokens in one job",
+    async ({ maxSteps, maxTaskTokens, calls, reason }) => {
+      const { testDb, outbound, runJobs } = await setup({
+        baseline: "douban",
+        externalIds: [],
+        tmdbSearchEmpty: true,
+        explorationAgent: { maxSteps, maxTaskTokens },
+        invokeModel: concludeCatalogMiss,
+      });
+
+      expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+      expect(outbound.modelRequests).toHaveLength(calls);
+      expect(await platformOutcomes(testDb)).toMatchObject([
+        { namespace: "tmdb", status: "not_found", reason: "no TMDB match" },
+        { namespace: "douban", status: "not_found", reason },
+      ]);
+      const day = await testDb.readDb
+        .selectFrom("exploration_daily_budget")
+        .select(["tokens_used", "pi_usage"])
+        .executeTakeFirstOrThrow();
+      expect(Number(day.tokens_used)).toBe(5 * calls);
+      expect(day.pi_usage).toMatchObject({ "test-model": { messages: calls } });
+    },
+  );
+
+  test.each([
+    {
+      lookupMs: 0,
+      modelMs: 90_000,
+      timeouts: [67_500, 22_500],
+      douban: { status: "not_found", reason: "no Douban match" },
+    },
+    {
+      lookupMs: 100_000,
+      modelMs: 50_000,
+      timeouts: [27_500],
+      douban: { status: "transient_error", reason: "exploration_time_budget_exceeded" },
+    },
+  ])(
+    "TMDB and Douban share the job deadline after $lookupMs ms of lookup and $modelMs ms of model time",
+    async ({ lookupMs, modelMs, timeouts, douban }) => {
+      let clockMs = 0;
+      const { testDb, outbound, runJobs } = await setup({
+        baseline: "douban",
+        externalIds: [],
+        explorationAgent: { maxDurationMs: 150_000, clockMs: () => clockMs },
+        extraHttpStub(request) {
+          if (request.namespace !== "tmdb" || !request.url.includes("/search/")) return null;
+          clockMs = lookupMs;
+          return json(request.url, { results: [] });
+        },
+        invokeModel(request) {
+          if (request.metadata?.namespace === "tmdb") clockMs += modelMs;
+          return concludeCatalogMiss(request);
+        },
+      });
+
+      expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+      expect(outbound.modelRequests.map((r) => r.timeoutMs)).toEqual(timeouts);
+      expect(await platformOutcomes(testDb)).toMatchObject([
+        {
+          namespace: "tmdb",
+          status: "transient_error",
+          reason: "exploration_time_budget_exceeded",
+        },
+        { namespace: "douban", ...douban },
+      ]);
+    },
+  );
+
   test("TMDB fallback session keeps search tools available even when explorationAgent maxDurationMs exceeds 6 minutes", async () => {
     let seenToolNames: string[] = [];
     let searchTimeoutMs: number | undefined;
