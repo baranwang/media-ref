@@ -657,7 +657,7 @@ async function fetchTvdbTargetSnapshot(
   if (extBlock && typeof extBlock === "object" && !Array.isArray(extBlock)) {
     addImdb(extBlock.imdb ?? extBlock.imdb_id);
     const tmdbCandidate = nonEmptyString(extBlock.tmdb);
-    if (tmdbCandidate && parseTmdbNativeId(tmdbCandidate)) {
+    if (tmdbCandidate && parseTmdbNativeId(tmdbCandidate)?.type === type) {
       externalIds.tmdb = tmdbCandidate;
       evidenceExternalIds.tmdb = tmdbCandidate;
       sources.push("tmdb");
@@ -789,7 +789,7 @@ async function fetchImdbTargetSnapshot(
       sources.push("tvdb");
     }
     const tmdbCandidate = nonEmptyString(extBlock.tmdb);
-    if (tmdbCandidate && parseTmdbNativeId(tmdbCandidate)) {
+    if (tmdbCandidate && parseTmdbNativeId(tmdbCandidate)?.type === type) {
       externalIds.tmdb = tmdbCandidate;
       evidenceExternalIds.tmdb = tmdbCandidate;
       sources.push("tmdb");

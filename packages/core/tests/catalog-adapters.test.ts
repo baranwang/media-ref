@@ -633,6 +633,23 @@ describe("Catalog gateway & baseline priority (selectBaseline + resolveCatalogTa
     expect(calls).toBe(2);
   });
 
+  test.each([
+    ["imdb:tt0848228", { primaryTitle: "Movie", type: "movie", externalIds: { tmdb: "tv:1429" } }],
+    ["tvdb:267440", { data: { name: "Series", externalIds: { tmdb: "movie:24428" } } }],
+  ] as const)("does not backfill a cross-type TMDB or Trakt ID for %s", async (key, data) => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (request) => jsonResponse(request.url, data),
+    });
+    const result = await resolveCatalogTargetSnapshot(key, outbound, { traktClientId: "test" });
+    expect(result.status).toBe("found");
+    if (result.status === "found") {
+      expect(result.target.externalIds.tmdb).toBeUndefined();
+      expect(result.target.externalIds.trakt).toBeUndefined();
+      expect(result.target.evidence.externalIds.tmdb).toBeUndefined();
+    }
+    expect(outbound.httpRequests).toHaveLength(1);
+  });
+
   test("resolveCatalogTargetSnapshot forwards catalog traktClientId to TMDB and enriches imdb/tvdb targets with Trakt when tmdb external ID is present", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
