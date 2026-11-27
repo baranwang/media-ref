@@ -170,7 +170,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     const testDb = await createTestDb();
     handles.push(testDb);
     const db = testDb.writeDb;
-    const now = new Date("2026-11-24T10:00:00.000Z");
+    let now = new Date("2026-11-24T10:00:00.000Z");
 
     // Existing TMDB media 3e1981bd already holds seed_unconfirmed douban:35235320
     const tmdbMedia = await db
@@ -332,6 +332,14 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     expect(doubanBeforeGate).toHaveLength(1);
     expect(doubanBeforeGate[0]!.media_id).toBe(tmdbMedia.id);
     expect(doubanBeforeGate[0]!.status).toBe("seed_unconfirmed");
+    const [deferred] = await listDemands(db, { externalKey: "douban:35235320" });
+    expect(deferred).toMatchObject({
+      mediaId: null,
+      status: "open",
+      demandCount: 10,
+      leaseExpiresAt: null,
+    });
+    expect(await listDemands(db, { mediaId: tmdbMedia.id })).toEqual([]);
 
     emitted.length = 0;
     await worker.scheduled(createScheduledController(now));
@@ -350,6 +358,15 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     expect(doubanRows).toHaveLength(1);
     expect(doubanRows[0]!.media_id).toBe(tmdbMedia.id);
     expect(doubanRows[0]!.status).toBe("confirmed");
+
+    now = new Date(deferred!.nextEligibleAt);
+    emitted.length = 0;
+    await worker.scheduled(createScheduledController(now));
+    const retried = emitted.filter((m) => m.jobType === EXPLORATION_JOB_TYPE);
+    expect(retried).toHaveLength(1);
+    await worker.queue(createQueueBatch(retried, now).batch);
+    expect(await listDemands(db, { externalKey: "douban:35235320" })).toEqual([]);
+    expect(await listDemands(db, { mediaId: tmdbMedia.id })).toMatchObject([{ demandCount: 10 }]);
   });
 
   test("exploring externalKey douban:35235320 reuses media holding wrong or needs_review seed without confirming it", async () => {
@@ -552,6 +569,11 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       .where("namespace", "=", "imdb")
       .execute();
     expect(copiedIds).toEqual([]);
+    for (const key of ["douban:35235320", "douban:35235321"]) {
+      expect(await listDemands(db, { externalKey: key })).toMatchObject([
+        { mediaId: null, status: "open", demandCount: 10 },
+      ]);
+    }
 
     // Neither wrong seed may become confirmed, and `needs_review=true` must NOT be queued again
     emitted.length = 0;
@@ -2400,6 +2422,10 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       },
     });
 
+    await db
+      .insertInto("demands")
+      .values({ external_key: "douban:35235320", namespace_group: "platform", demand_count: 3 })
+      .execute();
     const userId = "cr-wrong-seed-submitter";
     await db
       .insertInto("user")
@@ -2461,6 +2487,10 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       .where("media_id", "=", approved.mediaId)
       .execute();
     expect(approvedExtIds).toEqual([{ namespace: "imdb", native_id: "tt9915020" }]);
+    expect(await listDemands(db, { externalKey: "douban:35235320" })).toMatchObject([
+      { mediaId: null, demandCount: 3 },
+    ]);
+    expect(await listDemands(db, { mediaId: approved.mediaId })).toEqual([]);
   });
 
   test("convergeDuplicateMedia caps inspectedPairs at batchSize within a large multi-member group and resumes across sweeps", async () => {

@@ -1608,21 +1608,158 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect(outbound.httpRequests.some((r) => r.url.includes("24428"))).toBe(false);
   });
 
-  test("submitting a catalog association for existing TMDB-backed media without Trakt backfills Trakt on approval (#103)", async () => {
+  test.each(["matching", "conflicting"])(
+    "Trakt backfill preserves Bangumi coordinates with a %s IMDb ID",
+    async (identity) => {
+      const handle = await createTestDb();
+      handles.push(handle);
+      const db = handle.writeDb;
+      const media = await db
+        .insertInto("media")
+        .values({
+          type: "tv",
+          baseline: "bangumi",
+          title: "Bangumi title",
+          original_title: "Original",
+          year: 2020,
+          seasons: JSON.stringify([{ season: 1, episodeCount: 12, airYear: 2020 }]),
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const imdbId = identity === "matching" ? "tt0000001" : "tt0000002";
+      await db
+        .insertInto("associations")
+        .values([
+          {
+            media_id: media.id,
+            namespace: "tmdb",
+            native_id: "tv:10",
+            status: "confirmed",
+            is_external_id: true,
+          },
+          {
+            media_id: media.id,
+            namespace: "imdb",
+            native_id: imdbId,
+            status: "confirmed",
+            is_external_id: true,
+          },
+        ])
+        .execute();
+      const bangumi = await db
+        .insertInto("associations")
+        .values({ media_id: media.id, namespace: "bangumi", native_id: "12", status: "confirmed" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const segment = await db
+        .insertInto("segments")
+        .values({
+          association_id: bangumi.id,
+          season: 1,
+          episode_start: 1,
+          episode_end: 12,
+          target_episode_start: 1,
+          baseline: "bangumi",
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("demands")
+        .values({ external_key: "trakt:show:7", namespace_group: "platform", demand_count: 3 })
+        .execute();
+
+      const outbound = createFakeOutboundClient({
+        fetchExternal({ url }) {
+          let data: unknown;
+          switch (new URL(url).pathname) {
+            case "/3/tv/changes":
+              data = { page: 1, total_pages: 1, results: [] };
+              break;
+            case "/3/tv/10":
+              data = {
+                id: 10,
+                name: "TMDB title",
+                first_air_date: "2021-03-01",
+                seasons: [
+                  { season_number: 1, episode_count: 24 },
+                  { season_number: 2, episode_count: 6 },
+                ],
+                external_ids: { imdb_id: "tt0000001" },
+              };
+              break;
+            case "/search/tmdb/10":
+              data = [{ type: "show", show: { ids: { tmdb: 10, trakt: 7 } } }];
+              break;
+            default:
+              throw new Error(`Unexpected URL ${url}`);
+          }
+          return { url, status: 200, headers: {}, body: JSON.stringify(data) };
+        },
+      });
+      const result = await runTmdbDailySync(db, outbound, {
+        tmdbConfig: { accessToken: "test", traktClientId: "test" },
+      });
+      expect(result.transientErrors).toEqual([]);
+      expect(result.tv).toMatchObject({ mode: "changes", candidateCount: 1, cursorAdvanced: true });
+      expect(
+        await db.selectFrom("media").selectAll().where("id", "=", media.id).executeTakeFirst(),
+      ).toEqual(media);
+      expect(
+        await db.selectFrom("segments").selectAll().where("id", "=", segment.id).executeTakeFirst(),
+      ).toEqual(segment);
+      expect(await db.selectFrom("review_alerts").select("id").execute()).toEqual([]);
+      const ids = await db
+        .selectFrom("associations")
+        .select("native_id")
+        .where("is_external_id", "=", true)
+        .orderBy("namespace")
+        .execute();
+      const demands = await db
+        .selectFrom("demands")
+        .select(["media_id", "external_key", "season", "demand_count"])
+        .execute();
+      expect(ids.map((row) => row.native_id)).toEqual(
+        identity === "matching" ? [imdbId, "tv:10", "show:7"] : [imdbId, "tv:10"],
+      );
+      expect(demands).toEqual([
+        {
+          media_id: identity === "matching" ? media.id : null,
+          external_key: identity === "matching" ? null : "trakt:show:7",
+          season: identity === "matching" ? 1 : null,
+          demand_count: 3,
+        },
+      ]);
+    },
+  );
+
+  test.each(["missing", "locked", "foreign"])("approval with a %s IMDb ID", async (imdb) => {
     const testDb = await createTestDb();
     handles.push(testDb);
+    const imdbDemand = await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        external_key: "imdb:tt0848228",
+        namespace_group: "platform",
+        demand_count: 3,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
 
-    // Pre-existing Avengers media seeded with TMDB only (no Trakt yet)
+    // With a foreign IMDb owner the requested TMDB media is new at approval.
     const seededMedia = await testDb.writeDb
       .insertInto("media")
-      .values({
-        type: "movie",
-        baseline: "tmdb",
-        title: "复仇者联盟",
-        original_title: "The Avengers",
-        year: 2012,
-        seasons: "[]",
-      })
+      .values(
+        imdb === "foreign"
+          ? { type: "movie", title: "Another film", year: 1960 }
+          : {
+              type: "movie",
+              baseline: "tmdb",
+              title: "复仇者联盟",
+              original_title: "The Avengers",
+              year: 2012,
+              seasons: "[]",
+            },
+      )
       .returning("id")
       .executeTakeFirstOrThrow();
 
@@ -1632,11 +1769,26 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
         status: "confirmed",
         is_external_id: true,
         media_id: seededMedia.id,
-        namespace: "tmdb",
-        native_id: "movie:24428",
+        namespace: imdb === "foreign" ? "imdb" : "tmdb",
+        native_id: imdb === "foreign" ? "tt0848228" : "movie:24428",
         source: "sync",
       })
       .execute();
+
+    if (imdb === "locked") {
+      await testDb.writeDb
+        .insertInto("associations")
+        .values({
+          media_id: seededMedia.id,
+          namespace: "imdb",
+          native_id: "tt0000001",
+          status: "confirmed",
+          is_external_id: true,
+          locked: true,
+          source: "reviewer",
+        })
+        .execute();
+    }
 
     const outbound = createFakeOutboundClient({
       fetchExternal(request: ExternalHttpRequest): ExternalHttpResponse {
@@ -1751,13 +1903,29 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
 
       const after = await readMedia(app, readKey.key, "tmdb:movie:24428");
       expect(after.status).toBe(200);
-      expect(after.document?.externalIds).toEqual(
-        expect.arrayContaining([
-          { namespace: "tmdb", nativeId: "movie:24428" },
+      const tmdbId = { namespace: "tmdb", nativeId: "movie:24428" };
+      if (imdb === "foreign") {
+        expect(after.document?.media.id).not.toBe(seededMedia.id);
+        expect(after.document?.externalIds).toEqual([tmdbId]);
+      } else if (imdb === "locked") {
+        expect(after.document?.externalIds).toEqual([
+          { namespace: "imdb", nativeId: "tt0000001", locked: true },
+          tmdbId,
+        ]);
+      } else {
+        expect(after.document?.externalIds).toEqual([
           { namespace: "imdb", nativeId: "tt0848228" },
+          tmdbId,
           { namespace: "trakt", nativeId: "movie:727" },
-        ]),
-      );
+        ]);
+      }
+      expect(
+        await testDb.readDb
+          .selectFrom("demands")
+          .select("id")
+          .where("external_key", "=", "imdb:tt0848228")
+          .execute(),
+      ).toEqual(imdb === "missing" ? [] : [imdbDemand]);
     } finally {
       DOUBAN_API.apiKey = prevDouban.apiKey;
       DOUBAN_API.minIntervalMs = prevDouban.minIntervalMs;
