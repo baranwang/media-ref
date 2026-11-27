@@ -55,7 +55,10 @@ function createQueueBatch(bodies: JobQueueMessage[]): MessageBatch<JobQueueMessa
 }
 
 /** Fight Club as TMDB, IMDb and Douban know it. */
-function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
+function httpStub(
+  request: ExternalHttpRequest,
+  tmdbExternalIds?: Record<string, string>,
+): ExternalHttpResponse {
   const url = new URL(request.url);
   if (request.namespace === "tmdb" && url.pathname.endsWith("/find/tt0137523")) {
     return json(request.url, { movie_results: [{ id: 550 }], tv_results: [] });
@@ -66,7 +69,7 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
       title: "搏击俱乐部",
       original_title: "Fight Club",
       release_date: "1999-10-15",
-      external_ids: { imdb_id: "tt0137523" },
+      external_ids: { imdb_id: "tt0137523", ...tmdbExternalIds },
     });
   }
   if (url.hostname === "api.imdbapi.dev" && url.pathname === "/titles/tt0137523") {
@@ -107,6 +110,7 @@ describe("catalog-group exploration", () => {
     doubanAssociation?: string;
     /** TMDB `/find` knows nothing about the IMDb ID. */
     tmdbFindEmpty?: boolean;
+    tmdbExternalIds?: Record<string, string>;
   }) {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -162,7 +166,7 @@ describe("catalog-group exploration", () => {
       fetchExternal: (request) =>
         media.tmdbFindEmpty && request.namespace === "tmdb" && request.url.includes("/find/")
           ? json(request.url, { movie_results: [], tv_results: [] })
-          : httpStub(request),
+          : httpStub(request, media.tmdbExternalIds),
     });
     const emitted: JobQueueMessage[] = [];
     let now = T0;
@@ -219,6 +223,11 @@ describe("catalog-group exploration", () => {
       externalIds: [["imdb", "tt0137523"]],
       doubanAssociation: "1292000",
     });
+    await testDb.writeDb
+      .updateTable("media")
+      .set({ title: "鬥陣俱樂部", original_title: null })
+      .where("id", "=", mediaId)
+      .execute();
     const other = await testDb.writeDb
       .insertInto("media")
       .values({
@@ -264,6 +273,74 @@ describe("catalog-group exploration", () => {
     expect(conflictAlerts).toHaveLength(0);
     expect((await listDemands(testDb.readDb, { mediaId: other.id }))[0]?.status).toBe("fulfilled");
   });
+
+  test.each([
+    ["tvdb", "123"],
+    ["trakt", "movie:123"],
+  ] as const)(
+    "a conflicting %s ID does not lend the IMDb-verified title to its owner",
+    async (namespace, nativeId) => {
+      const { testDb, mediaId, runJobs } = await setup({
+        baseline: "douban",
+        externalIds: [["imdb", "tt0137523"]],
+        doubanAssociation: "1292000",
+        tmdbExternalIds: { [`${namespace}_id`]: "123" },
+      });
+      const db = testDb.writeDb;
+      const other = await db
+        .insertInto("media")
+        .values({
+          type: "movie",
+          title: "An unrelated film",
+          year: 1999,
+          baseline: "douban",
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("associations")
+        .values({
+          media_id: other.id,
+          namespace,
+          native_id: nativeId,
+          is_external_id: true,
+          status: "confirmed",
+        })
+        .execute();
+
+      expect(await runJobs()).toContain(EXPLORATION_JOB_TYPE);
+      expect(
+        await db
+          .selectFrom("media")
+          .select("id")
+          .where("merged_into_media_id", "is", null)
+          .execute(),
+      ).toHaveLength(2);
+      expect(await externalIds(testDb, mediaId)).toEqual([
+        { namespace: "imdb", native_id: "tt0137523", source: "sync" },
+        { namespace: "tmdb", native_id: "movie:550", source: "agent" },
+      ]);
+      expect(await externalIds(testDb, other.id)).toMatchObject([
+        { namespace, native_id: nativeId },
+      ]);
+      expect(
+        await db
+          .selectFrom("review_alerts")
+          .select("details")
+          .where("media_id", "=", mediaId)
+          .execute(),
+      ).toMatchObject([
+        {
+          details: {
+            namespace,
+            nativeId,
+            otherMediaId: other.id,
+            autoMergeBlockedReason: "title_mismatch",
+          },
+        },
+      ]);
+    },
+  );
 
   test("a TMDB ID held by an incompatible media is not written; a retry reuses the open alert", async () => {
     const { testDb, mediaId, runJobs } = await setup({

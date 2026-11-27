@@ -1303,6 +1303,139 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     expect(doubanAfterMerge[0]!.media_id).toBe(tmdbMedia.media_id);
   });
 
+  test.each([
+    {
+      targetStatus: "seed_unconfirmed",
+      sourceStatus: "confirmed",
+      sourceSeason: 2,
+      siblingSeason: 2,
+      merged: false,
+    },
+    {
+      targetStatus: "seed_unconfirmed",
+      sourceStatus: "confirmed",
+      sourceSeason: 3,
+      siblingSeason: 2,
+      merged: true,
+    },
+    {
+      targetStatus: "confirmed",
+      sourceStatus: "seed_unconfirmed",
+      sourceSeason: 2,
+      siblingSeason: 2,
+      merged: true,
+    },
+    {
+      targetStatus: "seed_unconfirmed",
+      sourceStatus: "confirmed",
+      sourceSeason: null,
+      siblingSeason: 2,
+      merged: false,
+    },
+    {
+      targetStatus: "seed_unconfirmed",
+      sourceStatus: "confirmed",
+      sourceSeason: null,
+      siblingSeason: null,
+      merged: true,
+    },
+    {
+      targetStatus: "delisted",
+      sourceStatus: "confirmed",
+      sourceSeason: 2,
+      siblingSeason: 2,
+      merged: false,
+    },
+  ] as const)(
+    "validates retained catalog segments ($targetStatus / $sourceStatus, incoming $sourceSeason, sibling $siblingSeason)",
+    async ({ targetStatus, sourceStatus, sourceSeason, siblingSeason, merged }) => {
+      const handle = await createTestDb();
+      handles.push(handle);
+      const db = handle.writeDb;
+      const media = { type: "tv", title: "同一部剧", year: 2026 } as const;
+      const target = await db
+        .insertInto("media")
+        .values({ ...media, baseline: "tmdb" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const source = await db
+        .insertInto("media")
+        .values({ ...media, baseline: "douban" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const rows = await db
+        .insertInto("associations")
+        .values([
+          { media_id: target.id, namespace: "douban", native_id: "1", status: targetStatus },
+          { media_id: source.id, namespace: "douban", native_id: "1", status: sourceStatus },
+          ...(siblingSeason === null
+            ? []
+            : [
+                {
+                  media_id: target.id,
+                  namespace: "douban",
+                  native_id: "2",
+                  status: "confirmed",
+                } as const,
+              ]),
+        ])
+        .returning(["id", "media_id", "native_id"])
+        .execute();
+      const targetRow = rows.find((row) => row.media_id === target.id && row.native_id === "1")!;
+      for (const row of rows) {
+        const season =
+          row.media_id === source.id ? sourceSeason : row.native_id === "2" ? siblingSeason : 1;
+        if (season !== null) {
+          await db
+            .insertInto("segments")
+            .values({
+              association_id: row.id,
+              season,
+              episode_start: 1,
+              episode_end: 10,
+              target_episode_start: 1,
+              baseline: "tmdb",
+            })
+            .execute();
+        }
+      }
+
+      const result = await verifyAndAutoMergeDuplicateMedia(db, {
+        mediaIdA: source.id,
+        mediaIdB: target.id,
+        actorUserId: null,
+        reason: "shared catalog",
+      });
+      expect(result).toMatchObject(
+        merged
+          ? { merged, targetMediaId: target.id }
+          : { merged, blockReason: "conflicting_catalog_association:douban" },
+      );
+      expect(
+        await db
+          .selectFrom("media")
+          .select("merged_into_media_id")
+          .where("id", "=", source.id)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ merged_into_media_id: merged ? target.id : null });
+      const storedSeason = merged && sourceStatus === "confirmed" ? sourceSeason : 1;
+      expect(
+        await db
+          .selectFrom("segments")
+          .select("season")
+          .where("association_id", "=", targetRow.id)
+          .execute(),
+      ).toEqual(storedSeason === null ? [] : [{ season: storedSeason }]);
+      expect(
+        await db
+          .selectFrom("associations")
+          .select("status")
+          .where("id", "=", targetRow.id)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ status: merged ? "confirmed" : targetStatus });
+    },
+  );
+
   test("mergeMedia preserves confirmed association over seed_unconfirmed, coalesces overlapping demands, and resolves pairwise conflict alerts", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

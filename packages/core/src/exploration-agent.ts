@@ -1382,7 +1382,7 @@ async function exploreTmdbExternalId(
           mediaIdB: canonicalOtherId,
           actorUserId: EXPLORATION_AGENT_USER_ID,
           reason: `exploration_external_id_match:${ns}:${nativeId}`,
-          extraTitlesByMediaId: new Map([[canonicalOtherId, tmdbSnapshotTitles]]),
+          extraTitlesByMediaId: new Map([[mediaId, tmdbSnapshotTitles]]),
           acquireMergeLocks: true,
           now: ctx.now,
         });

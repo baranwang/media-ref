@@ -36,6 +36,27 @@ export interface MergeCandidateAssociation {
   segments: NormalizedSegment[];
 }
 
+const ASSOCIATION_STATUS_RANK: Record<AssociationStatusRow, number> = {
+  delisted: 1,
+  seed_unconfirmed: 2,
+  confirmed: 3,
+};
+
+export function preferSourceAssociation(
+  sourceStatus: AssociationStatusRow,
+  sourceSegments: readonly NormalizedSegment[],
+  targetStatus: AssociationStatusRow,
+  targetSegments: readonly NormalizedSegment[],
+): boolean {
+  return (
+    ASSOCIATION_STATUS_RANK[sourceStatus] > ASSOCIATION_STATUS_RANK[targetStatus] ||
+    (sourceStatus === targetStatus &&
+      sourceStatus !== "delisted" &&
+      targetSegments.length === 0 &&
+      sourceSegments.length > 0)
+  );
+}
+
 export interface MergeCandidateExternalId {
   id: string;
   namespace: ExternalIdNamespace;
@@ -601,23 +622,25 @@ export async function verifyAutoMergeEligibilityInTx(
   for (const catalogNs of catalogNamespaces) {
     const tgtAssocs = target.associations.filter((a) => a.namespace === catalogNs);
     const srcAssocs = source.associations.filter((a) => a.namespace === catalogNs);
-    // Only check cross-collection overlaps between distinct nativeIds.
-    const tgtByNative = new Map(tgtAssocs.map((a) => [a.nativeId, a]));
-    const distinctIncoming = srcAssocs.filter((sa) => !tgtByNative.has(sa.nativeId));
-    if (distinctIncoming.length === 0 || tgtAssocs.length === 0) {
-      continue;
+    const retained = new Map(tgtAssocs.map((a) => [a.nativeId, a]));
+    for (const incoming of srcAssocs) {
+      const existing = retained.get(incoming.nativeId);
+      if (
+        !existing ||
+        preferSourceAssociation(
+          incoming.status,
+          incoming.segments,
+          existing.status,
+          existing.segments,
+        )
+      ) {
+        retained.set(incoming.nativeId, incoming);
+      }
     }
-
-    const validation = validateVariantSegments(
-      [
-        ...tgtAssocs.map((a) => ({ associationId: a.id, segments: a.segments })),
-        ...distinctIncoming.map((a) => ({ associationId: a.id, segments: a.segments })),
-      ],
-      {
-        baseline: target.baseline,
-        allowHierarchicalScopes: getNamespaceCapabilities(catalogNs).allowHierarchicalScopes,
-      },
-    );
+    const validation = validateVariantSegments([...retained.values()], {
+      baseline: target.baseline,
+      allowHierarchicalScopes: getNamespaceCapabilities(catalogNs).allowHierarchicalScopes,
+    });
 
     if (!validation.valid) {
       return {
