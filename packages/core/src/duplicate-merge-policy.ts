@@ -57,6 +57,39 @@ export function preferSourceAssociation(
   );
 }
 
+type VariantMergeAssociation = Omit<MergeCandidateAssociation, "locked">;
+
+/** Shared platform keys keep the target variant, even when promoted from a different source variant. */
+export function retainedTargetVariantSegments(
+  source: readonly VariantMergeAssociation[],
+  target: readonly VariantMergeAssociation[],
+  baseline: BaselineSource | null,
+) {
+  const byKey = new Map(source.map((a) => [`${a.namespace}:${a.nativeId}`, a]));
+  const groups = new Map<string, Array<{ associationId: string; segments: NormalizedSegment[] }>>();
+  const changed = new Set<string>();
+  for (const row of target) {
+    if (!row.variantId) continue;
+    const incoming = byKey.get(`${row.namespace}:${row.nativeId}`);
+    const retained =
+      incoming &&
+      preferSourceAssociation(incoming.status, incoming.segments, row.status, row.segments)
+        ? incoming
+        : row;
+    if (retained.status === "delisted") continue;
+    if (retained !== row) changed.add(row.variantId);
+    const entries = groups.get(row.variantId) ?? [];
+    entries.push({ associationId: row.id, segments: retained.segments });
+    groups.set(row.variantId, entries);
+  }
+  for (const variantId of changed) {
+    const result = validateVariantSegments(groups.get(variantId)!, { baseline });
+    if (!result.valid)
+      return { groups, conflict: { variantId, errors: result.errors.map((e) => e.message) } };
+  }
+  return { groups, conflict: null };
+}
+
 export interface MergeCandidateExternalId {
   id: string;
   namespace: ExternalIdNamespace;
@@ -652,6 +685,37 @@ export async function verifyAutoMergeEligibilityInTx(
           namespace: catalogNs,
           errors: validation.errors.map((e) => e.message),
         },
+      };
+    }
+  }
+
+  const sourcePlatform = source.associations.filter((a) => a.variantId !== null);
+  if (sourcePlatform.length > 0) {
+    // A promoted delisted row retains its old variant but none of its old segments.
+    const dormant = await trx
+      .selectFrom("associations")
+      .select(["id", "namespace", "native_id as nativeId", "variant_id as variantId", "status"])
+      .where("media_id", "=", target.id)
+      .where("status", "=", "delisted")
+      .where("variant_id", "is not", null)
+      .where(
+        "native_id",
+        "in",
+        sourcePlatform.map((a) => a.nativeId),
+      )
+      .execute();
+    const { conflict } = retainedTargetVariantSegments(
+      sourcePlatform,
+      [...target.associations, ...dormant.map((a) => ({ ...a, segments: [] }))],
+      target.baseline,
+    );
+    if (conflict) {
+      return {
+        eligible: false,
+        blockReason: `conflicting_variant:${conflict.variantId}`,
+        sourceMediaId: source.id,
+        targetMediaId: target.id,
+        details: conflict,
       };
     }
   }
