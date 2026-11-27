@@ -23,4 +23,13 @@
 
 ## 三、与现状不一致、待改的地方
 
-目前没有。2026-11-27 已改：`needs_review` 都由审核 agent 判定为通过或驳回（ADR 0003 修订），GLOSSARY 同步更新。
+截至 2026-11-27，变更单已由证据门和审核 agent 判定（ADR 0003 修订）。以下缺口仍在，拟议的处理方式见 [ADR 0004](docs/adr/0004-no-waiting-states.md)。
+
+- **重复媒体**：探索发现外部编号已归另一部媒体时只记告警；只有审核员 RPC 会调用 `mergeMedia` 写入媒体重定向（`packages/core/src/exploration-agent.ts`、`packages/core/src/tmdb-sync.ts`、`apps/api/src/reviewer.ts`）。
+- **审核员直接写入**：仍可锁定关联、覆盖或锁定外部编号、合并媒体、切换基准和关闭告警，前三项均不写修订记录（`apps/api/src/reviewer.ts`、`packages/core/src/conflict-resolution.ts`）。
+- **锁没有期限**：关联和外部编号由审核员上锁、解锁；挑战锁定关联的变更单可以自动驳回，但锁和挑战告警没有自动收尾（`packages/core/src/conflict-resolution.ts`、`packages/core/src/media-service.ts`、`packages/core/src/evidence-job.ts`）。
+- **锁定关联已下架**：平台明确找不到合集时，失效复查只记告警，关联仍是 `confirmed`（`packages/core/src/invalidation.ts` 的 `handleConfirmedNotFoundInTx`）。
+- **TMDB 编号失效**：同步遇到 404 就记告警、跳过该媒体的本次刷新，没有自动查找替代编号（`packages/core/src/tmdb-sync.ts` 的 `tmdb_missing_or_merged` 分支）。
+- **段的坐标待核对**：TMDB 季结构变化、合并媒体或切换基准都可能标记受影响的段，没有任务自动重算这些坐标（`packages/core/src/tmdb-sync.ts` 的 `segments_needs_review` 告警）。
+- **种子取证失败**：种子保留为 `seed_unconfirmed` 并标记 `needs_review`，后续排队会跳过它（`packages/core/src/seeds.ts` 的 `markSeedEvidenceFailedInTx`、`enqueueSeedEvidenceChecksForMedia`）。
+- **关联内容不符后的复查**：告警本身不会安排下次复查；没有新的失效上报，即使合集已经恢复，按集查询也可能一直降级（`packages/core/src/invalidation.ts`、`packages/client/src/resolve.ts`）。

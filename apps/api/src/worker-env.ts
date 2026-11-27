@@ -18,7 +18,6 @@ export interface ApiWorkerEnv {
   OUTBOUND_PROXY_CONFIG?: string;
   // Workers VPC service: the greencloud-hk egress relay.
   HK?: EgressFetcher;
-  ENABLE_HEALTH_OUTBOUND_PROBE?: string;
   TMDB_ACCESS_TOKEN?: string;
   TMDB_API_KEY?: string;
   TMDB_API_BASE_URL?: string;

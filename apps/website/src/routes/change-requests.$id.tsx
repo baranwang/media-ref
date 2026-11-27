@@ -259,17 +259,23 @@ function ChangeRequestDetailPage() {
                     </dd>
                   </div>
                   <div className="flex items-center gap-3 py-2.5">
-                    <dt className="w-24 shrink-0 text-muted-foreground">播放页</dt>
+                    <dt className="w-24 shrink-0 text-muted-foreground">
+                      {cr.pageLink?.source === "submission" ? "提交时的链接" : "条目链接"}
+                    </dt>
                     <dd className="min-w-0 flex-1">
-                      <a
-                        href={cr.pageUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex max-w-full items-center gap-1 truncate font-mono text-xs text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground"
-                      >
-                        <span className="truncate">{cr.pageUrl}</span>
-                        <RiArrowRightUpLine className="size-3.5 shrink-0" />
-                      </a>
+                      {cr.pageLink ? (
+                        <a
+                          href={cr.pageLink.href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex max-w-full items-center gap-1 truncate font-mono text-xs text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground"
+                        >
+                          <span className="truncate">{cr.pageLink.href}</span>
+                          <RiArrowRightUpLine className="size-3.5 shrink-0" />
+                        </a>
+                      ) : (
+                        <span className="font-mono">{cr.nativeId}</span>
+                      )}
                     </dd>
                   </div>
                   <div className="flex items-center gap-3 py-2.5">

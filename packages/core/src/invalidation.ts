@@ -28,6 +28,7 @@ import { extractCollectionDisplay, isUuid } from "./media-service.ts";
 export const INVALIDATION_RECHECK_JOB_TYPE = "invalidation_recheck";
 export const DEFAULT_ANONYMOUS_INVALIDATION_THRESHOLD = 3;
 export const MAX_INVALIDATION_REASON_LENGTH = 500;
+const INVALIDATION_DAILY_LIMIT = 20;
 
 export const LOCKED_ASSOCIATION_DELISTED_ALERT_TYPE = "locked_association_delisted";
 export const ASSOCIATION_CONTENT_MISMATCH_ALERT_TYPE = "association_content_mismatch";
@@ -37,6 +38,7 @@ export type InvalidationErrorCode =
   | "INVALID_ASSOCIATION_ID"
   | "INVALID_REASON"
   | "INVALID_THRESHOLD"
+  | "INVALIDATION_LIMIT_REACHED"
   | "ASSOCIATION_NOT_FOUND"
   | "ASSOCIATION_ALREADY_DELISTED"
   | "ASSOCIATION_NOT_CONFIRMED";
@@ -116,7 +118,7 @@ export async function reportInvalidAssociation(
   dbWrite: Db,
   input: ReportInvalidAssociationInput,
 ): Promise<ReportInvalidAssociationResult> {
-  const associationId = input.associationId.trim();
+  const associationId = input.associationId.trim().toLowerCase();
   if (!isUuid(associationId)) {
     throw new InvalidationError(
       "INVALID_ASSOCIATION_ID",
@@ -160,6 +162,55 @@ export async function reportInvalidAssociation(
       );
     }
 
+    const reporterUserId =
+      input.reporterType === "user"
+        ? input.reporterUserId
+        : (input.reporterUserId ??
+          (
+            await trx
+              .selectFrom("apikey")
+              .select("referenceId")
+              .where("id", "=", input.reporterKeyId)
+              .executeTakeFirstOrThrow()
+          ).referenceId);
+    const existing =
+      input.reporterType === "api_key"
+        ? await trx
+            .selectFrom("invalidation_reports")
+            .select("id")
+            .where("association_id", "=", associationId)
+            .where("reporter_type", "=", "api_key")
+            .where("reporter_key_id", "=", input.reporterKeyId)
+            .where("recheck_job_id", "is", null)
+            .executeTakeFirst()
+        : undefined;
+
+    if (!existing) {
+      // Reports on different associations share the same account quota.
+      await trx
+        .selectFrom("user")
+        .select("id")
+        .where("id", "=", reporterUserId)
+        .forNoKeyUpdate()
+        .executeTakeFirstOrThrow();
+      const day = new Date(now);
+      day.setUTCHours(0, 0, 0, 0);
+      const today = await trx
+        .selectFrom("invalidation_reports")
+        .select((eb) => eb.fn.countAll().as("count"))
+        .where("reporter_user_id", "=", reporterUserId)
+        .where("created_at", ">=", day)
+        .where("created_at", "<", new Date(day.getTime() + 86_400_000))
+        .executeTakeFirstOrThrow();
+      if (Number(today.count) >= INVALIDATION_DAILY_LIMIT) {
+        throw new InvalidationError(
+          "INVALIDATION_LIMIT_REACHED",
+          429,
+          `At most ${INVALIDATION_DAILY_LIMIT} invalidation reports per day`,
+        );
+      }
+    }
+
     if (input.reporterType === "user") {
       const enqueued = await enqueueJob(trx, {
         jobType: INVALIDATION_RECHECK_JOB_TYPE,
@@ -177,7 +228,7 @@ export async function reportInvalidAssociation(
           reporter_key_id: null,
           reason,
           recheck_job_id: enqueued.job.id,
-          ...(input.now ? { created_at: now } : {}),
+          created_at: now,
         })
         .returning("id")
         .executeTakeFirstOrThrow();
@@ -200,45 +251,26 @@ export async function reportInvalidAssociation(
       };
     }
 
-    const inserted = await trx
-      .insertInto("invalidation_reports")
-      .values({
-        association_id: associationId,
-        reporter_type: "api_key",
-        reporter_user_id: input.reporterUserId ?? null,
-        reporter_key_id: input.reporterKeyId,
-        reason,
-        recheck_job_id: null,
-        ...(input.now ? { created_at: now } : {}),
-      })
-      .onConflict((oc) =>
-        oc
-          .columns(["association_id", "reporter_key_id"])
-          .where(sql<boolean>`reporter_type = 'api_key' and recheck_job_id is null`)
-          .doNothing(),
-      )
-      .returning("id")
-      .executeTakeFirst();
-
-    let reportId: string;
-    const deduplicated = !inserted;
-    if (inserted) {
-      reportId = inserted.id;
-    } else {
-      const existing = await trx
-        .selectFrom("invalidation_reports")
-        .select("id")
-        .where("association_id", "=", associationId)
-        .where("reporter_type", "=", "api_key")
-        .where("reporter_key_id", "=", input.reporterKeyId)
-        .where("recheck_job_id", "is", null)
-        .executeTakeFirstOrThrow();
-      reportId = existing.id;
-    }
+    const { id: reportId } =
+      existing ??
+      (await trx
+        .insertInto("invalidation_reports")
+        .values({
+          association_id: associationId,
+          reporter_type: "api_key",
+          reporter_user_id: reporterUserId,
+          reporter_key_id: input.reporterKeyId,
+          reason,
+          recheck_job_id: null,
+          created_at: now,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow());
+    const deduplicated = Boolean(existing);
 
     const countRow = await trx
       .selectFrom("invalidation_reports")
-      .select(sql<string>`count(*)`.as("count"))
+      .select((eb) => eb.fn.count("reporter_user_id").distinct().as("count"))
       .where("association_id", "=", associationId)
       .where("reporter_type", "=", "api_key")
       .where("recheck_job_id", "is", null)
@@ -611,23 +643,190 @@ async function handleConfirmedNotFoundInTx(
   return { outcome: "delisted", platformMarkedNotFound };
 }
 
+type CheckedAssociation = {
+  id: string;
+  media_id: string;
+  namespace: Namespace;
+  native_id: string;
+  current_revision_id: string | null;
+};
+
+function lockCheckedAssociation(trx: Transaction<Database>, association: CheckedAssociation) {
+  return trx
+    .selectFrom("associations")
+    .select(["id", "media_id", "needs_review", "locked"])
+    .where("id", "=", association.id)
+    .where("media_id", "=", association.media_id)
+    .where("namespace", "=", association.namespace)
+    .where("native_id", "=", association.native_id)
+    .where("current_revision_id", "is not distinct from", association.current_revision_id)
+    .where("is_external_id", "=", false)
+    .where("status", "=", "confirmed")
+    .forUpdate()
+    .executeTakeFirst();
+}
+
+const STEP1_MISMATCH = "evidence_gate_step1_mismatch";
+
+function mismatchAlerts(trx: Transaction<Database>, association: CheckedAssociation) {
+  return trx
+    .selectFrom("review_alerts")
+    .where("association_id", "=", association.id)
+    .where("media_id", "=", association.media_id)
+    .where("alert_type", "=", ASSOCIATION_CONTENT_MISMATCH_ALERT_TYPE);
+}
+
+async function canAttributeRepeatMismatch(
+  trx: Transaction<Database>,
+  association: CheckedAssociation,
+) {
+  if (!association.current_revision_id) return false;
+  const query = mismatchAlerts(trx, association)
+    .select(["details", "status", "resolved_by_user_id"])
+    .limit(2)
+    .forUpdate();
+  let alerts = await query.where("status", "=", "open").execute();
+  // A closed, unversioned alert could never have authorized recovery. Use it to explain a new
+  // mismatch only if it is the association's sole alert of this type, never an old cycle.
+  if (!alerts.length) alerts = await query.execute();
+  const [alert] = alerts;
+  if (!alert || alerts.length !== 1) return false;
+  const evidence = parseJsonObject(alert.details);
+  if (
+    alert.status === "resolved" &&
+    (alert.resolved_by_user_id === null || "revisionId" in evidence)
+  )
+    return false;
+  if (
+    evidence.reason === STEP1_MISMATCH &&
+    evidence.revisionId === association.current_revision_id
+  ) {
+    return evidence.pendingRecovery !== false;
+  }
+  if (
+    "revisionId" in evidence ||
+    "checkedRevisionId" in evidence ||
+    "pendingRecovery" in evidence ||
+    evidence.reason !== STEP1_MISMATCH ||
+    evidence.namespace !== association.namespace ||
+    evidence.nativeId !== association.native_id ||
+    typeof evidence.jobId !== "string" ||
+    !isUuid(evidence.jobId)
+  )
+    return false;
+
+  // Approval creates a clean association. With this as its only revision, a genuine earlier
+  // confirmed-content mismatch cannot belong to an older revision or to a failed seed check.
+  const revisions = await trx
+    .selectFrom("association_revisions as r")
+    .leftJoin("change_requests as cr", "cr.id", "r.change_request_id")
+    .select([
+      "r.id",
+      "r.status",
+      "r.revision_number",
+      "cr.applied_association_id",
+      "cr.applied_revision_id",
+    ])
+    .where("r.association_id", "=", association.id)
+    .limit(2)
+    .execute();
+  const [initial] = revisions;
+  if (
+    revisions.length !== 1 ||
+    !initial ||
+    initial.id !== association.current_revision_id ||
+    initial.revision_number !== 1 ||
+    initial.status !== "confirmed" ||
+    initial.applied_association_id !== association.id ||
+    initial.applied_revision_id !== initial.id
+  )
+    return false;
+  const job = await trx
+    .selectFrom("background_jobs")
+    .select("id")
+    .where("id", "=", evidence.jobId)
+    .where("job_type", "=", INVALIDATION_RECHECK_JOB_TYPE)
+    .where("status", "=", "completed")
+    .where(sql<string>`payload->>'associationId'`, "=", association.id)
+    .where(sql<string>`result->>'associationId'`, "=", association.id)
+    .where(sql<string>`result->>'outcome'`, "=", "content_mismatch")
+    .executeTakeFirst();
+  return Boolean(job);
+}
+
+async function recoverMismatchInTx(
+  trx: Transaction<Database>,
+  association: CheckedAssociation,
+  jobId: string,
+  now: Date,
+) {
+  const revision = association.current_revision_id;
+  if (!revision) return false;
+  const rows = await mismatchAlerts(trx, association)
+    .select(["id", "status", "details", "resolved_by_user_id"])
+    .where((eb) =>
+      eb.or([eb("status", "=", "open"), eb(sql<string>`details->>'revisionId'`, "=", revision)]),
+    )
+    .where(sql<boolean>`not (details @> '{"pendingRecovery":false}'::jsonb)`)
+    .forUpdate()
+    .execute();
+  const candidates = rows.map((row) => ({ ...row, details: parseJsonObject(row.details) }));
+  const attributed = candidates.filter(
+    ({ details }) => details.reason === STEP1_MISMATCH && details.revisionId === revision,
+  );
+  const open = candidates.filter((row) => row.status === "open");
+  if (
+    !attributed.length ||
+    open.some(
+      (row) =>
+        !attributed.includes(row) &&
+        (row.details.checkedRevisionId !== revision || "revisionId" in row.details),
+    )
+  )
+    return false;
+
+  let owners = attributed.filter(
+    (row) => row.status === "open" || row.details.pendingRecovery === true,
+  );
+  if (!owners.length) {
+    // The old RPC could re-close an already recovered alert. Without a receipt accept only one
+    // manual closure, and only when no earlier pass could have spent its proof.
+    if (attributed.length !== 1 || attributed[0]!.resolved_by_user_id === null) return false;
+    const priorPass = await trx
+      .selectFrom("background_jobs")
+      .select("id")
+      .where("job_type", "=", INVALIDATION_RECHECK_JOB_TYPE)
+      .where("status", "=", "completed")
+      .where("id", "!=", jobId)
+      .where(sql<string>`payload->>'associationId'`, "=", association.id)
+      .where(sql<string>`result->>'outcome'`, "=", "still_valid")
+      .where(sql<boolean>`result ? 'matchedBy' and not (result ? 'checkedRevisionId')`)
+      .executeTakeFirst();
+    if (priorPass) return false;
+    owners = attributed;
+  }
+  await trx
+    .updateTable("review_alerts")
+    .set({
+      status: "resolved",
+      resolved_at: sql`case when status = 'open' then ${now}::timestamptz else resolved_at end`,
+      details: sql`details || '{"pendingRecovery":false}'::jsonb`,
+    })
+    .where("id", "in", [...new Set([...owners, ...open].map((r) => r.id))])
+    .execute();
+  return true;
+}
+
 async function flagAssociationContentMismatchInTx(
   trx: Transaction<Database>,
   input: {
-    associationId: string;
+    association: CheckedAssociation;
     details: JsonObject;
     now: Date;
   },
 ): Promise<boolean> {
-  const currentAssoc = await trx
-    .selectFrom("associations")
-    .where("is_external_id", "=", false)
-    .select(["id", "media_id", "status"])
-    .where("id", "=", input.associationId)
-    .forUpdate()
-    .executeTakeFirst();
-
-  if (!currentAssoc || currentAssoc.status !== "confirmed") {
+  const currentAssoc = await lockCheckedAssociation(trx, input.association);
+  if (!currentAssoc) {
     return false;
   }
 
@@ -640,11 +839,23 @@ async function flagAssociationContentMismatchInTx(
     .where("id", "=", currentAssoc.id)
     .execute();
 
+  const ownsFlag =
+    !currentAssoc.needs_review || (await canAttributeRepeatMismatch(trx, input.association));
   await recordOpenAssociationReviewAlert(trx, {
     alertType: ASSOCIATION_CONTENT_MISMATCH_ALERT_TYPE,
     mediaId: currentAssoc.media_id,
     associationId: currentAssoc.id,
-    details: input.details,
+    details: {
+      ...input.details,
+      checkedRevisionId: input.association.current_revision_id,
+      ...(ownsFlag
+        ? {
+            reason: STEP1_MISMATCH,
+            pendingRecovery: true,
+            revisionId: input.association.current_revision_id,
+          }
+        : {}),
+    },
   });
 
   return true;
@@ -667,7 +878,15 @@ export function createInvalidationRecheckJobHandler(
     const association = await ctx.db
       .selectFrom("associations")
       .where("is_external_id", "=", false)
-      .select(["id", "media_id", "namespace", "native_id", "status", "locked"])
+      .select([
+        "id",
+        "media_id",
+        "namespace",
+        "native_id",
+        "status",
+        "locked",
+        "current_revision_id",
+      ])
       .where("id", "=", rawAssociationId)
       .executeTakeFirst();
 
@@ -794,25 +1013,36 @@ export function createInvalidationRecheckJobHandler(
     const step1 = evaluateEvidenceGateStep1(catalogEvidence, collectionResult.info, { segments });
     if (step1.decision === "pass") {
       const display = extractCollectionDisplay({ collection: collectionResult.info });
-      if (Object.keys(display).length > 0) {
-        await ctx.db
-          .updateTable("associations")
-          .set(display)
-          .where("id", "=", association.id)
-          .execute();
-      }
       return {
         status: "completed",
         result: {
           associationId: association.id,
           outcome: "still_valid",
           matchedBy: step1.matchedBy,
+          checkedRevisionId: association.current_revision_id,
+        },
+        async onCommit(trx) {
+          const current = await lockCheckedAssociation(trx, association);
+          if (!current) return;
+          const resolved =
+            current.needs_review &&
+            !current.locked &&
+            (await recoverMismatchInTx(trx, association, ctx.job.id, ctx.now));
+          if (resolved || Object.keys(display).length > 0) {
+            await trx
+              .updateTable("associations")
+              .set({
+                ...display,
+                ...(resolved ? { needs_review: false, updated_at: ctx.now } : {}),
+              })
+              .where("id", "=", association.id)
+              .execute();
+          }
         },
       };
     }
 
     const mismatchDetails: JsonObject = {
-      reason: "evidence_gate_step1_mismatch",
       namespace: association.namespace,
       nativeId: association.native_id,
       conflicts: step1.conflicts,
@@ -839,7 +1069,7 @@ export function createInvalidationRecheckJobHandler(
       },
       async onCommit(trx) {
         await flagAssociationContentMismatchInTx(trx, {
-          associationId: association.id,
+          association,
           details: mismatchDetails,
           now: ctx.now,
         });

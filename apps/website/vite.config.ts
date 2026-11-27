@@ -1,5 +1,4 @@
 import { defineConfig } from "vite-plus";
-import { devtools } from "@tanstack/devtools-vite";
 import { paraglideVitePlugin } from "@inlang/paraglide-js";
 
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
@@ -11,7 +10,6 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 const config = defineConfig(({ command }) => ({
   resolve: { tsconfigPaths: true },
   plugins: [
-    devtools(),
     paraglideVitePlugin({
       project: "./project.inlang",
       outdir: "./src/paraglide",

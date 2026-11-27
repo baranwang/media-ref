@@ -1,0 +1,60 @@
+# Sender address for verification email.
+EMAIL_FROM=
+# Set a stable, nonblank signing secret for every Worker request, including local GET /health.
+AUTH_SECRET=
+# Public base URL for authentication callbacks.
+API_BASE_URL=
+# Domain shared by authentication cookies.
+COOKIE_DOMAIN=
+# Comma-separated additional trusted web origins.
+TRUSTED_ORIGINS=
+# GitHub OAuth application ID.
+GITHUB_CLIENT_ID=
+# GitHub OAuth application secret.
+GITHUB_CLIENT_SECRET=
+# Trakt client ID for catalog requests and OAuth where enabled.
+TRAKT_CLIENT_ID=
+# Trakt OAuth application secret.
+TRAKT_CLIENT_SECRET=
+# JSON map of outbound routes by namespace.
+OUTBOUND_PROXY_CONFIG=
+# Bearer token for TMDB requests.
+TMDB_ACCESS_TOKEN=
+# Alternative TMDB credential when no bearer token is set.
+TMDB_API_KEY=
+# Override the TMDB upstream base URL.
+TMDB_API_BASE_URL=
+# Bearer token for TVDB requests.
+TVDB_BEARER_TOKEN=
+# Override the TVDB upstream base URL.
+TVDB_API_BASE_URL=
+# Override the DOUBAN upstream base URL.
+DOUBAN_API_BASE_URL=
+# Override the BANGUMI upstream base URL.
+BANGUMI_API_BASE_URL=
+# Override the IMDB upstream base URL.
+IMDB_API_BASE_URL=
+# Override the TRAKT upstream base URL.
+TRAKT_API_BASE_URL=
+# Read limit per API key for the in-memory limiter.
+RATE_LIMIT_READ_KEY_LIMIT=
+# Read limit per IP for the in-memory limiter.
+RATE_LIMIT_READ_IP_LIMIT=
+# Read window in seconds for the in-memory limiter.
+RATE_LIMIT_READ_PERIOD_SECONDS=
+# Retry-After delay in seconds for throttled reads.
+RATE_LIMIT_READ_RETRY_AFTER_SECONDS=
+# Base submission quota per user.
+RATE_LIMIT_SUBMIT_BASE_HOURLY=
+# Submission window in seconds.
+RATE_LIMIT_SUBMIT_WINDOW_SECONDS=
+# JSON reputation tiers for submission quotas.
+RATE_LIMIT_REPUTATION_TIERS=
+# JSON map of hourly submission limits by role.
+RATE_LIMIT_ROLE_HOURLY_LIMITS=
+# Anonymous invalidation report threshold for a recheck.
+INVALIDATION_ANON_THRESHOLD=
+# Cloudflare account containing the API usage dataset.
+CF_ACCOUNT_ID=
+# Token for querying API usage in Analytics Engine.
+ANALYTICS_API_TOKEN=

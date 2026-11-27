@@ -33,6 +33,7 @@ export type {
   PlatformNamespaceRow,
   ReviewAlertsTable,
   ReviewAlertStatusRow,
+  ReviewCorrectionsTable,
   SchemaMetaTable,
   SeasonSnapshotRow,
   SegmentsTable,

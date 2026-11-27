@@ -935,7 +935,7 @@ export function evaluateEvidenceGateStep1(
 
   // 2. year
   let yearStatus: Step1FieldCheckStatus;
-  const segments = options?.segments;
+  const segments = options?.segments ?? [];
   const catalogYears = collectCatalogCandidateYears(catalog, segments);
   if (collection.year === null || catalogYears.size === 0) {
     yearStatus = "missing";
@@ -1011,17 +1011,14 @@ export function evaluateEvidenceGateStep1(
 
   // 4. episodeCount
   let episodeCountStatus: Step1FieldCheckStatus;
-  const hasTvNonLinearSegments =
-    catalog.mediaType === "tv" && segments !== undefined && segments.some((s) => s.nonLinear);
+  const linearSegments = segments.filter((s) => !s.nonLinear);
 
-  if (hasTvNonLinearSegments) {
+  if (catalog.mediaType === "tv" && segments.length > 0 && linearSegments.length === 0) {
     episodeCountStatus = "skipped";
   } else {
     const catalogEpisodeCounts = collectCatalogCandidateEpisodeCounts(catalog);
     const segmentRange =
-      catalog.mediaType === "tv" && segments !== undefined && segments.length > 0
-        ? computeLinearSegmentEpisodeRange(catalog, segments)
-        : null;
+      catalog.mediaType === "tv" ? computeLinearSegmentEpisodeRange(catalog, linearSegments) : null;
 
     const matchesSegmentRange =
       segmentRange !== null &&
@@ -1253,8 +1250,9 @@ export function evaluateEvidenceGateStep2(
     }
   }
 
-  // 3. Non-linear segments ("集号不对应"): only verify season existence and earliest season premiere year
-  if (context.segments.some((s) => s.nonLinear)) {
+  // Non-linear segments have no one-to-one episode mapping.
+  const linearSegments = context.segments.filter((s) => !s.nonLinear);
+  if (linearSegments.length === 0) {
     return {
       decision: conflicts.length === 0 ? "pass" : "needs_review",
       skipped: false,
@@ -1286,7 +1284,7 @@ export function evaluateEvidenceGateStep2(
     };
   }
 
-  const sortedSegments = [...context.segments].toSorted((a, b) =>
+  const sortedSegments = linearSegments.toSorted((a, b) =>
     a.season !== b.season ? a.season - b.season : a.episodeStart - b.episodeStart,
   );
 

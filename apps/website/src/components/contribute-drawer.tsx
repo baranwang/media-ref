@@ -34,7 +34,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAppStore } from "#/lib/app-store";
 import { browserClients, mediaDetailQuery } from "#/lib/queries";
 import type { CoverageSegment, MediaItem } from "#/lib/types";
-import { parseExternalInput } from "#/lib/url-parser";
+import { contributionLinkFields, parseExternalInput } from "#/lib/url-parser";
 import { NAMESPACE_LABELS, NamespaceLogo } from "./brand-logos";
 import { CoverageRuler, CoverageTrack } from "./coverage-bar";
 
@@ -211,9 +211,7 @@ export function ContributeDrawer({
           ];
       const res = await browserClients().changeRequest.createChangeRequest({
         target,
-        namespace: parsed.namespace,
-        nativeId: parsed.nativeId,
-        rawNativeId: parsed.url,
+        ...contributionLinkFields(parsed),
         ...(isCatalog ? {} : { variantDescription: cleanVariant }),
         segments,
       });

@@ -25,6 +25,8 @@ export interface BackgroundJob {
 }
 
 export interface JobQueueMessage {
+  /** Initial deadline used to take the execution lease once per exploration delivery. */
+  dispatchLeaseExpiresAt?: string;
   jobId: string;
   jobType: string;
   leaseGeneration: number;
@@ -53,6 +55,7 @@ export interface ClaimDueJobsOptions {
   now?: Date;
   batchSize: number;
   leaseDurationMs: number;
+  leaseDurationMsByType?: Readonly<Record<string, number>>;
   jobTypes?: readonly string[];
 }
 
@@ -90,6 +93,8 @@ export interface FailJobWithFencingInput {
 }
 
 export interface ReleaseLeaseOnDispatchFailureInput {
+  jobType?: string;
+  dispatchLeaseExpiresAt?: string;
   jobId: string;
   leaseGeneration: number;
   retryAt?: Date;
@@ -176,6 +181,40 @@ export async function getJobById(db: Db, jobId: string): Promise<BackgroundJob |
     .where("id", "=", jobId)
     .executeTakeFirst();
 
+  return row ? mapJobRow(row) : null;
+}
+
+/** Exchanges the dispatch deadline for an execution deadline, without changing the generation. */
+export async function startLeasedJob(
+  db: Db,
+  message: JobQueueMessage,
+  now: Date,
+  durationMs: number,
+): Promise<BackgroundJob | null> {
+  if (message.dispatchLeaseExpiresAt === undefined) {
+    // Re-dispatch pre-upgrade messages with a deadline, even when the configured lease changed.
+    await releaseLeaseOnDispatchFailure(db, {
+      jobId: message.jobId,
+      jobType: message.jobType,
+      leaseGeneration: message.leaseGeneration,
+      now,
+    });
+    return null;
+  }
+  const dispatchExpiry = new Date(message.dispatchLeaseExpiresAt);
+  // Even an immediate delivery must invalidate the original deadline for its duplicates.
+  const expiry = new Date(Math.max(dispatchExpiry.getTime() + 1, now.getTime() + durationMs));
+  const row = await db
+    .updateTable("background_jobs")
+    .set({ lease_expires_at: expiry, updated_at: now })
+    .where("id", "=", message.jobId)
+    .where("job_type", "=", message.jobType)
+    .where("status", "=", "leased")
+    .where("lease_generation", "=", message.leaseGeneration)
+    .where("lease_expires_at", ">", now)
+    .where("lease_expires_at", "=", dispatchExpiry)
+    .returningAll()
+    .executeTakeFirst();
   return row ? mapJobRow(row) : null;
 }
 
@@ -273,7 +312,16 @@ export async function claimDueJobs(db: Db, options: ClaimDueJobsOptions): Promis
     throw new Error("leaseDurationMs must be a positive number");
   }
 
-  const leaseExpiresAt = new Date(now.getTime() + leaseDurationMs);
+  const defaultExpiry = new Date(now.getTime() + leaseDurationMs);
+  const overrides = Object.entries(options.leaseDurationMsByType ?? {}).map(([type, duration]) => {
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error("Each job type's lease duration must be a positive number");
+    }
+    return sql`when ${type} then ${new Date(now.getTime() + duration)}::timestamptz`;
+  });
+  const leaseExpiresAt = overrides.length
+    ? sql<Date>`case job_type ${sql.join(overrides, sql` `)} else ${defaultExpiry}::timestamptz end`
+    : defaultExpiry;
 
   return db.transaction().execute(async (trx) => {
     let expireExhausted = trx
@@ -483,6 +531,10 @@ export async function releaseLeaseOnDispatchFailure(
     .where("id", "=", input.jobId)
     .where("status", "=", "leased")
     .where("lease_generation", "=", input.leaseGeneration)
+    .$if(input.jobType !== undefined, (qb) => qb.where("job_type", "=", input.jobType!))
+    .$if(input.dispatchLeaseExpiresAt !== undefined, (qb) =>
+      qb.where("lease_expires_at", "=", new Date(input.dispatchLeaseExpiresAt!)),
+    )
     .returningAll()
     .executeTakeFirst();
 

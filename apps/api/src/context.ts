@@ -18,7 +18,13 @@ import {
   type TmdbGatewayConfig,
 } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
-import { Code, ConnectError, createContextKey, type HandlerContext } from "@connectrpc/connect";
+import {
+  Code,
+  ConnectError,
+  createContextKey,
+  type HandlerContext,
+  type Interceptor,
+} from "@connectrpc/connect";
 import {
   extractApiKeyFromHeaders,
   verifyApiKey,
@@ -117,27 +123,19 @@ export async function requireApiKeyAuth(
   return result.apiKey;
 }
 
-export async function enforceReadRateLimit(
-  ctx: HandlerContext,
-  apiKey: VerifiedApiKey,
-): Promise<void> {
-  const runtime = getRuntime(ctx);
-  const decision = await checkReadRateLimit({
-    runtime: runtime.readRateLimit,
-    headers: ctx.requestHeader,
-    apiKeyId: apiKey.keyId,
-  });
-
+async function enforceRateLimit(input: Parameters<typeof checkReadRateLimit>[0]): Promise<void> {
+  const decision = await checkReadRateLimit(input);
   if (!decision.allowed) {
-    throw createDomainConnectError({
-      status: 429,
-      code: "RATE_LIMITED",
-      scope: decision.scope,
-      retryAfterSeconds: decision.retryAfterSeconds,
-      message: decision.message,
-    });
+    throw createDomainConnectError({ status: 429, code: "RATE_LIMITED", ...decision });
   }
 }
+
+export const limitRpcByIp: Interceptor = (next) => async (req) => {
+  const runtime = req.contextValues.get(kApiRequestRuntime);
+  if (!runtime) throw new ConnectError("API request runtime is not bound", Code.Internal);
+  await enforceRateLimit({ runtime: runtime.readRateLimit, headers: req.header });
+  return next(req);
+};
 
 /**
  * Auth for public read RPCs. Internal (service-binding) callers without an API key are let
@@ -147,24 +145,11 @@ export async function enforceReadRateLimit(
 export async function authorizePublicRead(ctx: HandlerContext): Promise<VerifiedApiKey | null> {
   const runtime = getRuntime(ctx);
   if (runtime.internal && extractApiKeyFromHeaders(ctx.requestHeader) === null) {
-    const decision = await checkReadRateLimit({
-      runtime: runtime.readRateLimit,
-      headers: ctx.requestHeader,
-    });
-    if (!decision.allowed) {
-      throw createDomainConnectError({
-        status: 429,
-        code: "RATE_LIMITED",
-        scope: decision.scope,
-        retryAfterSeconds: decision.retryAfterSeconds,
-        message: decision.message,
-      });
-    }
     return null;
   }
 
   const apiKey = await requireApiKeyAuth(ctx, { db: "read", permission: "read" });
-  await enforceReadRateLimit(ctx, apiKey);
+  await enforceRateLimit({ runtime: runtime.readRateLimit, apiKeyId: apiKey.keyId });
   return apiKey;
 }
 
@@ -181,8 +166,7 @@ export async function requireSessionAuth(ctx: HandlerContext): Promise<Authentic
   return session;
 }
 
-export async function requireVerifiedUserAuth(ctx: HandlerContext): Promise<AuthenticatedSession> {
-  const session = await requireSessionAuth(ctx);
+function requireVerifiedEmail(session: AuthenticatedSession): void {
   if (!session.user.emailVerified) {
     throw createDomainConnectError({
       status: 403,
@@ -190,6 +174,11 @@ export async function requireVerifiedUserAuth(ctx: HandlerContext): Promise<Auth
       message: "Email verification is required",
     });
   }
+}
+
+export async function requireVerifiedUserAuth(ctx: HandlerContext): Promise<AuthenticatedSession> {
+  const session = await requireSessionAuth(ctx);
+  requireVerifiedEmail(session);
   return session;
 }
 
@@ -251,13 +240,7 @@ export async function resolveSubmitterAuth(
     });
   }
 
-  if (!session.user.emailVerified) {
-    throw createDomainConnectError({
-      status: 403,
-      code: "EMAIL_NOT_VERIFIED",
-      message: "Email verification is required",
-    });
-  }
+  requireVerifiedEmail(session);
 
   return {
     userId: session.user.id,
@@ -330,6 +313,7 @@ export async function resolveInvalidationReporterAuth(
     });
   }
 
+  requireVerifiedEmail(session);
   return {
     reporterType: "user",
     reporterUserId: session.user.id,

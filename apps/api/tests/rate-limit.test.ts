@@ -202,7 +202,7 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       fetchExternal: createCatalogStubHandler(),
     });
 
-    const app = createApiApp({
+    const deps = {
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
       outbound,
@@ -215,22 +215,24 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
         tmdb: { accessToken: "test-tmdb-token" },
         readRetryAfterSeconds: 45,
       },
-    });
+    };
+    const app = createApiApp(deps);
+    const setupApp = createApiApp({ ...deps, readIpLimiter: undefined });
 
-    await seedConfirmedMedia(app, testDb, outbound);
+    await seedConfirmedMedia(setupApp, testDb, outbound);
 
-    const user1 = await signUpUser(app, outbound, {
+    const user1 = await signUpUser(setupApp, outbound, {
       email: "ip-user-1@example.com",
       password: "StrongPassword123!",
       name: "User 1",
     });
-    const user2 = await signUpUser(app, outbound, {
+    const user2 = await signUpUser(setupApp, outbound, {
       email: "ip-user-2@example.com",
       password: "StrongPassword123!",
       name: "User 2",
     });
-    const key1 = await issueApiKeyRpc(app, user1.cookie, { name: "Key 1" });
-    const key2 = await issueApiKeyRpc(app, user2.cookie, { name: "Key 2" });
+    const key1 = await issueApiKeyRpc(setupApp, user1.cookie, { name: "Key 1" });
+    const key2 = await issueApiKeyRpc(setupApp, user2.cookie, { name: "Key 2" });
 
     // 2 reads via Key 1 from 198.51.100.5
     const key1Rpc = createRpcClients(app, {
@@ -244,13 +246,13 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       ).toBeDefined();
     }
 
-    // 1 read via Key 2 from the same IP (via X-Forwarded-For) -> 3rd IP hit, succeeds
-    const key2XffRpc = createRpcClients(app, {
+    // 1 read via Key 2 from the same IP -> 3rd IP hit, succeeds
+    const key2Rpc = createRpcClients(app, {
       apiKey: key2.key,
-      headers: { "x-forwarded-for": "198.51.100.5, 10.0.0.1" },
+      headers: { "cf-connecting-ip": "198.51.100.5" },
     });
     expect(
-      (await key2XffRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
+      (await key2Rpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
         .document,
     ).toBeDefined();
 
@@ -279,6 +281,31 @@ describe("API Worker rate limiting & submission quotas (#19)", () => {
       (await key2OtherIpRpc.media.getMedia({ ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }) }))
         .document,
     ).toBeDefined();
+  });
+
+  test("invalid credentials consume one IP allowance per RPC and IPv6 visitors share a /64", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      config: { readIpLimit: 1 },
+    });
+    const rpc = (ip: string) =>
+      createRpcClients(app, {
+        apiKey: crypto.randomUUID(),
+        headers: { "cf-connecting-ip": ip },
+      });
+    expect(await expectRpcError(rpc("2001:db8::1").media.getMedia({}))).toMatchObject({
+      code: "INVALID_API_KEY",
+    });
+    expect(
+      await expectRpcError(rpc("2001:0db8:0:0:1234::2").association.reportInvalidation({})),
+    ).toMatchObject({ code: "RATE_LIMITED", scope: "ip" });
+    expect(
+      await expectRpcError(rpc("2001:db8:0:1::1").association.reportInvalidation({})),
+    ).toMatchObject({ code: "INVALID_API_KEY" });
   });
 
   test("wires Cloudflare RATE_LIMITER_READ_KEY and RATE_LIMITER_READ_IP bindings in default Worker fetch entrypoint", async () => {

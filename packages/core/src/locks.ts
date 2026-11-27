@@ -19,6 +19,7 @@ export const ADVISORY_LOCK_CLASSES = {
   MEDIA_MERGE: 1008,
   SUBMIT_QUOTA: 1009,
   INVALIDATION: 1010,
+  REVIEW_CORRECTION: 1011,
 } as const;
 
 export type AdvisoryLockClass = (typeof ADVISORY_LOCK_CLASSES)[keyof typeof ADVISORY_LOCK_CLASSES];

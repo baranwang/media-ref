@@ -4,9 +4,12 @@ import { resolveEpisode, type MediaDocument, type SegmentInput } from "@media-re
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
+  enqueueTmdbDailySyncIfDue,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
+  TMDB_SYNC_KEY_MOVIE,
+  TMDB_SYNC_KEY_TV,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
@@ -171,6 +174,29 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
         await handle.cleanup();
       }
     }
+  });
+
+  test("reports no tracked media even when both cursors are current", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const syncDate = "2026-11-10";
+    await testDb.writeDb
+      .insertInto("sync_state")
+      .values(
+        [TMDB_SYNC_KEY_MOVIE, TMDB_SYNC_KEY_TV].map((sync_key) => ({
+          sync_key,
+          last_synced_date: syncDate,
+        })),
+      )
+      .execute();
+
+    await expect(
+      enqueueTmdbDailySyncIfDue(testDb.writeDb, { now: new Date(syncDate) }),
+    ).resolves.toEqual({
+      enqueued: false,
+      reason: "no_tracked_media",
+      syncDate,
+    });
   });
 
   test("refreshes TMDB snapshot (title, year, seasons) and non-locked external IDs while preserving locked IDs", async () => {

@@ -67,6 +67,7 @@ export interface BackgroundWorkerEnv {
   EXPLORATION_LEASE_DURATION_MS?: string;
   EXPLORATION_BACKOFF_SECONDS?: string;
   EXPLORATION_MAX_STEPS?: string;
+  // Also sets the session budget used to size the exploration job lease.
   EXPLORATION_MAX_DURATION_MS?: string;
   EXPLORATION_MAX_TASK_TOKENS?: string;
   EXPLORATION_DAILY_TOKEN_BUDGET?: string;
@@ -219,7 +220,8 @@ const worker = {
     });
 
     try {
-      await instance.scheduled(controller, env, ctx);
+      const summary = await instance.scheduled(controller, env, ctx);
+      console.log({ event: "scheduled_run", ...summary });
     } finally {
       ctx.waitUntil(db.destroy());
     }
@@ -239,7 +241,8 @@ const worker = {
     });
 
     try {
-      await instance.queue(batch, env, ctx);
+      const summary = await instance.queue(batch, env, ctx);
+      console.log({ event: "queue_batch", ...summary });
     } finally {
       ctx.waitUntil(db.destroy());
     }

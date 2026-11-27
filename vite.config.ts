@@ -5,6 +5,7 @@ export default defineConfig({
     "*": "vp check --fix",
   },
   fmt: {
+    ignorePatterns: ["packages/client/CHANGELOG.md"],
     sortTailwindcss: {
       stylesheet: "./packages/ui/src/styles/globals.css",
       functions: ["clsx", "cn"],

@@ -31,8 +31,7 @@ _Avoid_: 锚点、主编号
 _Avoid_: 命名空间类型、平台配置
 
 **权威目录**（Authority Catalog）:
-`verificationMode` 为 `sync` 的目录：TMDB、IMDb、TVDB、Trakt。它的 ID 由上游同步或审核员写入，
-整部媒体的那个 ID 就是外部编号。
+`verificationMode` 为 `sync` 的目录：TMDB、IMDb、TVDB、Trakt。代表整部媒体的 ID 称为外部编号，由上游同步写入，也可由探索 agent 核实后补齐。
 
 **平台**（Platform）:
 能播放媒体的视频网站。

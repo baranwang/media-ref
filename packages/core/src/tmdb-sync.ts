@@ -38,6 +38,8 @@ export const TMDB_CHANGES_MAX_WINDOW_DAYS = 14;
 export const DEFAULT_TMDB_FULL_REFRESH_BATCH_SIZE = 50;
 
 export const REVIEW_ALERT_TYPES = {
+  AGENT_EXTERNAL_ID_CONFLICT: "agent_external_id_conflict",
+  ASSOCIATION_CONTENT_MISMATCH: "association_content_mismatch",
   TMDB_MISSING_OR_MERGED: "tmdb_missing_or_merged",
   LOCKED_ASSOCIATION_CHALLENGED: "locked_association_challenged",
   LOCKED_ASSOCIATION_DELISTED: "locked_association_delisted",
@@ -817,27 +819,30 @@ export async function enqueueTmdbDailySyncIfDue(
   const now = options.now ?? new Date();
   const syncDate = formatUtcDate(now);
 
-  const activeTypes = await db
+  const trackedMedia = db
     .selectFrom("media")
     .innerJoin("associations as external_ids", "external_ids.media_id", "media.id")
     .where("external_ids.is_external_id", "=", true)
-    .select("media.type")
-    .distinct()
     .where("media.merged_into_media_id", "is", null)
     .where("external_ids.namespace", "=", "tmdb")
-    .execute();
+    .select("media.id");
+  const tracked = await db
+    .selectNoFrom((eb) => [
+      eb.exists(trackedMedia.where("media.type", "=", "movie")).as("movie"),
+      eb.exists(trackedMedia.where("media.type", "=", "tv")).as("tv"),
+    ])
+    .executeTakeFirstOrThrow();
+  const requiredKeys: string[] = [];
+  if (tracked.movie) requiredKeys.push(TMDB_SYNC_KEY_MOVIE);
+  if (tracked.tv) requiredKeys.push(TMDB_SYNC_KEY_TV);
 
-  if (activeTypes.length === 0) {
+  if (requiredKeys.length === 0) {
     return {
       enqueued: false,
       reason: "no_tracked_media",
       syncDate,
     };
   }
-
-  const requiredKeys = activeTypes.map((row) =>
-    row.type === "movie" ? TMDB_SYNC_KEY_MOVIE : TMDB_SYNC_KEY_TV,
-  );
 
   const cursorRows = await db
     .selectFrom("sync_state")

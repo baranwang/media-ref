@@ -9,7 +9,11 @@ import {
   type MediaRef,
 } from "@media-ref/client";
 import {
-  approveChangeRequest,
+  approveChangeRequestInTransaction,
+  ensureReviewAgentUser,
+  getChangeRequestById,
+  MediaServiceError,
+  resolveCatalogTargetSnapshot,
   type createFakeOutboundClient,
   type EmailMessage,
   type OutboundClient,
@@ -196,21 +200,45 @@ export async function issueApiKeyRpc(
   };
 }
 
-/**
- * Approves a change request through core's approval, the path the review agent takes: people no
- * longer approve over the API (ADR 0003 amendment 2). Answers and errors take the old RPC's shape.
- */
-export async function approveInCore(
+/** Prefetches outside the transaction, then approves with the review agent's status and lock checks. */
+export async function approveWithReviewChecks(
   deps: { db: Db; outbound: OutboundClient; tmdb?: TmdbGatewayConfig },
   input: { id: string; reason?: string; reviewerUserId?: string },
+) {
+  const cr = await getChangeRequestById(deps.db, input.id);
+  if (!cr) throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
+  const catalog =
+    cr.mediaId === null
+      ? await resolveCatalogTargetSnapshot(cr.targetExternalKey, deps.outbound, {
+          tmdb: deps.tmdb ?? { accessToken: "test-tmdb-token" },
+        })
+      : null;
+  if (catalog && catalog.status !== "found") {
+    throw new Error(catalog.reason ?? `Cannot prefetch ${cr.targetExternalKey}`);
+  }
+  const reviewerUserId = input.reviewerUserId ?? (await ensureReviewAgentUser(deps.db));
+  return deps.db.transaction().execute((trx) =>
+    approveChangeRequestInTransaction(trx, {
+      changeRequestId: cr.id,
+      reviewerUserId,
+      reason: input.reason,
+      evidence: cr.evidence,
+      conflictReason: cr.conflictReason,
+      prefetchedCatalog: catalog?.target,
+      allowedStatuses: ["needs_review", "rejected"],
+      replacesAssociationId: cr.replacesAssociationId,
+      enforceUnlockedCheck: true,
+    }),
+  );
+}
+
+/** Runs the review agent's lock-checked approval transaction and returns the old RPC's shape. */
+export async function approveInCore(
+  deps: Parameters<typeof approveWithReviewChecks>[0],
+  input: Parameters<typeof approveWithReviewChecks>[1],
 ): Promise<proto.ApproveChangeRequestResponse> {
   try {
-    const result = await approveChangeRequest(deps.db, deps.outbound, {
-      changeRequestId: input.id,
-      reviewerUserId: input.reviewerUserId ?? null,
-      reason: input.reason ?? null,
-      tmdbConfig: deps.tmdb ?? { accessToken: "test-tmdb-token" },
-    });
+    const result = await approveWithReviewChecks(deps, input);
     return create(proto.ApproveChangeRequestResponseSchema, {
       changeRequest: toProtoChangeRequest(result.changeRequest),
       mediaId: result.mediaId,

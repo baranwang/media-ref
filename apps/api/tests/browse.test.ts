@@ -3,6 +3,7 @@ import {
   createFakeOutboundClient,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
+  type FakeOutboundHandlers,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
@@ -68,7 +69,7 @@ describe("BrowseService", () => {
     }
   });
 
-  async function setup() {
+  async function setup(fetchExternal: FakeOutboundHandlers["fetchExternal"] = tmdbStub) {
     const testDb = await createTestDb();
     handles.push(testDb);
     const media = await testDb.writeDb
@@ -110,7 +111,7 @@ describe("BrowseService", () => {
     const app = createApiApp({
       dbRead: testDb.readDb,
       dbWrite: testDb.writeDb,
-      outbound: createFakeOutboundClient({ fetchExternal: tmdbStub }),
+      outbound: createFakeOutboundClient({ fetchExternal }),
       config: { baseUrl: TEST_BASE_URL, authSecret: TEST_AUTH_SECRET },
     });
     const rpc = createRpcClients((req) => app.fetchInternal(req), {
@@ -162,6 +163,51 @@ describe("BrowseService", () => {
       ["tmdb:tv:95479", mediaId],
       ["tmdb:movie:777", null],
     ]);
+  });
+
+  test("Search keeps library order when the second card returns first", async () => {
+    let releaseFirst!: () => void;
+    const secondStarted = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const { rpc, testDb, mediaId } = await setup(async (req) => {
+      if (req.url.includes("/tv/95479")) await secondStarted;
+      if (req.url.includes("/tv/1399")) releaseFirst();
+      return tmdbStub(req);
+    });
+    const older = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        title: "咒术前传",
+        baseline: "tmdb",
+        updated_at: new Date("2000-01-01"),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: older.id,
+        status: "confirmed",
+        namespace: "tmdb",
+        native_id: "tv:1399",
+        is_external_id: true,
+      })
+      .execute();
+
+    const res = await rpc.browse.search({ query: "咒术", limit: 2 });
+    expect(res.items.map((card) => card.mediaId)).toEqual([mediaId, older.id]);
+  });
+
+  test("Search accepts 200 characters and rejects longer queries", async () => {
+    const { rpc } = await setup();
+    const query = "🍿".repeat(200);
+    await rpc.browse.search({ query });
+    expect(await expectRpcError(rpc.browse.search({ query: `${query}x` }))).toMatchObject({
+      status: 400,
+      code: "INVALID_QUERY",
+    });
   });
 
   test("ListDemands returns open platform demands, most wanted first, with cards", async () => {

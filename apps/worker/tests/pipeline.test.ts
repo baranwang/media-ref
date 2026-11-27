@@ -15,7 +15,7 @@ import {
   type JobQueueMessage,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
-import { afterEach, describe, expect, test } from "vite-plus/test";
+import { afterEach, describe, expect, test, vi } from "vite-plus/test";
 import workerDefault, { createBackgroundWorker } from "../src/index.ts";
 
 interface TrackedMessage {
@@ -90,6 +90,7 @@ describe("Background Worker pipeline", () => {
   const handles: TestDbHandle[] = [];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     while (handles.length > 0) {
       const handle = handles.pop();
       if (handle) {
@@ -407,6 +408,228 @@ describe("Background Worker pipeline", () => {
     });
   });
 
+  test("only ordinary jobs can be reclaimed six minutes after exploration and ordinary jobs are claimed together", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const t0 = new Date("2026-11-23T12:00:00Z");
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { jobTypes: ["exploration", "echo"], enableExplorationScheduling: false },
+    });
+    const { job: exploration } = await enqueueJob(testDb.writeDb, {
+      jobType: "exploration",
+      runAfter: t0,
+    });
+    const { job: ordinary } = await enqueueJob(testDb.writeDb, { jobType: "echo", runAfter: t0 });
+    await worker.scheduled(createScheduledController(t0));
+    expect(emitted).toHaveLength(2);
+    expect((await getJobById(testDb.readDb, exploration.id))?.leaseExpiresAt).toEqual(
+      new Date(t0.getTime() + 10 * 60_000),
+    );
+    emitted.length = 0;
+    await worker.scheduled(createScheduledController(new Date(t0.getTime() + 6 * 60_000)));
+    expect(emitted).toEqual([expect.objectContaining({ jobId: ordinary.id, leaseGeneration: 2 })]);
+  });
+
+  test("late exploration delivery keeps its generation through the original deadline", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const t0 = Date.parse("2026-11-23T12:00:00Z");
+    let now = new Date(t0);
+    const media = await testDb.writeDb
+      .insertInto("media")
+      .values({ type: "movie", baseline: "tmdb", title: "Late delivery" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const demand = await testDb.writeDb
+      .insertInto("demands")
+      .values({ media_id: media.id, namespace_group: "platform", next_eligible_at: now })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    let signalStarted!: () => void;
+    let finish!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const generations: number[] = [];
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      now: () => now,
+      config: { jobTypes: ["exploration"], exploration: { dailyBudget: 10 } },
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      explorationExecutor: async (ctx) => {
+        generations.push(ctx.jobLeaseGeneration);
+        if (generations.length === 1) {
+          signalStarted();
+          await running;
+        }
+        return {
+          platformOutcomes: [{ namespace: "bilibili", status: "not_found", reason: "absent" }],
+        };
+      },
+    });
+    await worker.scheduled();
+    expect(emitted).toHaveLength(1);
+    now = new Date(t0 + 6 * 60_000);
+    const message = emitted[0]!;
+    const first = worker.queue(createQueueBatch([message], now).batch);
+    await started;
+    now = new Date(t0 + 10 * 60_000);
+    let tick, duplicate;
+    try {
+      [tick, duplicate] = await Promise.all([
+        worker.scheduled(),
+        worker.queue(createQueueBatch([message], now).batch),
+      ]);
+    } finally {
+      now = new Date(t0 + 11 * 60_000);
+      finish();
+    }
+    expect((await first).completed).toBe(1);
+    expect(generations).toEqual([1]);
+    expect(duplicate.discarded).toBe(1);
+    expect(tick.claimed).toBe(0);
+    expect(await getJobById(testDb.readDb, message.jobId)).toMatchObject({
+      status: "completed",
+      leaseGeneration: 1,
+      attempts: 1,
+    });
+    expect(
+      await testDb.readDb
+        .selectFrom("demands")
+        .select(["status", "not_found_count"])
+        .where("id", "=", demand.id)
+        .executeTakeFirst(),
+    ).toEqual({ status: "not_found", not_found_count: 1 });
+  });
+
+  test("expiry and concurrent reclaim fence exploration starts, and a crashed execution is reclaimed", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const t0 = Date.parse("2026-11-23T12:00:00Z");
+    let now = new Date(t0);
+    const emitted: JobQueueMessage[] = [];
+    const generations: number[] = [];
+    let signalStarted!: () => void;
+    let finish!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      now: () => now,
+      config: { jobTypes: ["exploration"], enableExplorationScheduling: false },
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      handlers: {
+        async exploration(ctx) {
+          generations.push(ctx.job.leaseGeneration);
+          if (ctx.job.leaseGeneration === 2) {
+            signalStarted();
+            await running;
+          }
+          return { status: "completed", result: { generation: ctx.job.leaseGeneration } };
+        },
+      },
+    });
+    const { job } = await enqueueJob(testDb.writeDb, { jobType: "exploration", runAfter: now });
+    await worker.scheduled();
+    const first = emitted[0]!;
+    const deliver = (msg: JobQueueMessage) => worker.queue(createQueueBatch([msg], now).batch);
+    now = new Date(t0 + 10 * 60_000);
+    expect((await deliver(first)).discarded).toBe(1);
+    const [late, tick] = await Promise.all([deliver(first), worker.scheduled()]);
+    expect(late.discarded).toBe(1);
+    expect(tick.claimed).toBe(1);
+    expect((await deliver(first)).discarded).toBe(1);
+    expect(generations).toEqual([]);
+    now = new Date(t0 + 11 * 60_000);
+    const stalled = deliver(emitted[1]!);
+    await started;
+    try {
+      now = new Date(t0 + 21 * 60_000);
+      expect((await worker.scheduled()).claimed).toBe(1);
+      expect((await deliver(emitted[2]!)).completed).toBe(1);
+    } finally {
+      finish();
+    }
+    expect((await stalled).discarded).toBe(1);
+    expect(generations).toEqual([2, 3]);
+    expect(await getJobById(testDb.readDb, job.id)).toMatchObject({
+      attempts: 3,
+      result: { generation: 3 },
+    });
+  });
+
+  test("an older exploration message is redispatched without spending its last attempt", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const now = new Date("2026-11-23T12:00:00Z");
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      now: () => now,
+      config: { jobTypes: ["exploration"], enableExplorationScheduling: false },
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      handlers: {
+        async exploration() {
+          return { status: "completed" };
+        },
+      },
+    });
+    const { job } = await enqueueJob(testDb.writeDb, {
+      jobType: "exploration",
+      runAfter: now,
+      maxAttempts: 1,
+    });
+    await worker.scheduled();
+    const legacy = { ...emitted[0]! };
+    delete legacy.dispatchLeaseExpiresAt;
+    await worker.queue(createQueueBatch([legacy], now).batch);
+    expect(await getJobById(testDb.readDb, job.id)).toMatchObject({
+      status: "pending",
+      attempts: 0,
+    });
+    await worker.scheduled();
+    const { completed, discarded } = await worker.queue(
+      createQueueBatch([legacy, emitted[1]!], now).batch,
+    );
+    expect({ completed, discarded }).toEqual({ completed: 1, discarded: 1 });
+    expect(await getJobById(testDb.readDb, job.id)).toMatchObject({
+      status: "completed",
+      attempts: 1,
+      leaseGeneration: 2,
+    });
+  });
+
   test("queue dispatch failure releases lease and allows re-claim on a subsequent scheduled tick", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -421,6 +644,7 @@ describe("Background Worker pipeline", () => {
       runAfter: t0,
     });
 
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     let sendCalls = 0;
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -430,7 +654,7 @@ describe("Background Worker pipeline", () => {
         async send(message) {
           sendCalls += 1;
           if (sendCalls === 1) {
-            throw new Error("Simulated Cloudflare Queue send failure");
+            throw new Error("Queue HTTP 503: private response body");
           }
           emitted.push(message);
         },
@@ -449,6 +673,16 @@ describe("Background Worker pipeline", () => {
     });
     expect(emitted).toHaveLength(0);
 
+    expect(logged.mock.calls).toEqual([
+      [
+        {
+          event: "job_dispatch_failed",
+          jobId: job.id,
+          jobType: "record_marker",
+          error: "Upstream HTTP 503",
+        },
+      ],
+    ]);
     const releasedJob = await getJobById(testDb.readDb, job.id);
     expect(releasedJob?.status).toBe("pending");
     expect(releasedJob?.leaseGeneration).toBe(1);
@@ -482,6 +716,35 @@ describe("Background Worker pipeline", () => {
       .where("key", "=", "marker:dispatch-recovery")
       .executeTakeFirstOrThrow();
     expect(meta.value).toBe("dispatched-on-retry");
+  });
+
+  test("a failed evidence sweep still dispatches due jobs", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const now = new Date("2026-11-23T13:00:00Z");
+    const { job } = await enqueueJob(testDb.writeDb, { jobType: "echo", runAfter: now });
+    // Simulate a schema mismatch in this test's database, limited to the evidence sweep.
+    await testDb.writeDb.schema
+      .alterTable("change_requests")
+      .renameTo("unavailable_change_requests")
+      .execute();
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      config: { jobTypes: [EVIDENCE_CHECK_JOB_TYPE, "echo"] },
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+    });
+    expect(await worker.scheduled(createScheduledController(now))).toEqual({
+      claimed: 1,
+      dispatched: 1,
+      dispatchFailed: 0,
+    });
+    expect(emitted).toEqual([expect.objectContaining({ jobId: job.id, leaseGeneration: 1 })]);
   });
 
   test("retryable handler errors reschedule with backoff and fail once maxAttempts are exhausted", async () => {
@@ -711,6 +974,7 @@ describe("Background Worker pipeline", () => {
       ENABLE_DAILY_TMDB_EXPORTS_SYNC: "false",
     };
 
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
     await workerDefault.scheduled(createScheduledController(t0), env, ctx);
     expect(emitted).toHaveLength(1);
     expect(emitted[0]?.jobId).toBe(job.id);
@@ -718,6 +982,20 @@ describe("Background Worker pipeline", () => {
     const { batch, tracked } = createQueueBatch(emitted, t0);
     await workerDefault.queue(batch, env, ctx);
     await Promise.all(pending);
+    expect(logged.mock.calls).toEqual([
+      [{ event: "scheduled_run", claimed: 1, dispatched: 1, dispatchFailed: 0 }],
+      [
+        {
+          event: "queue_batch",
+          processed: 1,
+          completed: 1,
+          discarded: 0,
+          rescheduled: 0,
+          failed: 0,
+          retriedInQueue: 0,
+        },
+      ],
+    ]);
 
     expect(tracked[0]?.acked).toBe(true);
     const completedJob = await getJobById(testDb.readDb, job.id);

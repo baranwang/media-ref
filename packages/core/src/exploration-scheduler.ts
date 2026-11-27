@@ -32,6 +32,9 @@ import {
   DEFAULT_NOT_FOUND_BACKOFF_SECONDS,
   isMediaDemandCoveredInTx,
   mergeExternalKeyDemandsIntoMedia,
+  hasCorrectionForDemandRoundInTx,
+  settleDemandAfterSubmissionInTx,
+  settleOrphanedReviewDemandsInTx,
 } from "./demands.ts";
 
 export { computeNotFoundBackoffSeconds, DEFAULT_NOT_FOUND_BACKOFF_SECONDS } from "./demands.ts";
@@ -68,6 +71,17 @@ export const DEFAULT_EXPLORATION_TRANSIENT_RETRY_DELAY_MS = 60 * 60 * 1000;
 const UTC_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const POSITIVE_INT_STRING_PATTERN = /^[1-9]\d*$/;
 const EXPORT_UPSERT_CHUNK_SIZE = 1000;
+const MAX_TMDB_EXPORT_AGE_DAYS = 3;
+const INVALID_KEY_RETRY_DELAY_MS = 30 * 86_400_000;
+
+function invalidKeyUpdate(now: Date) {
+  return {
+    status: "invalid_key" as const,
+    next_eligible_at: new Date(now.getTime() + INVALID_KEY_RETRY_DELAY_MS),
+    lease_expires_at: null,
+    updated_at: now,
+  };
+}
 const EXTERNAL_ID_NAMESPACE_SET: ReadonlySet<string> = new Set(EXTERNAL_ID_NAMESPACES);
 
 export interface ExplorationSchedulerConfig {
@@ -190,6 +204,13 @@ export type PlatformExplorationOutcome =
       nativeId?: string;
       /** Written straight into the library (agent external ID), no change request to wait for. */
       directWrite?: boolean;
+      durationMs?: number;
+    }
+  | {
+      namespace: Namespace;
+      status: "rejected";
+      changeRequestId: string;
+      reason: string;
       durationMs?: number;
     }
   | {
@@ -835,26 +856,8 @@ export async function scheduleExplorationJobs(
     eligibleGroups.push("catalog");
   }
 
-  if (eligibleGroups.length === 0) {
-    const existingBudget = await db
-      .selectFrom("exploration_daily_budget")
-      .select("consumed")
-      .where("budget_date", "=", budgetDate)
-      .executeTakeFirst();
-    const consumedBefore = existingBudget?.consumed ?? 0;
-    return {
-      budgetDate,
-      dailyBudget: config.dailyBudget,
-      consumedBefore,
-      consumedAfter: consumedBefore,
-      remainingBudget: Math.max(0, config.dailyBudget - consumedBefore),
-      invalidKeysMarked: 0,
-      scheduledCount: 0,
-      jobs: [],
-    };
-  }
-
   return db.transaction().execute(async (trx) => {
+    await settleOrphanedReviewDemandsInTx(trx, now);
     await trx
       .insertInto("exploration_daily_budget")
       .values({
@@ -875,7 +878,12 @@ export async function scheduleExplorationJobs(
     const consumedBefore = budgetRow.consumed;
     const remainingBefore = Math.max(0, config.dailyBudget - consumedBefore);
     const tokensExhausted = Number(budgetRow.tokens_used) >= config.dailyTokenBudget;
-    if (remainingBefore <= 0 || tokensExhausted || config.batchSize <= 0) {
+    if (
+      eligibleGroups.length === 0 ||
+      remainingBefore <= 0 ||
+      tokensExhausted ||
+      config.batchSize <= 0
+    ) {
       return {
         budgetDate,
         dailyBudget: config.dailyBudget,
@@ -890,12 +898,9 @@ export async function scheduleExplorationJobs(
 
     const maxToClaim = Math.min(config.batchSize, remainingBefore);
 
-    const exportTypeRows = await trx
-      .selectFrom("tmdb_daily_export_ids")
-      .select("media_type")
-      .distinct()
-      .execute();
-    const syncedExportTypes = new Set<MediaType>(exportTypeRows.map((row) => row.media_type));
+    const oldestExportDate = formatUtcDate(
+      new Date(now.getTime() - MAX_TMDB_EXPORT_AGE_DAYS * 86_400_000),
+    );
 
     const scheduledJobs: BackgroundJob[] = [];
     let consumedDelta = 0;
@@ -909,11 +914,13 @@ export async function scheduleExplorationJobs(
         .where("namespace_group", "in", eligibleGroups)
         .where((eb) =>
           eb.or([
-            eb.and([eb("status", "in", ["open", "not_found"]), eb("next_eligible_at", "<=", now)]),
+            eb.and([
+              eb("status", "in", ["open", "not_found", "invalid_key"]),
+              eb("next_eligible_at", "<=", now),
+            ]),
             eb.and([
               eb("status", "=", "leased"),
-              eb("lease_expires_at", "is not", null),
-              eb("lease_expires_at", "<=", now),
+              eb.or([eb("lease_expires_at", "is", null), eb("lease_expires_at", "<=", now)]),
             ]),
           ]),
         )
@@ -938,11 +945,7 @@ export async function scheduleExplorationJobs(
           if (!parsedKey) {
             await trx
               .updateTable("demands")
-              .set({
-                status: "invalid_key",
-                lease_expires_at: null,
-                updated_at: now,
-              })
+              .set(invalidKeyUpdate(now))
               .where("id", "=", demand.id)
               .execute();
             invalidKeysMarked += 1;
@@ -955,11 +958,7 @@ export async function scheduleExplorationJobs(
             if (!existingByKey) {
               await trx
                 .updateTable("demands")
-                .set({
-                  status: "invalid_key",
-                  lease_expires_at: null,
-                  updated_at: now,
-                })
+                .set(invalidKeyUpdate(now))
                 .where("id", "=", demand.id)
                 .execute();
               invalidKeysMarked += 1;
@@ -973,11 +972,7 @@ export async function scheduleExplorationJobs(
             if (!tmdbParsed) {
               await trx
                 .updateTable("demands")
-                .set({
-                  status: "invalid_key",
-                  lease_expires_at: null,
-                  updated_at: now,
-                })
+                .set(invalidKeyUpdate(now))
                 .where("id", "=", demand.id)
                 .execute();
               invalidKeysMarked += 1;
@@ -985,28 +980,38 @@ export async function scheduleExplorationJobs(
               continue;
             }
 
-            if (syncedExportTypes.has(tmdbParsed.type)) {
-              const exportMatch = await trx
-                .selectFrom("tmdb_daily_export_ids")
-                .select("tmdb_id")
-                .where("media_type", "=", tmdbParsed.type)
-                .where("tmdb_id", "=", tmdbParsed.id)
-                .executeTakeFirst();
-
-              if (!exportMatch) {
-                await trx
-                  .updateTable("demands")
-                  .set({
-                    status: "invalid_key",
-                    lease_expires_at: null,
-                    updated_at: now,
-                  })
-                  .where("id", "=", demand.id)
-                  .execute();
-                invalidKeysMarked += 1;
-                skippedInBatch += 1;
-                continue;
-              }
+            const latestExport = await trx
+              .selectFrom("tmdb_daily_export_ids")
+              .select("exported_date")
+              .select((eb) =>
+                eb
+                  .exists(
+                    eb
+                      .selectFrom("tmdb_daily_export_ids as ids")
+                      .select("ids.tmdb_id")
+                      .where("ids.media_type", "=", tmdbParsed.type)
+                      .where("ids.tmdb_id", "=", tmdbParsed.id),
+                  )
+                  .as("includes_id"),
+              )
+              .where("media_type", "=", tmdbParsed.type)
+              .orderBy("exported_date", "desc")
+              .limit(1)
+              .executeTakeFirst();
+            if (
+              latestExport &&
+              latestExport.exported_date >= oldestExportDate &&
+              latestExport.exported_date <= budgetDate &&
+              !latestExport.includes_id
+            ) {
+              await trx
+                .updateTable("demands")
+                .set(invalidKeyUpdate(now))
+                .where("id", "=", demand.id)
+                .execute();
+              invalidKeysMarked += 1;
+              skippedInBatch += 1;
+              continue;
             }
           }
         } else {
@@ -1430,11 +1435,7 @@ export function createExplorationJobHandler(
           async onCommit(trx) {
             await trx
               .updateTable("demands")
-              .set({
-                status: "invalid_key",
-                lease_expires_at: null,
-                updated_at: ctx.now,
-              })
+              .set(invalidKeyUpdate(ctx.now))
               .where("id", "=", activeDemandId)
               .where("status", "=", "leased")
               .where("lease_generation", "=", activeDemandLeaseGeneration)
@@ -1481,11 +1482,7 @@ export function createExplorationJobHandler(
             async onCommit(trx) {
               await trx
                 .updateTable("demands")
-                .set({
-                  status: "invalid_key",
-                  lease_expires_at: null,
-                  updated_at: ctx.now,
-                })
+                .set(invalidKeyUpdate(ctx.now))
                 .where("id", "=", activeDemandId)
                 .where("status", "=", "leased")
                 .where("lease_generation", "=", activeDemandLeaseGeneration)
@@ -1731,25 +1728,6 @@ export function createExplorationJobHandler(
             item.namespaceGroup === lockedDemand.namespace_group && item.season === targetSeason,
         );
 
-        // Reset any sibling rows created from splitting a seasonless TV demand so they aren't stranded in 'leased'
-        for (const item of merged.demands) {
-          if (
-            item.id !== mergedTarget?.id &&
-            item.status === "leased" &&
-            item.leaseExpiresAt === null
-          ) {
-            await trx
-              .updateTable("demands")
-              .set({
-                status: "open",
-                lease_expires_at: null,
-                updated_at: ctx.now,
-              })
-              .where("id", "=", item.id)
-              .execute();
-          }
-        }
-
         if (targetAlreadyActivelyLeased || !mergedTarget) {
           return {
             kind: "merged_into_active" as const,
@@ -1842,11 +1820,7 @@ export function createExplorationJobHandler(
         async onCommit(trx) {
           await trx
             .updateTable("demands")
-            .set({
-              status: "invalid_key",
-              lease_expires_at: null,
-              updated_at: ctx.now,
-            })
+            .set(invalidKeyUpdate(ctx.now))
             .where("id", "=", activeDemandId)
             .where("status", "=", "leased")
             .where("lease_generation", "=", activeDemandLeaseGeneration)
@@ -1882,9 +1856,11 @@ export function createExplorationJobHandler(
     const hasTransientError = outcomes.some((o) => o.status === "transient_error");
     const hasNotFound = outcomes.some((o) => o.status === "not_found");
 
-    let demandOutcome: "submitted" | "not_found" | "transient_error";
+    let demandOutcome: "rejected" | "submitted" | "not_found" | "transient_error";
     if (hasSubmitted && !hasTransientError) {
       demandOutcome = "submitted";
+    } else if (!hasTransientError && outcomes.some((o) => o.status === "rejected")) {
+      demandOutcome = "rejected";
     } else if (hasNotFound && !hasSubmitted && !hasTransientError) {
       demandOutcome = "not_found";
     } else {
@@ -1991,26 +1967,14 @@ export function createExplorationJobHandler(
           return;
         }
 
-        if (demandOutcome === "submitted") {
-          // Submitted is not satisfied: the demand waits for its change requests to take effect.
-          // If one was already applied (fast evidence check), coverage is there and it is fulfilled.
-          const covered = await isMediaDemandCoveredInTx(trx, {
-            mediaId: targetMedia.id,
-            season: activeSeason,
-            namespaceGroup: payload.namespaceGroup,
-          });
-          await trx
-            .updateTable("demands")
-            .set({
-              status: covered ? "fulfilled" : "awaiting_review",
-              last_explored_at: ctx.now,
-              lease_expires_at: null,
-              updated_at: ctx.now,
-            })
-            .where("id", "=", lockedDemand.id)
-            .where("status", "=", "leased")
-            .where("lease_generation", "=", activeDemandLeaseGeneration)
-            .execute();
+        const corrected = await hasCorrectionForDemandRoundInTx(trx, lockedDemand);
+        if (corrected || demandOutcome === "submitted" || demandOutcome === "rejected") {
+          await settleDemandAfterSubmissionInTx(
+            trx,
+            { ...lockedDemand, media_id: targetMedia.id },
+            ctx.now,
+            corrected,
+          );
           return;
         }
 

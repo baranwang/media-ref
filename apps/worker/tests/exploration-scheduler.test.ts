@@ -6,6 +6,10 @@ import {
   bilibiliAdapter,
   createAdapterRegistry,
   createChangeRequest,
+  createExplorationAgentExecutor,
+  createExplorationJobHandler,
+  ensureExplorationAgentUser,
+  scheduleExplorationJobs,
   createFakeOutboundClient,
   createTier1Adapter,
   EVIDENCE_CHECK_JOB_TYPE,
@@ -235,6 +239,46 @@ describe("Exploration scheduler (#28)", () => {
     expect(executedContexts).toHaveLength(0);
   });
 
+  test("a stale TV export allows exploration even when the movie export is fresh", async () => {
+    const handle = await createTestDb();
+    handles.push(handle);
+    const db = handle.writeDb;
+    const now = new Date("2026-11-27T00:00:00Z");
+    await seedTmdbExportIds(db, [
+      { mediaType: "tv", tmdbId: "1", exportedDate: "2026-11-23" },
+      { mediaType: "movie", tmdbId: "1", exportedDate: "2026-11-24" },
+    ]);
+    for (const key of ["tmdb:tv:2", "tmdb:movie:2"]) {
+      await recordDemandForRead(db, { rawKey: key, queryResult: { kind: "not_found", key }, now });
+    }
+    const result = await scheduleExplorationJobs(db, { now });
+    expect(result.jobs).toMatchObject([{ payload: { externalKey: "tmdb:tv:2" } }]);
+    expect(result.invalidKeysMarked).toBe(1);
+    expect((await listDemands(db, { externalKey: "tmdb:movie:2" }))[0]?.status).toBe("invalid_key");
+  });
+
+  test("an invalid key is retried at the end of its 30-day delay", async () => {
+    const handle = await createTestDb();
+    handles.push(handle);
+    const db = handle.writeDb;
+    const now = new Date("2026-11-27T23:59:00Z");
+    const key = "tmdb:tv:2";
+    await recordDemandForRead(db, { rawKey: key, queryResult: { kind: "not_found", key }, now });
+    await seedTmdbExportIds(db, [{ mediaType: "tv", tmdbId: "1" }], "2026-11-27");
+    expect((await scheduleExplorationJobs(db, { now })).invalidKeysMarked).toBe(1);
+    const retryAt = new Date("2026-12-27T23:59:00Z");
+    expect((await listDemands(db, { externalKey: key }))[0]).toMatchObject({
+      status: "invalid_key",
+      nextEligibleAt: retryAt.toISOString(),
+    });
+    expect(
+      (await scheduleExplorationJobs(db, { now: new Date(retryAt.getTime() - 1) })).jobs,
+    ).toHaveLength(0);
+    expect((await scheduleExplorationJobs(db, { now: retryAt })).jobs).toMatchObject([
+      { payload: { externalKey: key } },
+    ]);
+  });
+
   test("verifies non-TMDB external keys against their catalog at exploration start (404 -> invalid_key, 503 -> retry, zero media)", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -327,7 +371,10 @@ describe("Exploration scheduler (#28)", () => {
 
     // Non-existent Douban & Bangumi demands marked invalid_key
     const douban404 = await listDemands(testDb.readDb, { externalKey: "douban:99999999" });
-    expect(douban404[0]?.status).toBe("invalid_key");
+    expect(douban404[0]).toMatchObject({
+      status: "invalid_key",
+      nextEligibleAt: "2026-12-23T10:00:00.000Z",
+    });
 
     const bangumi404 = await listDemands(testDb.readDb, { externalKey: "bangumi:88888888" });
     expect(bangumi404[0]?.status).toBe("invalid_key");
@@ -446,13 +493,13 @@ describe("Exploration scheduler (#28)", () => {
     const readByImdb = await queryMediaByKey(testDb.readDb, "imdb:tt12343534");
     expect(readByImdb.kind).toBe("ok");
 
-    // External-key demand was merged into media-scoped season demands: S1 awaits its change request, S2 open
+    // External-key demand was merged into media-scoped season demands: S1 backs off without a change request, S2 stays eligible
     const extDemands = await listDemands(testDb.readDb, { externalKey: "tmdb:tv:95479" });
     expect(extDemands).toHaveLength(0);
 
     const mediaDemands = await listDemands(testDb.readDb, { mediaId: execCtx.media.id });
     const bySeason = new Map(mediaDemands.map((d) => [d.season, d]));
-    expect(bySeason.get(1)?.status).toBe("awaiting_review");
+    expect(bySeason.get(1)).toMatchObject({ status: "open", notFoundCount: 1 });
     expect(bySeason.get(1)?.lastExploredAt).toBe(t0.toISOString());
     expect(bySeason.get(2)?.status).toBe("open");
     expect(bySeason.get(2)?.leaseExpiresAt).toBeNull();
@@ -1765,6 +1812,154 @@ describe("Exploration scheduler (#28)", () => {
       .selectAll()
       .execute();
     expect(budgetRows.reduce((sum, row) => sum + row.consumed, 0)).toBe(0);
+  });
+
+  async function reviewFixture() {
+    const handle = await createTestDb();
+    handles.push(handle);
+    const db = handle.writeDb;
+    const now = new Date("2026-11-23T12:00:00Z");
+    const media = await db
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "Review fixture",
+        seasons: JSON.stringify([
+          { season: 1, episodeCount: 12 },
+          { season: 2, episodeCount: 12 },
+        ]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const demand = await db
+      .insertInto("demands")
+      .values({ media_id: media.id, season: 1, namespace_group: "platform", next_eligible_at: now })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const user = await ensureExplorationAgentUser(db);
+    const submit = (nativeId: string, season = 1, taskId?: string) =>
+      createChangeRequest(db, {
+        submitterUserId: user,
+        submitterType: "agent",
+        targetExternalKey: media.id,
+        demandId: demand.id,
+        taskId,
+        namespace: "bilibili",
+        nativeId,
+        variantDescription: "原声",
+        segments: [
+          { season, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+        initialStatus: "needs_review",
+        now,
+      });
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (request) => ({ status: 200, headers: {}, body: "{}", url: request.url }),
+    });
+    const approve = (id: string) =>
+      approveChangeRequest(db, outbound, { changeRequestId: id, reviewerUserId: user, now });
+    const reject = (id: string) =>
+      rejectChangeRequest(db, { changeRequestId: id, reviewerUserId: user });
+    const read = async () => (await listDemands(db, { mediaId: media.id }))[0]!;
+    const waitForReview = () =>
+      db
+        .updateTable("demands")
+        .set({ status: "awaiting_review" })
+        .where("id", "=", demand.id)
+        .execute();
+    const adapterRegistry = createTier3PlatformRegistry();
+    const schedule = async () =>
+      (await scheduleExplorationJobs(db, { now, adapterRegistry })).jobs[0]!;
+    const handler = createExplorationJobHandler({
+      adapterRegistry,
+      executor: createExplorationAgentExecutor(),
+    });
+    return {
+      db,
+      now,
+      demand,
+      submit,
+      approve,
+      reject,
+      read,
+      waitForReview,
+      schedule,
+      handler,
+      outbound,
+    };
+  }
+
+  test("a request rejected between exploration and its commit reopens the demand with backoff", async () => {
+    const f = await reviewFixture();
+    const job = await f.schedule();
+    const cr = await f.submit("ss1001", 1, job.id);
+    const outcome = await f.handler({ db: f.db, outbound: f.outbound, now: f.now, job });
+    expect(outcome).toMatchObject({ status: "completed", result: { demandOutcome: "submitted" } });
+    await f.reject(cr.id);
+    expect((await f.read()).status).toBe("leased");
+    if (outcome.status !== "completed" || !outcome.onCommit)
+      throw new Error("missing exploration commit");
+    await f.db.transaction().execute((trx) => outcome.onCommit!(trx, job));
+    expect(await f.read()).toMatchObject({
+      status: "open",
+      notFoundCount: 1,
+      leaseExpiresAt: null,
+      nextEligibleAt: "2026-11-24T12:00:00.000Z",
+    });
+  });
+
+  test("a delisted approval no longer keeps a demand waiting after rejection", async () => {
+    const f = await reviewFixture();
+    const first = await f.submit("ss1001");
+    const approved = await f.approve(first.id);
+    await f.db
+      .updateTable("associations")
+      .set({ status: "delisted" })
+      .where("id", "=", approved.associationId)
+      .execute();
+    await f.waitForReview();
+    const second = await f.submit("ss1002");
+    await f.reject(second.id);
+    expect(await f.read()).toMatchObject({ status: "open", notFoundCount: 1 });
+  });
+
+  test("each tick reopens an orphan after approval for another season, even without budget", async () => {
+    const f = await reviewFixture();
+    await f.waitForReview();
+    const cr = await f.submit("ss1002", 2);
+    const tick = () => scheduleExplorationJobs(f.db, { now: f.now, config: { dailyBudget: 0 } });
+    await tick();
+    expect((await f.read()).status).toBe("awaiting_review");
+    await f.approve(cr.id);
+    expect((await f.read()).status).toBe("awaiting_review");
+    await tick();
+    await tick();
+    expect(await f.read()).toMatchObject({
+      status: "open",
+      notFoundCount: 1,
+      nextEligibleAt: "2026-11-24T12:00:00.000Z",
+    });
+  });
+
+  test("redelivery of a rejected task records the rejection without another platform check", async () => {
+    const f = await reviewFixture();
+    const job = await f.schedule();
+    const cr = await f.submit("ss1001", 1, job.id);
+    await f.reject(cr.id);
+    const outcome = await f.handler({ db: f.db, outbound: f.outbound, now: f.now, job });
+    expect(outcome).toMatchObject({
+      status: "completed",
+      result: { platformOutcomes: [{ status: "rejected", changeRequestId: cr.id }] },
+    });
+    if (outcome.status !== "completed" || !outcome.onCommit)
+      throw new Error("missing exploration commit");
+    await f.db.transaction().execute((trx) => outcome.onCommit!(trx, job));
+    expect(await f.read()).toMatchObject({ status: "open", notFoundCount: 1 });
+    expect(await f.db.selectFrom("platform_checks").select("id").execute()).toEqual([]);
+    expect(await f.db.selectFrom("change_requests").select("id").execute()).toEqual([
+      { id: cr.id },
+    ]);
   });
 
   test("an awaiting_review demand reopens only after all its change requests are rejected, and is fulfilled on approval", async () => {

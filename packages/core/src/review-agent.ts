@@ -20,7 +20,10 @@
  */
 
 import {
+  EXTERNAL_ID_NAMESPACES,
   getNamespaceGroup,
+  isExternalIdNamespace,
+  parseExternalKey,
   validateVariantSegments,
   type NormalizedSegment,
 } from "@media-ref/client";
@@ -63,6 +66,7 @@ import {
   type JobHandler,
 } from "./jobs.ts";
 import { MAX_LEAD_NOTES_LENGTH, recordLead } from "./leads.ts";
+import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import {
   approveChangeRequestInTransaction,
   getChangeRequestById,
@@ -95,7 +99,12 @@ const LEASE_MARGIN_MS = 30_000;
 export const COMMENT_SESSIONS_PER_DAY = 3;
 
 /** Gate conflicts the review agent may never approve over (ADR 0003 §1). */
-const NON_OVERRIDABLE_CONFLICT_CODES: ReadonlySet<string> = new Set(["shared_id_conflict"]);
+const NON_OVERRIDABLE_CONFLICT_CODES: ReadonlySet<string> = new Set([
+  "shared_id_conflict",
+  "media_type_mismatch",
+  "segment_episode_out_of_range",
+  "segment_season_not_found",
+]);
 /** Wait before retrying a review that failed on an outage (model gateway, catalog). */
 const OUTAGE_RETRY_MS = 60 * 60 * 1000;
 /** Platform search finds other collections; a review judges the submitted one (ADR 0003 §6). */
@@ -133,15 +142,17 @@ function positionMisfit(
   const count = (season: number) => seasons.find((s) => s.season === season)?.episodeCount ?? null;
   // An open end runs to the collection's end (a season still airing), at most to the season's end.
   const available = collection.featureEpisodes.length;
-  const ended = segments.map((s) => ({
-    ...s,
-    episodeEnd:
-      s.episodeEnd ??
-      Math.min(
-        count(s.season) ?? Number.POSITIVE_INFINITY,
-        s.episodeStart + available - s.targetEpisodeStart,
-      ),
-  }));
+  const ended = segments
+    .filter((s) => !s.nonLinear)
+    .map((s) => ({
+      ...s,
+      episodeEnd:
+        s.episodeEnd ??
+        Math.min(
+          count(s.season) ?? Number.POSITIVE_INFINITY,
+          s.episodeStart + available - s.targetEpisodeStart,
+        ),
+    }));
   const misfit = checkSegmentsFitCollection(ended, collection, count);
   if (misfit) {
     return misfit;
@@ -352,10 +363,10 @@ const VERDICT_LABELS: Record<ReviewVerdict, string> = {
 const VERDICT_OUTCOMES: Record<ReviewVerdict, string> = {
   approve: "通过，关联已生效。",
   reject: "驳回。",
-  reject_with_correction: "驳回并改正，改正已交给探索 agent 重新提交。",
+  reject_with_correction: "驳回并改正，改正后的季已开放探索。",
   keep: "维持通过，关联不变。",
-  revoke: "撤下，这条关联已下线，对应季的需求重新开放。",
-  revoke_with_correction: "撤下并改正，这条关联已下线，改正已交给探索 agent 重新提交。",
+  revoke: "撤下，已撤回这张变更单，并重新核对对应季的需求。",
+  revoke_with_correction: "撤下并改正，已撤回这张变更单，改正后的季已开放探索。",
 };
 
 /** The agent's reply in the thread: the conclusion, what was done, and what was not followed. */
@@ -680,27 +691,125 @@ function describeCorrection(correction: ReviewCorrection): string {
     .join("；");
 }
 
-/** The review agent corrects a media's platform ID only once (ADR 0003 §4): its lead says it did. */
+async function correctionTargetKeys(db: Db, cr: ChangeRequestRecord): Promise<string[]> {
+  if (!cr.mediaId) {
+    const target = parseExternalKey(cr.targetExternalKey);
+    return target && isExternalIdNamespace(target.namespace) ? [cr.targetExternalKey] : [];
+  }
+  const rows = await db
+    .selectFrom("associations")
+    .select(["namespace", "native_id"])
+    .where("media_id", "=", cr.mediaId)
+    .where("is_external_id", "=", true)
+    .execute();
+  return EXTERNAL_ID_NAMESPACES.flatMap((ns) => {
+    const id = rows.find((row) => row.namespace === ns);
+    return id ? [`${ns}:${id.native_id}`] : [];
+  });
+}
+
+/** An external-key request may have acquired a media between submission and the deciding transaction. */
+async function correctionMediaId(
+  db: Db,
+  mediaId: string | null,
+  targetKey: string,
+): Promise<string | null> {
+  if (mediaId) {
+    return mediaId;
+  }
+  const target = parseExternalKey(targetKey);
+  if (!target) {
+    return null;
+  }
+  const matches = await db
+    .selectFrom("associations")
+    .select("media_id")
+    .distinct()
+    .where("namespace", "=", target.namespace)
+    .where("native_id", "=", target.nativeId)
+    .where("is_external_id", "=", isExternalIdNamespace(target.namespace))
+    .where("status", "=", "confirmed")
+    .limit(2)
+    .execute();
+  return matches.length === 1 ? matches[0]!.media_id : null;
+}
+
+/** The receipt survives later reviews; pre-receipt corrections may only have a lead. */
 async function correctedBefore(db: Db, cr: ChangeRequestRecord): Promise<boolean> {
-  const mediaKeys = cr.mediaId
-    ? (
-        await db
-          .selectFrom("associations")
-          .select(["namespace", "native_id"])
-          .where("media_id", "=", cr.mediaId)
-          .where("is_external_id", "=", true)
-          .execute()
-      ).map((a) => `${a.namespace}:${a.native_id}`)
-    : [];
+  const mediaKeys = await correctionTargetKeys(db, cr);
+  const targetKeys = [cr.targetExternalKey, ...mediaKeys];
+  const receipt = await db
+    .selectFrom("review_corrections as r")
+    .innerJoin("change_requests as origin", "origin.id", "r.change_request_id")
+    .select("r.change_request_id")
+    .where("r.namespace", "=", cr.namespace)
+    .where("r.native_id", "=", cr.nativeId)
+    .where((eb) =>
+      cr.mediaId
+        ? eb.or([
+            eb("r.media_id", "=", cr.mediaId),
+            // A media merge updates the originating change request, not the historical receipt.
+            eb("origin.media_id", "=", cr.mediaId),
+            // An unresolved receipt may since have acquired an unambiguous media association.
+            sql<boolean>`exists (
+        select 1 from associations a
+        where a.media_id = ${cr.mediaId} and a.status = 'confirmed'
+          and r.target_external_key = a.namespace || ':' || a.native_id
+          and not exists (select 1 from associations b where b.namespace = a.namespace
+            and b.native_id = a.native_id and b.status = 'confirmed' and b.media_id <> a.media_id)
+      )`,
+          ])
+        : eb("r.target_external_key", "=", cr.targetExternalKey),
+    )
+    .executeTakeFirst();
+  if (receipt) {
+    return true;
+  }
   const lead = await db
     .selectFrom("leads")
     .select("id")
     .where("reporter_user_id", "=", REVIEW_AGENT_USER_ID)
     .where("namespace", "=", cr.namespace)
     .where("native_id", "=", cr.nativeId)
-    .where("target_external_key", "in", [cr.targetExternalKey, ...mediaKeys])
+    .where("target_external_key", "in", targetKeys)
     .executeTakeFirst();
   return lead !== undefined;
+}
+
+/** Claim in the deciding transaction: two model sessions can both have been offered a correction. */
+async function claimCorrectionInTx(
+  trx: Transaction<Database>,
+  cr: ChangeRequestRecord,
+): Promise<boolean> {
+  const current = await trx
+    .selectFrom("change_requests")
+    .select("media_id")
+    .where("id", "=", cr.id)
+    .forUpdate()
+    .executeTakeFirstOrThrow();
+  // Serialize resolution as well as insertion when an unresolved target becomes a known media.
+  await acquireAdvisoryLock(
+    trx,
+    ADVISORY_LOCK_CLASSES.REVIEW_CORRECTION,
+    `${cr.namespace}:${cr.nativeId}`,
+  );
+  const mediaId = await correctionMediaId(trx, current.media_id, cr.targetExternalKey);
+  if (await correctedBefore(trx, { ...cr, mediaId })) {
+    return false;
+  }
+  const claim = await trx
+    .insertInto("review_corrections")
+    .values({
+      change_request_id: cr.id,
+      media_id: mediaId,
+      target_external_key: mediaId ? null : cr.targetExternalKey,
+      namespace: cr.namespace,
+      native_id: cr.nativeId,
+    })
+    .onConflict((oc) => oc.doNothing())
+    .returning("change_request_id")
+    .executeTakeFirst();
+  return claim !== undefined;
 }
 
 function parseReasons(raw: unknown): ReviewReason[] {
@@ -772,8 +881,27 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       };
     }
     const evidence = cr.evidence ?? {};
-    const reply = (trx: Transaction<Database>, record: JsonObject) =>
-      writeReplyInTx(trx, { cr, comments, record, now: ctx.now });
+    const reply = async (
+      trx: Transaction<Database>,
+      record: JsonObject,
+      intended?: ReviewVerdict,
+    ) => {
+      if (intended && record.verdict !== intended) {
+        // The fenced job row was written before onCommit; record what actually took effect.
+        await trx
+          .updateTable("background_jobs")
+          .set({
+            result: JSON.stringify({
+              changeRequestId,
+              verdict: record.verdict,
+              fallback: record.fallback,
+            }),
+          })
+          .where("id", "=", ctx.job.id)
+          .execute();
+      }
+      await writeReplyInTx(trx, { cr, comments, record, now: ctx.now });
+    };
 
     // Nothing a review could approve: reject now, without a model or a daily slot.
     const unreviewable = mode === "approved" ? null : unreviewableReason(cr);
@@ -836,7 +964,8 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
     const conflictCodes = gateConflictCodes(cr);
     const modeTools =
       mode === "approved" ? APPROVED_CONCLUSION_TOOL_DEFINITIONS : CONCLUSION_TOOL_DEFINITIONS;
-    const conclusionTools = (await correctedBefore(ctx.db, cr))
+    const mediaId = await correctionMediaId(ctx.db, cr.mediaId, cr.targetExternalKey);
+    const conclusionTools = (await correctedBefore(ctx.db, { ...cr, mediaId }))
       ? modeTools.filter((t) => !t.name.endsWith("_with_correction"))
       : modeTools;
     const conclusionNames = conclusionTools.map((t) => t.name).join(", ");
@@ -870,6 +999,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         registry,
         tmdb: tmdbGateway,
         collectionNamespaces: [cr.namespace],
+        reportLiveFetch: true,
         seasons: catalog.seasons ?? [],
         tmdbTvId:
           catalog.namespace === "tmdb"
@@ -926,13 +1056,28 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           return runQueryTool(toolCtx, name, args);
         },
         onQueryReplied: (call, result, step) => {
-          if (typeof result !== "object" || result === null || "error" in result) {
+          if (
+            typeof result !== "object" ||
+            result === null ||
+            !("live" in result) ||
+            result.live !== true ||
+            !("episodes" in result) ||
+            !Array.isArray(result.episodes) ||
+            result.episodes.length === 0
+          ) {
             return;
           }
           const args = call.arguments ?? {};
           if (call.name === "get_collection") {
-            const { namespace, canonicalId } = result as { namespace: string; canonicalId: string };
-            const key = `${namespace}:${canonicalId}`;
+            if (
+              !("namespace" in result) ||
+              typeof result.namespace !== "string" ||
+              !("canonicalId" in result) ||
+              typeof result.canonicalId !== "string"
+            ) {
+              return;
+            }
+            const key = `${result.namespace}:${result.canonicalId}`;
             const info = collected.get(key);
             if (info && !fetchedCollections.has(key)) {
               fetchedCollections.set(key, { info, step });
@@ -942,21 +1087,14 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             if (!fetchedSeasons.has(args.season)) {
               fetchedSeasons.set(args.season, step);
             }
-            const { episodes } = result as {
-              episodes?: Array<{ episode: number; airDate: string | null }>;
+            const episodes = result.episodes as Array<{ episode: number; airDate: string | null }>;
+            // A long season comes in windows (fromEpisode): keep the episodes of every call.
+            episodeAirYears[args.season] = {
+              ...episodeAirYears[args.season],
+              ...Object.fromEntries(
+                episodes.map((e) => [e.episode, e.airDate ? Number(e.airDate.slice(0, 4)) : null]),
+              ),
             };
-            if (episodes) {
-              // A long season comes in windows (fromEpisode): keep the episodes of every call.
-              episodeAirYears[args.season] = {
-                ...episodeAirYears[args.season],
-                ...Object.fromEntries(
-                  episodes.map((e) => [
-                    e.episode,
-                    e.airDate ? Number(e.airDate.slice(0, 4)) : null,
-                  ]),
-                ),
-              };
-            }
           }
         },
         wrapUpMessage: () =>
@@ -1055,19 +1193,24 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             await reply(trx, reviewAgent);
             return;
           }
-          const reason = [
-            `${VERDICT_LABELS[verdict]}：${concluded!.opinion}`,
-            ...(verdict === "revoke_with_correction"
-              ? [`改正：${describeCorrection(correction!)}`]
-              : []),
-            `留言：${comments.map((c) => c.content).join(" / ")}`,
-          ].join("\n");
           await sql`savepoint sp_review_agent_revoke`.execute(trx);
+          let applied = reviewAgent;
           try {
+            const duplicate =
+              verdict === "revoke_with_correction" && !(await claimCorrectionInTx(trx, cr));
+            if (duplicate) {
+              applied = record("revoke", "already_corrected");
+            }
+            const corrected = verdict === "revoke_with_correction" && !duplicate;
+            const reason = [
+              `${VERDICT_LABELS[corrected ? "revoke_with_correction" : "revoke"]}：${concluded!.opinion}`,
+              ...(corrected ? [`改正：${describeCorrection(correction!)}`] : []),
+              `留言：${comments.map((c) => c.content).join(" / ")}`,
+            ].join("\n");
             await revokeInTx(trx, cr, {
               reason,
-              evidence: { ...evidence, reviewAgent },
-              correction: verdict === "revoke_with_correction" ? correction : null,
+              evidence: { ...evidence, reviewAgent: applied },
+              correction: corrected ? correction : null,
               now: ctx.now,
             });
             await sql`release savepoint sp_review_agent_revoke`.execute(trx);
@@ -1079,12 +1222,16 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             if (error.code === "INVALID_CHANGE_REQUEST_STATE") {
               return; // Decided meanwhile.
             }
-            const kept = record("keep", `revoke_failed: ${error.code}`);
+            const detail = error.details?.[0];
+            const kept = record(
+              "keep",
+              `revoke_failed: ${error.code}${detail ? `: ${detail.message}` : ""}`,
+            );
             await keepInTx(trx, cr, { ...evidence, reviewAgent: kept }, ctx.now);
-            await reply(trx, kept);
+            await reply(trx, kept, verdict);
             return;
           }
-          await reply(trx, reviewAgent);
+          await reply(trx, applied, verdict);
         },
       };
     }
@@ -1149,7 +1296,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           ctx.now,
         )
       ) {
-        await reply(trx, rec);
+        await reply(trx, rec, reviewAgent.verdict as ReviewVerdict);
       }
     };
 
@@ -1158,6 +1305,11 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       result: { changeRequestId, verdict: reviewAgent.verdict, fallback },
       async onCommit(trx) {
         if (rejected) {
+          await sql`savepoint sp_review_agent_correct`.execute(trx);
+          if (!(await claimCorrectionInTx(trx, cr))) {
+            await rejectPlainly(trx, record("reject", "already_corrected"));
+            return;
+          }
           if (
             await rejectWithCorrectionInTx(
               trx,
@@ -1169,6 +1321,9 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             )
           ) {
             await reply(trx, reviewAgent);
+          } else {
+            // A stale decision did not correct anything.
+            await sql`rollback to savepoint sp_review_agent_correct`.execute(trx);
           }
           return;
         }
@@ -1231,8 +1386,8 @@ async function keepInTx(
 }
 
 /**
- * Takes back an approval (ADR 0003 amendment 2): the association is delisted, the request
- * rejected, and its seasons wanted again. With a correction, the corrected season is handed to
+ * Takes back an approval (ADR 0003 amendment 2) and rechecks coverage of the removed snapshot.
+ * With a correction, the corrected season is handed to
  * exploration (lead, explorable now) instead of backing off.
  */
 async function revokeInTx(
@@ -1245,7 +1400,7 @@ async function revokeInTx(
     now: Date;
   },
 ): Promise<void> {
-  await revokeChangeRequestInTx(trx, {
+  const { deletedSeasons } = await revokeChangeRequestInTx(trx, {
     changeRequestId: cr.id,
     reviewerUserId: REVIEW_AGENT_USER_ID,
     reason: input.reason,
@@ -1254,7 +1409,7 @@ async function revokeInTx(
   });
   await reopenDemandsAfterRevokeInTx(trx, {
     mediaId: cr.mediaId!,
-    seasons: cr.segments.map((s) => s.season),
+    seasons: deletedSeasons,
     // The corrected season is made explorable now below, with no not-found round.
     exceptSeason: input.correction?.season ?? null,
     namespaceGroup: getNamespaceGroup(cr.namespace),
@@ -1278,9 +1433,9 @@ function unreviewableReason(cr: ChangeRequestRecord): string | null {
   if (codes.length === 0 || cr.conflictReason !== codes[0]) {
     return cr.conflictReason ?? cr.decisionReason ?? "not_a_gate_conflict";
   }
-  const blocking = codes.filter((code) => NON_OVERRIDABLE_CONFLICT_CODES.has(code));
-  return blocking.length > 0
-    ? `non_overridable_conflict: ${[...new Set(blocking)].join(", ")}`
+  // A wrong season or episode range can still be corrected, but a shared ID points elsewhere.
+  return codes.includes("shared_id_conflict")
+    ? "non_overridable_conflict: shared_id_conflict"
     : null;
 }
 
@@ -1355,7 +1510,9 @@ function approvalBlocker(
   if (unexplained.length > 0) {
     return `no_reason_for: ${unexplained.join(", ")}`;
   }
-  return null;
+  const collection = fetched.fetchedCollections.get(`${cr.namespace}:${cr.nativeId}`)!;
+  const catalog = cr.evidence?.catalog as { seasons?: CatalogEvidence["seasons"] } | undefined;
+  return positionMisfit(cr.segments, collection, catalog?.seasons ?? []);
 }
 
 /**
@@ -1478,9 +1635,7 @@ async function rejectWithCorrectionInTx(
       reviewerUserId: REVIEW_AGENT_USER_ID,
       reason,
       evidence,
-      // Only a correction within the request's own seasons answers its demand; one to another
-      // season leaves that demand a normal not-found round.
-      corrected: cr.segments.some((s) => s.season === correction.season),
+      correctedSeason: correction.season,
       allowedStatuses: DECIDABLE_STATUSES,
       now,
     });
@@ -1505,17 +1660,20 @@ async function handOverCorrectionInTx(
   reason: string,
   now: Date,
 ): Promise<void> {
-  await recordLead(trx, {
-    targetExternalKey: cr.targetExternalKey,
-    namespace: cr.namespace,
-    nativeId: cr.nativeId,
-    season: correction.season,
-    segments: correction.segments,
-    variantDescription: cr.variantDescription,
-    notes: reason.slice(0, MAX_LEAD_NOTES_LENGTH),
-    reporterUserId: REVIEW_AGENT_USER_ID,
-    reporterKeyId: REVIEW_AGENT_KEY_ID,
-  });
+  const [targetExternalKey] = await correctionTargetKeys(trx, cr);
+  if (targetExternalKey) {
+    await recordLead(trx, {
+      targetExternalKey,
+      namespace: cr.namespace,
+      nativeId: cr.nativeId,
+      season: correction.season,
+      segments: correction.segments,
+      variantDescription: cr.variantDescription,
+      notes: reason.slice(0, MAX_LEAD_NOTES_LENGTH),
+      reporterUserId: REVIEW_AGENT_USER_ID,
+      reporterKeyId: REVIEW_AGENT_KEY_ID,
+    });
+  }
   await ensureDemandExplorableNowInTx(trx, {
     mediaId: cr.mediaId,
     externalKey: cr.targetExternalKey,

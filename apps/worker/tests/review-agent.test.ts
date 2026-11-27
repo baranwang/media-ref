@@ -1,12 +1,19 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import type { SegmentInput } from "@media-ref/client";
 import {
+  approveChangeRequest,
   bilibiliAdapter,
   createAdapterRegistry,
   createChangeRequest,
   createChangeRequestComment,
+  createReviewAgentJobHandler,
+  completeJobWithFencing,
+  getJobById,
   createDefaultAdapterRegistry,
   createFakeOutboundClient,
+  createExplorationJobHandler,
+  scheduleExplorationJobs,
+  rejectChangeRequest,
   enqueuePendingReviews,
   ensureExplorationAgentUser,
   EXPLORATION_AGENT_USER_ID,
@@ -456,6 +463,22 @@ describe("review agent (#75)", () => {
 
   test.each([
     {
+      name: "approve after an empty collection window",
+      model: approveAfter([
+        ["get_collection", { namespace: "bilibili", id: "ss28888", fromPosition: 99 }],
+        ["get_catalog_season", { season: 1 }],
+      ]),
+      fallback: "collection_not_fetched",
+    },
+    {
+      name: "approve after an empty season window",
+      model: approveAfter([
+        ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+        ["get_catalog_season", { season: 1, fromEpisode: 99 }],
+      ]),
+      fallback: "season_not_fetched: 1",
+    },
+    {
       name: "approve without fetching the collection",
       model: approveAfter([["get_catalog_season", { season: 1 }]]),
       fallback: "collection_not_fetched",
@@ -691,6 +714,108 @@ describe("review agent (#75)", () => {
     },
   );
 
+  test.each(["media_type_mismatch", "segment_episode_out_of_range", "segment_season_not_found"])(
+    "an explained %s cannot be approved",
+    async (code) => {
+      const ctx = track(await setup(approvesLikeLinglong));
+      const id = await ctx.submit();
+      await ctx.tick();
+      const evidence = (await ctx.changeRequest(id)).evidence!;
+      await ctx.testDb.writeDb
+        .updateTable("change_requests")
+        .where("id", "=", id)
+        .set({
+          conflict_reason: code,
+          evidence: JSON.stringify({ ...evidence, gate: { conflicts: [{ code }] } }),
+        })
+        .execute();
+      await ctx.drain();
+      expect(await ctx.changeRequest(id)).toMatchObject({
+        status: "rejected",
+        evidence: {
+          reviewAgent: {
+            verdict: "reject",
+            concluded: "approve",
+            fallback: `non_overridable_conflict: ${code}`,
+          },
+        },
+      });
+    },
+  );
+
+  test("a stored-only catalog season does not count as fetched", async () => {
+    const ctx = track(await setup(approvesLikeLinglong));
+    const id = await ctx.submit();
+    await ctx.tick();
+    const fetchExternal = ctx.outbound.fetchExternal.bind(ctx.outbound);
+    ctx.outbound.fetchExternal = (request) =>
+      request.namespace === "tmdb" && request.url.includes("/season/")
+        ? Promise.resolve(jsonResponse(request.url, {}, 503))
+        : fetchExternal(request);
+    await ctx.drain();
+    expect(await ctx.changeRequest(id)).toMatchObject({
+      status: "rejected",
+      evidence: { reviewAgent: { fallback: "season_not_fetched: 1" } },
+    });
+  });
+
+  test.each([
+    { nextPosition: 7, expected: "approved" },
+    { nextPosition: 6, expected: "rejected" },
+    { nextPosition: 12, expected: "rejected" },
+  ])(
+    "mixed approval checks linear positions only (second linear segment starts at $nextPosition)",
+    async ({ nextPosition, expected }) => {
+      const ctx = track(await setup(approvesLikeLinglong));
+      const id = await ctx.submit("ss28888", {
+        segments: [
+          {
+            season: 0,
+            episodeStart: 1,
+            episodeEnd: 4,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+            nonLinear: true,
+          },
+          { season: 1, episodeStart: 1, episodeEnd: 6, targetEpisodeStart: 1, baseline: "tmdb" },
+          {
+            season: 1,
+            episodeStart: 7,
+            episodeEnd: 12,
+            targetEpisodeStart: nextPosition,
+            baseline: "tmdb",
+          },
+        ],
+      });
+      await ctx.drain();
+      expect(await ctx.changeRequest(id)).toMatchObject({
+        status: expected,
+        evidence: {
+          reviewAgent: {
+            concluded: "approve",
+            verdict: expected === "approved" ? "approve" : "reject",
+          },
+        },
+      });
+    },
+  );
+
+  test("approval refuses segments extending past the fetched collection", async () => {
+    const ctx = track(await setup(approvesLikeLinglong));
+    const id = await ctx.submit("ss28888", {
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 6, baseline: "tmdb" },
+      ],
+    });
+    await ctx.drain();
+    expect(await ctx.changeRequest(id)).toMatchObject({
+      status: "rejected",
+      evidence: {
+        reviewAgent: { fallback: expect.stringContaining("segment reaches collection episode 17") },
+      },
+    });
+  });
+
   test("a model outage puts the review back for an hour instead of rejecting", async () => {
     const failing: ScriptedModel = () => {
       throw new Error("upstream 503");
@@ -842,11 +967,11 @@ describe("review agent (#75)", () => {
 
 const WIFE_KEY = "tmdb:tv:70001";
 const WIFE_OPINION = "这是 2026 年播出的一季，TMDB 第 8 季，不是第 6 季";
-const wifeSegments = (season: number): SegmentInput[] => [
+const wifeSegments = (season: number, episodeEnd = wifeEpisodeCount(season)): SegmentInput[] => [
   {
     season,
     episodeStart: 1,
-    episodeEnd: wifeEpisodeCount(season),
+    episodeEnd,
     targetEpisodeStart: 1,
     baseline: "tmdb",
   },
@@ -857,6 +982,38 @@ const correctionFor = (season: number) => ({
     { season, episodeStart: 1, episodeEnd: wifeEpisodeCount(season), targetEpisodeStart: 1 },
   ],
 });
+
+async function createWifeMedia(ctx: Ctx) {
+  const media = await ctx.testDb.writeDb
+    .insertInto("media")
+    .values({
+      type: "tv",
+      baseline: "tmdb",
+      title: "妻子的浪漫旅行",
+      original_title: "妻子的浪漫旅行",
+      year: 2018,
+      seasons: JSON.stringify(
+        WIFE_SEASON_YEARS.map((airYear, i) => ({
+          season: i + 1,
+          episodeCount: wifeEpisodeCount(i + 1),
+          airYear,
+        })),
+      ),
+    })
+    .returning("id")
+    .executeTakeFirstOrThrow();
+  await ctx.testDb.writeDb
+    .insertInto("associations")
+    .values({
+      status: "confirmed",
+      is_external_id: true,
+      media_id: media.id,
+      namespace: "tmdb",
+      native_id: "tv:70001",
+    })
+    .execute();
+  return media;
+}
 
 /** Fetches the collection and the corrected season, then rejects with that correction. */
 const correctsTo =
@@ -963,6 +1120,43 @@ describe("review agent: reject with correction (#76)", () => {
       }),
     ]);
   });
+
+  test.each([true, false])(
+    "a correction on a media ID rejects and reopens the demand (authority ID: %s)",
+    async (withId) => {
+      const ctx = track(await setup(correctsTo(8)));
+      const media = await createWifeMedia(ctx);
+      const id = await ctx.submit("ss77777", {
+        targetExternalKey: media.id,
+        segments: wifeSegments(6),
+      });
+      await ctx.tick(); // Collect the evidence before the external ID can disappear.
+      if (!withId) {
+        await ctx.testDb.writeDb
+          .deleteFrom("associations")
+          .where("media_id", "=", media.id)
+          .where("is_external_id", "=", true)
+          .execute();
+      }
+      await ctx.drain();
+      expect(await ctx.changeRequest(id)).toMatchObject({
+        target_external_key: `media:${media.id}`,
+        status: "rejected",
+        decision_reason: expect.stringContaining("改正：第 8 季"),
+      });
+      expect(await leads(ctx)).toEqual(
+        withId ? [expect.objectContaining({ target_external_key: WIFE_KEY, season: 8 })] : [],
+      );
+      expect(await demands(ctx)).toEqual([
+        expect.objectContaining({
+          media_id: media.id,
+          season: 8,
+          status: "open",
+          next_eligible_at: T0,
+        }),
+      ]);
+    },
+  );
 
   test("a correction that fails step 2 rejects the request plainly, keeping the opinion and the proposed correction", async () => {
     // Season 7 aired in 2024; the collection is from 2026.
@@ -1139,10 +1333,175 @@ describe("review agent: reject with correction (#76)", () => {
     expect(await leads(ctx)).toEqual([]);
   });
 
+  test("a correction with no authority ID survives later comments and applies only once across requests", async () => {
+    const ctx = track(await setup(correctsTo(8)));
+    const { id: mediaId } = await createWifeMedia(ctx);
+    const submit = () =>
+      ctx.submit("ss77777", { targetExternalKey: mediaId, segments: wifeSegments(6) });
+    const first = await submit();
+    await ctx.tick();
+    const ext = await ctx.testDb.writeDb
+      .deleteFrom("associations")
+      .where("media_id", "=", mediaId)
+      .where("is_external_id", "=", true)
+      .returning(["media_id", "namespace", "native_id", "status", "is_external_id"])
+      .executeTakeFirstOrThrow();
+    await ctx.drain();
+    expect(await ctx.changeRequest(first)).toMatchObject({
+      status: "rejected",
+      evidence: { reviewAgent: { verdict: "reject_with_correction" } },
+    });
+    expect(await leads(ctx)).toEqual([]);
+    for (const text of ["再改正一次", "请重试改正"]) {
+      await comment(ctx, first, text);
+      const calls = ctx.outbound.modelRequests.length;
+      await ctx.drain();
+      expect(ctx.outbound.modelRequests[calls]!.tools!.map((t) => t.name)).not.toContain(
+        "reject_with_correction",
+      );
+      expect(await ctx.changeRequest(first)).toMatchObject({
+        status: "rejected",
+        evidence: { reviewAgent: { verdict: "reject" } },
+      });
+    }
+    await ctx.testDb.writeDb.insertInto("associations").values(ext).execute();
+    const next = await submit();
+    const calls = ctx.outbound.modelRequests.length;
+    await ctx.drain();
+    expect(ctx.outbound.modelRequests[calls]!.tools!.map((t) => t.name)).not.toContain(
+      "reject_with_correction",
+    );
+    expect(await ctx.changeRequest(next)).toMatchObject({
+      status: "rejected",
+      evidence: { reviewAgent: { verdict: "reject" } },
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
+  test("racing corrections have one durable winner, and an aborted commit consumes no correction", async () => {
+    const ctx = track(await setup(correctsTo(8)));
+    const { id: mediaId } = await createWifeMedia(ctx);
+    const db = ctx.testDb.writeDb;
+    const submit = () =>
+      ctx.submit("ss77777", { targetExternalKey: mediaId, segments: wifeSegments(6) });
+    const ids = [await submit(), await submit()];
+    await ctx.tick(); // Evidence for both requests is now available to both sessions.
+    await db
+      .deleteFrom("associations")
+      .where("media_id", "=", mediaId)
+      .where("is_external_id", "=", true)
+      .execute();
+    await ctx.worker.scheduled(createScheduledController(T0));
+    const handler = createReviewAgentJobHandler({
+      dailyBudget: 10,
+      tmdbConfig: { accessToken: "fixture" },
+    });
+    const reviews = await Promise.all(
+      ctx.emitted
+        .filter((m) => m.jobType === "review_agent")
+        .map(async (m) => {
+          const job = (await getJobById(db, m.jobId))!;
+          const outcome = await handler({ db, outbound: ctx.outbound, job, now: T0 });
+          if (outcome.status !== "completed" || !outcome.onCommit)
+            throw new Error("expected a review decision");
+          expect(outcome.result?.verdict).toBe("reject_with_correction");
+          return {
+            jobId: job.id,
+            leaseGeneration: job.leaseGeneration,
+            result: outcome.result,
+            onCommit: outcome.onCommit,
+            now: T0,
+          };
+        }),
+    );
+    expect(reviews).toHaveLength(2);
+    const first = reviews[0]!;
+    await expect(
+      completeJobWithFencing(db, {
+        ...first,
+        onCommit: async (trx, job) => {
+          await first.onCommit(trx, job);
+          throw new Error("abort deciding transaction");
+        },
+      }),
+    ).rejects.toThrow("abort deciding transaction");
+    expect(await db.selectFrom("review_corrections").selectAll().execute()).toEqual([]);
+    expect(await demands(ctx)).toEqual([]);
+    const commits = await Promise.all(reviews.map((r) => completeJobWithFencing(db, r)));
+    expect(commits.every((c) => c.applied)).toBe(true);
+    const rows = await db.selectFrom("review_corrections").selectAll().execute();
+    expect(rows).toEqual([
+      expect.objectContaining({ media_id: mediaId, namespace: "bilibili", native_id: "ss77777" }),
+    ]);
+    for (const id of ids) {
+      const verdict = rows[0]!.change_request_id === id ? "reject_with_correction" : "reject";
+      expect(await ctx.changeRequest(id)).toMatchObject({
+        status: "rejected",
+        evidence: {
+          reviewAgent: {
+            verdict,
+            concluded: "reject_with_correction",
+            fallback: verdict === "reject" ? "already_corrected" : null,
+          },
+        },
+      });
+    }
+    const recorded = await Promise.all(reviews.map((r) => getJobById(db, r.jobId)));
+    expect(recorded.map((j) => j!.result?.verdict)).toEqual(
+      expect.arrayContaining(["reject", "reject_with_correction"]),
+    );
+    expect(await leads(ctx)).toEqual([]);
+    expect(await demands(ctx)).toHaveLength(1);
+  });
+
+  test("a receipt for an unresolved catalog key follows that key once it identifies a media", async () => {
+    const ctx = track(await setup(correctsTo(8)));
+    const { id: mediaId } = await createWifeMedia(ctx);
+    const origin = await ctx.submit("ss77777", {
+      targetExternalKey: "douban:1234",
+      segments: wifeSegments(6),
+      initialStatus: "needs_review",
+    });
+    const db = ctx.testDb.writeDb;
+    await db
+      .updateTable("change_requests")
+      .set({ status: "rejected" })
+      .where("id", "=", origin)
+      .execute();
+    await db
+      .insertInto("review_corrections")
+      .values({
+        change_request_id: origin,
+        namespace: "bilibili",
+        native_id: "ss77777",
+        target_external_key: "douban:1234",
+      })
+      .execute();
+    await db
+      .insertInto("associations")
+      .values({ media_id: mediaId, namespace: "douban", native_id: "1234", status: "confirmed" })
+      .execute();
+    const next = await ctx.submit("ss77777", {
+      targetExternalKey: mediaId,
+      segments: wifeSegments(6),
+    });
+    await ctx.drain();
+    expect(ctx.outbound.modelRequests[0]!.tools!.map((t) => t.name)).not.toContain(
+      "reject_with_correction",
+    );
+    expect(await ctx.changeRequest(next)).toMatchObject({
+      status: "rejected",
+      evidence: { reviewAgent: { verdict: "reject" } },
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
   test("the same media and platform ID is corrected only once: the second review cannot reject", async () => {
     const ctx = track(await setup(correctsTo(8)));
     await submitAsHuman(ctx);
     await ctx.drain();
+    // Corrections made before receipts existed may have only their lead left.
+    await ctx.testDb.writeDb.deleteFrom("review_corrections").execute();
     const callsAfterFirst = ctx.outbound.modelRequests.length;
 
     const second = await submitAsHuman(ctx);
@@ -1214,7 +1573,7 @@ describe("review agent: reject with correction (#76)", () => {
       name: "overlapping positions",
       segments: [
         { season: 1, episodeStart: 1, episodeEnd: 6, targetEpisodeStart: 1 },
-        { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 6 },
+        { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 6, baseline: "tmdb" },
       ],
     },
     {
@@ -1378,6 +1737,166 @@ describe("review agent: reject with correction (#76)", () => {
     ]);
   });
 
+  /** Stop after exploration has submitted a request; run its commit separately from review. */
+  async function leasedReview(season = 8, ordinary = false, mixed = false) {
+    const ctx = track(
+      await setup(
+        ordinary
+          ? (request) => reply(turnOf(request), [["reject", { opinion: "no match" }]])
+          : correctsTo(8),
+        {},
+        createDefaultAdapterRegistry(),
+        { jobTypes: ["evidence_check", "review_agent"] },
+      ),
+    );
+    const db = ctx.testDb.writeDb;
+    const media = await createWifeMedia(ctx);
+    const demand = await db
+      .insertInto("demands")
+      .values({
+        media_id: media.id,
+        season,
+        namespace_group: "platform",
+        not_found_count: 1,
+        next_eligible_at: T0,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const read = () =>
+      db.selectFrom("demands").selectAll().where("id", "=", demand.id).executeTakeFirstOrThrow();
+    const [job] = (await scheduleExplorationJobs(db, { now: T0 })).jobs;
+    if (!job) throw new Error("missing exploration job");
+    let requestId = "";
+    const handler = createExplorationJobHandler({
+      executor: async () => {
+        // The same-season submission includes more episodes than this collection has.
+        requestId = await ctx.submit("ss77777", {
+          targetExternalKey: WIFE_KEY,
+          segments: season === 8 && !mixed ? wifeSegments(8, 12) : wifeSegments(6),
+          demandId: demand.id,
+        });
+        const submitted = {
+          namespace: "bilibili",
+          status: "submitted",
+          changeRequestId: requestId,
+        } as const;
+        return {
+          platformOutcomes: mixed
+            ? [submitted, { namespace: "iqiyi", status: "transient_error", reason: "timeout" }]
+            : [submitted],
+        };
+      },
+    });
+    const outcome = await handler({ db, outbound: ctx.outbound, now: T0, job });
+    if (outcome.status !== "completed" || !outcome.onCommit)
+      throw new Error("missing exploration commit");
+    const commit = () => db.transaction().execute((trx) => outcome.onCommit!(trx, job));
+    const review = async () => {
+      expect((await ctx.drain()).map((m) => m.jobType)).toEqual(["evidence_check", "review_agent"]);
+      expect(await ctx.changeRequest(requestId)).toMatchObject({
+        status: "rejected",
+        evidence: { reviewAgent: { verdict: ordinary ? "reject" : "reject_with_correction" } },
+      });
+    };
+    const sibling = () =>
+      createChangeRequest(db, {
+        submitterUserId: EXPLORATION_AGENT_USER_ID,
+        targetExternalKey: WIFE_KEY,
+        namespace: "bilibili",
+        nativeId: "ss77778",
+        variantDescription: "原声",
+        segments: wifeSegments(8),
+        demandId: demand.id,
+        initialStatus: "needs_review",
+        now: T0,
+      });
+    return { ctx, db, review, commit, read, sibling };
+  }
+
+  test.each([
+    { name: "same season", season: 8, ordinary: false, mixed: false, backoff: false },
+    {
+      name: "same season with another platform unavailable",
+      season: 8,
+      ordinary: false,
+      mixed: true,
+      backoff: false,
+    },
+    { name: "different season", season: 6, ordinary: false, mixed: false, backoff: true },
+    { name: "ordinary rejection", season: 8, ordinary: true, mixed: false, backoff: true },
+  ])("review before exploration commits: $name", async ({ season, ordinary, mixed, backoff }) => {
+    const f = await leasedReview(season, ordinary, mixed);
+    await f.review();
+    expect(await f.read()).toMatchObject({ status: "leased", not_found_count: 1 });
+    await f.commit();
+    expect(await f.read()).toMatchObject({
+      status: "open",
+      lease_expires_at: null,
+      not_found_count: backoff ? 2 : 1,
+      next_eligible_at: backoff ? new Date(T0.getTime() + 259_200_000) : T0,
+    });
+  });
+
+  test("a same-season correction survives until the last pending request is rejected", async () => {
+    const f = await leasedReview();
+    await f.review();
+    const sibling = await f.sibling();
+    await f.commit();
+    expect(await f.read()).toMatchObject({ status: "awaiting_review", not_found_count: 1 });
+    await rejectChangeRequest(f.db, {
+      changeRequestId: sibling.id,
+      reviewerUserId: REVIEW_AGENT_USER_ID,
+    });
+    const reopened = await f.read();
+    expect(reopened).toMatchObject({
+      status: "open",
+      not_found_count: 1,
+      next_eligible_at: reopened.updated_at,
+    });
+  });
+
+  test("a same-season correction never reopens an already covered demand", async () => {
+    const f = await leasedReview();
+    await f.commit();
+    const sibling = await f.sibling();
+    await approveChangeRequest(f.db, f.ctx.outbound, {
+      changeRequestId: sibling.id,
+      reviewerUserId: null,
+      now: T0,
+    });
+    expect(await f.read()).toMatchObject({ status: "fulfilled" });
+    await f.review();
+    expect(await f.read()).toMatchObject({ status: "fulfilled", not_found_count: 1 });
+  });
+
+  test("neither the old exploration commit nor its correction overrides the next lease", async () => {
+    const f = await leasedReview();
+    await f.review();
+    const later = new Date(T0.getTime() + 86_400_000);
+    const [job] = (await scheduleExplorationJobs(f.db, { now: later })).jobs;
+    if (!job) throw new Error("missing replacement exploration job");
+    await f.commit();
+    expect(await f.read()).toMatchObject({
+      status: "leased",
+      lease_generation: 2,
+      not_found_count: 1,
+    });
+    const handler = createExplorationJobHandler({
+      executor: async () => ({
+        platformOutcomes: [{ namespace: "bilibili", status: "not_found" }],
+      }),
+    });
+    const result = await handler({ db: f.db, outbound: f.ctx.outbound, now: later, job });
+    if (result.status !== "completed" || !result.onCommit)
+      throw new Error("missing replacement commit");
+    await f.db.transaction().execute((trx) => result.onCommit!(trx, job));
+    expect(await f.read()).toMatchObject({
+      status: "not_found",
+      not_found_count: 2,
+      next_eligible_at: new Date(later.getTime() + 259_200_000),
+    });
+  });
+
   test("a correction to another season: the submission's own demand backs off, the corrected season is explorable now, and exploration resubmits from the lead", async () => {
     // The exploration agent marks every platform it has no candidate for as not found.
     const model: ScriptedModel = (request) => {
@@ -1400,34 +1919,7 @@ describe("review agent: reject with correction (#76)", () => {
         explorationAgent: { discover: async () => ({ candidates: [], sources: [], dropped: [] }) },
       }),
     );
-    const media = await ctx.testDb.writeDb
-      .insertInto("media")
-      .values({
-        type: "tv",
-        baseline: "tmdb",
-        title: "妻子的浪漫旅行",
-        original_title: "妻子的浪漫旅行",
-        year: 2018,
-        seasons: JSON.stringify(
-          WIFE_SEASON_YEARS.map((airYear, i) => ({
-            season: i + 1,
-            episodeCount: wifeEpisodeCount(i + 1),
-            airYear,
-          })),
-        ),
-      })
-      .returning("id")
-      .executeTakeFirstOrThrow();
-    await ctx.testDb.writeDb
-      .insertInto("associations")
-      .values({
-        status: "confirmed",
-        is_external_id: true,
-        media_id: media.id,
-        namespace: "tmdb",
-        native_id: "tv:70001",
-      })
-      .execute();
+    const media = await createWifeMedia(ctx);
     // The season 6 demand the exploration agent submitted for, now waiting on that review.
     const demand = await ctx.testDb.writeDb
       .insertInto("demands")
@@ -1850,6 +2342,304 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
     ]);
   });
 
+  async function revokeHistorySetup() {
+    const ctx = track(
+      await setup((request) => {
+        const turn = turnOf(request);
+        return turn === 0
+          ? reply(turn, [
+              ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+              ["get_catalog_season", { season: 1 }],
+              ["get_catalog_season", { season: 2 }],
+            ])
+          : reply(turn, [["revoke", { opinion: "核实后撤下本次变更" }]]);
+      }),
+    );
+    const { id: mediaId } = await createWifeMedia(ctx);
+    const approve = async (
+      nativeId: string,
+      season: number,
+      episodeStart: number,
+      episodeEnd: number,
+      targetEpisodeStart = 1,
+    ) => {
+      const id = await ctx.submit(nativeId, {
+        targetExternalKey: mediaId,
+        initialStatus: "needs_review",
+        segments: [{ season, episodeStart, episodeEnd, targetEpisodeStart, baseline: "tmdb" }],
+      });
+      return approveChangeRequest(ctx.testDb.writeDb, ctx.outbound, {
+        changeRequestId: id,
+        reviewerUserId: null,
+        now: T0,
+        evidence: {
+          catalog: {
+            namespace: "tmdb",
+            canonicalId: "tv:70001",
+            seasons: [
+              { season: 1, episodeCount: 12 },
+              { season: 2, episodeCount: 12 },
+            ],
+          },
+        },
+      });
+    };
+    const segments = (associationId: string) =>
+      ctx.testDb.readDb
+        .selectFrom("segments")
+        .select(["season", "episode_start", "episode_end", "target_episode_start"])
+        .where("association_id", "=", associationId)
+        .orderBy("season")
+        .orderBy("episode_start")
+        .execute();
+    return { ctx, approve, segments, mediaId };
+  }
+
+  test("revoking the second season restores the first season and records a confirmed revision", async () => {
+    const { ctx, approve, segments } = await revokeHistorySetup();
+    const first = await approve("ss77777", 1, 1, 5);
+    const before = await segments(first.associationId);
+    const second = await approve("ss77777", 2, 1, 5, 6);
+    expect(second.associationId).toBe(first.associationId);
+    expect(await segments(first.associationId)).toHaveLength(2);
+    await comment(ctx, second.changeRequest.id, "撤下第二季");
+    await ctx.drain();
+    expect((await ctx.changeRequest(second.changeRequest.id)).status).toBe("rejected");
+    expect((await ctx.changeRequest(first.changeRequest.id)).status).toBe("approved");
+    expect(await segments(first.associationId)).toEqual(before);
+    const restored = await association(ctx, first.associationId);
+    expect(restored.status).toBe("confirmed");
+    const revision = await ctx.testDb.readDb
+      .selectFrom("association_revisions")
+      .selectAll()
+      .where("id", "=", restored.current_revision_id!)
+      .executeTakeFirstOrThrow();
+    expect(revision).toMatchObject({
+      revision_number: 3,
+      status: "confirmed",
+      change_request_id: second.changeRequest.id,
+      segments: first.changeRequest.segments,
+      actor_user_id: REVIEW_AGENT_USER_ID,
+      reason: expect.stringContaining("撤下第二季"),
+    });
+  });
+
+  test.each([false, true])(
+    "a restored approval can still be revoked, while locked or superseded ones cannot (another approval: %s)",
+    async (withC) => {
+      const { ctx, approve, segments } = await revokeHistorySetup();
+      const a = await approve("ss77777", 1, 1, 5);
+      const b = await approve("ss77777", 2, 1, 5, 6);
+      await comment(ctx, b.changeRequest.id, "撤下第二张单");
+      await ctx.drain();
+      expect(await ctx.changeRequest(b.changeRequest.id)).toMatchObject({ status: "rejected" });
+      const c = withC ? await approve("ss77777", 2, 2, 3, 8) : null;
+      if (c) {
+        await comment(ctx, a.changeRequest.id, "撤下已被替代的第一张单");
+        await ctx.drain();
+        expect(await ctx.changeRequest(a.changeRequest.id)).toMatchObject({
+          status: "approved",
+          evidence: { reviewAgent: { fallback: "revoke_failed: ASSOCIATION_SUPERSEDED" } },
+        });
+        expect((await association(ctx, a.associationId)).current_revision_id).toBe(c.revisionId);
+        await comment(ctx, c.changeRequest.id, "撤下第三张单");
+        await ctx.drain();
+        expect(await ctx.changeRequest(c.changeRequest.id)).toMatchObject({ status: "rejected" });
+      }
+      const restored = await association(ctx, a.associationId);
+      await ctx.testDb.writeDb
+        .updateTable("associations")
+        .where("id", "=", a.associationId)
+        .set({ locked: true })
+        .execute();
+      await comment(ctx, a.changeRequest.id, "撤下锁定的关联");
+      await ctx.drain();
+      expect(await association(ctx, a.associationId)).toEqual(restored);
+      expect(await ctx.changeRequest(a.changeRequest.id)).toMatchObject({
+        status: "approved",
+        evidence: { reviewAgent: { fallback: "revoke_failed: ASSOCIATION_LOCKED" } },
+      });
+      await ctx.testDb.writeDb
+        .updateTable("associations")
+        .where("id", "=", a.associationId)
+        .set({ locked: false })
+        .execute();
+      await comment(ctx, a.changeRequest.id, "核实后撤下第一张单");
+      await ctx.drain();
+      expect(await ctx.changeRequest(a.changeRequest.id)).toMatchObject({
+        status: "rejected",
+        evidence: { reviewAgent: { verdict: "revoke" } },
+      });
+      expect((await association(ctx, a.associationId)).status).toBe("delisted");
+      expect(await segments(a.associationId)).toEqual([]);
+      expect(
+        await ctx.testDb.readDb
+          .selectFrom("association_revisions")
+          .select(["change_request_id", "status", "restored_from_revision_id"])
+          .where("association_id", "=", a.associationId)
+          .orderBy("revision_number")
+          .execute(),
+      ).toEqual([
+        {
+          change_request_id: a.changeRequest.id,
+          status: "confirmed",
+          restored_from_revision_id: null,
+        },
+        {
+          change_request_id: b.changeRequest.id,
+          status: "confirmed",
+          restored_from_revision_id: null,
+        },
+        {
+          change_request_id: b.changeRequest.id,
+          status: "confirmed",
+          restored_from_revision_id: a.revisionId,
+        },
+        ...(c
+          ? [
+              {
+                change_request_id: c.changeRequest.id,
+                status: "confirmed",
+                restored_from_revision_id: null,
+              },
+              {
+                change_request_id: c.changeRequest.id,
+                status: "confirmed",
+                restored_from_revision_id: a.revisionId,
+              },
+            ]
+          : []),
+        {
+          change_request_id: a.changeRequest.id,
+          status: "delisted",
+          restored_from_revision_id: null,
+        },
+      ]);
+    },
+  );
+
+  test("a pre-migration restore without provable provenance cannot authorize a later delist", async () => {
+    const { ctx, approve, segments } = await revokeHistorySetup();
+    const a = await approve("ss77777", 1, 1, 5);
+    const b = await approve("ss77777", 2, 1, 5, 6);
+    await comment(ctx, b.changeRequest.id, "撤下第二张单");
+    await ctx.drain();
+    const restored = await association(ctx, a.associationId);
+    await ctx.testDb.writeDb
+      .updateTable("association_revisions")
+      .set({ restored_from_revision_id: null })
+      .where("id", "=", restored.current_revision_id!)
+      .execute();
+    const c = await approve("ss77777", 2, 1, 5, 6);
+    const before = await segments(a.associationId);
+    await comment(ctx, c.changeRequest.id, "撤下第三张单");
+    await ctx.drain();
+    expect(await ctx.changeRequest(c.changeRequest.id)).toMatchObject({
+      status: "approved",
+      evidence: { reviewAgent: { verdict: "keep" } },
+    });
+    expect((await association(ctx, a.associationId)).current_revision_id).toBe(c.revisionId);
+    expect(await segments(a.associationId)).toEqual(before);
+  });
+
+  test("delisting reopens demands for all seasons removed, including segments inherited from a seed", async () => {
+    const { ctx, approve, mediaId } = await revokeHistorySetup();
+    const first = await approve("ss77777", 1, 1, 5);
+    // A seeded revision did not come from a change request.
+    await ctx.testDb.writeDb
+      .updateTable("association_revisions")
+      .set({ change_request_id: null })
+      .where("id", "=", first.revisionId)
+      .execute();
+    const second = await approve("ss77777", 2, 1, 5, 6);
+    await ctx.testDb.writeDb
+      .insertInto("demands")
+      .values(
+        [1, 2].map((season) => ({
+          media_id: mediaId,
+          season,
+          namespace_group: "platform" as const,
+          status: "fulfilled" as const,
+          next_eligible_at: T0,
+          last_demanded_at: T0,
+        })),
+      )
+      .execute();
+    await comment(ctx, second.changeRequest.id, "撤下第二季");
+    await ctx.drain();
+    expect((await association(ctx, first.associationId)).status).toBe("delisted");
+    expect(
+      await ctx.testDb.readDb
+        .selectFrom("demands")
+        .select(["season", "status"])
+        .orderBy("season")
+        .execute(),
+    ).toEqual([
+      { season: 1, status: "open" },
+      { season: 2, status: "open" },
+    ]);
+  });
+
+  test("a restore that overlaps another collection keeps both segment sets, revisions and demands unchanged and explains why", async () => {
+    const { ctx, approve, segments, mediaId } = await revokeHistorySetup();
+    await approve("ss77777", 1, 1, 12);
+    const a = await approve("ss77777", 1, 1, 6);
+    const b = await approve("ss28889", 1, 7, 12);
+    const before = await Promise.all([segments(a.associationId), segments(b.associationId)]);
+    const demand = await ctx.testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: mediaId,
+        season: 1,
+        namespace_group: "platform",
+        status: "fulfilled",
+        next_eligible_at: T0,
+        last_demanded_at: T0,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    const commentId = await comment(ctx, a.changeRequest.id, "撤下缩短范围的变更");
+    await ctx.drain();
+    expect(await ctx.changeRequest(a.changeRequest.id)).toMatchObject({
+      status: "approved",
+      evidence: {
+        reviewAgent: {
+          verdict: "keep",
+          concluded: "revoke",
+          fallback: expect.stringContaining("Overlapping segments in season 1"),
+        },
+      },
+    });
+    expect(await replyTo(ctx, a.changeRequest.id, commentId)).toEqual([
+      expect.objectContaining({
+        content: expect.stringContaining("Overlapping segments in season 1"),
+      }),
+    ]);
+    expect(await Promise.all([segments(a.associationId), segments(b.associationId)])).toEqual(
+      before,
+    );
+    for (const live of [a, b]) {
+      expect(await association(ctx, live.associationId)).toEqual({
+        status: "confirmed",
+        current_revision_id: live.revisionId,
+      });
+    }
+    expect(
+      await ctx.testDb.readDb
+        .selectFrom("association_revisions")
+        .select("id")
+        .where("association_id", "=", a.associationId)
+        .execute(),
+    ).toHaveLength(2);
+    expect(
+      await ctx.testDb.readDb
+        .selectFrom("demands")
+        .selectAll()
+        .where("id", "=", demand.id)
+        .executeTakeFirst(),
+    ).toEqual(demand);
+  });
+
   test("revoke without fetching the collection and season keeps the mapping, and the reply says why", async () => {
     const lazyRevoke: ScriptedModel = (request) =>
       reply(turnOf(request), [["revoke", { opinion: "留言说错了" }]]);
@@ -1956,7 +2746,7 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
     const ctx = track(await setup(byComments(approvesSeason6, correctsUnchecked)));
     const id = await ctx.submit("ss77777", {
       targetExternalKey: WIFE_KEY,
-      segments: wifeSegments(6),
+      segments: wifeSegments(6, 10),
     });
     await ctx.drain();
     const approved = await ctx.changeRequest(id);
@@ -2003,62 +2793,90 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
     ]);
   });
 
-  test("revoke_with_correction: 妻子的浪漫旅行 approved as season 6 is taken down, and season 8 handed to exploration without backoff", async () => {
-    // The first review approves season 6; the comment session corrects it to season 8.
-    const correctsApproved: ScriptedModel = (request) => {
-      const turn = turnOf(request);
-      if (turn === 0) {
+  test.each([true, false])(
+    "revoke_with_correction: 妻子的浪漫旅行 approved as season 6 is taken down, and season 8 handed to exploration without backoff (authority ID: %s)",
+    async (withId) => {
+      // The first review approves season 6; the comment session corrects it to season 8.
+      const correctsApproved: ScriptedModel = (request) => {
+        const turn = turnOf(request);
+        if (turn === 0) {
+          return reply(turn, [
+            ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+            ["get_catalog_season", { season: 6 }],
+            ["get_catalog_season", { season: 8 }],
+          ]);
+        }
         return reply(turn, [
-          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
-          ["get_catalog_season", { season: 6 }],
-          ["get_catalog_season", { season: 8 }],
+          ["revoke_with_correction", { opinion: WIFE_OPINION, ...correctionFor(8) }],
         ]);
+      };
+      const ctx = track(await setup(byComments(approvesSeason6, correctsApproved)));
+      const media = await createWifeMedia(ctx);
+      const id = await ctx.submit("ss77777", {
+        targetExternalKey: media.id,
+        segments: wifeSegments(6, 10),
+      });
+      await ctx.drain();
+      const approved = await ctx.changeRequest(id);
+      expect(approved.status).toBe("approved");
+
+      if (!withId) {
+        await ctx.testDb.writeDb
+          .deleteFrom("associations")
+          .where("media_id", "=", media.id)
+          .where("is_external_id", "=", true)
+          .execute();
       }
-      return reply(turn, [
-        ["revoke_with_correction", { opinion: WIFE_OPINION, ...correctionFor(8) }],
+      const commentId = await comment(ctx, id, "这是 2026 年那季，第 8 季");
+      await ctx.drain();
+
+      const cr = await ctx.changeRequest(id);
+      expect(cr).toMatchObject({
+        status: "rejected",
+        target_external_key: `media:${media.id}`,
+        decision_reason: expect.stringContaining("改正：第 8 季"),
+      });
+      expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+        verdict: "revoke_with_correction",
+        correction: correctionFor(8),
+        fallback: null,
+      });
+      expect(
+        await ctx.testDb.readDb
+          .selectFrom("review_corrections")
+          .select(["change_request_id", "media_id"])
+          .execute(),
+      ).toEqual([{ change_request_id: id, media_id: media.id }]);
+      expect((await association(ctx, approved.applied_association_id!)).status).toBe("delisted");
+      expect(
+        await ctx.testDb.readDb
+          .selectFrom("leads")
+          .select(["target_external_key", "season", "reporter_user_id"])
+          .execute(),
+      ).toEqual(
+        withId
+          ? [{ target_external_key: WIFE_KEY, season: 8, reporter_user_id: REVIEW_AGENT_USER_ID }]
+          : [],
+      );
+      expect(
+        await ctx.testDb.readDb
+          .selectFrom("demands")
+          .select(["media_id", "season", "status", "not_found_count", "next_eligible_at"])
+          .execute(),
+      ).toEqual([
+        {
+          media_id: approved.media_id,
+          season: 8,
+          status: "open",
+          not_found_count: 0,
+          next_eligible_at: T0,
+        },
       ]);
-    };
-    const ctx = track(await setup(byComments(approvesSeason6, correctsApproved)));
-    const id = await ctx.submit("ss77777", {
-      targetExternalKey: WIFE_KEY,
-      segments: wifeSegments(6),
-    });
-    await ctx.drain();
-    const approved = await ctx.changeRequest(id);
-    expect(approved.status).toBe("approved");
-
-    const commentId = await comment(ctx, id, "这是 2026 年那季，第 8 季");
-    await ctx.drain();
-
-    const cr = await ctx.changeRequest(id);
-    expect(cr.status).toBe("rejected");
-    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
-      verdict: "revoke_with_correction",
-      correction: correctionFor(8),
-      fallback: null,
-    });
-    expect((await association(ctx, approved.applied_association_id!)).status).toBe("delisted");
-    expect(
-      await ctx.testDb.readDb.selectFrom("leads").select(["season", "reporter_user_id"]).execute(),
-    ).toEqual([{ season: 8, reporter_user_id: REVIEW_AGENT_USER_ID }]);
-    expect(
-      await ctx.testDb.readDb
-        .selectFrom("demands")
-        .select(["media_id", "season", "status", "not_found_count", "next_eligible_at"])
-        .execute(),
-    ).toEqual([
-      {
-        media_id: approved.media_id,
-        season: 8,
-        status: "open",
-        not_found_count: 0,
-        next_eligible_at: T0,
-      },
-    ]);
-    expect(await replyTo(ctx, id, commentId)).toEqual([
-      expect.objectContaining({ content: expect.stringMatching(/撤下并改正[\s\S]*第 8 季/) }),
-    ]);
-  });
+      expect(await replyTo(ctx, id, commentId)).toEqual([
+        expect.objectContaining({ content: expect.stringMatching(/撤下并改正[\s\S]*第 8 季/) }),
+      ]);
+    },
+  );
 
   test(`comments drive at most ${3} sessions per change request a day; the next comment waits for the next UTC day`, async () => {
     const { ctx, id } = await approvedLinglong(keeps);

@@ -6,7 +6,7 @@ import {
   type ExternalHttpRequest,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
-import { afterEach, describe, expect, test } from "vite-plus/test";
+import { afterEach, describe, expect, test, vi } from "vite-plus/test";
 import { createApiApp } from "../src/lib.ts";
 import {
   createRpcClients,
@@ -57,6 +57,33 @@ describe("ConnectRPC Protobuf end-to-end protocol compatibility", () => {
       if (handle) {
         await handle.cleanup();
       }
+    }
+  });
+
+  test("logs the method and cause of unexpected failures, not expected RPC errors or request data", async () => {
+    const testDb = await createTestDb({ migrate: false });
+    handles.push(testDb);
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      config: {},
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const query = { ref: mediaRef("tmdb:tv:95479") };
+      expect(await expectRpcError(createRpcClients(app).media.getMedia(query))).toMatchObject({
+        code: "API_KEY_REQUIRED",
+      });
+      expect(log).not.toHaveBeenCalled();
+      await expectRpcError(
+        createRpcClients(app, { apiKey: crypto.randomUUID() }).media.getMedia(query),
+      );
+      expect(log.mock.calls).toEqual([
+        ['RPC mediaref.v1.MediaService/GetMedia failed: relation "apikey" does not exist'],
+      ]);
+    } finally {
+      log.mockRestore();
     }
   });
 

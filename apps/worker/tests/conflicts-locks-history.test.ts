@@ -941,7 +941,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     expect(mediaAfterRecovery.document.associations[0]?.nativeId).toBe("ss34430");
   });
 
-  test("Locked association is never auto-modified even when new passes and old fails, emits open review_alert, and allows explicit reviewer approval", async () => {
+  test("A locked association emits an open review alert and refuses replacement until unlocked", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -1059,15 +1059,29 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       challengeCr.id,
     );
 
-    // The replacement can still be approved through core (no lock check), as before
-    await approveInCore(
-      { db: testDb.writeDb, outbound },
-      {
-        reviewerUserId: reviewer.userId,
-        id: challengeCr.id,
-        reason: "Verified ss34430 supersedes locked ss77777",
-      },
-    );
+    const approveReplacement = () =>
+      approveInCore(
+        { db: testDb.writeDb, outbound },
+        {
+          reviewerUserId: reviewer.userId,
+          id: challengeCr.id,
+          reason: "Verified ss34430 supersedes ss77777",
+        },
+      );
+    await expect(approveReplacement()).rejects.toMatchObject({
+      code: "ASSOCIATION_LOCKED",
+      status: 409,
+    });
+    const unchanged = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
+    expect(unchanged.document.associations).toMatchObject([
+      { id: lockedAssoc.associationId, nativeId: "ss77777", locked: true },
+    ]);
+
+    await reviewerRpc.reviewer.setAssociationLock({
+      associationId: lockedAssoc.associationId,
+      locked: false,
+    });
+    await approveReplacement();
 
     const mediaAfterManualApprove = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
     expect(mediaAfterManualApprove.document.associations).toHaveLength(1);

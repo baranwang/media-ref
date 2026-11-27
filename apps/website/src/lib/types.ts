@@ -1,3 +1,4 @@
+import type { ChangeRequestLink } from "./change-request-link";
 import type {
   BaselineSource,
   CatalogNamespace,
@@ -198,7 +199,7 @@ export interface ChangeRequestItem {
   targetKey: string;
   namespace: Namespace;
   nativeId: string;
-  pageUrl: string;
+  pageLink: ChangeRequestLink | null;
   /** Title of the platform page, from the evidence check. */
   pageTitle: string | null;
   pageEpisodeCount: number | null;

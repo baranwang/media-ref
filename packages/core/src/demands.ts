@@ -598,7 +598,9 @@ export async function mergeExternalKeyDemandsIntoMedia(
       }
 
       const rowLastDemandedAt = toDate(row.last_demanded_at);
-      const rowNextEligibleAt = toDate(row.next_eligible_at);
+      const reopen = row.status === "leased" || row.status === "invalid_key";
+      const status = reopen ? "open" : row.status;
+      const rowNextEligibleAt = reopen ? now : toDate(row.next_eligible_at);
       const rowLastExploredAt = row.last_explored_at ? toDate(row.last_explored_at) : null;
 
       for (const targetSeason of targetSeasons) {
@@ -610,7 +612,7 @@ export async function mergeExternalKeyDemandsIntoMedia(
             season: targetSeason,
             namespaceGroup: row.namespace_group,
             delta: row.demand_count,
-            status: row.status,
+            status,
             notFoundCount: row.not_found_count,
             nextEligibleAt: rowNextEligibleAt,
             lastExploredAt: rowLastExploredAt,
@@ -618,8 +620,8 @@ export async function mergeExternalKeyDemandsIntoMedia(
           });
         } else {
           existing.delta += row.demand_count;
-          if (STATUS_MERGE_PRIORITY[row.status] < STATUS_MERGE_PRIORITY[existing.status]) {
-            existing.status = row.status;
+          if (STATUS_MERGE_PRIORITY[status] < STATUS_MERGE_PRIORITY[existing.status]) {
+            existing.status = status;
           }
           existing.notFoundCount = Math.max(existing.notFoundCount, row.not_found_count);
           if (rowLastDemandedAt.getTime() > existing.lastDemandedAt.getTime()) {
@@ -724,49 +726,113 @@ export interface FulfillCoveredDemandsInput {
   now?: Date;
 }
 
-/**
- * After a rejection, reopens the demand a change request was submitted for, unless another
- * request for that demand is still pending or already approved. The rejection counts as a
- * not-found round, so the demand backs off before it is explored again; a rejection with a
- * correction (`corrected`, ADR 0003 §4) does not, and the demand is explorable at once.
- * shortcut: uses the default backoff schedule, not the worker's EXPLORATION_BACKOFF_SECONDS; pass it in if that diverges.
- */
-export async function reopenDemandAfterRejectionInTx(
+const PENDING_REQUEST_STATUSES = ["pending_evidence", "needs_review"] as const;
+
+export async function hasCorrectionForDemandRoundInTx(
   executor: DbExecutor,
-  input: { demandId: string; now: Date; corrected?: boolean },
+  demand: Selectable<DemandsTable>,
 ): Promise<boolean> {
-  const demand = await executor
-    .selectFrom("demands")
-    .select(["id", "status", "not_found_count"])
-    .where("id", "=", input.demandId)
-    .forUpdate()
-    .executeTakeFirst();
-  if (!demand || demand.status !== "awaiting_review") {
-    return false;
-  }
-  const live = await executor
+  const corrected = await executor
     .selectFrom("change_requests")
     .select("id")
-    .where("demand_id", "=", input.demandId)
-    .where("status", "in", ["pending_evidence", "needs_review", "approved"])
+    .where("demand_id", "=", demand.id)
+    .where("status", "=", "rejected")
+    .where(
+      sql<boolean>`evidence @> ${JSON.stringify({ correctedDemandGeneration: demand.lease_generation })}::jsonb`,
+    )
     .executeTakeFirst();
-  if (live) {
+  return corrected !== undefined;
+}
+
+/** The caller holds the demand row lock while deciding which review outcome still applies. */
+export async function settleDemandAfterSubmissionInTx(
+  executor: DbExecutor,
+  demand: Selectable<DemandsTable>,
+  now: Date,
+  corrected?: boolean,
+): Promise<boolean> {
+  const covered =
+    demand.media_id !== null &&
+    (await isMediaDemandCoveredInTx(executor, {
+      mediaId: demand.media_id,
+      season: demand.season,
+      namespaceGroup: demand.namespace_group,
+    }));
+  const pending =
+    !covered &&
+    (await executor
+      .selectFrom("change_requests")
+      .select("id")
+      .where("demand_id", "=", demand.id)
+      .where("status", "in", PENDING_REQUEST_STATUSES)
+      .executeTakeFirst());
+  if (pending && demand.status === "awaiting_review") {
     return false;
   }
-  const notFoundCount = demand.not_found_count + (input.corrected ? 0 : 1);
+  const status = covered ? "fulfilled" : pending ? "awaiting_review" : "open";
+  const retryNow =
+    status === "open" && (corrected ?? (await hasCorrectionForDemandRoundInTx(executor, demand)));
+  const notFoundCount = demand.not_found_count + (retryNow ? 0 : 1);
   await executor
     .updateTable("demands")
     .set({
-      status: "open",
-      not_found_count: notFoundCount,
-      next_eligible_at: input.corrected
-        ? input.now
-        : new Date(input.now.getTime() + computeNotFoundBackoffSeconds(notFoundCount) * 1000),
-      updated_at: input.now,
+      status,
+      ...(status === "open" && {
+        not_found_count: notFoundCount,
+        next_eligible_at: retryNow
+          ? now
+          : new Date(now.getTime() + computeNotFoundBackoffSeconds(notFoundCount) * 1000),
+      }),
+      ...(demand.status === "leased" && { last_explored_at: now }),
+      lease_expires_at: null,
+      updated_at: now,
     })
     .where("id", "=", demand.id)
     .execute();
-  return true;
+  return status === "open";
+}
+
+export async function reopenDemandAfterRejectionInTx(
+  executor: DbExecutor,
+  input: { demandId: string; now: Date },
+): Promise<boolean> {
+  const demand = await executor
+    .selectFrom("demands")
+    .selectAll()
+    .where("id", "=", input.demandId)
+    .forUpdate()
+    .executeTakeFirst();
+  return demand?.status === "awaiting_review"
+    ? settleDemandAfterSubmissionInTx(executor, demand, input.now)
+    : false;
+}
+
+export async function settleOrphanedReviewDemandsInTx(
+  trx: Transaction<Database>,
+  now: Date,
+): Promise<void> {
+  const orphans = await trx
+    .selectFrom("demands")
+    .selectAll()
+    .where("status", "=", "awaiting_review")
+    .where((eb) =>
+      eb.not(
+        eb.exists(
+          eb
+            .selectFrom("change_requests")
+            .select("id")
+            .whereRef("change_requests.demand_id", "=", "demands.id")
+            .where("status", "in", PENDING_REQUEST_STATUSES),
+        ),
+      ),
+    )
+    .orderBy("id")
+    .forUpdate()
+    .skipLocked()
+    .execute();
+  for (const demand of orphans) {
+    await settleDemandAfterSubmissionInTx(trx, demand, now);
+  }
 }
 
 /**
@@ -865,9 +931,12 @@ export async function ensureDemandExplorableNowInTx(
         { kind: "external_key", externalKey: input.externalKey, season, namespaceGroup, delta: 1 },
         now,
       );
+  const covered =
+    mediaId !== null &&
+    (await isMediaDemandCoveredInTx(executor, { mediaId, season, namespaceGroup }));
   await executor
     .updateTable("demands")
-    .set({ status: "open", next_eligible_at: now, updated_at: now })
+    .set({ status: covered ? "fulfilled" : "open", next_eligible_at: now, updated_at: now })
     .where("id", "=", demand.id)
     .where("status", "in", ["open", "not_found", "fulfilled"])
     .execute();

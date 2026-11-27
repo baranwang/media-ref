@@ -30,7 +30,7 @@ import type {
   ReviewAgentView,
   ReviewAlertItem,
 } from "./types";
-import { buildExternalUrl } from "./url-parser";
+import { changeRequestLink } from "./change-request-link";
 
 /** Shows with more seasons than this get the all-seasons overview. */
 export const LONG_SERIES_SEASONS = 6;
@@ -538,7 +538,6 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
   const evidence = asJson(cr.evidence);
   const collection = asJson(evidence?.collection);
   const namespace = cr.namespace as Namespace;
-  const rawIsUrl = /^https?:\/\//i.test(cr.rawNativeId);
   const reviewAgent = reviewAgentFromEvidence(evidence);
   return {
     id: cr.id,
@@ -547,7 +546,13 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
     targetKey: cr.mediaId ?? targetKeyOf(cr.target),
     namespace,
     nativeId: cr.nativeId,
-    pageUrl: rawIsUrl ? cr.rawNativeId : buildExternalUrl(namespace, cr.nativeId, "tv"),
+    pageLink: changeRequestLink(
+      namespace,
+      cr.nativeId,
+      cr.rawNativeId,
+      asJson(evidence?.resolvedPage),
+      collection,
+    ),
     pageTitle: typeof collection?.title === "string" ? collection.title : null,
     pageEpisodeCount:
       typeof collection?.featureEpisodeCount === "number" ? collection.featureEpisodeCount : null,
@@ -657,6 +662,11 @@ const ALERT_LABELS: Record<
   locked_association_challenged: {
     badge: "记录被质疑",
     title: "有人提交了和已锁定记录冲突的变更",
+    severity: "warning",
+  },
+  agent_external_id_conflict: {
+    badge: "编号冲突",
+    title: "探索找到的外部编号已属于另一部媒体",
     severity: "warning",
   },
   association_content_mismatch: {

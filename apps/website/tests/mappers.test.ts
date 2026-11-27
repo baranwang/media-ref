@@ -77,6 +77,113 @@ const reviewedCr = (overrides: Record<string, unknown>) =>
     ...overrides,
   }) as unknown as Parameters<typeof changeRequestFromProto>[0];
 
+test.each([
+  [
+    "bilibili",
+    "ss38221",
+    "https://example.invalid/page",
+    "https://www.bilibili.com/bangumi/play/ss38221",
+  ],
+  [
+    "bilibili",
+    "ss38221",
+    "https://www.bilibili.com/bangumi/play/ss9",
+    "https://www.bilibili.com/bangumi/play/ss38221",
+  ],
+  ["tencent", "https://example.invalid/unrecognized", "https://example.invalid/unrecognized", null],
+  ["tvdb", "episode:123", "123", "https://thetvdb.com/dereferrer/episode/123"],
+  ["tvdb", "series:123", "123", "https://thetvdb.com/dereferrer/series/123"],
+  ["tvdb", "series:123", "https://thetvdb.com/dereferrer/episode/123", null],
+  ["tvdb", "123", "123", null],
+  ["tvdb", "123", "https://thetvdb.com/dereferrer/episode/456", null],
+  ["tvdb", "123", "https://thetvdb.com/series/123", null],
+  ["tvdb", "123", "https://example.invalid/dereferrer/episode/123", null],
+  ["tvdb", "123", "http://thetvdb.com/dereferrer/episode/123", null],
+  [
+    "iqiyi",
+    "5328486914190101",
+    "https://www.iqiyi.com/v_xkt6z3z798.html",
+    "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+  ],
+  [
+    "iqiyi",
+    "923452300",
+    "https://www.iqiyi.com/v_19rrfe142o.html",
+    "https://www.iqiyi.com/v_19rrfe142o.html",
+  ],
+] as const)(
+  "maps stored %s ID %s and input %s without trusting the raw URL",
+  (namespace, nativeId, rawNativeId, href) => {
+    const cr = reviewedCr({ namespace, nativeId, rawNativeId });
+    const expected = href ? { source: "entry", href } : null;
+    expect(changeRequestFromProto(cr).pageLink).toEqual(expected);
+    expect(
+      changeRequestFromGetResponse({ changeRequest: cr } as proto.GetChangeRequestResponse)
+        ?.pageLink,
+    ).toEqual(expected);
+  },
+);
+
+test.each([
+  ["https://www.thetvdb.com/series/sample/episodes/123?lang=en#title", "episode"],
+  ["https://thetvdb.com/dereferrer/series/123?lang=en", "series"],
+  ["https://thetvdb.com/dereferrer/episode/123", "episode"],
+])(
+  "an explicit TVDB entry matching a bare ID is only a submitted link: %s",
+  (rawNativeId, kind) => {
+    const cr = changeRequestFromProto(
+      reviewedCr({ namespace: "tvdb", nativeId: "123", rawNativeId }),
+    );
+    expect(cr.nativeId).toBe("123");
+    expect(cr.pageLink).toEqual({
+      source: "submission",
+      href: `https://thetvdb.com/dereferrer/${kind}/123`,
+    });
+  },
+);
+
+test("a legacy TVDB URL cannot override evidence for the entry or borrow a type from its parent media", () => {
+  const entry = {
+    namespace: "tvdb",
+    nativeId: "123",
+    rawNativeId: "https://thetvdb.com/dereferrer/episode/123",
+  };
+  const collection = { namespace: "tvdb", canonicalId: "123", mediaType: "movie" };
+  expect(
+    changeRequestFromProto(reviewedCr({ ...entry, evidence: { collection } })).pageLink,
+  ).toBeNull();
+  expect(
+    changeRequestFromProto(
+      reviewedCr({ ...entry, rawNativeId: "123", evidence: { catalog: collection } }),
+    ).pageLink,
+  ).toBeNull();
+  expect(
+    changeRequestFromProto(
+      reviewedCr({
+        ...entry,
+        rawNativeId: "123",
+        evidence: { collection: { ...collection, mediaType: "tv" } },
+      }),
+    ).pageLink,
+  ).toBeNull();
+});
+
+test("only the upstream-resolved episode for this iQiyi collection replaces its canonical album link", () => {
+  const nativeId = "5328486914190101";
+  const resolvedPage = { namespace: "iqiyi", nativeId, kind: "video_page", id: "xkt6z3z798" };
+  const cr = { namespace: "iqiyi", nativeId, rawNativeId: "https://example.invalid/page" };
+  const display = (proof: typeof resolvedPage) =>
+    changeRequestFromProto(reviewedCr({ ...cr, evidence: { resolvedPage: proof } })).pageLink;
+  expect(display(resolvedPage)).toEqual({
+    source: "entry",
+    href: "https://www.iqiyi.com/v_xkt6z3z798.html",
+  });
+  expect(display({ ...resolvedPage, nativeId: "923452300" })).toEqual({
+    source: "entry",
+    href: "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+  });
+});
+
 test("review agent approval shows the agent and its per-conflict reasons", () => {
   const cr = changeRequestFromProto(
     reviewedCr({

@@ -4,6 +4,8 @@ import { resolveEpisode, type SegmentInput } from "@media-ref/client";
 import {
   bilibiliAdapter,
   createAdapterRegistry,
+  createChangeRequest,
+  ensureExplorationAgentUser,
   createFakeOutboundClient,
   createTier1Adapter,
   type ExternalHttpRequest,
@@ -656,6 +658,104 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
 
     const mediaBody = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:108545");
     expect(mediaBody.document.associations[0]?.nativeId).toBe("ss43123");
+  });
+
+  async function setupPendingEvidence(now: Date, submittedAt = now) {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    const outbound = createFakeOutboundClient();
+    const demand = await db
+      .insertInto("demands")
+      .values({
+        external_key: "tmdb:movie:550",
+        namespace_group: "platform",
+        status: "awaiting_review",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const request = await createChangeRequest(
+      db,
+      {
+        submitterUserId: await ensureExplorationAgentUser(db),
+        submitterType: "agent",
+        targetExternalKey: "tmdb:movie:550",
+        namespace: "bilibili",
+        nativeId: "ss43123",
+        variantDescription: "原声",
+        segments: [],
+        demandId: demand.id,
+        now: submittedAt,
+      },
+      { adapterRegistry: createAdapterRegistry([bilibiliAdapter]), outbound },
+    );
+    expect(request.status).toBe("pending_evidence");
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { jobTypes: ["evidence_check", "review_agent"] },
+      now: () => now,
+    });
+    return { db, outbound, demand, request, emitted, worker };
+  }
+
+  test("cron replaces a failed evidence job once, using the original dedupe key", async () => {
+    const now = new Date("2026-11-24T10:00:00Z");
+    const { db, request, emitted, worker } = await setupPendingEvidence(now);
+    const dedupeKey = `evidence_check:${request.id}`;
+    const failed = await db
+      .updateTable("background_jobs")
+      .set({ status: "failed" })
+      .where("dedupe_key", "=", dedupeKey)
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await worker.scheduled();
+    await worker.scheduled();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toMatchObject({
+      jobType: "evidence_check",
+      payload: { changeRequestId: request.id },
+    });
+    expect(emitted[0]!.jobId).not.toBe(failed.id);
+    expect(
+      await db
+        .selectFrom("background_jobs")
+        .select("dedupe_key")
+        .where("id", "=", emitted[0]!.jobId)
+        .executeTakeFirst(),
+    ).toEqual({ dedupe_key: dedupeKey });
+  });
+
+  test("cron expires a day-old request even with a pending evidence job and its demand backs off", async () => {
+    const now = new Date("2026-11-24T10:00:01Z");
+    const { db, request, outbound, emitted, worker, demand } = await setupPendingEvidence(
+      now,
+      new Date("2026-11-23T10:00:00Z"),
+    );
+    await worker.scheduled();
+    expect(emitted.map((job) => job.jobType)).toContain("review_agent");
+    await worker.queue(createQueueBatch(emitted, now).batch);
+    expect(
+      await db
+        .selectFrom("change_requests")
+        .select(["status", "conflict_reason"])
+        .where("id", "=", request.id)
+        .executeTakeFirst(),
+    ).toEqual({ status: "rejected", conflict_reason: "catalog_not_found" });
+    const reopened = await db
+      .selectFrom("demands")
+      .select(["status", "not_found_count", "next_eligible_at"])
+      .where("id", "=", demand.id)
+      .executeTakeFirstOrThrow();
+    expect(reopened).toMatchObject({ status: "open", not_found_count: 1 });
+    expect(reopened.next_eligible_at.getTime()).toBeGreaterThan(now.getTime());
+    expect(outbound.modelRequests).toHaveLength(0);
   });
 
   test("routes Tier 1-only platform submissions to needs_review without an evidence job, then the review agent rejects them", async () => {
