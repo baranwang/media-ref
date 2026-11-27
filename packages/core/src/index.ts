@@ -61,6 +61,7 @@ export {
   isMediaDemandCoveredInTx,
   listDemands,
   mergeExternalKeyDemandsIntoMedia,
+  enqueueTmdbLookupDemands,
   recordDemandForRead,
   recordDemandsForBatchRead,
   type CheckMediaDemandCoveredInput,

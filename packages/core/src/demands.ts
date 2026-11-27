@@ -926,6 +926,67 @@ export async function fulfillCoveredDemandsForAssociationInTx(
   return updated.length;
 }
 
+/**
+ * Gives each media without the TMDB external ID (one created from Douban or Bangumi) an open
+ * catalog demand, so exploration looks the ID up even when no caller asked for the catalog group.
+ * One demand per media is enough: the TMDB ID is media-wide. Returns how many were added.
+ */
+export async function enqueueTmdbLookupDemands(
+  db: Db,
+  input: { now: Date; limit?: number },
+): Promise<number> {
+  const rows = await db
+    .selectFrom("media")
+    .select(["id", "type", "seasons"])
+    .where("merged_into_media_id", "is", null)
+    // A TMDB-baseline media gets its TMDB ID when it is created.
+    .where((eb) => eb.or([eb("baseline", "is", null), eb("baseline", "!=", "tmdb")]))
+    .where((eb) =>
+      eb.not(
+        eb.exists(
+          eb
+            .selectFrom("associations")
+            .select("associations.id")
+            .whereRef("associations.media_id", "=", "media.id")
+            .where("associations.namespace", "=", "tmdb")
+            .where("associations.is_external_id", "=", true),
+        ),
+      ),
+    )
+    .where((eb) =>
+      eb.not(
+        eb.exists(
+          eb
+            .selectFrom("demands")
+            .select("demands.id")
+            .whereRef("demands.media_id", "=", "media.id")
+            .where("demands.namespace_group", "=", "catalog"),
+        ),
+      ),
+    )
+    .orderBy("created_at")
+    .limit(input.limit ?? 20)
+    .execute();
+  for (const row of rows) {
+    await upsertMediaDemandRow(
+      db,
+      {
+        mediaId: row.id,
+        season: row.type === "movie" ? null : (extractRegularTvSeasons(row.seasons)[0] ?? null),
+        namespaceGroup: "catalog",
+        delta: 1,
+        status: "open",
+        notFoundCount: 0,
+        nextEligibleAt: input.now,
+        lastExploredAt: null,
+        lastDemandedAt: input.now,
+      },
+      input.now,
+    );
+  }
+  return rows.length;
+}
+
 async function hasTmdbExternalId(executor: DbExecutor, mediaId: string): Promise<boolean> {
   const row = await executor
     .selectFrom("associations")
