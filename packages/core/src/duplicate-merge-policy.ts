@@ -233,6 +233,73 @@ export function areMediaSnapshotsCompatibleForAutoMerge(
   return { compatible: false, reason: "title_mismatch" };
 }
 
+/**
+ * Verifies whether a fetched catalog target independently describes `snap` (matching `type`,
+ * year within ±1, non-conflicting external IDs, and either title/alias overlap or matching
+ * authoritative external ID). Used to keep alias enrichment attributable per media.
+ */
+export function doesCatalogTargetMatchMediaSnapshot(
+  snap: Pick<
+    MergeCandidateMediaSnapshot,
+    "type" | "title" | "originalTitle" | "year" | "seasons" | "externalIds"
+  >,
+  ownExtraTitles: readonly (string | null | undefined)[],
+  catalogTarget: {
+    type: MediaType;
+    snapshot: {
+      title: string;
+      originalTitle: string | null;
+      year: number | null;
+      seasons: readonly SeasonSnapshot[];
+    };
+    externalIds?: Partial<Record<ExternalIdNamespace, string>>;
+    aliases?: readonly (string | null | undefined)[];
+  },
+): boolean {
+  if (snap.type !== catalogTarget.type) {
+    return false;
+  }
+
+  if (
+    !areYearsCompatible(snap, {
+      year: catalogTarget.snapshot.year,
+      seasons: [...catalogTarget.snapshot.seasons],
+    })
+  ) {
+    return false;
+  }
+
+  const targetExternalIds = catalogTarget.externalIds ?? {};
+  let hasMatchingExternalId = false;
+  for (const ext of snap.externalIds) {
+    const catalogVal = targetExternalIds[ext.namespace];
+    if (!catalogVal) {
+      continue;
+    }
+    if (catalogVal !== ext.nativeId) {
+      return false;
+    }
+    hasMatchingExternalId = true;
+  }
+
+  const titleCompat = areMediaSnapshotsCompatibleForAutoMerge(
+    snap,
+    {
+      type: catalogTarget.type,
+      title: catalogTarget.snapshot.title,
+      originalTitle: catalogTarget.snapshot.originalTitle,
+      year: catalogTarget.snapshot.year,
+      seasons: [...catalogTarget.snapshot.seasons],
+    },
+    {
+      extraTitlesA: ownExtraTitles,
+      extraTitlesB: catalogTarget.aliases ?? [],
+    },
+  );
+
+  return titleCompat.compatible || hasMatchingExternalId;
+}
+
 function hasConfirmedTmdb(snapshot: MergeCandidateMediaSnapshot): boolean {
   return snapshot.externalIds.some((ext) => ext.namespace === "tmdb");
 }

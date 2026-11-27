@@ -349,6 +349,7 @@ export {
 } from "./tmdb.ts";
 export {
   areMediaSnapshotsCompatibleForAutoMerge,
+  doesCatalogTargetMatchMediaSnapshot,
   parseMediaSeasonsJson,
   selectCanonicalMergeTarget,
   verifyAutoMergeEligibilityInTx,
@@ -362,6 +363,7 @@ export {
 } from "./duplicate-merge-policy.ts";
 export {
   convergeDuplicateMedia,
+  DUPLICATE_CONVERGENCE_SYNC_KEY,
   findSharedCatalogDuplicateMediaIdsInTx,
   isPlausibleCatalogDuplicateOverlapForSubmit,
   verifyAndAutoMergeDuplicateMedia,

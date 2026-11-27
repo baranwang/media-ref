@@ -9,9 +9,11 @@ import { sql, type Transaction } from "kysely";
 import { resolveCatalogTargetSnapshot, type CatalogGatewayConfig } from "./catalog-gateway.ts";
 import {
   areMediaSnapshotsCompatibleForAutoMerge,
+  doesCatalogTargetMatchMediaSnapshot,
   loadMediaMergeCandidateSnapshotInTx,
   resolveCanonicalMediaIdInTx,
   verifyAutoMergeEligibilityInTx,
+  type MergeCandidateMediaSnapshot,
 } from "./duplicate-merge-policy.ts";
 import { fulfillCoveredCatalogDemandsInTx } from "./demands.ts";
 import type { OutboundClient } from "./outbound.ts";
@@ -197,29 +199,32 @@ async function fetchExtraAliasesForMerge(
   },
 ): Promise<Map<string, string[]>> {
   const extra = new Map<string, string[]>();
-  const keysToFetch = await db.transaction().execute(async (trx) => {
+  const loaded = await db.transaction().execute(async (trx) => {
     const [snapA, snapB] = await Promise.all([
       loadMediaMergeCandidateSnapshotInTx(trx, mediaIdA),
       loadMediaMergeCandidateSnapshotInTx(trx, mediaIdB),
     ]);
     if (!snapA || !snapB) {
-      return [];
+      return null;
     }
-    const items: Array<{ key: string; mediaIds: string[] }> = [];
+    const tmdbItems: Array<{ key: string; mediaIds: string[] }> = [];
     const tmdbA = snapA.externalIds.find((e) => e.namespace === "tmdb");
     const tmdbB = snapB.externalIds.find((e) => e.namespace === "tmdb");
     if (tmdbA) {
-      items.push({
+      tmdbItems.push({
         key: formatExternalKey({ namespace: "tmdb", nativeId: tmdbA.nativeId }),
         mediaIds: [snapA.id],
       });
     }
     if (tmdbB && (!tmdbA || tmdbB.nativeId !== tmdbA.nativeId)) {
-      items.push({
+      tmdbItems.push({
         key: formatExternalKey({ namespace: "tmdb", nativeId: tmdbB.nativeId }),
         mediaIds: [snapB.id],
       });
     }
+
+    const sharedCatalogKeys: string[] = [];
+    const seenShared = new Set<string>();
     for (const aAssoc of snapA.associations) {
       if (!isCatalogNamespace(aAssoc.namespace)) {
         continue;
@@ -229,16 +234,40 @@ async function fetchExtraAliasesForMerge(
           (bAssoc) => bAssoc.namespace === aAssoc.namespace && bAssoc.nativeId === aAssoc.nativeId,
         )
       ) {
-        items.push({
-          key: formatExternalKey({ namespace: aAssoc.namespace, nativeId: aAssoc.nativeId }),
-          mediaIds: [snapA.id, snapB.id],
-        });
+        const key = formatExternalKey({ namespace: aAssoc.namespace, nativeId: aAssoc.nativeId });
+        if (!seenShared.has(key)) {
+          seenShared.add(key);
+          sharedCatalogKeys.push(key);
+        }
       }
     }
-    return items;
+    return { snapA, snapB, tmdbItems, sharedCatalogKeys };
   });
 
-  for (const item of keysToFetch) {
+  if (!loaded) {
+    return extra;
+  }
+
+  const resolveTitles = (target: {
+    snapshot: { title: string; originalTitle: string | null };
+    evidence: unknown;
+  }): string[] => {
+    const ev = target.evidence as {
+      aliases?: string[];
+      title?: string;
+      originalTitle?: string | null;
+    };
+    return [
+      target.snapshot.title,
+      target.snapshot.originalTitle,
+      ev?.title,
+      ev?.originalTitle,
+      ...(Array.isArray(ev?.aliases) ? ev.aliases : []),
+    ].filter((t): t is string => typeof t === "string" && t.trim().length > 0);
+  };
+
+  // 1. Fetch each media's own authoritative TMDB titles first so they belong strictly to that media.
+  for (const item of loaded.tmdbItems) {
     try {
       const resolved = await resolveCatalogTargetSnapshot(item.key, outbound, {
         ...options.catalogConfig,
@@ -248,23 +277,50 @@ async function fetchExtraAliasesForMerge(
       if (resolved.status !== "found") {
         continue;
       }
-      const ev = resolved.target.evidence as {
-        aliases?: string[];
-        title?: string;
-        originalTitle?: string | null;
-      };
-      const titles = [
-        resolved.target.snapshot.title,
-        resolved.target.snapshot.originalTitle,
-        ev?.title,
-        ev?.originalTitle,
-        ...(Array.isArray(ev?.aliases) ? ev.aliases : []),
-      ].filter((t): t is string => typeof t === "string" && t.trim().length > 0);
+      const titles = resolveTitles(resolved.target);
       for (const mediaId of item.mediaIds) {
         const list = extra.get(mediaId) ?? [];
         list.push(...titles);
         extra.set(mediaId, list);
       }
+    } catch {
+      // Best-effort alias enrichment only; verification still rejects safely if aliases are unavailable.
+    }
+  }
+
+  // 2. For shared catalog entries (including seed_unconfirmed), attribute fetched titles to a side
+  //    ONLY when that side independently verifies against the fetched entry (type, year, non-conflicting
+  //    external IDs, and either title/alias overlap or matching external ID).
+  const attributeSharedIfMatched = (
+    snap: MergeCandidateMediaSnapshot,
+    resolvedTarget: Parameters<typeof doesCatalogTargetMatchMediaSnapshot>[2],
+    titles: readonly string[],
+  ) => {
+    const ownAliases = extra.get(snap.id) ?? [];
+    if (doesCatalogTargetMatchMediaSnapshot(snap, ownAliases, resolvedTarget)) {
+      extra.set(snap.id, [...ownAliases, ...titles]);
+    }
+  };
+
+  for (const key of loaded.sharedCatalogKeys) {
+    try {
+      const resolved = await resolveCatalogTargetSnapshot(key, outbound, {
+        ...options.catalogConfig,
+        ...(options.tmdbConfig ? { tmdb: options.tmdbConfig } : {}),
+        ...(options.tmdbGateway ? { tmdbGateway: options.tmdbGateway } : {}),
+      });
+      if (resolved.status !== "found") {
+        continue;
+      }
+      const titles = resolveTitles(resolved.target);
+      const catalogTarget = {
+        type: resolved.target.type,
+        snapshot: resolved.target.snapshot,
+        externalIds: resolved.target.externalIds,
+        aliases: titles,
+      };
+      attributeSharedIfMatched(loaded.snapA, catalogTarget, titles);
+      attributeSharedIfMatched(loaded.snapB, catalogTarget, titles);
     } catch {
       // Best-effort alias enrichment only; verification still rejects safely if aliases are unavailable.
     }
@@ -434,9 +490,73 @@ function parseJsonObject(raw: unknown): JsonObject {
   return {};
 }
 
+export const DUPLICATE_CONVERGENCE_SYNC_KEY = "duplicate_convergence";
+
+interface CatalogConvergenceCursor {
+  namespace: "douban" | "bangumi";
+  nativeId: string;
+}
+
+function parseCatalogConvergenceCursor(metadata: unknown): CatalogConvergenceCursor | null {
+  const obj = parseJsonObject(metadata);
+  const raw = obj.catalogCursor;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const rec = raw as Record<string, unknown>;
+  if (
+    (rec.namespace === "douban" || rec.namespace === "bangumi") &&
+    typeof rec.nativeId === "string" &&
+    rec.nativeId.length > 0
+  ) {
+    return { namespace: rec.namespace, nativeId: rec.nativeId };
+  }
+  return null;
+}
+
+async function fetchDuplicateCatalogGroups(
+  db: Db,
+  limit: number,
+  afterCursor: CatalogConvergenceCursor | null,
+): Promise<Array<{ namespace: AssociationNamespaceRow; native_id: string }>> {
+  if (limit <= 0) {
+    return [];
+  }
+  let query = db
+    .selectFrom("associations as a")
+    .innerJoin("media as m", "m.id", "a.media_id")
+    .where("a.is_external_id", "=", false)
+    .where("a.namespace", "in", ["douban", "bangumi"])
+    .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
+    .where("m.merged_into_media_id", "is", null);
+
+  if (afterCursor) {
+    query = query.where((eb) =>
+      eb.or([
+        eb("a.namespace", ">", afterCursor.namespace),
+        eb.and([
+          eb("a.namespace", "=", afterCursor.namespace),
+          eb("a.native_id", ">", afterCursor.nativeId),
+        ]),
+      ]),
+    );
+  }
+
+  return query
+    .select(["a.namespace", "a.native_id"])
+    .groupBy(["a.namespace", "a.native_id"])
+    .having(sql<number>`count(distinct a.media_id)`, ">", 1)
+    .orderBy("a.namespace", "asc")
+    .orderBy("a.native_id", "asc")
+    .limit(limit)
+    .execute();
+}
+
 /**
  * Idempotent background sweep converging existing unmerged canonical duplicates sharing
  * active `douban`/`bangumi` entries or open `agent_external_id_conflict` alerts.
+ * Advances a keyset cursor in `sync_state` past blocked catalog groups and reserves
+ * capacity for unchecked conflict alerts so blocked pairs cannot starve later groups or alerts.
  */
 export async function convergeDuplicateMedia(
   db: Db,
@@ -446,22 +566,6 @@ export async function convergeDuplicateMedia(
   const now = options.now ?? new Date();
   const actorUserId = options.actorUserId ?? null;
 
-  // 1. Collect pairs sharing an active exclusive catalog (`douban`/`bangumi`) association.
-  const duplicateCatalogGroups = await db
-    .selectFrom("associations as a")
-    .innerJoin("media as m", "m.id", "a.media_id")
-    .where("a.is_external_id", "=", false)
-    .where("a.namespace", "in", ["douban", "bangumi"])
-    .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
-    .where("m.merged_into_media_id", "is", null)
-    .select(["a.namespace", "a.native_id"])
-    .groupBy(["a.namespace", "a.native_id"])
-    .having(sql<number>`count(distinct a.media_id)`, ">", 1)
-    .orderBy("a.namespace", "asc")
-    .orderBy("a.native_id", "asc")
-    .limit(batchSize)
-    .execute();
-
   const candidatePairs: Array<{
     mediaIdA: string;
     mediaIdB: string;
@@ -469,55 +573,28 @@ export async function convergeDuplicateMedia(
     alertId?: string;
   }> = [];
   const seenPairs = new Set<string>();
+  const seenAlertIds = new Set<string>();
 
-  for (const group of duplicateCatalogGroups) {
-    const members = await db
-      .selectFrom("associations as a")
-      .innerJoin("media as m", "m.id", "a.media_id")
-      .where("a.is_external_id", "=", false)
-      .where("a.namespace", "=", group.namespace)
-      .where("a.native_id", "=", group.native_id)
-      .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
-      .where("m.merged_into_media_id", "is", null)
-      .select("m.id as media_id")
-      .distinct()
-      .orderBy("m.id", "asc")
-      .execute();
-
-    if (members.length < 2) {
-      continue;
+  const collectOpenAlerts = async (limit: number) => {
+    if (limit <= 0) {
+      return;
     }
-    for (let i = 0; i < members.length; i += 1) {
-      for (let j = i + 1; j < members.length; j += 1) {
-        const a = members[i]!.media_id;
-        const b = members[j]!.media_id;
-        const pairKey = [a, b].sort().join(":");
-        if (!seenPairs.has(pairKey)) {
-          seenPairs.add(pairKey);
-          candidatePairs.push({
-            mediaIdA: a,
-            mediaIdB: b,
-            reason: `converge_shared_catalog:${group.namespace}:${group.native_id}`,
-          });
-        }
-      }
-    }
-  }
-
-  // 2. Also inspect unchecked open `agent_external_id_conflict` alerts pointing between active media.
-  if (candidatePairs.length < batchSize) {
-    const openAlerts = await db
+    let query = db
       .selectFrom("review_alerts")
       .select(["id", "media_id", "details"])
       .where("alert_type", "=", REVIEW_ALERT_TYPES.AGENT_EXTERNAL_ID_CONFLICT)
       .where("status", "=", "open")
       .where("media_id", "is not", null)
-      .where(sql<boolean>`coalesce(details ->> 'autoMergeCheckedAt', '') = ''`)
-      .orderBy("created_at", "asc")
-      .limit(batchSize - candidatePairs.length)
-      .execute();
+      .where(sql<boolean>`coalesce(details ->> 'autoMergeCheckedAt', '') = ''`);
+
+    if (seenAlertIds.size > 0) {
+      query = query.where("id", "not in", [...seenAlertIds]);
+    }
+
+    const openAlerts = await query.orderBy("created_at", "asc").limit(limit).execute();
 
     for (const alert of openAlerts) {
+      seenAlertIds.add(alert.id);
       if (!alert.media_id) {
         continue;
       }
@@ -529,6 +606,18 @@ export async function convergeDuplicateMedia(
             ? details.conflictingMediaId
             : null;
       if (!otherMediaId || otherMediaId === alert.media_id) {
+        await db
+          .updateTable("review_alerts")
+          .set({
+            details: JSON.stringify({
+              ...details,
+              autoMergeCheckedAt: now.toISOString(),
+              autoMergeBlockedReason: "invalid_alert_target",
+            }),
+          })
+          .where("id", "=", alert.id)
+          .where("status", "=", "open")
+          .execute();
         continue;
       }
       const pairKey = [alert.media_id, otherMediaId].sort().join(":");
@@ -542,6 +631,101 @@ export async function convergeDuplicateMedia(
         });
       }
     }
+  };
+
+  // 1. Reserve capacity for unchecked `agent_external_id_conflict` alerts so blocked catalog groups
+  //    cannot permanently starve alert convergence. When no unchecked alerts exist, catalog gets the full batch.
+  const reservedAlertQuota = batchSize === 1 ? 1 : Math.max(1, Math.floor(batchSize / 4));
+  await collectOpenAlerts(reservedAlertQuota);
+
+  // 2. Collect pairs sharing an active exclusive catalog (`douban`/`bangumi`) association starting
+  //    after the persisted keyset cursor so blocked groups never stall subsequent groups.
+  const catalogLimit = Math.max(0, batchSize - candidatePairs.length);
+  if (catalogLimit > 0) {
+    const stateRow = await db
+      .selectFrom("sync_state")
+      .select("metadata")
+      .where("sync_key", "=", DUPLICATE_CONVERGENCE_SYNC_KEY)
+      .executeTakeFirst();
+    const initialCursor = stateRow ? parseCatalogConvergenceCursor(stateRow.metadata) : null;
+
+    let duplicateCatalogGroups = await fetchDuplicateCatalogGroups(db, catalogLimit, initialCursor);
+    if (initialCursor !== null && duplicateCatalogGroups.length === 0) {
+      duplicateCatalogGroups = await fetchDuplicateCatalogGroups(db, catalogLimit, null);
+    }
+
+    const nextCursor: CatalogConvergenceCursor | null =
+      duplicateCatalogGroups.length === catalogLimit && duplicateCatalogGroups.length > 0
+        ? {
+            namespace: duplicateCatalogGroups[duplicateCatalogGroups.length - 1]!.namespace as
+              | "douban"
+              | "bangumi",
+            nativeId: duplicateCatalogGroups[duplicateCatalogGroups.length - 1]!.native_id,
+          }
+        : null;
+
+    for (const group of duplicateCatalogGroups) {
+      const members = await db
+        .selectFrom("associations as a")
+        .innerJoin("media as m", "m.id", "a.media_id")
+        .where("a.is_external_id", "=", false)
+        .where("a.namespace", "=", group.namespace)
+        .where("a.native_id", "=", group.native_id)
+        .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
+        .where("m.merged_into_media_id", "is", null)
+        .select("m.id as media_id")
+        .distinct()
+        .orderBy("m.id", "asc")
+        .execute();
+
+      if (members.length < 2) {
+        continue;
+      }
+      for (let i = 0; i < members.length; i += 1) {
+        for (let j = i + 1; j < members.length; j += 1) {
+          const a = members[i]!.media_id;
+          const b = members[j]!.media_id;
+          const pairKey = [a, b].sort().join(":");
+          if (!seenPairs.has(pairKey)) {
+            seenPairs.add(pairKey);
+            candidatePairs.push({
+              mediaIdA: a,
+              mediaIdB: b,
+              reason: `converge_shared_catalog:${group.namespace}:${group.native_id}`,
+            });
+          }
+        }
+      }
+    }
+
+    if (initialCursor !== null || nextCursor !== null) {
+      const syncDate = now.toISOString().slice(0, 10);
+      const serializedMeta = JSON.stringify({
+        catalogCursor: nextCursor,
+        updatedAt: now.toISOString(),
+      });
+      await db
+        .insertInto("sync_state")
+        .values({
+          sync_key: DUPLICATE_CONVERGENCE_SYNC_KEY,
+          last_synced_date: syncDate,
+          metadata: serializedMeta,
+          updated_at: now,
+        })
+        .onConflict((oc) =>
+          oc.column("sync_key").doUpdateSet({
+            last_synced_date: syncDate,
+            metadata: serializedMeta,
+            updated_at: now,
+          }),
+        )
+        .execute();
+    }
+  }
+
+  // 3. Fill any remaining capacity with additional unchecked open conflict alerts.
+  if (candidatePairs.length < batchSize) {
+    await collectOpenAlerts(batchSize - candidatePairs.length);
   }
 
   const mergedPairs: ConvergeDuplicateMediaResult["mergedPairs"] = [];

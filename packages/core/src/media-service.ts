@@ -47,8 +47,10 @@ import {
   verifyAndAutoMergeDuplicateMediaInTx,
 } from "./duplicate-merge.ts";
 import {
+  doesCatalogTargetMatchMediaSnapshot,
   extractCatalogAndCollectionTitlesFromEvidence,
   findReusableMediaForPrefetchedCatalogInTx,
+  loadMediaMergeCandidateSnapshotInTx,
   parseMediaSeasonsJson,
   resolveCanonicalMediaIdInTx,
 } from "./duplicate-merge-policy.ts";
@@ -57,7 +59,7 @@ import {
   mergeExternalKeyDemandsIntoMedia,
   reopenDemandAfterRejectionInTx,
 } from "./demands.ts";
-import { enqueueJob } from "./jobs.ts";
+import { enqueueJob, enqueueSeedEvidenceCheckForAssociation } from "./jobs.ts";
 import { MAX_LEAD_VARIANT_DESCRIPTION_LENGTH } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import type { OutboundClient } from "./outbound.ts";
@@ -483,17 +485,19 @@ async function resolveExistingMediaByTarget(
     const rawRows = await db
       .selectFrom("associations")
       .where("is_external_id", "=", false)
-      .select(["id", "media_id", "status"])
+      .select(["id", "media_id", "status", "needs_review"])
       .where("namespace", "=", target.namespace)
       .where("native_id", "=", target.nativeId)
       .where("status", "in", [...allowedStatuses])
+      .orderBy("needs_review", "asc")
       .orderBy("created_at", "asc")
       .orderBy("id", "asc")
       .execute();
 
     const rows = [
       ...rawRows.filter((r) => r.status === "confirmed"),
-      ...rawRows.filter((r) => r.status !== "confirmed"),
+      ...rawRows.filter((r) => r.status !== "confirmed" && !r.needs_review),
+      ...rawRows.filter((r) => r.status !== "confirmed" && r.needs_review),
     ];
 
     if (rows.length === 0) {
@@ -518,7 +522,7 @@ async function resolveExistingMediaByTarget(
   return null;
 }
 
-async function loadActiveAssociationsWithSegments(
+export async function loadActiveAssociationsWithSegments(
   db: DbExecutor,
   filter: {
     variantId?: string;
@@ -1520,11 +1524,34 @@ export async function approveChangeRequestInTransaction(
       );
     }
 
-    const existingInTx = await resolveExistingMediaByTarget(trx, target, {
-      includeUnconfirmedCatalog: true,
+    const existingConfirmedInTx = await resolveExistingMediaByTarget(trx, target, {
+      includeUnconfirmedCatalog: false,
     });
-    let resolvedOrCreatedMedia: ResolvedMediaRow | null = existingInTx?.media ?? null;
-    let reusedExisting = existingInTx !== null;
+    let resolvedOrCreatedMedia: ResolvedMediaRow | null = existingConfirmedInTx?.media ?? null;
+    let reusedExisting = existingConfirmedInTx !== null;
+
+    if (!resolvedOrCreatedMedia && prefetchedCatalog) {
+      const reusable = await findReusableMediaForPrefetchedCatalogInTx(trx, {
+        type: prefetchedCatalog.type,
+        snapshot: prefetchedCatalog.snapshot,
+        externalIds: prefetchedCatalog.externalIds,
+        initialAssociation: initAssoc,
+      });
+      if (reusable) {
+        resolvedOrCreatedMedia = reusable;
+        reusedExisting = true;
+      }
+    }
+
+    if (!resolvedOrCreatedMedia) {
+      const existingUnconfirmedInTx = await resolveExistingMediaByTarget(trx, target, {
+        includeUnconfirmedCatalog: true,
+      });
+      if (existingUnconfirmedInTx) {
+        resolvedOrCreatedMedia = existingUnconfirmedInTx.media;
+        reusedExisting = true;
+      }
+    }
 
     if (!resolvedOrCreatedMedia) {
       if (!prefetchedCatalog) {
@@ -1535,38 +1562,27 @@ export async function approveChangeRequestInTransaction(
         );
       }
 
-      const reusable = await findReusableMediaForPrefetchedCatalogInTx(trx, {
-        type: prefetchedCatalog.type,
-        snapshot: prefetchedCatalog.snapshot,
-        externalIds: prefetchedCatalog.externalIds,
-        initialAssociation: initAssoc,
-      });
-      if (reusable) {
-        resolvedOrCreatedMedia = reusable;
-        reusedExisting = true;
-      } else {
-        resolvedOrCreatedMedia = await trx
-          .insertInto("media")
-          .values({
-            type: prefetchedCatalog.type,
-            baseline: prefetchedCatalog.baseline,
-            title: prefetchedCatalog.snapshot.title,
-            original_title: prefetchedCatalog.snapshot.originalTitle,
-            year: prefetchedCatalog.snapshot.year,
-            seasons: JSON.stringify(prefetchedCatalog.snapshot.seasons),
-          })
-          .returning([
-            "id",
-            "type",
-            "baseline",
-            "title",
-            "original_title",
-            "year",
-            "seasons",
-            "merged_into_media_id",
-          ])
-          .executeTakeFirstOrThrow();
-      }
+      resolvedOrCreatedMedia = await trx
+        .insertInto("media")
+        .values({
+          type: prefetchedCatalog.type,
+          baseline: prefetchedCatalog.baseline,
+          title: prefetchedCatalog.snapshot.title,
+          original_title: prefetchedCatalog.snapshot.originalTitle,
+          year: prefetchedCatalog.snapshot.year,
+          seasons: JSON.stringify(prefetchedCatalog.snapshot.seasons),
+        })
+        .returning([
+          "id",
+          "type",
+          "baseline",
+          "title",
+          "original_title",
+          "year",
+          "seasons",
+          "merged_into_media_id",
+        ])
+        .executeTakeFirstOrThrow();
     }
 
     if (prefetchedCatalog) {
@@ -1656,7 +1672,8 @@ export async function approveChangeRequestInTransaction(
         }
       }
 
-      // Establish or promote the initial confirmed catalog association (Douban/Bangumi)
+      // Establish the initial confirmed catalog association (Douban/Bangumi) if missing;
+      // NEVER bypass `seed_evidence_check` to promote an existing `seed_unconfirmed` or `delisted` row.
       let createdInitSegments: NormalizedSegment[] = [];
       let shouldFulfillInitAssoc = false;
       if (
@@ -1666,7 +1683,7 @@ export async function approveChangeRequestInTransaction(
         const existingInitAssoc = await trx
           .selectFrom("associations")
           .where("is_external_id", "=", false)
-          .select(["id", "status"])
+          .select(["id", "status", "needs_review", "locked"])
           .where("media_id", "=", resolvedOrCreatedMedia.id)
           .where("namespace", "=", initAssoc.namespace)
           .where("native_id", "=", initAssoc.nativeId)
@@ -1687,117 +1704,113 @@ export async function approveChangeRequestInTransaction(
           });
         }
 
-        if (!existingInitAssoc) {
-          const createdInitAssoc = await trx
-            .insertInto("associations")
-            .values({
-              media_id: resolvedOrCreatedMedia.id,
-              namespace: initAssoc.namespace,
-              native_id: initAssoc.nativeId,
-              variant_id: null,
-              status: "confirmed",
-              needs_review: false,
-              locked: false,
-            })
-            .returning("id")
-            .executeTakeFirstOrThrow();
-
-          if (initSegments.length > 0) {
-            await trx
-              .insertInto("segments")
-              .values(
-                initSegments.map((seg) => ({
-                  association_id: createdInitAssoc.id,
-                  season: seg.season,
-                  episode_start: seg.episodeStart,
-                  episode_end: seg.episodeEnd,
-                  target_episode_start: seg.targetEpisodeStart,
-                  baseline: seg.baseline,
-                  non_linear: seg.nonLinear,
-                  needs_review: seg.needsReview,
-                })),
-              )
-              .execute();
+        if (existingInitAssoc) {
+          if (
+            existingInitAssoc.status === "seed_unconfirmed" &&
+            !existingInitAssoc.needs_review &&
+            !existingInitAssoc.locked
+          ) {
+            await enqueueSeedEvidenceCheckForAssociation(trx, {
+              associationId: existingInitAssoc.id,
+              mediaId: resolvedOrCreatedMedia.id,
+              now: input.now ?? new Date(),
+            });
+          }
+        } else if (resolvedOrCreatedMedia.type === prefetchedCatalog.type) {
+          let canInsertInitAssoc = !reusedExisting;
+          if (!canInsertInitAssoc) {
+            const [siblingAssocs, sharedCollectionAssocs] = await Promise.all([
+              loadActiveAssociationsWithSegments(trx, {
+                mediaId: resolvedOrCreatedMedia.id,
+                catalogNamespace: initAssoc.namespace,
+              }),
+              loadActiveAssociationsWithSegments(trx, {
+                collection: { namespace: initAssoc.namespace, nativeId: initAssoc.nativeId },
+              }),
+            ]);
+            const variantCheck = validateVariantSegments(
+              [
+                ...siblingAssocs.map((a) => ({ associationId: a.id, segments: a.segments })),
+                { associationId: "candidate", segments: initSegments },
+              ],
+              {
+                baseline: resolvedOrCreatedMedia.baseline,
+                allowHierarchicalScopes: getNamespaceCapabilities(initAssoc.namespace)
+                  .allowHierarchicalScopes,
+              },
+            );
+            const sharedCheck = validateSharedCollectionSegments([
+              ...sharedCollectionAssocs.map((a) => ({
+                mediaId: a.mediaId,
+                associationId: a.id,
+                segments: a.segments,
+              })),
+              {
+                mediaId: resolvedOrCreatedMedia.id,
+                associationId: "candidate",
+                segments: initSegments,
+              },
+            ]);
+            canInsertInitAssoc = variantCheck.valid && sharedCheck.valid;
           }
 
-          const initRev = await trx
-            .insertInto("association_revisions")
-            .values({
-              association_id: createdInitAssoc.id,
-              revision_number: 1,
-              change_request_id: null,
-              variant_id: null,
-              status: "confirmed",
-              segments: JSON.stringify(initSegments),
-              actor_user_id: null,
-              reason: "initial_catalog_target",
-            })
-            .returning("id")
-            .executeTakeFirstOrThrow();
+          if (canInsertInitAssoc) {
+            const createdInitAssoc = await trx
+              .insertInto("associations")
+              .values({
+                media_id: resolvedOrCreatedMedia.id,
+                namespace: initAssoc.namespace,
+                native_id: initAssoc.nativeId,
+                variant_id: null,
+                status: "confirmed",
+                needs_review: false,
+                locked: false,
+              })
+              .returning("id")
+              .executeTakeFirstOrThrow();
 
-          await trx
-            .updateTable("associations")
-            .set({ current_revision_id: initRev.id })
-            .where("id", "=", createdInitAssoc.id)
-            .execute();
+            if (initSegments.length > 0) {
+              await trx
+                .insertInto("segments")
+                .values(
+                  initSegments.map((seg) => ({
+                    association_id: createdInitAssoc.id,
+                    season: seg.season,
+                    episode_start: seg.episodeStart,
+                    episode_end: seg.episodeEnd,
+                    target_episode_start: seg.targetEpisodeStart,
+                    baseline: seg.baseline,
+                    non_linear: seg.nonLinear,
+                    needs_review: seg.needsReview,
+                  })),
+                )
+                .execute();
+            }
 
-          createdInitSegments = initSegments;
-          shouldFulfillInitAssoc = true;
-        } else if (existingInitAssoc.status !== "confirmed") {
-          const existingInitSegs = await loadSegments(trx, existingInitAssoc.id);
-          const finalSegs = existingInitSegs.length > 0 ? existingInitSegs : initSegments;
-          await trx
-            .updateTable("associations")
-            .set({
-              status: "confirmed",
-              needs_review: false,
-              updated_at: input.now ?? new Date(),
-            })
-            .where("id", "=", existingInitAssoc.id)
-            .execute();
-          if (existingInitSegs.length === 0 && initSegments.length > 0) {
+            const initRev = await trx
+              .insertInto("association_revisions")
+              .values({
+                association_id: createdInitAssoc.id,
+                revision_number: 1,
+                change_request_id: null,
+                variant_id: null,
+                status: "confirmed",
+                segments: JSON.stringify(initSegments),
+                actor_user_id: null,
+                reason: "initial_catalog_target",
+              })
+              .returning("id")
+              .executeTakeFirstOrThrow();
+
             await trx
-              .insertInto("segments")
-              .values(
-                initSegments.map((seg) => ({
-                  association_id: existingInitAssoc.id,
-                  season: seg.season,
-                  episode_start: seg.episodeStart,
-                  episode_end: seg.episodeEnd,
-                  target_episode_start: seg.targetEpisodeStart,
-                  baseline: seg.baseline,
-                  non_linear: seg.nonLinear,
-                  needs_review: seg.needsReview,
-                })),
-              )
+              .updateTable("associations")
+              .set({ current_revision_id: initRev.id })
+              .where("id", "=", createdInitAssoc.id)
               .execute();
+
+            createdInitSegments = initSegments;
+            shouldFulfillInitAssoc = true;
           }
-          const maxRevRow = await trx
-            .selectFrom("association_revisions")
-            .select(sql<number | null>`max(revision_number)`.as("max_rev"))
-            .where("association_id", "=", existingInitAssoc.id)
-            .executeTakeFirst();
-          const initRev = await trx
-            .insertInto("association_revisions")
-            .values({
-              association_id: existingInitAssoc.id,
-              revision_number: (maxRevRow?.max_rev ?? 0) + 1,
-              change_request_id: null,
-              variant_id: null,
-              status: "confirmed",
-              segments: JSON.stringify(finalSegs),
-              actor_user_id: input.reviewerUserId,
-              reason: "confirmed_existing_seed_catalog_target",
-            })
-            .returning("id")
-            .executeTakeFirstOrThrow();
-          await trx
-            .updateTable("associations")
-            .set({ current_revision_id: initRev.id })
-            .where("id", "=", existingInitAssoc.id)
-            .execute();
-          createdInitSegments = finalSegs;
-          shouldFulfillInitAssoc = true;
         }
       }
 
@@ -2124,14 +2137,60 @@ export async function approveChangeRequestInTransaction(
       let mergedAny = false;
       let allMerged = candidateOtherIds.length > 0;
 
+      const rawEvidence = input.evidence !== undefined ? input.evidence : cr.evidence;
+      const collectionEvidenceRaw =
+        rawEvidence &&
+        typeof rawEvidence === "object" &&
+        !Array.isArray(rawEvidence) &&
+        typeof (rawEvidence as Record<string, unknown>).collection === "object" &&
+        (rawEvidence as Record<string, unknown>).collection !== null
+          ? ((rawEvidence as Record<string, unknown>).collection as Record<string, unknown>)
+          : null;
+
       for (const otherId of candidateOtherIds) {
         const extraTitlesByMediaId = new Map<string, readonly string[]>();
         const targetExtra = [...prefetchedTitles, ...catalogTitles];
         if (targetExtra.length > 0) {
           extraTitlesByMediaId.set(mediaId, targetExtra);
         }
-        if (collectionTitles.length > 0) {
-          extraTitlesByMediaId.set(otherId, collectionTitles);
+        if (collectionTitles.length > 0 && collectionEvidenceRaw) {
+          const otherSnap = await loadMediaMergeCandidateSnapshotInTx(trx, otherId);
+          const colTitle =
+            typeof collectionEvidenceRaw.title === "string"
+              ? collectionEvidenceRaw.title
+              : collectionTitles[0]!;
+          const colOrigTitle =
+            typeof collectionEvidenceRaw.originalTitle === "string"
+              ? collectionEvidenceRaw.originalTitle
+              : null;
+          const colYear =
+            typeof collectionEvidenceRaw.year === "number" ? collectionEvidenceRaw.year : null;
+          const colType =
+            collectionEvidenceRaw.mediaType === "movie" || collectionEvidenceRaw.mediaType === "tv"
+              ? collectionEvidenceRaw.mediaType
+              : media.type;
+          const colExtRaw =
+            collectionEvidenceRaw.externalIds &&
+            typeof collectionEvidenceRaw.externalIds === "object" &&
+            !Array.isArray(collectionEvidenceRaw.externalIds)
+              ? (collectionEvidenceRaw.externalIds as Partial<Record<ExternalIdNamespace, string>>)
+              : undefined;
+          if (
+            otherSnap &&
+            doesCatalogTargetMatchMediaSnapshot(otherSnap, [], {
+              type: colType,
+              snapshot: {
+                title: colTitle,
+                originalTitle: colOrigTitle,
+                year: colYear,
+                seasons: [],
+              },
+              externalIds: colExtRaw,
+              aliases: collectionTitles,
+            })
+          ) {
+            extraTitlesByMediaId.set(otherId, collectionTitles);
+          }
         }
 
         const mergeAttempt = await verifyAndAutoMergeDuplicateMediaInTx(trx, {

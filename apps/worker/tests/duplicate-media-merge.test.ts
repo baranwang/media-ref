@@ -9,13 +9,16 @@ import {
   createFakeOutboundClient,
   createTmdbGateway,
   DOUBAN_API,
+  doubanAdapter,
   EXPLORATION_JOB_TYPE,
   listDemands,
   mergeMedia,
   queryMediaByKey,
   recordDemandForRead,
   runTmdbDailySync,
+  SEED_EVIDENCE_CHECK_JOB_TYPE,
   tencentAdapter,
+  verifyAndAutoMergeDuplicateMedia,
   type AdapterRegistry,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
@@ -258,6 +261,21 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
             episodesCount: 40,
           });
         }
+        if (url.pathname.endsWith("/tv/203483")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 203483,
+              name: "两京十五日",
+              original_name: "两京十五日",
+              first_air_date: "2026-06-01",
+              seasons: [{ season_number: 1, episode_count: 40, air_date: "2026-06-01" }],
+              external_ids: {},
+            }),
+          };
+        }
         throw new Error(`Unexpected outbound URL: ${request.url}`);
       },
     });
@@ -271,7 +289,11 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
           emitted.push(msg);
         },
       },
-      adapterRegistry: createTestPlatformRegistry(),
+      adapterRegistry: createAdapterRegistry([
+        createTier3BilibiliStub(),
+        tencentAdapter,
+        doubanAdapter,
+      ]),
       config: {
         enableDailyTmdbSync: false,
         tmdb: { accessToken: "test-tmdb-token" },
@@ -297,6 +319,26 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     expect(activeMedia).toHaveLength(1);
     expect(activeMedia[0]!.id).toBe(tmdbMedia.id);
 
+    // Exploration reuses the existing media WITHOUT prematurely confirming the seed before
+    // `seed_evidence_check` passes the Evidence Gate + segment check.
+    const doubanBeforeGate = await db
+      .selectFrom("associations")
+      .selectAll()
+      .where("is_external_id", "=", false)
+      .where("namespace", "=", "douban")
+      .where("native_id", "=", "35235320")
+      .where("status", "!=", "delisted")
+      .execute();
+    expect(doubanBeforeGate).toHaveLength(1);
+    expect(doubanBeforeGate[0]!.media_id).toBe(tmdbMedia.id);
+    expect(doubanBeforeGate[0]!.status).toBe("seed_unconfirmed");
+
+    emitted.length = 0;
+    await worker.scheduled(createScheduledController(now));
+    const seedMsgs = emitted.filter((m) => m.jobType === SEED_EVIDENCE_CHECK_JOB_TYPE);
+    expect(seedMsgs).toHaveLength(1);
+    await worker.queue(createQueueBatch(seedMsgs, now).batch);
+
     const doubanRows = await db
       .selectFrom("associations")
       .selectAll()
@@ -308,6 +350,215 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     expect(doubanRows).toHaveLength(1);
     expect(doubanRows[0]!.media_id).toBe(tmdbMedia.id);
     expect(doubanRows[0]!.status).toBe("confirmed");
+  });
+
+  test("exploring externalKey douban:35235320 reuses media holding wrong or needs_review seed without confirming it", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    const now = new Date("2026-11-24T10:00:00.000Z");
+
+    // Existing TMDB media holds a BAD seed_unconfirmed douban:35235320 (wrong work) already flagged needs_review
+    const wrongMedia = await db
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "完全不同的剧",
+        original_title: "Completely Different Show",
+        year: 2019,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 12, airYear: 2019 }]),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    await db
+      .insertInto("associations")
+      .values({
+        media_id: wrongMedia.id,
+        namespace: "tmdb",
+        native_id: "tv:999111",
+        is_external_id: true,
+        status: "confirmed",
+        needs_review: false,
+        locked: false,
+      })
+      .execute();
+
+    const badSeed = await db
+      .insertInto("associations")
+      .values({
+        media_id: wrongMedia.id,
+        namespace: "douban",
+        native_id: "35235320",
+        is_external_id: false,
+        status: "seed_unconfirmed",
+        needs_review: true,
+        locked: false,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    // Also create a second media whose seed_unconfirmed has needs_review=false but fails Evidence Gate
+    const uncheckedWrongMedia = await db
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "另一部无关作品",
+        original_title: "Another Wrong Show",
+        year: 2020,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 10, airYear: 2020 }]),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    await db
+      .insertInto("associations")
+      .values({
+        media_id: uncheckedWrongMedia.id,
+        namespace: "tmdb",
+        native_id: "tv:999222",
+        is_external_id: true,
+        status: "confirmed",
+        needs_review: false,
+        locked: false,
+      })
+      .execute();
+
+    const uncheckedBadSeed = await db
+      .insertInto("associations")
+      .values({
+        media_id: uncheckedWrongMedia.id,
+        namespace: "douban",
+        native_id: "35235321",
+        is_external_id: false,
+        status: "seed_unconfirmed",
+        needs_review: false,
+        locked: false,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    await db
+      .insertInto("segments")
+      .values({
+        association_id: uncheckedBadSeed.id,
+        season: 1,
+        episode_start: 1,
+        episode_end: 10,
+        target_episode_start: 1,
+        baseline: "tmdb",
+        non_linear: false,
+        needs_review: false,
+      })
+      .execute();
+
+    for (const key of ["douban:35235320", "douban:35235321"]) {
+      const qr = await queryMediaByKey(db, key);
+      await recordDemandForRead(db, { rawKey: key, queryResult: qr, now });
+      await db
+        .updateTable("demands")
+        .set({ demand_count: 10, next_eligible_at: now })
+        .where("external_key", "=", key)
+        .execute();
+    }
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (
+          url.hostname === "frodo.douban.com" &&
+          (url.pathname.includes("35235320") || url.pathname.includes("35235321"))
+        ) {
+          const id = url.pathname.includes("35235320") ? "35235320" : "35235321";
+          return createDoubanSubjectResponse(request, {
+            id,
+            title: "两京十五日",
+            year: "2026",
+            type: "tv",
+            episodesCount: 40,
+          });
+        }
+        if (
+          url.hostname === "movie.douban.com" &&
+          (url.pathname.includes("/subject/35235320") || url.pathname.includes("/subject/35235321"))
+        ) {
+          const id = url.pathname.includes("35235320") ? "35235320" : "35235321";
+          return createDoubanHtmlResponse(request, {
+            id,
+            title: "两京十五日",
+            year: "2026",
+            type: "tv",
+            episodesCount: 40,
+          });
+        }
+        if (url.pathname.endsWith("/tv/999222")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 999222,
+              name: "另一部无关作品",
+              original_name: "Another Wrong Show",
+              first_air_date: "2020-01-01",
+              seasons: [{ season_number: 1, episode_count: 10, air_date: "2020-01-01" }],
+              external_ids: {},
+            }),
+          };
+        }
+        throw new Error(`Unexpected outbound URL: ${request.url}`);
+      },
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db,
+      outbound,
+      queue: {
+        async send(msg) {
+          emitted.push(msg);
+        },
+      },
+      adapterRegistry: createAdapterRegistry([
+        createTier3BilibiliStub(),
+        tencentAdapter,
+        doubanAdapter,
+      ]),
+      config: {
+        enableDailyTmdbSync: false,
+        tmdb: { accessToken: "test-tmdb-token" },
+        exploration: { dailyBudget: 10 },
+      },
+      explorationExecutor: async () => ({
+        platformOutcomes: [{ namespace: "bilibili", status: "not_found" }],
+      }),
+      now: () => now,
+    });
+
+    await worker.scheduled(createScheduledController(now));
+    const explorationMsgs = emitted.filter((m) => m.jobType === EXPLORATION_JOB_TYPE);
+    expect(explorationMsgs).toHaveLength(2);
+    await worker.queue(createQueueBatch(explorationMsgs, now).batch);
+
+    // Neither wrong seed may become confirmed, and `needs_review=true` must NOT be queued again
+    emitted.length = 0;
+    await worker.scheduled(createScheduledController(now));
+    const seedMsgs = emitted.filter((m) => m.jobType === SEED_EVIDENCE_CHECK_JOB_TYPE);
+    expect(seedMsgs).toHaveLength(1);
+    expect(seedMsgs[0]!.payload.associationId).toBe(uncheckedBadSeed.id);
+    await worker.queue(createQueueBatch(seedMsgs, now).batch);
+
+    const refreshedSeeds = await db
+      .selectFrom("associations")
+      .select(["id", "status", "needs_review"])
+      .where("id", "in", [badSeed.id, uncheckedBadSeed.id])
+      .execute();
+    for (const row of refreshedSeeds) {
+      expect(row.status).toBe("seed_unconfirmed");
+      expect(row.needs_review).toBe(true);
+    }
   });
 
   test("approving a new-target CR for douban:35235320 reuses existing media holding matching IMDb external ID or seed_unconfirmed douban", async () => {
@@ -1657,5 +1908,398 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     // Idempotent second sweep: dupDoubanMedia already merged, unrelated stays skipped
     const second = await convergeDuplicateMedia(db, { now });
     expect(second.mergedCount).toBe(0);
+  });
+
+  test("verifyAndAutoMergeDuplicateMedia refuses to merge unrelated media sharing a bad seed even after fetching shared catalog aliases", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    const now = new Date("2026-11-24T10:00:00.000Z");
+
+    const unrelatedA = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "douban",
+        title: "完全无关电影甲",
+        original_title: "Unrelated Film Alpha",
+        year: 2024,
+        seasons: JSON.stringify([]),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    const unrelatedB = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "douban",
+        title: "完全无关电影乙",
+        original_title: "Unrelated Film Beta",
+        year: 2024,
+        seasons: JSON.stringify([]),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    await db
+      .insertInto("associations")
+      .values([
+        {
+          media_id: unrelatedA.id,
+          namespace: "douban",
+          native_id: "999001",
+          is_external_id: false,
+          status: "seed_unconfirmed",
+          needs_review: false,
+          locked: false,
+        },
+        {
+          media_id: unrelatedB.id,
+          namespace: "douban",
+          native_id: "999001",
+          is_external_id: false,
+          status: "seed_unconfirmed",
+          needs_review: false,
+          locked: false,
+        },
+      ])
+      .execute();
+
+    // Positive cross-language pair sharing douban:1292000 where BOTH sides independently match the entry
+    const tmdbFightClub = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "tmdb",
+        title: "Fight Club",
+        original_title: "Fight Club",
+        year: 1999,
+        seasons: JSON.stringify([]),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    const doubanFightClub = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "douban",
+        title: "搏击俱乐部",
+        original_title: null,
+        year: 1999,
+        seasons: JSON.stringify([]),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    await db
+      .insertInto("associations")
+      .values([
+        {
+          media_id: tmdbFightClub.id,
+          namespace: "tmdb",
+          native_id: "movie:550",
+          is_external_id: true,
+          status: "confirmed",
+          needs_review: false,
+          locked: false,
+        },
+        {
+          media_id: tmdbFightClub.id,
+          namespace: "douban",
+          native_id: "1292000",
+          is_external_id: false,
+          status: "confirmed",
+          needs_review: false,
+          locked: false,
+        },
+        {
+          media_id: doubanFightClub.id,
+          namespace: "douban",
+          native_id: "1292000",
+          is_external_id: false,
+          status: "confirmed",
+          needs_review: false,
+          locked: false,
+        },
+      ])
+      .execute();
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (url.hostname === "frodo.douban.com" && url.pathname.includes("999001")) {
+          return createDoubanSubjectResponse(request, {
+            id: "999001",
+            title: "第三部无关作品",
+            originalTitle: "Third Movie",
+            year: "2024",
+            type: "movie",
+            aka: ["Third Movie Alias"],
+          });
+        }
+        if (url.hostname === "movie.douban.com" && url.pathname.includes("/subject/999001")) {
+          return createDoubanHtmlResponse(request, {
+            id: "999001",
+            title: "第三部无关作品",
+            year: "2024",
+            type: "movie",
+          });
+        }
+        if (url.hostname === "frodo.douban.com" && url.pathname.includes("1292000")) {
+          return createDoubanSubjectResponse(request, {
+            id: "1292000",
+            title: "搏击俱乐部",
+            originalTitle: "Fight Club",
+            year: "1999",
+            type: "movie",
+            aka: ["Fight Club"],
+          });
+        }
+        if (url.hostname === "movie.douban.com" && url.pathname.includes("/subject/1292000")) {
+          return createDoubanHtmlResponse(request, {
+            id: "1292000",
+            title: "搏击俱乐部",
+            year: "1999",
+            type: "movie",
+          });
+        }
+        if (url.pathname.endsWith("/movie/550")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 550,
+              title: "Fight Club",
+              original_title: "Fight Club",
+              release_date: "1999-10-15",
+              external_ids: {},
+            }),
+          };
+        }
+        throw new Error(`Unexpected outbound URL: ${request.url}`);
+      },
+    });
+
+    const blocked = await verifyAndAutoMergeDuplicateMedia(db, {
+      mediaIdA: unrelatedA.id,
+      mediaIdB: unrelatedB.id,
+      actorUserId: null,
+      reason: "test_bad_shared_seed",
+      outbound,
+      tmdbConfig: { accessToken: "test-tmdb-token" },
+      now,
+    });
+    expect(blocked.merged).toBe(false);
+    if (!blocked.merged) {
+      expect(blocked.blockReason).toBe("title_mismatch");
+    }
+
+    const validCrossLang = await verifyAndAutoMergeDuplicateMedia(db, {
+      mediaIdA: tmdbFightClub.id,
+      mediaIdB: doubanFightClub.id,
+      actorUserId: null,
+      reason: "test_valid_cross_language",
+      outbound,
+      tmdbConfig: { accessToken: "test-tmdb-token" },
+      now,
+    });
+    expect(validCrossLang.merged).toBe(true);
+    if (validCrossLang.merged) {
+      expect(validCrossLang.targetMediaId).toBe(tmdbFightClub.id);
+    }
+  });
+
+  test("convergeDuplicateMedia advances past blocked prefix catalog groups and still inspects open conflict alerts", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    const now = new Date("2026-11-24T10:00:00.000Z");
+
+    const createBlockedGroup = async (nativeId: string, idx: number) => {
+      const m1 = await db
+        .insertInto("media")
+        .values({
+          type: "movie",
+          baseline: "douban",
+          title: `阻断作品A-${idx}`,
+          year: 2010 + idx,
+          seasons: JSON.stringify([]),
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const m2 = await db
+        .insertInto("media")
+        .values({
+          type: "movie",
+          baseline: "douban",
+          title: `阻断作品B-${idx}`,
+          year: 2015 + idx,
+          seasons: JSON.stringify([]),
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("associations")
+        .values([
+          {
+            media_id: m1.id,
+            namespace: "douban",
+            native_id: nativeId,
+            is_external_id: false,
+            status: "confirmed",
+            needs_review: false,
+            locked: false,
+          },
+          {
+            media_id: m2.id,
+            namespace: "douban",
+            native_id: nativeId,
+            is_external_id: false,
+            status: "seed_unconfirmed",
+            needs_review: false,
+            locked: false,
+          },
+        ])
+        .execute();
+    };
+
+    // First 2 catalog groups (sorted ascending) are blocked and cannot merge
+    await createBlockedGroup("100001", 1);
+    await createBlockedGroup("100002", 2);
+
+    // 3rd catalog group (sorted later) is mergeable
+    const targetLater = await db
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "后续可合并剧集",
+        original_title: "后续可合并剧集",
+        year: 2026,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 12, airYear: 2026 }]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const sourceLater = await db
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "douban",
+        title: "后续可合并剧集",
+        original_title: "后续可合并剧集",
+        year: 2026,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 12, airYear: 2026 }]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("associations")
+      .values([
+        {
+          media_id: targetLater.id,
+          namespace: "tmdb",
+          native_id: "tv:444555",
+          is_external_id: true,
+          status: "confirmed",
+          needs_review: false,
+          locked: false,
+        },
+        {
+          media_id: targetLater.id,
+          namespace: "douban",
+          native_id: "900001",
+          is_external_id: false,
+          status: "confirmed",
+          needs_review: false,
+          locked: false,
+        },
+        {
+          media_id: sourceLater.id,
+          namespace: "douban",
+          native_id: "900001",
+          is_external_id: false,
+          status: "confirmed",
+          needs_review: false,
+          locked: false,
+        },
+      ])
+      .execute();
+
+    // Also create an unchecked open agent_external_id_conflict alert between another mergeable pair
+    const alertTarget = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "tmdb",
+        title: "告警收敛电影",
+        original_title: "Alert Convergence Movie",
+        year: 2025,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const alertSource = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "douban",
+        title: "告警收敛电影",
+        original_title: "Alert Convergence Movie",
+        year: 2025,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("associations")
+      .values({
+        media_id: alertTarget.id,
+        namespace: "tmdb",
+        native_id: "movie:555666",
+        is_external_id: true,
+        status: "confirmed",
+        needs_review: false,
+        locked: false,
+      })
+      .execute();
+    await db
+      .insertInto("review_alerts")
+      .values({
+        alert_type: "agent_external_id_conflict",
+        media_id: alertSource.id,
+        association_id: null,
+        status: "open",
+        details: JSON.stringify({
+          namespace: "tmdb",
+          nativeId: "movie:555666",
+          otherMediaId: alertTarget.id,
+        }),
+      })
+      .execute();
+
+    // With batchSize=2, blocked groups 100001 & 100002 must not starve either the alert branch or 900001
+    const run1 = await convergeDuplicateMedia(db, { batchSize: 2, now });
+    const run2 = await convergeDuplicateMedia(db, { batchSize: 2, now });
+    const run3 = await convergeDuplicateMedia(db, { batchSize: 2, now });
+
+    expect(run1.mergedCount + run2.mergedCount + run3.mergedCount).toBe(2);
+
+    const [laterRefreshed, alertRefreshed] = await Promise.all([
+      db
+        .selectFrom("media")
+        .select("merged_into_media_id")
+        .where("id", "=", sourceLater.id)
+        .executeTakeFirstOrThrow(),
+      db
+        .selectFrom("media")
+        .select("merged_into_media_id")
+        .where("id", "=", alertSource.id)
+        .executeTakeFirstOrThrow(),
+    ]);
+    expect(laterRefreshed.merged_into_media_id).toBe(targetLater.id);
+    expect(alertRefreshed.merged_into_media_id).toBe(alertTarget.id);
   });
 });
