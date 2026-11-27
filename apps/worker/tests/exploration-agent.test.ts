@@ -111,11 +111,23 @@ interface StubOptions {
   failIqiyiSearch?: boolean;
   /** bilibili season ids the Douban subject lists under "where to watch". */
   doubanBilibili?: string[];
+  /** The platform demand's season (default 1). */
+  demandSeason?: number;
+  /** TMDB fails the requested season's first-episode IMDb lookup. */
+  failSeasonImdb?: boolean;
 }
 
-function createHttpStub({ kan360Rows, failIqiyiSearch, doubanBilibili = [] }: StubOptions) {
+function createHttpStub({
+  kan360Rows,
+  failIqiyiSearch,
+  doubanBilibili = [],
+  failSeasonImdb,
+}: StubOptions) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     const url = new URL(request.url);
+    if (failSeasonImdb && url.pathname.endsWith("/episode/1/external_ids")) {
+      return jsonResponse(request.url, {}, 500);
+    }
     const tmdbSeason = url.pathname.match(/\/tv\/95479\/season\/(\d+)$/);
     if (request.namespace === "tmdb" && tmdbSeason?.[1] === "3") {
       // A long season: 100 episodes.
@@ -308,7 +320,7 @@ describe("Exploration agent: discover → judge → gate", () => {
       .insertInto("demands")
       .values({
         media_id: media.id,
-        season: 1,
+        season: stub.demandSeason ?? 1,
         namespace_group: "platform",
         status: "open",
         next_eligible_at: T0,
@@ -563,6 +575,18 @@ describe("Exploration agent: discover → judge → gate", () => {
       }
     },
   );
+
+  test("a failed season IMDb lookup keeps the platforms' absence inconclusive", async () => {
+    const platformChecks = async (failSeasonImdb: boolean) => {
+      const { testDb, explore } = await setup({ kan360Rows: [], demandSeason: 2, failSeasonImdb });
+      await explore();
+      return testDb.readDb.selectFrom("platform_checks").select("platform").execute();
+    };
+    // Every source answered and the season's Douban subject was checked: absence is recorded.
+    expect(await platformChecks(false)).toHaveLength(platformCount);
+    // Discovery read only the series subject (season 1's): nothing is recorded as absent.
+    expect(await platformChecks(true)).toEqual([]);
+  });
 
   test("redelivered job does not submit twice", async () => {
     const { testDb, explore } = await setup({ kan360Rows: [["咒术回战", "2020", "34430"]] });

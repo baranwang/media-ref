@@ -746,11 +746,13 @@ interface NamespaceCandidates {
 /**
  * `doubanConfirmed`: the season's confirmed Douban subject lists its own links, so on a platform
  * it lists, search hits are not candidates at all (#130). Elsewhere every source counts.
+ * `doubanSeasonUnknown`: discovery could not look the season's own Douban subject up.
  */
 function platformCandidates(
   discovery: DiscoveryResult,
   namespace: Namespace,
   doubanConfirmed: boolean,
+  doubanSeasonUnknown: boolean,
 ): NamespaceCandidates {
   const fromDouban = (c: DiscoveryResult["candidates"][number]) =>
     c.sources.some((s) => s.source === "douban");
@@ -770,6 +772,7 @@ function platformCandidates(
     // A source error, or a link for this platform that could not be resolved for now, means
     // the absence of candidates is not evidence of absence.
     sourceErrored:
+      doubanSeasonUnknown ||
       discovery.sources.some((s) => s.status === "error") ||
       discovery.dropped.some(
         (d) => d.namespace === namespace && d.reason.startsWith("canonicalize_transient:"),
@@ -2561,7 +2564,13 @@ export function createExplorationAgentExecutor(
         const candidates =
           adapter.namespace === "douban"
             ? await doubanCandidates(ctx.media, ctx.outbound, seasonImdbId)
-            : platformCandidates(discovery!, adapter.namespace, doubanSubject?.confirmed ?? false);
+            : platformCandidates(
+                discovery!,
+                adapter.namespace,
+                doubanSubject?.confirmed ?? false,
+                // Discovery read the series subject only: the season's own was never checked.
+                !doubanSubject && seasonImdbId === undefined,
+              );
         const platformStartMs = clockMs();
         const prepared = await prepareTarget(run, adapter, candidates);
         if ("outcome" in prepared) {
