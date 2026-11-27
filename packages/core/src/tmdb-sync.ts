@@ -20,7 +20,12 @@ import type {
   ExternalIdNamespaceRow,
 } from "@media-ref/db";
 import { sql, type Selectable, type Transaction } from "kysely";
-import { fulfillCoveredCatalogDemandsInTx, isMediaDemandCoveredInTx } from "./demands.ts";
+import {
+  fulfillCoveredCatalogDemandsInTx,
+  isMediaDemandCoveredInTx,
+  mergeExternalKeyDemandsIntoMedia,
+} from "./demands.ts";
+import { backfillMissingExternalIdsInTx } from "./external-ids.ts";
 import {
   preferSourceAssociation,
   resolveCanonicalMediaIdInTx,
@@ -482,6 +487,7 @@ async function syncSingleMediaType(
         tmdbId: parsed.id,
         tmdbNativeId: row.tmdb_native_id,
         hasTrakt: Boolean(row.has_trakt),
+        backfillOnly: false,
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
@@ -552,7 +558,9 @@ async function syncSingleMediaType(
           const head = prevBackfillCursor
             ? missingTrakt.filter((entry) => entry.mediaId <= prevBackfillCursor)
             : [];
-          backfillCandidates = [...tail, ...head].slice(0, fullRefreshBatchSize);
+          backfillCandidates = [...tail, ...head]
+            .slice(0, fullRefreshBatchSize)
+            .map((entry) => ({ ...entry, backfillOnly: true }));
           traktBackfillCount = backfillCandidates.length;
           nextBackfillCursor = backfillCandidates.at(-1)?.mediaId ?? prevBackfillCursor;
         } else {
@@ -619,6 +627,7 @@ async function syncSingleMediaType(
 
       if (isNotFound || !fetched) {
         missingCount += 1;
+        if (item.backfillOnly) continue;
         await recordOpenReviewAlert(db, {
           alertType: REVIEW_ALERT_TYPES.TMDB_MISSING_OR_MERGED,
           mediaId: item.mediaId,
@@ -647,6 +656,23 @@ async function syncSingleMediaType(
         }
 
         const oldSeasons = parseSeasonsSnapshot(currentMedia.seasons);
+        if (item.backfillOnly) {
+          const { insertedKeys } = await backfillMissingExternalIdsInTx(trx, {
+            mediaId: currentMedia.id,
+            externalIds: fetched.externalIds,
+            requiredExistingKey: `tmdb:${item.tmdbNativeId}`,
+            now,
+          });
+          await mergeExternalKeyDemandsIntoMedia(trx, {
+            mediaId: currentMedia.id,
+            mediaType,
+            seasons: oldSeasons,
+            externalKeys: insertedKeys,
+            now,
+          });
+          return { refreshed: false, newlyFlagged: 0 };
+        }
+
         const newSeasons = fetched.snapshot.seasons;
         const changedSeasons = detectChangedSeasons(oldSeasons, newSeasons);
 
