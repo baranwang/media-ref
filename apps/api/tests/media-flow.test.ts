@@ -1312,6 +1312,25 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       ),
     ).toMatchObject({ status: 409, code: "NO_CHANGE" });
 
+    const flagged = {
+      ...basePayload,
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          needsReview: true,
+        }),
+      ],
+    };
+    expect((await rpc1.changeRequest.createChangeRequest(flagged)).changeRequest?.id).toBeTruthy();
+    expect(await expectRpcError(rpc2.changeRequest.createChangeRequest(flagged))).toMatchObject({
+      status: 409,
+      code: "DUPLICATE_CHANGE_REQUEST",
+    });
+
     // 3. Valid modifications against the confirmed collection remain allowed:
     // extending episode range (1-12 -> 1-24) or switching to a new variant description ("中配")
     const extendConfirmedRes = await rpc1.changeRequest.createChangeRequest({

@@ -1473,6 +1473,7 @@ function canonicalSegmentsKey(segments: readonly NormalizedSegment[]): string {
           s.episodeEnd ?? null,
           s.targetEpisodeStart,
           Boolean(s.nonLinear),
+          Boolean(s.needsReview),
         ] as const,
     )
     .sort(
@@ -1482,7 +1483,8 @@ function canonicalSegmentsKey(segments: readonly NormalizedSegment[]): string {
         a[4] - b[4] ||
         (a[3] ?? Number.POSITIVE_INFINITY) - (b[3] ?? Number.POSITIVE_INFINITY) ||
         a[0].localeCompare(b[0]) ||
-        Number(a[5]) - Number(b[5]),
+        Number(a[5]) - Number(b[5]) ||
+        Number(a[6]) - Number(b[6]),
     );
   return JSON.stringify(entries);
 }
