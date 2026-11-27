@@ -1106,7 +1106,10 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             result.live !== true ||
             !("episodes" in result) ||
             !Array.isArray(result.episodes) ||
-            result.episodes.length === 0
+            // An empty window shows nothing, unless the whole collection is empty (a film whose
+            // platform lists no feature episode): then the model saw all there is.
+            (result.episodes.length === 0 &&
+              !("featureEpisodeCount" in result && result.featureEpisodeCount === 0))
           ) {
             return;
           }
