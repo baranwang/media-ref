@@ -61,6 +61,11 @@ describe("checkSegmentsFitCollection", () => {
     expect(airedEpisodeCount([ep(2, null), ep(1, "2026-11-01")], now)).toBe(1);
     expect(airedEpisodeCount([ep(1, "2026-11-01"), ep(2, "2026-11-26")], now)).toBeNull();
     expect(airedEpisodeCount([], now)).toBeNull();
+    // Missing dates alone are no evidence of airing.
+    expect(airedEpisodeCount([ep(1, null), ep(2, null)], now)).toBeNull();
+    expect(airedEpisodeCount([ep(1, "2025-01-01"), ep(2, null)], now)).toBeNull();
+    // An old broadcast with the rest scheduled ahead is still airing (a mid-season break).
+    expect(airedEpisodeCount([ep(1, "2025-01-01"), ep(2, "2027-01-01")], now)).toBe(1);
   });
 
   test("an open end with an unknown season length is refused", () => {

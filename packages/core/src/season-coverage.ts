@@ -15,15 +15,27 @@ type CoverageScope = {
   targetEnd: number;
 };
 
+/** An undated finale counts as still to come only this long after the latest broadcast. */
+const AIRING_RECENT_BROADCAST_DAYS = 30;
+
 /**
- * Episodes aired before `now` while the season's last catalog episode has not aired (no air date,
- * or today or later); null once the season has finished airing.
+ * Episodes aired before `now` while the season is still airing; null when it has finished or the
+ * catalog cannot tell. Airing needs evidence beyond missing dates: some episode has aired, the last
+ * one has not, and either an episode is scheduled for today or later or the latest broadcast is
+ * recent (a finished season whose finale merely lacks a date stays finished).
  */
 export function airedEpisodeCount(episodes: readonly SeasonEpisode[], now: Date): number | null {
-  const today = now.toISOString().slice(0, 10);
-  const aired = (ep: SeasonEpisode) => ep.airDate !== null && ep.airDate < today;
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const today = day(now.getTime());
+  const aired = episodes.flatMap((ep) =>
+    ep.airDate !== null && ep.airDate < today ? [ep.airDate] : [],
+  );
   const last = episodes.toSorted((a, b) => a.episode - b.episode).at(-1);
-  return last && !aired(last) ? episodes.filter(aired).length : null;
+  if (!last || aired.length === 0 || (last.airDate !== null && last.airDate < today)) return null;
+  const scheduled = episodes.some((ep) => ep.airDate !== null && ep.airDate >= today);
+  const recent =
+    aired.toSorted().at(-1)! >= day(now.getTime() - AIRING_RECENT_BROADCAST_DAYS * 86_400_000);
+  return scheduled || recent ? aired.length : null;
 }
 
 /** Split but contiguous linear segments describe the same prefix as a single segment. */

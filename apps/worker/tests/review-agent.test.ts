@@ -1358,12 +1358,13 @@ describe("review agent: reject with correction (#76)", () => {
   });
 
   test("an open-ended correction on a season still airing keeps its open end", async () => {
-    // TMDB season 8 lists 10 episodes, of which 8–10 have not aired; the platform has the first 7.
+    // TMDB season 8 lists 10 episodes, of which 8–10 are scheduled ahead; the platform has the first 7.
     const unaired: typeof httpStub = (request) => {
       const response = httpStub(request);
       if (!/\/tv\/70001\/season\/8/.test(request.url)) return response;
       const body = JSON.parse(response.body) as { episodes: Array<Record<string, unknown>> };
-      for (const ep of body.episodes) if ((ep.episode_number as number) > 7) ep.air_date = null;
+      for (const ep of body.episodes)
+        if ((ep.episode_number as number) > 7) ep.air_date = "2026-12-31";
       return { ...response, body: JSON.stringify(body) };
     };
     const airing = createAdapterRegistry([
