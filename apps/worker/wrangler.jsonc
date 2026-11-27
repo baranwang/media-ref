@@ -18,8 +18,9 @@
     },
   },
   "vars": {
-    // Demands explored per UTC day; start small and watch outcomes before raising it.
-    "EXPLORATION_DAILY_BUDGET": "200",
+    // Demands explored per UTC day. With one job per minute the cron runs at most 1440 a day, so
+    // this no longer caps by count; EXPLORATION_DAILY_TOKEN_BUDGET still bounds model spend.
+    "EXPLORATION_DAILY_BUDGET": "2000",
     // One exploration job per cron tick: queue messages run one after another in one consumer
     // invocation (15-minute wall clock), and a job may take up to its 5-minute budget.
     "EXPLORATION_BATCH_SIZE": "1",
