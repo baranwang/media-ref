@@ -857,12 +857,12 @@ async function fetchAlbumFeatureEpisodes(
       });
     }
 
+    // Long albums (e.g. 航海王, total 1181) report hasMore: false on every page, so `total` must win.
     const hasMore =
-      typeof data.hasMore === "boolean"
-        ? data.hasMore
-        : typeof data.total === "number" && Number.isFinite(data.total)
-          ? totalRawItemsSeen < data.total
-          : false;
+      data.hasMore === true ||
+      (typeof data.total === "number" &&
+        Number.isFinite(data.total) &&
+        totalRawItemsSeen < data.total);
 
     if (!hasMore || rawList.length === 0) {
       break;

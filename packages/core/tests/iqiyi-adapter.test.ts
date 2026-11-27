@@ -390,6 +390,50 @@ describe("iQIYI Tier 1 & Tier 2 adapter (#14)", () => {
     expect(result.info.externalIds).toBeUndefined();
   });
 
+  test("keeps paging by total when long albums report hasMore: false on every page", async () => {
+    const pages: Record<number, number[]> = {
+      1: Array.from({ length: 50 }, (_, i) => i + 1),
+      2: Array.from({ length: 50 }, (_, i) => i + 51),
+      3: Array.from({ length: 20 }, (_, i) => i + 101),
+    };
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.url === "https://pcw-api.iqiyi.com/album/album/baseinfo/202861101") {
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: { albumId: 202861101, name: "航海王", channelId: 4 },
+          });
+        }
+        const match = /avlistinfo\?aid=202861101&page=(\d+)&size=50$/.exec(request.url);
+        const orders = match ? pages[Number(match[1])] : undefined;
+        if (orders) {
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: {
+              total: 120,
+              hasMore: false,
+              epsodelist: orders.map((order) => ({
+                tvId: 202861100 + order,
+                order,
+                name: `第${order}集`,
+                contentType: 1,
+              })),
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+
+    const result = await iqiyiAdapter.fetchCollection("202861101", outbound);
+    expect(result.status).toBe("found");
+    if (result.status !== "found") {
+      return;
+    }
+    expect(result.info.featureEpisodeCount).toBe(120);
+    expect(result.info.featureEpisodes[119]).toMatchObject({ index: 120, title: "第120集" });
+  });
+
   test("prefers firstVideo.period, falls back to CST publishTime, and returns null year/episodeCount when missing on TV", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
