@@ -467,6 +467,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
         episodeStart: number;
         episodeEnd: number;
         targetEpisodeStart: number;
+        nonLinear?: boolean;
       }>,
     ) => {
       const created = await createRpcClients(app, {
@@ -487,6 +488,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       } else {
         expect(state.status).toBe("approved");
       }
+      return state.status;
     };
     const resolve = async (season: number, episode: number) =>
       resolveEpisode((await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479")).document, {
@@ -497,6 +499,11 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
 
     // Season 1 on positions 1–12, then season 2 on positions 13–24 of the same collection.
     await land([{ season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1 }]);
+    expect(
+      await land([
+        { season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13, nonLinear: true },
+      ]),
+    ).toBe("needs_review");
     await land([{ season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13 }]);
     expect(await resolve(1, 5)).toMatchObject({
       kind: "mapped",

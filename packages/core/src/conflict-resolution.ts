@@ -1025,6 +1025,10 @@ function canAutoMergeSameUnlockedCollection(
 
   // Non-overlapping season addition on the same collection (merged by `mergeApprovedSegments`).
   if (existingSegs.length > 0 && incomingSegs.length > 0) {
+    if (
+      [...existingSegs, ...incomingSegs].some((segment) => segment.nonLinear || segment.needsReview)
+    )
+      return false;
     const existingSeasons = new Set(existingSegs.map((s) => s.season));
     if (incomingSegs.some((s) => existingSeasons.has(s.season))) {
       return false;
