@@ -23,6 +23,7 @@ import { sql, type Selectable, type Transaction } from "kysely";
 import { fulfillCoveredCatalogDemandsInTx, isMediaDemandCoveredInTx } from "./demands.ts";
 import {
   preferSourceAssociation,
+  retainedTargetVariantSegments,
   resolveCanonicalMediaIdInTx,
   verifyAutoMergeEligibilityInTx,
 } from "./duplicate-merge-policy.ts";
@@ -127,6 +128,7 @@ export type MediaSyncErrorCode =
   | "MEDIA_NOT_FOUND"
   | "ALERT_NOT_FOUND"
   | "MERGE_SELF_NOT_ALLOWED"
+  | "SEGMENT_OVERLAP"
   | "MERGE_CYCLE"
   | "MEDIA_ALREADY_MERGED";
 
@@ -1671,16 +1673,25 @@ export async function mergeMediaInTx(
   const targetDefaultPlatforms = new Set<PlatformNamespace>(
     targetVariants.filter((v) => v.is_default).map((v) => v.platform),
   );
-  const activeTargetSegmentsByVariant = new Map<
-    string,
-    Array<{ associationId: string; segments: NormalizedSegment[] }>
-  >();
-  for (const ta of targetAssociations) {
-    if (ta.variant_id && ta.status !== "delisted") {
-      const list = activeTargetSegmentsByVariant.get(ta.variant_id) ?? [];
-      list.push({ associationId: ta.id, segments: segmentsByAssoc.get(ta.id) ?? [] });
-      activeTargetSegmentsByVariant.set(ta.variant_id, list);
-    }
+  const withSegments = (a: (typeof targetAssociations)[number]) => ({
+    id: a.id,
+    namespace: a.namespace,
+    nativeId: a.native_id,
+    variantId: a.variant_id,
+    status: a.status,
+    segments: segmentsByAssoc.get(a.id) ?? [],
+  });
+  const { groups: activeTargetSegmentsByVariant, conflict } = retainedTargetVariantSegments(
+    sourceAssociations.map(withSegments),
+    targetAssociations.map(withSegments),
+    canonicalTarget.baseline,
+  );
+  if (conflict) {
+    throw new MediaSyncError(
+      "SEGMENT_OVERLAP",
+      409,
+      `Variant ${conflict.variantId}: ${conflict.errors.join("; ")}`,
+    );
   }
 
   const variantRemap = new Map<string, string>();
