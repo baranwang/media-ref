@@ -707,8 +707,6 @@ function MediaDetailPage() {
                               mode={isAllSeasons ? "season" : "episode"}
                             />
                           )}
-
-                          {cat.note && <p className="text-2xs text-muted-foreground">{cat.note}</p>}
                         </div>
 
                         <div className="flex w-16 shrink-0 justify-end">

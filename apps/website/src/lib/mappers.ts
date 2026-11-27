@@ -405,9 +405,6 @@ function buildCatalogRows(
               allSeasonSegments: seasonRangeSegments(segmented, seasons),
             }
           : {}),
-        ...(namespace === "imdb"
-          ? { note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）" }
-          : {}),
       };
     },
   );
