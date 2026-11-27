@@ -515,6 +515,67 @@ describe("review agent (#75)", () => {
     },
   );
 
+  test("a model that stops without a conclusion is asked once to conclude, with only the conclusion tools left", async () => {
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+          ["get_catalog_season", { season: 1 }],
+        ]);
+      }
+      if (turn === 1) {
+        return { content: "看起来没问题。", toolCalls: [], model: "test-model" };
+      }
+      return reply(turn, [["approve", { reasons: reasonsFor(request) }]]);
+    };
+    const { submit, drain, changeRequest, outbound } = track(await setup(model));
+    const id = await submit();
+
+    await drain();
+
+    const cr = await changeRequest(id);
+    expect(cr.status).toBe("approved");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "approve",
+      fallback: null,
+    });
+    const nudged = outbound.modelRequests.at(-1)!;
+    expect(nudged.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: expect.stringContaining("approve"),
+    });
+    expect(nudged.tools!.map((t) => t.name).sort()).toEqual(
+      ["approve", "reject", "reject_with_correction"].sort(),
+    );
+  });
+
+  test("a session that runs out of time mid-turn is a rejection, not an outage to retry", async () => {
+    // The model never answers: the session's time budget ends the call.
+    const model = (() => new Promise(() => {})) as unknown as ScriptedModel;
+    const { testDb, submit, drain, changeRequest } = track(
+      await setup(model, { maxDurationMs: 500 }),
+    );
+    const id = await submit();
+
+    await drain();
+
+    const cr = await changeRequest(id);
+    expect(cr.status).toBe("rejected");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "reject",
+      fallback: "time_up",
+    });
+    expect(
+      await testDb.readDb
+        .selectFrom("background_jobs")
+        .select("id")
+        .where("job_type", "=", "review_agent")
+        .where("status", "=", "pending")
+        .execute(),
+    ).toEqual([]);
+  });
+
   test("fetches in the same turn as the approval do not count: the model never saw them", async () => {
     const model: ScriptedModel = (request) =>
       reply(turnOf(request), [
@@ -754,7 +815,7 @@ describe("review agent (#75)", () => {
     expect(parseWorkerConfig(env({})).reviewAgent).toMatchObject({
       dailyBudget: 0,
       maxSteps: 16,
-      maxDurationMs: 120_000,
+      maxDurationMs: 180_000,
       maxTaskTokens: 300_000,
     });
     expect(

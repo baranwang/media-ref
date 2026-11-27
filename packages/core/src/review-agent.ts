@@ -84,7 +84,9 @@ export const REVIEW_AGENT_USER_NAME = "Review Agent";
 /** `reporter_key_id` of the leads it writes: it has no API key, and the column has no foreign key. */
 export const REVIEW_AGENT_KEY_ID = REVIEW_AGENT_USER_ID;
 export const DEFAULT_REVIEW_AGENT_MAX_STEPS = 16;
-export const DEFAULT_REVIEW_AGENT_MAX_DURATION_MS = 2 * 60_000;
+/** A 40-episode collection plus its catalog season takes close to 2 minutes; the 5-minute job lease
+ * still leaves room (see LEASE_MARGIN_MS). */
+export const DEFAULT_REVIEW_AGENT_MAX_DURATION_MS = 3 * 60_000;
 export const DEFAULT_REVIEW_AGENT_MAX_TASK_TOKENS = 300_000;
 /** Lease time a review needs beyond its session: the outcome's fenced write and its commit. */
 const LEASE_MARGIN_MS = 30_000;
@@ -950,6 +952,8 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         wrapUpMessage: () =>
           `The time, step or token budget is almost used up. Stop searching and conclude now with ${conclusionNames}.`,
         wrapUpRefusal: `No more searching: conclude with ${conclusionNames}.`,
+        noDecisionNudge: () =>
+          `You stopped without a conclusion. End now by calling exactly one of: ${conclusionNames}.`,
         conclude,
         done: () => conclusion !== null,
       });
