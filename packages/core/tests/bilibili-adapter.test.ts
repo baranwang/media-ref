@@ -397,6 +397,99 @@ describe("Bilibili Tier 1 & Tier 2 adapter", () => {
     expect(result).toMatchObject({ status: "found", info: { mediaType: "movie" } });
   });
 
+  test("reads 港澳台 episodes from the section API when the season lists none, else leaves the count unknown", async () => {
+    const SEASON = "https://api.bilibili.com/pgc/view/web/season?season_id=";
+    const SECTION = "https://api.bilibili.com/pgc/web/season/section?season_id=";
+    const season = (seasonId: number) => ({
+      code: 0,
+      message: "success",
+      result: { season_id: seasonId, title: "测试番剧", type: 1, episodes: [] },
+    });
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.url === `${SEASON}1001`) return jsonResponse(request.url, season(1001));
+        if (request.url === `${SEASON}1002`) return jsonResponse(request.url, season(1002));
+        if (request.url === `${SECTION}1001`) {
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              main_section: {
+                id: 48855,
+                title: "正片",
+                type: 0,
+                episodes: [
+                  { id: 331893, title: "01", long_title: "", badge: "", badge_type: 0 },
+                  { id: 331894, title: "02", long_title: "", badge: "", badge_type: 0 },
+                ],
+              },
+              section: [{ title: "PV", episodes: [{ id: 999001, title: "PV1", badge_type: 0 }] }],
+            },
+          });
+        }
+        if (request.url === `${SECTION}1002`) {
+          return jsonResponse(request.url, { code: 0, message: "success", result: {} });
+        }
+        throw new Error(`Unexpected URL: ${request.url}`);
+      },
+    });
+
+    const fromSection = await bilibiliAdapter.fetchCollection("ss1001", outbound);
+    expect(fromSection).toMatchObject({ status: "found", info: { featureEpisodeCount: 2 } });
+    if (fromSection.status !== "found") return;
+    expect(
+      fromSection.info.featureEpisodes.map((ep) => [ep.index, ep.nativeEpisodeId, ep.title]),
+    ).toEqual([
+      [1, "331893", "01"],
+      [2, "331894", "02"],
+    ]);
+
+    // An empty list is "not shown", not "zero episodes".
+    const unknown = await bilibiliAdapter.fetchCollection("ss1002", outbound);
+    expect(unknown).toMatchObject({
+      status: "found",
+      info: { featureEpisodeCount: null, featureEpisodes: [] },
+    });
+  });
+
+  test("a season hidden by region (-404) but listed by the section API is not reported as missing", async () => {
+    // ss33973 (遊戲王怪獸之決鬥, 僅限港澳台) answered this way from a mainland IP on 2026-11-28.
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.url.includes("/pgc/view/web/season?")) {
+          return jsonResponse(request.url, { code: -404, message: "啥都木有" });
+        }
+        if (request.url.endsWith("section?season_id=33973")) {
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              main_section: {
+                id: 48855,
+                title: "正片",
+                type: 0,
+                episodes: [{ id: 331893, title: "01" }],
+              },
+              section: [],
+            },
+          });
+        }
+        if (request.url.endsWith("section?season_id=99999999")) {
+          return jsonResponse(request.url, { code: -404, message: "啥都木有" });
+        }
+        throw new Error(`Unexpected URL: ${request.url}`);
+      },
+    });
+
+    expect(await bilibiliAdapter.fetchCollection("ss33973", outbound)).toEqual({
+      status: "transient_error",
+      reason: "bilibili_season_region_restricted",
+    });
+    expect((await bilibiliAdapter.fetchCollection("ss99999999", outbound)).status).toBe(
+      "not_found",
+    );
+  });
+
   test("registry exposes default adapters and tier guards cleanly", () => {
     const defaultRegistry = createDefaultAdapterRegistry();
     const bili = defaultRegistry.get("bilibili");
