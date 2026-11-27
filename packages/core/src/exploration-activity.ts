@@ -67,7 +67,7 @@ const REASON_TEXT: Record<string, string> = {
   tmdb_id_on_other_media: "这个 TMDB 编号已经属于另一部作品",
   already_confirmed: "此前已在库中收录",
   both_passed_evidence_gate: "库里已有这个平台的收录",
-  locked_association_challenged: "库里对应记录已锁定，需要人工核对",
+  locked_association_challenged: "提交的关联与已锁定的记录冲突",
   title_mismatch: "平台片名和资料站对不上",
   year_mismatch: "平台年份和资料站对不上",
   episode_count_mismatch: "平台集数和资料站对不上",
@@ -114,10 +114,6 @@ interface CrSnapshot {
   evidence: Record<string, unknown> | null;
 }
 
-function truncateReason(text: string): string {
-  return text.length > MAX_REASON_LENGTH ? `${text.slice(0, MAX_REASON_LENGTH - 1)}…` : text;
-}
-
 function summarizeRejectedCrReason(cr: CrSnapshot): {
   reason: string | null;
   verdict: string | null;
@@ -141,20 +137,6 @@ function summarizeRejectedCrReason(cr: CrSnapshot): {
     };
   }
 
-  const opinion = typeof reviewAgent?.opinion === "string" ? reviewAgent.opinion.trim() : "";
-  if (opinion && !/^[a-z0-9_:.-]+$/i.test(opinion)) {
-    return { reason: truncateReason(opinion), verdict, isDuplicateGateConflict: false };
-  }
-
-  if (Array.isArray(reviewAgent?.reasons)) {
-    for (const item of reviewAgent.reasons) {
-      const r = item && typeof item === "object" ? (item as Record<string, unknown>).reason : null;
-      if (typeof r === "string" && r.trim() && !/^[a-z0-9_:.-]+$/i.test(r.trim())) {
-        return { reason: truncateReason(r.trim()), verdict, isDuplicateGateConflict: false };
-      }
-    }
-  }
-
   if (conflict && REASON_TEXT[conflict]) {
     return { reason: REASON_TEXT[conflict]!, verdict, isDuplicateGateConflict: false };
   }
@@ -165,13 +147,6 @@ function summarizeRejectedCrReason(cr: CrSnapshot): {
     REASON_TEXT[strippedCode] ?? REASON_TEXT[strippedCode.split(":")[0]?.trim() ?? ""];
   if (knownDecision) {
     return { reason: knownDecision, verdict, isDuplicateGateConflict: false };
-  }
-  if (
-    rawDecision &&
-    !/^[a-z0-9_:.-]+$/i.test(rawDecision) &&
-    !rawDecision.startsWith("无法自动通过")
-  ) {
-    return { reason: truncateReason(rawDecision), verdict, isDuplicateGateConflict: false };
   }
   return { reason: null, verdict, isDuplicateGateConflict: false };
 }
@@ -486,7 +461,7 @@ export async function listExplorationActivity(
                   {
                     namespace: o.namespace,
                     status: "rejected",
-                    reason: details?.reason ?? reasonText("not_found", o.reason) ?? "未通过审核",
+                    reason: details?.reason ?? reasonText("rejected", o.reason) ?? "未通过审核",
                     changeRequestId: crId,
                     liveChangeRequestId: null,
                   },

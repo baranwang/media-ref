@@ -418,7 +418,14 @@ describe("BrowseService", () => {
         native_id: "ss99999",
         status: "rejected",
         conflict_reason: "title_mismatch",
-        decision_reason: "无法自动通过：title_mismatch",
+        decision_reason: "Private decision text from the authenticated change request",
+        evidence: JSON.stringify({
+          reviewAgent: {
+            verdict: "reject",
+            opinion: "Private reviewer note",
+            reasons: [{ reason: "Non-public evidence detail" }],
+          },
+        }),
         segments: JSON.stringify([]),
       })
       .returning("id")
