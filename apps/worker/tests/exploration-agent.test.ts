@@ -15,6 +15,7 @@ import {
   type JobQueueMessage,
   type ModelInvocationRequest,
   type ModelInvocationResponse,
+  type ModelToolCall,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
@@ -489,7 +490,11 @@ describe("Exploration agent: discover → judge → gate", () => {
               {
                 id: "call_s",
                 name: "submit_mapping",
-                arguments: { namespace: "bilibili", canonicalId: "ss45574", segments: submitted },
+                arguments: {
+                  namespace: "bilibili",
+                  canonicalId: "ss45574",
+                  ...(submitted ? { segments: submitted } : {}),
+                },
               },
             ],
             model: "test-model",
@@ -560,7 +565,7 @@ describe("Exploration agent: discover → judge → gate", () => {
     const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
       const toolMessages = request.messages.filter((m) => m.role === "tool");
       replies.splice(0, replies.length, ...toolMessages.map((m) => JSON.parse(m.content)));
-      const submit = (args: Record<string, unknown>) => ({
+      const submit = (args: ModelToolCall["arguments"]) => ({
         content: null,
         toolCalls: [
           {
@@ -697,7 +702,7 @@ describe("Exploration agent: discover → judge → gate", () => {
   test("open tools: the agent fetches a collection nobody discovered and submits it", async () => {
     const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
       const turn = request.messages.filter((m) => m.role === "assistant").length;
-      const call = (name: string, args: Record<string, unknown>) => ({
+      const call = (name: string, args: ModelToolCall["arguments"]) => ({
         content: null,
         toolCalls: [{ id: `call_${turn}`, name, arguments: args }],
         model: "test-model",

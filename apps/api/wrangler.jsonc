@@ -29,8 +29,6 @@
     "COOKIE_DOMAIN": "mediaref.org",
     "TRUSTED_ORIGINS": "https://mediaref.org,https://www.mediaref.org",
     "EMAIL_FROM": "noreply@mediaref.org",
-    // Account that owns the API_USAGE dataset; queried with the ANALYTICS_API_TOKEN secret.
-    "CF_ACCOUNT_ID": "9c578ed9cad837fb4a2564db7b36b483",
     // Bilibili answers HTTP 412 and Youku its CAPTCHA to Cloudflare egress IPs; send them out of
     // greencloud-hk instead.
     "OUTBOUND_PROXY_CONFIG": "{\"bilibili\":{\"mode\":\"egress\"},\"youku\":{\"mode\":\"egress\"}}",
@@ -50,6 +48,10 @@
       "dataset": "media_ref_api_usage",
     },
   ],
+  "analytics": {
+    "binding": "ANALYTICS_SQL",
+    "remote": true,
+  },
   "send_email": [
     {
       "name": "EMAIL",

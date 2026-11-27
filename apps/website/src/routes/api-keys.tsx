@@ -82,6 +82,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
 import { formatCount, formatDate, formatRelativeTime } from "#/lib/format";
+import { apiKeyFromProto, usageBarHeights } from "#/lib/mappers";
 import { apiKeysQuery, apiUsageQuery, browserClients } from "#/lib/queries";
 import type { ApiKeyItem } from "#/lib/types";
 
@@ -123,8 +124,16 @@ function ApiKeysPage() {
   const isEmailVerified = user?.emailVerified ?? false;
   const keysQuery = useQuery({ ...apiKeysQuery(), enabled: isEmailVerified });
   const usageQuery = useQuery({ ...apiUsageQuery(), enabled: isEmailVerified });
-  const apiKeys = keysQuery.data ?? NO_KEYS;
-  const usage = usageQuery.data ?? [];
+  const lastUsedMap = useMemo(
+    () => new Map(Object.entries(usageQuery.data?.lastUsed ?? {})),
+    [usageQuery.data?.lastUsed],
+  );
+  const apiKeys = useMemo(
+    () =>
+      keysQuery.data ? keysQuery.data.map((key) => apiKeyFromProto(key, lastUsedMap)) : NO_KEYS,
+    [keysQuery.data, lastUsedMap],
+  );
+  const usage = usageQuery.data?.days ?? [];
 
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
@@ -168,7 +177,10 @@ function ApiKeysPage() {
       setActionError(null);
       try {
         await action();
-        await queryClient.invalidateQueries({ queryKey: apiKeysQuery().queryKey });
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: apiKeysQuery().queryKey }),
+          queryClient.invalidateQueries({ queryKey: ["api-usage"] }),
+        ]);
         return true;
       } catch (error) {
         setActionError(errorMessage(error));
@@ -517,13 +529,10 @@ function ApiKeysPage() {
                       {/* Bars */}
                       <div className="relative grid h-45 grid-cols-14 items-end gap-2 sm:gap-3">
                         {usage.map((day) => {
-                          const foundPct = (day.found / maxDayTotal) * 100;
-                          const notFoundPct = (day.notFound / maxDayTotal) * 100;
-                          // Keep a visible sliver for small non-zero counts; zero stays empty.
-                          const submitPct =
-                            day.submitted > 0
-                              ? Math.max((day.submitted / maxDayTotal) * 100, 1.5)
-                              : 0;
+                          const { foundPct, notFoundPct, submitPct } = usageBarHeights(
+                            day,
+                            maxDayTotal,
+                          );
                           return (
                             <div
                               key={day.date}
