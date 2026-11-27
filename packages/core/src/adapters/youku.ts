@@ -1,17 +1,20 @@
 import type { MediaType } from "@media-ref/client";
-import type { OutboundClient } from "../outbound.ts";
+import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 import { selectBroadcastEpisodes } from "./variety.ts";
 import {
   AdapterTransientError,
   InvalidNativeIdError,
+  type AdapterSearchCandidate,
+  type AdapterSearchQuery,
+  type AdapterSearchResult,
   type CollectionEvidenceResult,
   type FeatureEpisode,
   type ParsedNativeIdInput,
-  type Tier2Adapter,
+  type Tier3Adapter,
 } from "./types.ts";
 
 /**
- * Youku platform adapter (Tier 1 & Tier 2).
+ * Youku platform adapter (Tier 1, Tier 2 & Tier 3).
  *
  * Canonical ID (`canonicalId`):
  * - 20-character lowercase hexadecimal `showId` WITHOUT the URL's leading `z` prefix
@@ -29,8 +32,12 @@ import {
  * An empty episode list (expired copyright) or one longer than the pages read gives
  * `featureEpisodeCount: null`, so the Evidence Gate never approves on a guessed count.
  *
- * No search: `searches/show/by_keyword.json` returns nothing, and the site search is behind the
- * CAPTCHA. Exploration finds Youku collections through Douban, 360kan and web leads.
+ * Tier 3 search: `search.youku.com/api/search` (the site search's JSON API) with a desktop UA;
+ * answers datacenter IPs, including Cloudflare Workers egress (checked 2026-11-28), without the
+ * CAPTCHA. It lists other platforms' shows too, each under its own Youku showId with `isYouku: 0`
+ * (乘风破浪 第三季 `eaba37f7f29b46a7810f` is Migu's): the open API has no episodes for those, so
+ * they are dropped, as are commentary and preview shows (解读, 抢先看, 《片名》...).
+ * (`searches/show/by_keyword.json` of the open API returns nothing.)
  */
 
 const YOUKU_SHOW_HOSTS = new Set(["youku.com", "www.youku.com", "list.youku.com", "m.youku.com"]);
@@ -53,6 +60,16 @@ const YOUKU_OPENAPI_CLIENT = {
 /** The API's largest page; a larger `count` silently falls back to 20. */
 const YOUKU_PAGE_SIZE = 100;
 const YOUKU_MAX_PAGES = 20;
+
+const YOUKU_SEARCH_API = "https://search.youku.com/api/search";
+const YOUKU_SEARCH_HEADERS: Record<string, string> = {
+  "user-agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  accept: "application/json",
+};
+/** Shows about a work rather than the work; a leading 《 is the same (《庆余年》观影指南). */
+const YOUKU_SEARCH_SKIP_WORDS = ["中配版", "抢先看", "非正片", "解读", "揭秘", "赏析"];
+const YOUKU_TMD_PATTERN = /punish|_____tmd_____|x5sec/i;
 
 const YOUKU_TV_CATEGORIES = new Set(["电视剧", "动漫", "综艺", "纪录片", "少儿", "剧集"]);
 
@@ -215,6 +232,36 @@ async function callOpenApi(
   return { kind: "ok", data };
 }
 
+/** One search card's `commonData`, or null when it is off-site, a side show, or unreadable. */
+function toSearchCandidate(raw: unknown): AdapterSearchCandidate | null {
+  const data = asRecord(asRecord(raw)?.commonData);
+  if (!data || (data.isYouku !== 1 && data.hasYouku !== 1)) {
+    return null;
+  }
+  const canonicalId = nonEmptyString(data.showId)?.match(CANONICAL_SHOW_ID_PATTERN)?.[1];
+  const title = nonEmptyString(asRecord(data.titleDTO)?.displayName)?.replace(/<[^>]+>/g, "");
+  if (
+    !canonicalId ||
+    !title ||
+    title.startsWith("《") ||
+    YOUKU_SEARCH_SKIP_WORDS.some((word) => title.includes(word))
+  ) {
+    return null;
+  }
+  // `feature` reads "2017 · 电影 · 中国 · 共39集"; the year is missing before release.
+  const parts = (nonEmptyString(data.feature) ?? "").split("·").map((part) => part.trim());
+  const year = parts.map((part) => parseFourDigitYear(part)).find((y) => y !== null) ?? null;
+  const mediaType = parts.map(mapYoukuMediaType).find((type) => type !== null) ?? null;
+  const total = Number(data.episodeTotal);
+  return {
+    canonicalId: canonicalId.toLowerCase(),
+    title,
+    year,
+    mediaType,
+    episodeCount: Number.isInteger(total) && total > 0 ? total : null,
+  };
+}
+
 export function parseYoukuInput(raw: string): ParsedNativeIdInput | null {
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
@@ -265,9 +312,9 @@ export function parseYoukuInput(raw: string): ParsedNativeIdInput | null {
   return null;
 }
 
-export const youkuAdapter: Tier2Adapter<"youku"> = {
+export const youkuAdapter: Tier3Adapter<"youku"> = {
   namespace: "youku",
-  tier: 2,
+  tier: 3,
 
   parseInput: parseYoukuInput,
 
@@ -377,5 +424,71 @@ export const youkuAdapter: Tier2Adapter<"youku"> = {
         featureEpisodes,
       },
     };
+  },
+
+  async search(query: AdapterSearchQuery, outbound: OutboundClient): Promise<AdapterSearchResult> {
+    const keyword = query.title.trim();
+    if (keyword.length === 0) {
+      return { status: "ok", candidates: [] };
+    }
+    const page =
+      query.page !== undefined && Number.isInteger(query.page) && query.page > 0 ? query.page : 1;
+    const params = new URLSearchParams({
+      keyword,
+      site: "1",
+      categories: "0",
+      ftype: "0",
+      ob: "0",
+      pg: String(page),
+    });
+
+    let response: ExternalHttpResponse;
+    try {
+      response = await outbound.fetchExternal({
+        kind: "platform",
+        namespace: "youku",
+        url: `${YOUKU_SEARCH_API}?${params.toString()}`,
+        method: "GET",
+        headers: YOUKU_SEARCH_HEADERS,
+      });
+    } catch (error) {
+      return {
+        status: "transient_error",
+        reason: error instanceof Error ? error.message : "youku_search_request_failed",
+      };
+    }
+    let components: unknown = null;
+    if (response.status >= 200 && response.status < 300) {
+      try {
+        components = asRecord(JSON.parse(response.body))?.pageComponentList;
+      } catch {
+        // Handled below with the other unreadable answers.
+      }
+    }
+    if (!Array.isArray(components)) {
+      // Alibaba's TMD answers with a punish page (or a redirect to one) instead of results.
+      const challenged = YOUKU_TMD_PATTERN.test(`${response.url} ${response.body}`);
+      return {
+        status: "transient_error",
+        reason: challenged
+          ? "youku_captcha_challenge"
+          : response.status < 200 || response.status >= 300
+            ? `http_${response.status}`
+            : "unexpected_payload",
+      };
+    }
+
+    const limit =
+      query.limit !== undefined && Number.isInteger(query.limit) && query.limit > 0
+        ? query.limit
+        : Infinity;
+    const candidates = new Map<string, AdapterSearchCandidate>();
+    for (const component of components) {
+      const candidate = toSearchCandidate(component);
+      if (candidate && !candidates.has(candidate.canonicalId)) {
+        candidates.set(candidate.canonicalId, candidate);
+      }
+    }
+    return { status: "ok", candidates: [...candidates.values()].slice(0, limit) };
   },
 };

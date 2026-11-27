@@ -1,8 +1,8 @@
 /**
  * Exploration agent (`@media-ref/core`), ADR 0002: discover → judge → gate.
  *
- * 1. **Discover** (no model): `discoverCandidates` asks 360kan, Douban "where to watch" and iQIYI
- *    search once per job; client leads add their own IDs. Every candidate is fetched with the
+ * 1. **Discover** (no model): `discoverCandidates` asks 360kan, Douban "where to watch" and iQIYI /
+ *    Youku search once per job; client leads add their own IDs. Every candidate is fetched with the
  *    platform adapter's `fetchCollection`, so only collections someone fetched can be submitted.
  * 2. **Fast path**: a single fetched candidate that already passes Evidence Gate Step 1 with the
  *    default segments is submitted without calling the model.

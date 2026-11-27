@@ -190,6 +190,9 @@ function createHttpStub({ kan360Rows, failIqiyiSearch, doubanBilibili = [] }: St
     if (url.hostname === "api.douban.com") {
       return jsonResponse(request.url, { msg: "movie_not_found", code: 5000 });
     }
+    if (url.hostname === "search.youku.com") {
+      return jsonResponse(request.url, { message: "success", pageComponentList: [] });
+    }
     if (url.hostname === "search.video.iqiyi.com") {
       if (failIqiyiSearch) {
         return jsonResponse(request.url, {}, 500);
@@ -1624,6 +1627,9 @@ describe("Exploration agent: discover → judge → gate", () => {
         if (url.hostname === "api.douban.com") {
           return jsonResponse(request.url, { msg: "not_found", code: 5000 });
         }
+        if (url.hostname === "search.youku.com") {
+          return jsonResponse(request.url, { message: "success", pageComponentList: [] });
+        }
         if (url.hostname === "search.video.iqiyi.com") {
           return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
         }
@@ -1968,6 +1974,9 @@ describe("Exploration agent: discover → judge → gate", () => {
         if (url.hostname === "api.douban.com") {
           return jsonResponse(request.url, { msg: "not_found", code: 5000 });
         }
+        if (url.hostname === "search.youku.com") {
+          return jsonResponse(request.url, { message: "success", pageComponentList: [] });
+        }
         if (url.hostname === "search.video.iqiyi.com") {
           return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
         }
@@ -2203,6 +2212,9 @@ describe("Exploration agent: discover → judge → gate", () => {
         }
         if (url.hostname === "api.douban.com") {
           return jsonResponse(request.url, { msg: "not_found", code: 5000 });
+        }
+        if (url.hostname === "search.youku.com") {
+          return jsonResponse(request.url, { message: "success", pageComponentList: [] });
         }
         if (url.hostname === "search.video.iqiyi.com") {
           return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });

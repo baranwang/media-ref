@@ -46,7 +46,7 @@ function iqiyiSearchPayload(docs: Array<{ albumId: number; title: string; releas
 }
 
 describe("discoverCandidates", () => {
-  test("collects 360kan, Douban and iQIYI search, canonicalizes and merges by (namespace, id)", async () => {
+  test("collects 360kan, Douban and iQIYI / Youku search, canonicalizes and merges by (namespace, id)", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
         const url = new URL(request.url);
@@ -66,6 +66,23 @@ describe("discoverCandidates", () => {
               { albumId: 5328486914190101, title: "狂飙", releaseDate: "20230114" },
             ]),
           );
+        }
+        if (url.hostname === "search.youku.com") {
+          expect(url.searchParams.get("keyword")).toBe("狂飙");
+          // Youku lists iQIYI's 狂飙 under its own showId, as off-site (`isYouku: 0`).
+          return json(request, {
+            pageComponentList: [
+              {
+                commonData: {
+                  showId: "cabed959dea44a72ac1f",
+                  titleDTO: { displayName: "狂飙" },
+                  feature: "2023 · 电视剧 · 中国 · 共39集",
+                  isYouku: 0,
+                  hasYouku: 0,
+                },
+              },
+            ],
+          });
         }
         if (request.url === "https://m.iqiyi.com/v_2bql2y1p4qs.html") {
           return {
@@ -90,6 +107,7 @@ describe("discoverCandidates", () => {
       { source: "360kan", status: "ok", links: 1 },
       { source: "douban", status: "ok", links: 1 },
       { source: "iqiyi_search", status: "ok", links: 1 },
+      { source: "youku_search", status: "ok", links: 0 },
     ]);
     expect(outbound.httpRequests.every((r) => r.timeoutMs === 1234 && r.kind === "platform")).toBe(
       true,
@@ -149,6 +167,7 @@ describe("discoverCandidates", () => {
       { source: "360kan", status: "error", reason: "The operation timed out." },
       { source: "douban", status: "ok", links: 4 },
       { source: "iqiyi_search", status: "error", reason: "http_500" },
+      { source: "youku_search", status: "error", reason: "http_500" },
     ]);
     expect(
       result.candidates
@@ -174,6 +193,7 @@ describe("discoverCandidates", () => {
       "frodo.douban.com",
       "pcw-api.iqiyi.com",
       "search.video.iqiyi.com",
+      "search.youku.com",
     ]);
   });
 
@@ -225,6 +245,9 @@ describe("discoverCandidates", () => {
         if (host === "api.so.360kan.com") {
           return json(request, { code: 0, msg: "ok", data: { longData: { rows: [] } } });
         }
+        if (host === "search.youku.com") {
+          return json(request, { message: "success", pageComponentList: [] });
+        }
         return json(request, { code: "A00000", data: { result_num: 0 } });
       },
     });
@@ -239,6 +262,7 @@ describe("discoverCandidates", () => {
         { source: "360kan", status: "ok", links: 0 },
         { source: "douban", status: "not_found", reason: "imdb_not_on_douban" },
         { source: "iqiyi_search", status: "ok", links: 0 },
+        { source: "youku_search", status: "ok", links: 0 },
       ],
     });
 
@@ -250,6 +274,7 @@ describe("discoverCandidates", () => {
       { source: "360kan", status: "error", reason: "360kan_code_1" },
       { source: "douban", status: "skipped", reason: "no_douban_or_imdb_id" },
       { source: "iqiyi_search", status: "error", reason: "missing_code" },
+      { source: "youku_search", status: "error", reason: "unexpected_payload" },
     ]);
   });
 });

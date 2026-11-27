@@ -9,6 +9,9 @@ import {
   youkuAdapter,
   type ExternalHttpResponse,
 } from "../src/index.ts";
+import searchChengfeng from "./fixtures/youku/search-chengfengpolang.json" with { type: "json" };
+import searchLiulang from "./fixtures/youku/search-liulangdiqiu.json" with { type: "json" };
+import searchQingyunian from "./fixtures/youku/search-qingyunian.json" with { type: "json" };
 
 const API = "https://openapi.youku.com/v2";
 
@@ -66,7 +69,7 @@ function showStub(show: Record<string, unknown>, total: number) {
   });
 }
 
-describe("Youku Tier 1 & Tier 2 adapter", () => {
+describe("Youku Tier 1, 2 & 3 adapter", () => {
   test("parses and canonicalizes bare showIds, z-prefixed IDs, and list/m show URLs without network calls", async () => {
     const outbound = createFakeOutboundClient();
 
@@ -186,6 +189,31 @@ describe("Youku Tier 1 & Tier 2 adapter", () => {
     );
     expect(expired).toMatchObject({ status: "found", info: { featureEpisodeCount: null } });
 
+    // An off-site listing (Migu's 乘风破浪 第三季): show.json answers, with no play link and no videos.
+    const offSite = await youkuAdapter.fetchCollection(
+      "eaba37f7f29b46a7810f",
+      showStub(
+        {
+          name: "乘风破浪 第三季",
+          category: "综艺",
+          released: "2022-05-20",
+          episode_count: "0",
+          play_link: null,
+          streamtypes: null,
+        },
+        0,
+      ),
+    );
+    expect(offSite).toMatchObject({
+      status: "found",
+      info: {
+        title: "乘风破浪 第三季",
+        mediaType: "tv",
+        featureEpisodeCount: null,
+        featureEpisodes: [],
+      },
+    });
+
     const long = await youkuAdapter.fetchCollection(
       "bbac165ee82549779af3",
       showStub({ name: "名侦探柯南", category: "动漫", released: "1996-01-08" }, 2500),
@@ -240,14 +268,148 @@ describe("Youku Tier 1 & Tier 2 adapter", () => {
     expect((await youkuAdapter.fetchCollection("not-an-id", timeout)).status).toBe("not_found");
   });
 
-  test("registers youkuAdapter as a Tier 2 adapter in createDefaultAdapterRegistry()", () => {
+  test("searches Youku and keeps only Youku-hosted feature shows", async () => {
+    const searchStub = (payload: unknown) =>
+      createFakeOutboundClient({
+        fetchExternal: (request) => {
+          const url = new URL(request.url);
+          expect(`${url.origin}${url.pathname}`).toBe("https://search.youku.com/api/search");
+          expect(request.headers?.["user-agent"]).toMatch(/^Mozilla\/5\.0/);
+          return jsonResponse(request.url, payload);
+        },
+      });
+
+    const liulang = searchStub(searchLiulang);
+    const movies = await youkuAdapter.search({ title: " 流浪地球 ", page: 2 }, liulang);
+    const params = new URL(liulang.httpRequests[0]!.url).searchParams;
+    expect([params.get("keyword"), params.get("pg"), params.get("site")]).toEqual([
+      "流浪地球",
+      "2",
+      "1",
+    ]);
+    // Dropped: 《流浪地球》优酷独家幕后记录 (《), Tencent's 流浪地球2：再次冒险, unreleased 流浪地球3.
+    expect(movies).toEqual({
+      status: "ok",
+      candidates: [
+        {
+          canonicalId: "7027efbfbd13efbfbd04",
+          title: "流浪地球",
+          year: 2019,
+          mediaType: "movie",
+          episodeCount: 1,
+        },
+        {
+          canonicalId: "efcdfcb66fd346f9b2a9",
+          title: "流浪地球2",
+          year: 2023,
+          mediaType: "movie",
+          episodeCount: 1,
+        },
+        {
+          canonicalId: "dacdc75b16b142c2a0ab",
+          title: "流浪地球：飞跃2020特别版",
+          year: 2020,
+          mediaType: "movie",
+          episodeCount: 1,
+        },
+        {
+          canonicalId: "ceaa946b761b4d65a3c9",
+          title: "流浪地球",
+          year: 2022,
+          mediaType: "tv",
+          episodeCount: 10,
+        },
+        {
+          canonicalId: "dcca1e4ef15246bcac2a",
+          title: "解析流浪地球2-移山计划始末",
+          year: 2023,
+          mediaType: null,
+          episodeCount: 6,
+        },
+        {
+          canonicalId: "1761efbfbd7f31efbfbd",
+          title: "流浪地球 畅听版",
+          year: 2020,
+          mediaType: null,
+          episodeCount: 5,
+        },
+      ],
+    });
+    const limited = await youkuAdapter.search(
+      { title: "流浪地球", limit: 2 },
+      searchStub(searchLiulang),
+    );
+    expect(limited.status === "ok" && limited.candidates.map((c) => c.canonicalId)).toEqual([
+      "7027efbfbd13efbfbd04",
+      "efcdfcb66fd346f9b2a9",
+    ]);
+
+    // Every 乘风破浪的姐姐 season is Mango TV's or Migu's on Youku; only two Youku dramas remain.
+    const chengfeng = await youkuAdapter.search(
+      { title: "乘风破浪的姐姐" },
+      searchStub(searchChengfeng),
+    );
+    expect(chengfeng.status === "ok" && chengfeng.candidates.map((c) => c.canonicalId)).toEqual([
+      "adebd64da6e54938bc10",
+      "eabf1c54ee5146d99581",
+    ]);
+
+    // 庆余年 is Tencent's; what Youku hosts is commentary (解读, 揭秘, 抢先看, 《》).
+    expect(await youkuAdapter.search({ title: "庆余年" }, searchStub(searchQingyunian))).toEqual({
+      status: "ok",
+      candidates: [],
+    });
+
+    const blank = searchStub(searchLiulang);
+    expect(await youkuAdapter.search({ title: "  " }, blank)).toEqual({
+      status: "ok",
+      candidates: [],
+    });
+    expect(blank.httpRequests).toHaveLength(0);
+  });
+
+  test("reports search failures and TMD CAPTCHA pages as transient", async () => {
+    const respond = (response: Partial<ExternalHttpResponse>) =>
+      createFakeOutboundClient({
+        fetchExternal: (request) => ({ ...jsonResponse(request.url, ""), ...response }),
+      });
+    const cases: Array<[Partial<ExternalHttpResponse>, string]> = [
+      [{ status: 503, body: "busy" }, "http_503"],
+      [{ body: "<html>" }, "unexpected_payload"],
+      [{ body: JSON.stringify({ message: "fail" }) }, "unexpected_payload"],
+      [
+        { body: '<html><script>var url="https://search.youku.com//punish?x5secdata=abc"</script>' },
+        "youku_captcha_challenge",
+      ],
+      [
+        { url: "https://search.youku.com/_____tmd_____/punish?x5secdata=abc", body: "<html>" },
+        "youku_captcha_challenge",
+      ],
+    ];
+    for (const [response, reason] of cases) {
+      expect(await youkuAdapter.search({ title: "狂飙" }, respond(response))).toEqual({
+        status: "transient_error",
+        reason,
+      });
+    }
+    const timeout = createFakeOutboundClient({
+      fetchExternal: async () => {
+        throw new Error("Simulated upstream timeout");
+      },
+    });
+    expect(await youkuAdapter.search({ title: "狂飙" }, timeout)).toEqual({
+      status: "transient_error",
+      reason: "Simulated upstream timeout",
+    });
+  });
+
+  test("registers youkuAdapter as a Tier 3 adapter in createDefaultAdapterRegistry()", () => {
     const registry = createDefaultAdapterRegistry();
     const youku = registry.get("youku");
     expect(youku).toBe(youkuAdapter);
-    expect(youku?.tier).toBe(2);
+    expect(youku?.tier).toBe(3);
     expect(youku && isTier2Adapter(youku)).toBe(true);
-    expect(youku && isTier3Adapter(youku)).toBe(false);
-    expect(registry.listByMinTier(2).map((a) => a.namespace)).toContain("youku");
-    expect(registry.listByMinTier(3).map((a) => a.namespace)).not.toContain("youku");
+    expect(youku && isTier3Adapter(youku)).toBe(true);
+    expect(registry.listByMinTier(3).map((a) => a.namespace)).toContain("youku");
   });
 });
