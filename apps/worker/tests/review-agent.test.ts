@@ -23,6 +23,7 @@ import {
   type JobQueueMessage,
   type ModelInvocationRequest,
   type ModelInvocationResponse,
+  type ModelToolCall,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
@@ -69,10 +70,10 @@ const LINGLONG_TITLES = [
 ];
 
 /** Correct split for 灵笼: episodes 1–6 at positions 1–6, 7–12 at positions 8–13. */
-const LINGLONG_SEGMENTS: SegmentInput[] = [
+const LINGLONG_SEGMENTS = [
   { season: 1, episodeStart: 1, episodeEnd: 6, targetEpisodeStart: 1, baseline: "tmdb" },
   { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 8, baseline: "tmdb" },
-];
+] satisfies SegmentInput[];
 
 // 妻子的浪漫旅行 on TMDB: season n aired in WIFE_SEASON_YEARS[n - 1]; season 8 has 10 episodes.
 const WIFE_SEASON_YEARS = [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2026];
@@ -245,7 +246,7 @@ type ScriptedModel = (request: ModelInvocationRequest) => ModelInvocationRespons
 
 function reply(
   turn: number,
-  calls: Array<[string, Record<string, unknown>]>,
+  calls: Array<[string, ModelToolCall["arguments"]]>,
   usage = { inputTokens: 1000, outputTokens: 100 },
 ): ModelInvocationResponse {
   return {
@@ -452,7 +453,7 @@ describe("review agent (#75)", () => {
   });
 
   const approveAfter =
-    (queries: Array<[string, Record<string, unknown>]>, dropReason = false): ScriptedModel =>
+    (queries: Array<[string, ModelToolCall["arguments"]]>, dropReason = false): ScriptedModel =>
     (request) => {
       const turn = turnOf(request);
       if (turn === 0) {
@@ -1522,7 +1523,7 @@ describe("review agent: reject with correction (#76)", () => {
 
   /** Fetches 灵笼's collection and season 1, then rejects with these segments. */
   const correctsLinglong =
-    (segments: unknown[]): ScriptedModel =>
+    (segments: typeof linglongCorrection): ScriptedModel =>
     (request) => {
       const turn = turnOf(request);
       if (turn === 0) {
