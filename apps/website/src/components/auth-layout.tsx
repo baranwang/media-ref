@@ -28,7 +28,7 @@ export function AuthLayout({
       {/* Left column: Brand + centered form */}
       <div className="flex flex-col p-6 md:p-10">
         <div className="flex items-center">
-          <Link to="/" className="transition-opacity hover:opacity-90">
+          <Link to="/" className="flex transition-opacity hover:opacity-90">
             <BrandLogo />
           </Link>
         </div>
