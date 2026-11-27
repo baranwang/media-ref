@@ -78,11 +78,7 @@ import {
   type ChangeRequestRecord,
 } from "./media-service.ts";
 import type { ModelToolCall, ModelToolDefinition } from "./outbound.ts";
-import {
-  airedEpisodeCount,
-  seasonCoverageConflict,
-  type SeasonEpisode,
-} from "./season-coverage.ts";
+import { lastAiredEpisode, seasonCoverageConflict, type SeasonEpisode } from "./season-coverage.ts";
 import { createTmdbGateway, type TmdbGateway, type TmdbGatewayConfig } from "./tmdb.ts";
 import { formatUtcDate } from "./tmdb-sync.ts";
 import { reportPiUsage } from "./tokens-report.ts";
@@ -1572,7 +1568,7 @@ function boundToCollection(
         return s;
       }
       const lastSeen = s.episodeStart + available - s.targetEpisodeStart;
-      const aired = airedEpisodeCount(fetched.seasonEpisodes[s.season] ?? [], fetched.now);
+      const aired = lastAiredEpisode(fetched.seasonEpisodes[s.season] ?? [], fetched.now);
       if (aired !== null && lastSeen >= aired) {
         return s;
       }

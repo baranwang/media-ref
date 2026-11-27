@@ -41,7 +41,7 @@ import {
   type Tier3Adapter,
 } from "./adapters/index.ts";
 import {
-  airedEpisodeCount,
+  lastAiredEpisode,
   seasonCoverageConflict,
   seasonCoverageScopes,
   type SeasonEpisode,
@@ -485,7 +485,7 @@ export function checkSegmentsFitCollection(
   segments: readonly SegmentInput[],
   info: CollectionInfo,
   seasonEpisodeCount: (season: number) => number | null,
-  airedEpisodeCount: (season: number) => number | null = () => null,
+  lastAired: (season: number) => number | null = () => null,
 ): string | null {
   const available = info.featureEpisodes.length;
   for (const seg of segments) {
@@ -522,7 +522,7 @@ export function checkSegmentsFitCollection(
     }
     let end = rawEnd;
     if (end === null) {
-      const aired = airedEpisodeCount(seg.season);
+      const aired = lastAired(seg.season);
       end = aired === null ? seasonCount : Math.max(start, aired);
       if (end === null) {
         return `episodeEnd is required: season ${seg.season} has no known episode count`;
@@ -713,7 +713,9 @@ function buildAgentUserPrompt(
       year: media.snapshot.year,
       requestedSeason: season,
       seasons: media.snapshot.seasons,
-      ...(airing ? { airingSeason: { season: airing.season, airedEpisodes: airing.aired } } : {}),
+      ...(airing
+        ? { airingSeason: { season: airing.season, lastAiredEpisode: airing.aired } }
+        : {}),
       externalIds: Object.fromEntries(media.externalIds.map((e) => [e.namespace, e.nativeId])),
     },
     namespaces: targets,
@@ -849,7 +851,7 @@ interface JobRun {
   airing: AiringSeason | null;
 }
 
-/** The media's last season while it is still airing, and how many of its episodes have aired. */
+/** The media's last season while it is still airing, and the last of its episodes that aired. */
 interface AiringSeason {
   season: number;
   aired: number;
@@ -872,7 +874,7 @@ async function loadAiringSeason(
         BUDGET_EXCEEDED,
       )) ??
       [];
-    const aired = airedEpisodeCount(episodes, ctx.now);
+    const aired = lastAiredEpisode(episodes, ctx.now);
     return aired === null ? null : { season, aired, episodes };
   } catch {
     // An unknown airing state keeps the finished-season rules.
