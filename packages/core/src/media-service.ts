@@ -1314,6 +1314,66 @@ export async function approveChangeRequest(
   );
 }
 
+async function loadSegments(
+  trx: Transaction<Database>,
+  associationId: string,
+): Promise<NormalizedSegment[]> {
+  const rows = await trx
+    .selectFrom("segments")
+    .select([
+      "season",
+      "episode_start",
+      "episode_end",
+      "target_episode_start",
+      "baseline",
+      "non_linear",
+      "needs_review",
+    ])
+    .where("association_id", "=", associationId)
+    .orderBy("season", "asc")
+    .orderBy("episode_start", "asc")
+    .orderBy("id", "asc")
+    .execute();
+  return rows.map((seg) => ({
+    season: seg.season,
+    episodeStart: seg.episode_start,
+    episodeEnd: seg.episode_end,
+    targetEpisodeStart: seg.target_episode_start,
+    baseline: seg.baseline,
+    nonLinear: Boolean(seg.non_linear),
+    needsReview: Boolean(seg.needs_review),
+  }));
+}
+
+/**
+ * Segments an approved change request leaves on its collection's existing association: its own,
+ * plus existing ones it does not speak for — another season, on platform positions it does not use.
+ * A whole-media request (no segments) replaces everything.
+ */
+function mergeApprovedSegments(
+  existing: readonly NormalizedSegment[],
+  requested: readonly NormalizedSegment[],
+  seasons: readonly SeasonSnapshotRow[],
+): NormalizedSegment[] {
+  if (requested.length === 0) {
+    return [];
+  }
+  // Platform positions a segment covers; open-ended runs to its season's end, or forever if unknown.
+  const positions = (s: NormalizedSegment): [number, number] => {
+    const end = s.episodeEnd ?? seasons.find((x) => x.season === s.season)?.episodeCount;
+    return [s.targetEpisodeStart, end ? s.targetEpisodeStart + end - s.episodeStart : Infinity];
+  };
+  const requestedSeasons = new Set(requested.map((s) => s.season));
+  const claimed = requested.map(positions);
+  const kept = existing.filter((s) => {
+    const [start, end] = positions(s);
+    return !requestedSeasons.has(s.season) && claimed.every(([a, b]) => end < a || b < start);
+  });
+  return [...kept, ...requested].sort(
+    (a, b) => a.season - b.season || a.episodeStart - b.episodeStart,
+  );
+}
+
 export async function approveChangeRequestInTransaction(
   trx: Transaction<Database>,
   input: ApproveChangeRequestInTransactionInput,
@@ -1673,13 +1733,13 @@ export async function approveChangeRequestInTransaction(
 
   // 5. Re-read active associations & segments inside the locked transaction and validate via @media-ref/client
   const storedSegments = parseJsonArray<StoredSegmentJson>(cr.segments);
-  const normalizedSegments = normalizeSegments(storedSegments);
+  const requestedSegments = normalizeSegments(storedSegments);
   const effectiveReplacesAssociationId =
     input.replacesAssociationId !== undefined
       ? input.replacesAssociationId
       : extractReplacesAssociationId(cr.evidence);
 
-  if (media.baseline === null && normalizedSegments.length > 0) {
+  if (media.baseline === null && requestedSegments.length > 0) {
     throw new MediaServiceError(
       "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE",
       400,
@@ -1696,6 +1756,15 @@ export async function approveChangeRequestInTransaction(
     .where("native_id", "=", nativeId)
     .forUpdate()
     .executeTakeFirst();
+
+  const normalizedSegments =
+    existingAssociation?.status === "confirmed"
+      ? mergeApprovedSegments(
+          await loadSegments(trx, existingAssociation.id),
+          requestedSegments,
+          media.seasons,
+        )
+      : requestedSegments;
 
   const replacedAssociation =
     effectiveReplacesAssociationId &&
@@ -1798,32 +1867,7 @@ export async function approveChangeRequestInTransaction(
 
   // 5b. If replacing a distinct association, atomically delist it and record a new revision preserving history
   if (replacedAssociation && replacedAssociation.status !== "delisted") {
-    const replacedSegmentRows = await trx
-      .selectFrom("segments")
-      .select([
-        "season",
-        "episode_start",
-        "episode_end",
-        "target_episode_start",
-        "baseline",
-        "non_linear",
-        "needs_review",
-      ])
-      .where("association_id", "=", replacedAssociation.id)
-      .orderBy("season", "asc")
-      .orderBy("episode_start", "asc")
-      .orderBy("id", "asc")
-      .execute();
-
-    const replacedSegmentsSnapshot: NormalizedSegment[] = replacedSegmentRows.map((seg) => ({
-      season: seg.season,
-      episodeStart: seg.episode_start,
-      episodeEnd: seg.episode_end,
-      targetEpisodeStart: seg.target_episode_start,
-      baseline: seg.baseline,
-      nonLinear: Boolean(seg.non_linear),
-      needsReview: Boolean(seg.needs_review),
-    }));
+    const replacedSegmentsSnapshot = await loadSegments(trx, replacedAssociation.id);
 
     await trx
       .updateTable("associations")
