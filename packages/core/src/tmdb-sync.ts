@@ -1,5 +1,6 @@
 import {
   isBaselineSource,
+  isPlatformNamespace,
   validateVariantSegments,
   type BaselineSource,
   type ExternalIdNamespace,
@@ -19,10 +20,20 @@ import type {
   ExternalIdNamespaceRow,
 } from "@media-ref/db";
 import { sql, type Selectable, type Transaction } from "kysely";
-import { mergeExternalKeyDemandsIntoMedia } from "./demands.ts";
+import {
+  fulfillCoveredCatalogDemandsInTx,
+  isMediaDemandCoveredInTx,
+  mergeExternalKeyDemandsIntoMedia,
+} from "./demands.ts";
+import { backfillMissingExternalIdsInTx } from "./external-ids.ts";
+import {
+  preferSourceAssociation,
+  retainedTargetVariantSegments,
+  resolveCanonicalMediaIdInTx,
+  verifyAutoMergeEligibilityInTx,
+} from "./duplicate-merge-policy.ts";
 import { enqueueJob, type BackgroundJob, type JobHandler } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
-import { backfillMissingExternalIdsInTx, isUuid } from "./media-service.ts";
 import type { OutboundClient } from "./outbound.ts";
 import {
   createTmdbGateway,
@@ -125,6 +136,7 @@ export type MediaSyncErrorCode =
   | "MEDIA_NOT_FOUND"
   | "ALERT_NOT_FOUND"
   | "MERGE_SELF_NOT_ALLOWED"
+  | "SEGMENT_OVERLAP"
   | "MERGE_CYCLE"
   | "MEDIA_ALREADY_MERGED";
 
@@ -202,10 +214,16 @@ export interface ListNeedsReviewSegmentsResult {
   total: number;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string): boolean {
+  return UUID_PATTERN.test(value);
+}
+
 export interface MergeMediaInput {
   sourceMediaId: string;
   targetMediaId: string;
-  actorUserId: string;
+  actorUserId: string | null;
   reason?: string | null;
   now?: Date;
 }
@@ -693,18 +711,85 @@ async function syncSingleMediaType(
             .where("namespace", "=", ext.namespace)
             .executeTakeFirst();
 
-          if (existingExt) {
-            if (existingExt.locked || existingExt.native_id === ext.nativeId) {
+          if (existingExt && (existingExt.locked || existingExt.native_id === ext.nativeId)) {
+            continue;
+          }
+
+          const claimedByOther = await trx
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
+            .select(["id", "media_id"])
+            .where("namespace", "=", ext.namespace)
+            .where("native_id", "=", ext.nativeId)
+            .where("media_id", "!=", currentMedia.id)
+            .executeTakeFirst();
+
+          if (claimedByOther) {
+            const canonicalOtherId = await resolveCanonicalMediaIdInTx(
+              trx,
+              claimedByOther.media_id,
+            );
+            if (canonicalOtherId && canonicalOtherId !== currentMedia.id) {
+              const eligibility = await verifyAutoMergeEligibilityInTx(trx, {
+                mediaIdA: currentMedia.id,
+                mediaIdB: canonicalOtherId,
+                extraTitlesByMediaId: new Map([
+                  [currentMedia.id, [fetched.snapshot.title, fetched.snapshot.originalTitle]],
+                ]),
+                acquireMergeLocks: true,
+              });
+              if (eligibility.eligible && eligibility.targetMediaId === currentMedia.id) {
+                await mergeMediaInTx(trx, {
+                  sourceMediaId: eligibility.sourceMediaId,
+                  targetMediaId: eligibility.targetMediaId,
+                  actorUserId: null,
+                  reason: `tmdb_sync_external_id_duplicate:${ext.namespace}:${ext.nativeId}`,
+                  now,
+                });
+              } else if (!eligibility.eligible) {
+                await recordExternalIdConflictAlertInTx(trx, {
+                  mediaId: currentMedia.id,
+                  otherMediaId: canonicalOtherId,
+                  namespace: ext.namespace,
+                  nativeId: ext.nativeId,
+                  blockReason: eligibility.blockReason,
+                  now,
+                });
+              }
+            } else if (canonicalOtherId === currentMedia.id && !existingExt) {
+              await trx
+                .updateTable("associations")
+                .where("is_external_id", "=", true)
+                .set({
+                  media_id: currentMedia.id,
+                  source: "sync",
+                  updated_at: now,
+                })
+                .where("id", "=", claimedByOther.id)
+                .execute();
               continue;
             }
-            const claimedByOther = await trx
-              .selectFrom("associations")
-              .where("is_external_id", "=", true)
-              .select("id")
-              .where("namespace", "=", ext.namespace)
-              .where("native_id", "=", ext.nativeId)
-              .executeTakeFirst();
-            if (!claimedByOther) {
+          }
+
+          const postMergeExt = await trx
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
+            .select(["id", "native_id", "locked"])
+            .where("media_id", "=", currentMedia.id)
+            .where("namespace", "=", ext.namespace)
+            .executeTakeFirst();
+
+          const stillClaimed = await trx
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
+            .select("id")
+            .where("namespace", "=", ext.namespace)
+            .where("native_id", "=", ext.nativeId)
+            .where("media_id", "!=", currentMedia.id)
+            .executeTakeFirst();
+
+          if (postMergeExt) {
+            if (!postMergeExt.locked && postMergeExt.native_id !== ext.nativeId && !stillClaimed) {
               await trx
                 .updateTable("associations")
                 .where("is_external_id", "=", true)
@@ -713,10 +798,10 @@ async function syncSingleMediaType(
                   source: "sync",
                   updated_at: now,
                 })
-                .where("id", "=", existingExt.id)
+                .where("id", "=", postMergeExt.id)
                 .execute();
             }
-          } else {
+          } else if (!stillClaimed) {
             await trx
               .insertInto("associations")
               .values({
@@ -1324,7 +1409,159 @@ async function flagBaselineMismatchedSegments(
   return flagged.length;
 }
 
-export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeMediaResult> {
+async function recordExternalIdConflictAlertInTx(
+  trx: Transaction<Database>,
+  input: {
+    mediaId: string;
+    otherMediaId: string;
+    namespace: ExternalIdNamespace;
+    nativeId: string;
+    blockReason: string;
+    now: Date;
+  },
+): Promise<void> {
+  const existing = await trx
+    .selectFrom("review_alerts")
+    .select("id")
+    .where("alert_type", "=", REVIEW_ALERT_TYPES.AGENT_EXTERNAL_ID_CONFLICT)
+    .where("media_id", "=", input.mediaId)
+    .where("status", "=", "open")
+    .where((eb) => eb(eb.ref("details", "->>").key("namespace"), "=", input.namespace))
+    .where((eb) => eb(eb.ref("details", "->>").key("nativeId"), "=", input.nativeId))
+    .executeTakeFirst();
+
+  if (existing) {
+    return;
+  }
+
+  await trx
+    .insertInto("review_alerts")
+    .values({
+      alert_type: REVIEW_ALERT_TYPES.AGENT_EXTERNAL_ID_CONFLICT,
+      media_id: input.mediaId,
+      association_id: null,
+      status: "open",
+      details: JSON.stringify({
+        namespace: input.namespace,
+        nativeId: input.nativeId,
+        otherMediaId: input.otherMediaId,
+        autoMergeBlockedReason: input.blockReason,
+        autoMergeCheckedAt: input.now.toISOString(),
+        source: "tmdb_sync",
+      }),
+    })
+    .execute();
+}
+
+async function coalesceMediaDemandsInTx(
+  trx: Transaction<Database>,
+  input: {
+    sourceMediaId: string;
+    targetMediaId: string;
+    now: Date;
+  },
+): Promise<void> {
+  const sourceDemands = await trx
+    .selectFrom("demands")
+    .selectAll()
+    .where("media_id", "=", input.sourceMediaId)
+    .orderBy("id", "asc")
+    .forUpdate()
+    .execute();
+
+  for (const sd of sourceDemands) {
+    let targetQuery = trx
+      .selectFrom("demands")
+      .selectAll()
+      .where("media_id", "=", input.targetMediaId)
+      .where("namespace_group", "=", sd.namespace_group)
+      .forUpdate();
+    targetQuery =
+      sd.season === null
+        ? targetQuery.where("season", "is", null)
+        : targetQuery.where("season", "=", sd.season);
+
+    const existingTarget = await targetQuery.executeTakeFirst();
+    const isCovered = await isMediaDemandCoveredInTx(trx, {
+      mediaId: input.targetMediaId,
+      season: sd.season,
+      namespaceGroup: sd.namespace_group,
+    });
+
+    if (existingTarget) {
+      const nextStatus = isCovered
+        ? "fulfilled"
+        : existingTarget.status === "leased" &&
+            existingTarget.lease_expires_at &&
+            existingTarget.lease_expires_at > input.now
+          ? "leased"
+          : existingTarget.status === "open" ||
+              sd.status === "open" ||
+              existingTarget.status === "leased"
+            ? "open"
+            : existingTarget.status;
+      const createdAt =
+        new Date(existingTarget.created_at) <= new Date(sd.created_at)
+          ? existingTarget.created_at
+          : sd.created_at;
+      const lastDemandedAt =
+        new Date(existingTarget.last_demanded_at) >= new Date(sd.last_demanded_at)
+          ? existingTarget.last_demanded_at
+          : sd.last_demanded_at;
+      const lastExploredAt =
+        existingTarget.last_explored_at && sd.last_explored_at
+          ? new Date(existingTarget.last_explored_at) >= new Date(sd.last_explored_at)
+            ? existingTarget.last_explored_at
+            : sd.last_explored_at
+          : (existingTarget.last_explored_at ?? sd.last_explored_at);
+
+      await trx
+        .updateTable("demands")
+        .set({
+          demand_count: existingTarget.demand_count + sd.demand_count,
+          not_found_count: Math.max(existingTarget.not_found_count, sd.not_found_count),
+          status: nextStatus,
+          created_at: createdAt,
+          last_demanded_at: lastDemandedAt,
+          last_explored_at: lastExploredAt,
+          lease_expires_at: nextStatus === "leased" ? existingTarget.lease_expires_at : null,
+          next_eligible_at:
+            nextStatus === "open"
+              ? new Date(existingTarget.next_eligible_at) <= new Date(sd.next_eligible_at)
+                ? existingTarget.next_eligible_at
+                : sd.next_eligible_at
+              : existingTarget.next_eligible_at,
+          updated_at: input.now,
+        })
+        .where("id", "=", existingTarget.id)
+        .execute();
+
+      await trx
+        .updateTable("change_requests")
+        .set({ demand_id: existingTarget.id, updated_at: input.now })
+        .where("demand_id", "=", sd.id)
+        .execute();
+
+      await trx.deleteFrom("demands").where("id", "=", sd.id).execute();
+    } else {
+      await trx
+        .updateTable("demands")
+        .set({
+          media_id: input.targetMediaId,
+          status: isCovered ? "fulfilled" : sd.status,
+          lease_expires_at: isCovered ? null : sd.lease_expires_at,
+          updated_at: input.now,
+        })
+        .where("id", "=", sd.id)
+        .execute();
+    }
+  }
+}
+
+export async function mergeMediaInTx(
+  trx: Transaction<Database>,
+  input: MergeMediaInput,
+): Promise<MergeMediaResult> {
   if (!isUuid(input.sourceMediaId) || !isUuid(input.targetMediaId)) {
     throw new MediaSyncError(
       "INVALID_MEDIA_ID",
@@ -1340,267 +1577,351 @@ export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeM
   const now = input.now ?? new Date();
   const reason = input.reason?.trim() || null;
 
-  return db.transaction().execute(async (trx) => {
-    // Deterministic lock ordering avoids deadlocks across concurrent merges
-    for (const id of [input.sourceMediaId, input.targetMediaId].sort()) {
-      await acquireMergeAdvisoryLock(trx, id);
-    }
+  // Deterministic lock ordering avoids deadlocks across concurrent merges
+  for (const id of [input.sourceMediaId, input.targetMediaId].sort()) {
+    await acquireMergeAdvisoryLock(trx, id);
+  }
 
-    const source = await trx
-      .selectFrom("media")
-      .select(["id", "type", "baseline", "title", "merged_into_media_id"])
-      .where("id", "=", input.sourceMediaId)
-      .forUpdate()
-      .executeTakeFirst();
+  const source = await trx
+    .selectFrom("media")
+    .select(["id", "type", "baseline", "title", "merged_into_media_id"])
+    .where("id", "=", input.sourceMediaId)
+    .forUpdate()
+    .executeTakeFirst();
 
-    if (!source) {
-      throw new MediaSyncError(
-        "MEDIA_NOT_FOUND",
-        404,
-        `Source media not found: ${input.sourceMediaId}`,
-      );
-    }
-
-    const canonicalTarget = await resolveCanonicalMediaForUpdate(
-      trx,
-      input.targetMediaId,
-      source.id,
+  if (!source) {
+    throw new MediaSyncError(
+      "MEDIA_NOT_FOUND",
+      404,
+      `Source media not found: ${input.sourceMediaId}`,
     );
-    if (!canonicalTarget) {
-      throw new MediaSyncError(
-        "MEDIA_NOT_FOUND",
-        404,
-        `Target media not found: ${input.targetMediaId}`,
-      );
+  }
+
+  const canonicalTarget = await resolveCanonicalMediaForUpdate(trx, input.targetMediaId, source.id);
+  if (!canonicalTarget) {
+    throw new MediaSyncError(
+      "MEDIA_NOT_FOUND",
+      404,
+      `Target media not found: ${input.targetMediaId}`,
+    );
+  }
+
+  if (canonicalTarget.id !== input.targetMediaId) {
+    await acquireMergeAdvisoryLock(trx, canonicalTarget.id);
+  }
+
+  if (source.merged_into_media_id !== null) {
+    if (source.merged_into_media_id === canonicalTarget.id) {
+      await trx
+        .updateTable("media")
+        .set({ merged_into_media_id: canonicalTarget.id, updated_at: now })
+        .where("merged_into_media_id", "=", source.id)
+        .execute();
+
+      return {
+        sourceMediaId: source.id,
+        targetMediaId: canonicalTarget.id,
+        movedExternalIdCount: 0,
+        movedVariantCount: 0,
+        movedAssociationCount: 0,
+        flaggedSegmentCount: 0,
+        resolvedAlertCount: 0,
+        alreadyMerged: true,
+      };
     }
 
-    if (canonicalTarget.id !== input.targetMediaId) {
-      await acquireMergeAdvisoryLock(trx, canonicalTarget.id);
-    }
+    throw new MediaSyncError(
+      "MEDIA_ALREADY_MERGED",
+      409,
+      `Source media ${source.id} is already merged into ${source.merged_into_media_id}`,
+    );
+  }
 
-    if (source.merged_into_media_id !== null) {
-      if (source.merged_into_media_id === canonicalTarget.id) {
-        await trx
-          .updateTable("media")
-          .set({ merged_into_media_id: canonicalTarget.id, updated_at: now })
-          .where("merged_into_media_id", "=", source.id)
-          .execute();
+  // 1. Mark source redirected to canonicalTarget and flatten any chains pointing to source
+  await trx
+    .updateTable("media")
+    .set({
+      merged_into_media_id: canonicalTarget.id,
+      updated_at: now,
+    })
+    .where("id", "=", source.id)
+    .execute();
 
-        return {
-          sourceMediaId: source.id,
-          targetMediaId: canonicalTarget.id,
-          movedExternalIdCount: 0,
-          movedVariantCount: 0,
-          movedAssociationCount: 0,
-          flaggedSegmentCount: 0,
-          resolvedAlertCount: 0,
-          alreadyMerged: true,
-        };
-      }
+  await trx
+    .updateTable("media")
+    .set({
+      merged_into_media_id: canonicalTarget.id,
+      updated_at: now,
+    })
+    .where("merged_into_media_id", "=", source.id)
+    .execute();
 
-      throw new MediaSyncError(
-        "MEDIA_ALREADY_MERGED",
-        409,
-        `Source media ${source.id} is already merged into ${source.merged_into_media_id}`,
-      );
-    }
+  // 2. Migrate non-conflicting external_ids; conflicting ones remain on source as redirect keys
+  const [sourceExternalIds, targetExternalIds] = await Promise.all([
+    trx
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
+      .select(["id", "namespace", "native_id"])
+      .where("media_id", "=", source.id)
+      .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
+      .execute(),
+    trx
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
+      .select(["id", "namespace", "native_id"])
+      .where("media_id", "=", canonicalTarget.id)
+      .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
+      .execute(),
+  ]);
 
-    // 1. Mark source redirected to canonicalTarget and flatten any chains pointing to source
-    await trx
-      .updateTable("media")
-      .set({
-        merged_into_media_id: canonicalTarget.id,
-        updated_at: now,
-      })
-      .where("id", "=", source.id)
-      .execute();
+  const targetExtNamespaces = new Set(targetExternalIds.map((row) => row.namespace));
+  let movedExternalIdCount = 0;
 
-    await trx
-      .updateTable("media")
-      .set({
-        merged_into_media_id: canonicalTarget.id,
-        updated_at: now,
-      })
-      .where("merged_into_media_id", "=", source.id)
-      .execute();
-
-    // 2. Migrate non-conflicting external_ids; conflicting ones remain on source as redirect keys
-    const [sourceExternalIds, targetExternalIds] = await Promise.all([
-      trx
-        .selectFrom("associations")
+  for (const ext of sourceExternalIds) {
+    if (!targetExtNamespaces.has(ext.namespace)) {
+      await trx
+        .updateTable("associations")
         .where("is_external_id", "=", true)
-        .select(["id", "namespace", "native_id"])
+        .set({ media_id: canonicalTarget.id, updated_at: now })
+        .where("id", "=", ext.id)
+        .execute();
+      targetExtNamespaces.add(ext.namespace);
+      movedExternalIdCount += 1;
+    }
+  }
+
+  // 3. Migrate variants and associations cleanly while preserving status precedence & defaults
+  const [sourceVariants, targetVariants, sourceAssociations, targetAssociations] =
+    await Promise.all([
+      trx
+        .selectFrom("variants")
+        .select(["id", "platform", "description", "is_default"])
         .where("media_id", "=", source.id)
-        .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .execute(),
+      trx
+        .selectFrom("variants")
+        .select(["id", "platform", "description", "is_default"])
+        .where("media_id", "=", canonicalTarget.id)
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
         .execute(),
       trx
         .selectFrom("associations")
-        .where("is_external_id", "=", true)
-        .select(["id", "namespace", "native_id"])
+        .where("is_external_id", "=", false)
+        .select([
+          "id",
+          "namespace",
+          "native_id",
+          "variant_id",
+          "status",
+          "needs_review",
+          "locked",
+          "source",
+        ])
+        .where("media_id", "=", source.id)
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
+        .execute(),
+      trx
+        .selectFrom("associations")
+        .where("is_external_id", "=", false)
+        .select([
+          "id",
+          "namespace",
+          "native_id",
+          "variant_id",
+          "status",
+          "needs_review",
+          "locked",
+          "source",
+        ])
         .where("media_id", "=", canonicalTarget.id)
-        .$narrowType<{ namespace: ExternalIdNamespaceRow }>()
+        .orderBy("created_at", "asc")
+        .orderBy("id", "asc")
         .execute(),
     ]);
 
-    const targetExtNamespaces = new Set(targetExternalIds.map((row) => row.namespace));
-    let movedExternalIdCount = 0;
+  const allAssocIds = [
+    ...sourceAssociations.map((a) => a.id),
+    ...targetAssociations.map((a) => a.id),
+  ];
+  const segmentsByAssoc = await loadSegmentsByAssociationIds(trx, allAssocIds);
 
-    for (const ext of sourceExternalIds) {
-      if (!targetExtNamespaces.has(ext.namespace)) {
-        await trx
-          .updateTable("associations")
-          .where("is_external_id", "=", true)
-          .set({ media_id: canonicalTarget.id, updated_at: now })
-          .where("id", "=", ext.id)
-          .execute();
-        targetExtNamespaces.add(ext.namespace);
-        movedExternalIdCount += 1;
-      }
-    }
-
-    // 3. Migrate variants and associations cleanly while preserving single default variant per platform
-    const [sourceVariants, targetVariants, sourceAssociations, targetAssociations] =
-      await Promise.all([
-        trx
-          .selectFrom("variants")
-          .select(["id", "platform", "description", "is_default"])
-          .where("media_id", "=", source.id)
-          .orderBy("created_at", "asc")
-          .orderBy("id", "asc")
-          .execute(),
-        trx
-          .selectFrom("variants")
-          .select(["id", "platform", "description", "is_default"])
-          .where("media_id", "=", canonicalTarget.id)
-          .orderBy("created_at", "asc")
-          .orderBy("id", "asc")
-          .execute(),
-        trx
-          .selectFrom("associations")
-          .where("is_external_id", "=", false)
-          .select(["id", "namespace", "native_id", "variant_id", "status"])
-          .where("media_id", "=", source.id)
-          .orderBy("created_at", "asc")
-          .orderBy("id", "asc")
-          .execute(),
-        trx
-          .selectFrom("associations")
-          .where("is_external_id", "=", false)
-          .select(["id", "namespace", "native_id", "variant_id", "status"])
-          .where("media_id", "=", canonicalTarget.id)
-          .orderBy("created_at", "asc")
-          .orderBy("id", "asc")
-          .execute(),
-      ]);
-
-    const allAssocIds = [
-      ...sourceAssociations.map((a) => a.id),
-      ...targetAssociations.map((a) => a.id),
-    ];
-    const segmentsByAssoc = await loadSegmentsByAssociationIds(trx, allAssocIds);
-
-    const targetAssocByKey = new Map(
-      targetAssociations.map((a) => [`${a.namespace}:${a.native_id}`, a]),
+  const targetAssocByKey = new Map(
+    targetAssociations.map((a) => [`${a.namespace}:${a.native_id}`, a]),
+  );
+  const targetDefaultPlatforms = new Set<PlatformNamespace>(
+    targetVariants.filter((v) => v.is_default).map((v) => v.platform),
+  );
+  const withSegments = (a: (typeof targetAssociations)[number]) => ({
+    id: a.id,
+    namespace: a.namespace,
+    nativeId: a.native_id,
+    variantId: a.variant_id,
+    status: a.status,
+    segments: segmentsByAssoc.get(a.id) ?? [],
+  });
+  const { groups: activeTargetSegmentsByVariant, conflict } = retainedTargetVariantSegments(
+    sourceAssociations.map(withSegments),
+    targetAssociations.map(withSegments),
+    canonicalTarget.baseline,
+  );
+  if (conflict) {
+    throw new MediaSyncError(
+      "SEGMENT_OVERLAP",
+      409,
+      `Variant ${conflict.variantId}: ${conflict.errors.join("; ")}`,
     );
-    const targetDefaultPlatforms = new Set<PlatformNamespace>(
-      targetVariants.filter((v) => v.is_default).map((v) => v.platform),
+  }
+
+  const variantRemap = new Map<string, string>();
+  const variantsToDelete: string[] = [];
+  let movedVariantCount = 0;
+
+  for (const sv of sourceVariants) {
+    const matchingTarget = targetVariants.find(
+      (tv) => tv.platform === sv.platform && tv.description === sv.description,
     );
-    const activeTargetSegmentsByVariant = new Map<
-      string,
-      Array<{ associationId: string; segments: NormalizedSegment[] }>
-    >();
-    for (const ta of targetAssociations) {
-      if (ta.variant_id && ta.status !== "delisted") {
-        const list = activeTargetSegmentsByVariant.get(ta.variant_id) ?? [];
-        list.push({ associationId: ta.id, segments: segmentsByAssoc.get(ta.id) ?? [] });
-        activeTargetSegmentsByVariant.set(ta.variant_id, list);
-      }
-    }
 
-    const variantRemap = new Map<string, string>();
-    const variantsToDelete: string[] = [];
-    let movedVariantCount = 0;
-
-    for (const sv of sourceVariants) {
-      const matchingTarget = targetVariants.find(
-        (tv) => tv.platform === sv.platform && tv.description === sv.description,
+    let coalesced = false;
+    if (matchingTarget) {
+      const incomingActiveAssocs = sourceAssociations.filter(
+        (sa) =>
+          sa.variant_id === sv.id &&
+          sa.status !== "delisted" &&
+          !targetAssocByKey.has(`${sa.namespace}:${sa.native_id}`),
       );
+      const existingEntries = activeTargetSegmentsByVariant.get(matchingTarget.id) ?? [];
+      const incomingEntries = incomingActiveAssocs.map((sa) => ({
+        associationId: sa.id,
+        segments: segmentsByAssoc.get(sa.id) ?? [],
+      }));
+      const combined = [...existingEntries, ...incomingEntries];
+      const validation = validateVariantSegments(combined, {
+        baseline: canonicalTarget.baseline,
+      });
 
-      let coalesced = false;
-      if (matchingTarget) {
-        const incomingActiveAssocs = sourceAssociations.filter(
-          (sa) =>
-            sa.variant_id === sv.id &&
-            sa.status !== "delisted" &&
-            !targetAssocByKey.has(`${sa.namespace}:${sa.native_id}`),
-        );
-        const existingEntries = activeTargetSegmentsByVariant.get(matchingTarget.id) ?? [];
-        const incomingEntries = incomingActiveAssocs.map((sa) => ({
-          associationId: sa.id,
-          segments: segmentsByAssoc.get(sa.id) ?? [],
-        }));
-        const combined = [...existingEntries, ...incomingEntries];
-        const validation = validateVariantSegments(combined, {
-          baseline: canonicalTarget.baseline,
-        });
-
-        if (validation.valid) {
-          variantRemap.set(sv.id, matchingTarget.id);
-          variantsToDelete.push(sv.id);
-          activeTargetSegmentsByVariant.set(matchingTarget.id, combined);
-          coalesced = true;
-        }
-      }
-
-      if (!coalesced) {
-        const keepDefault = Boolean(sv.is_default) && !targetDefaultPlatforms.has(sv.platform);
-        await trx
-          .updateTable("variants")
-          .set({
-            media_id: canonicalTarget.id,
-            is_default: keepDefault,
-            updated_at: now,
-          })
-          .where("id", "=", sv.id)
-          .execute();
-
-        if (keepDefault) {
-          targetDefaultPlatforms.add(sv.platform);
-        }
-        variantRemap.set(sv.id, sv.id);
-        movedVariantCount += 1;
+      if (validation.valid) {
+        variantRemap.set(sv.id, matchingTarget.id);
+        variantsToDelete.push(sv.id);
+        activeTargetSegmentsByVariant.set(matchingTarget.id, combined);
+        coalesced = true;
       }
     }
 
-    let movedAssociationCount = 0;
-    for (const sa of sourceAssociations) {
-      const key = `${sa.namespace}:${sa.native_id}`;
-      const existingTarget = targetAssocByKey.get(key);
-      const nextVariantId = sa.variant_id
-        ? (variantRemap.get(sa.variant_id) ?? sa.variant_id)
-        : null;
+    if (!coalesced) {
+      const keepDefault = Boolean(sv.is_default) && !targetDefaultPlatforms.has(sv.platform);
+      await trx
+        .updateTable("variants")
+        .set({
+          media_id: canonicalTarget.id,
+          is_default: keepDefault,
+          updated_at: now,
+        })
+        .where("id", "=", sv.id)
+        .execute();
 
-      if (!existingTarget) {
+      if (keepDefault) {
+        targetDefaultPlatforms.add(sv.platform);
+      }
+      variantRemap.set(sv.id, sv.id);
+      movedVariantCount += 1;
+    }
+  }
+
+  let movedAssociationCount = 0;
+  for (const sa of sourceAssociations) {
+    const key = `${sa.namespace}:${sa.native_id}`;
+    const existingTarget = targetAssocByKey.get(key);
+    const nextVariantId = sa.variant_id ? (variantRemap.get(sa.variant_id) ?? sa.variant_id) : null;
+
+    if (!existingTarget) {
+      await trx
+        .updateTable("associations")
+        .set({
+          media_id: canonicalTarget.id,
+          variant_id: nextVariantId,
+          updated_at: now,
+        })
+        .where("id", "=", sa.id)
+        .execute();
+
+      if (sa.variant_id && nextVariantId && sa.variant_id !== nextVariantId) {
+        await trx
+          .updateTable("association_revisions")
+          .set({ variant_id: nextVariantId })
+          .where("association_id", "=", sa.id)
+          .where("variant_id", "=", sa.variant_id)
+          .execute();
+      }
+      if (sa.status !== "delisted") {
+        movedAssociationCount += 1;
+      }
+    } else {
+      const saSegs = segmentsByAssoc.get(sa.id) ?? [];
+      const tgtSegs = segmentsByAssoc.get(existingTarget.id) ?? [];
+      if (preferSourceAssociation(sa.status, saSegs, existingTarget.status, tgtSegs)) {
         await trx
           .updateTable("associations")
           .set({
-            media_id: canonicalTarget.id,
-            variant_id: nextVariantId,
+            status: sa.status,
+            variant_id: existingTarget.variant_id ?? nextVariantId,
+            needs_review: sa.needs_review || existingTarget.needs_review,
+            locked: Boolean(existingTarget.locked || sa.locked),
+            source: existingTarget.source ?? sa.source,
             updated_at: now,
           })
-          .where("id", "=", sa.id)
+          .where("id", "=", existingTarget.id)
           .execute();
 
-        if (sa.variant_id && nextVariantId && sa.variant_id !== nextVariantId) {
+        await trx.deleteFrom("segments").where("association_id", "=", existingTarget.id).execute();
+        if (saSegs.length > 0) {
           await trx
-            .updateTable("association_revisions")
-            .set({ variant_id: nextVariantId })
-            .where("association_id", "=", sa.id)
-            .where("variant_id", "=", sa.variant_id)
+            .insertInto("segments")
+            .values(
+              saSegs.map((seg) => ({
+                association_id: existingTarget.id,
+                season: seg.season,
+                episode_start: seg.episodeStart,
+                episode_end: seg.episodeEnd,
+                target_episode_start: seg.targetEpisodeStart,
+                baseline: seg.baseline,
+                non_linear: seg.nonLinear,
+                needs_review: seg.needsReview,
+              })),
+            )
             .execute();
         }
-        movedAssociationCount += 1;
-      } else {
+
+        const maxRevRow = await trx
+          .selectFrom("association_revisions")
+          .select(sql<number | null>`max(revision_number)`.as("max_rev"))
+          .where("association_id", "=", existingTarget.id)
+          .executeTakeFirst();
+        const revRow = await trx
+          .insertInto("association_revisions")
+          .values({
+            association_id: existingTarget.id,
+            revision_number: (maxRevRow?.max_rev ?? 0) + 1,
+            change_request_id: null,
+            variant_id: existingTarget.variant_id ?? nextVariantId,
+            status: sa.status,
+            segments: JSON.stringify(saSegs),
+            actor_user_id: input.actorUserId,
+            reason: reason ?? "media_merge_promoted_association",
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+        await trx
+          .updateTable("associations")
+          .set({ current_revision_id: revRow.id, updated_at: now })
+          .where("id", "=", existingTarget.id)
+          .execute();
+      }
+
+      if (sa.status !== "delisted") {
         await trx
           .updateTable("associations")
           .set({
@@ -1610,119 +1931,226 @@ export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeM
           })
           .where("id", "=", sa.id)
           .execute();
-      }
-    }
-
-    for (const [oldVariantId, newVariantId] of variantRemap.entries()) {
-      if (oldVariantId !== newVariantId) {
+        await trx.deleteFrom("segments").where("association_id", "=", sa.id).execute();
+      } else if (sa.variant_id !== nextVariantId) {
         await trx
-          .updateTable("change_requests")
-          .set({ variant_id: newVariantId, updated_at: now })
-          .where("variant_id", "=", oldVariantId)
-          .execute();
-
-        await trx
-          .updateTable("association_revisions")
-          .set({ variant_id: newVariantId })
-          .where("variant_id", "=", oldVariantId)
+          .updateTable("associations")
+          .set({
+            variant_id: nextVariantId,
+            updated_at: now,
+          })
+          .where("id", "=", sa.id)
           .execute();
       }
     }
+  }
 
-    await trx
-      .updateTable("change_requests")
-      .set({ media_id: canonicalTarget.id, updated_at: now })
+  for (const [oldVariantId, newVariantId] of variantRemap.entries()) {
+    if (oldVariantId !== newVariantId) {
+      await trx
+        .updateTable("change_requests")
+        .set({ variant_id: newVariantId, updated_at: now })
+        .where("variant_id", "=", oldVariantId)
+        .execute();
+
+      await trx
+        .updateTable("association_revisions")
+        .set({ variant_id: newVariantId })
+        .where("variant_id", "=", oldVariantId)
+        .execute();
+    }
+  }
+
+  await trx
+    .updateTable("change_requests")
+    .set({ media_id: canonicalTarget.id, updated_at: now })
+    .where("media_id", "=", source.id)
+    .execute();
+
+  if (variantsToDelete.length > 0) {
+    await trx.deleteFrom("variants").where("id", "in", variantsToDelete).execute();
+  }
+
+  // 4. Migrate review_corrections without violating (media_id, namespace, native_id) uniqueness
+  const [sourceCorrections, targetCorrections] = await Promise.all([
+    trx
+      .selectFrom("review_corrections")
+      .select(["change_request_id", "namespace", "native_id"])
       .where("media_id", "=", source.id)
-      .execute();
-
-    if (variantsToDelete.length > 0) {
-      await trx.deleteFrom("variants").where("id", "in", variantsToDelete).execute();
-    }
-
-    // 4. Migrate non-conflicting platform_checks from source to canonicalTarget
-    const [sourceChecks, targetChecks] = await Promise.all([
-      trx
-        .selectFrom("platform_checks")
-        .select(["id", "platform"])
+      .execute(),
+    trx
+      .selectFrom("review_corrections")
+      .select(["namespace", "native_id"])
+      .where("media_id", "=", canonicalTarget.id)
+      .execute(),
+  ]);
+  if (sourceCorrections.length > 0) {
+    const targetCorrKeys = new Set(targetCorrections.map((c) => `${c.namespace}:${c.native_id}`));
+    const conflictingCrIds = sourceCorrections
+      .filter((c) => targetCorrKeys.has(`${c.namespace}:${c.native_id}`))
+      .map((c) => c.change_request_id);
+    if (conflictingCrIds.length > 0) {
+      await trx
+        .deleteFrom("review_corrections")
         .where("media_id", "=", source.id)
-        .execute(),
-      trx
-        .selectFrom("platform_checks")
-        .select(["platform"])
-        .where("media_id", "=", canonicalTarget.id)
-        .execute(),
-    ]);
-
-    const targetCheckedPlatforms = new Set(targetChecks.map((row) => row.platform));
-    for (const check of sourceChecks) {
-      if (!targetCheckedPlatforms.has(check.platform)) {
-        await trx
-          .updateTable("platform_checks")
-          .set({ media_id: canonicalTarget.id, updated_at: now })
-          .where("id", "=", check.id)
-          .execute();
-        targetCheckedPlatforms.add(check.platform);
-      }
+        .where("change_request_id", "in", conflictingCrIds)
+        .execute();
     }
-
-    // 5. Resolve open tmdb_missing_or_merged alerts on source & move remaining open alerts to target
-    const resolvedAlerts = await trx
-      .updateTable("review_alerts")
-      .set({
-        status: "resolved",
-        resolved_at: now,
-        resolved_by_user_id: input.actorUserId,
-      })
-      .where("media_id", "=", source.id)
-      .where("alert_type", "=", REVIEW_ALERT_TYPES.TMDB_MISSING_OR_MERGED)
-      .where("status", "=", "open")
-      .returning("id")
-      .execute();
-
     await trx
-      .updateTable("review_alerts")
+      .updateTable("review_corrections")
       .set({ media_id: canonicalTarget.id })
       .where("media_id", "=", source.id)
-      .where("status", "=", "open")
       .execute();
+  }
 
-    // 5. Mark any migrated/existing segments whose baseline mismatches target.baseline as needs_review
-    const flaggedSegmentCount = await flagBaselineMismatchedSegments(
-      trx,
-      canonicalTarget.id,
-      canonicalTarget.baseline,
-      now,
-    );
+  // 5. Migrate non-conflicting platform_checks and purge stale checks for now-covered platforms
+  const [sourceChecks, targetChecks, targetConfirmedPlatforms] = await Promise.all([
+    trx
+      .selectFrom("platform_checks")
+      .select(["id", "platform"])
+      .where("media_id", "=", source.id)
+      .execute(),
+    trx
+      .selectFrom("platform_checks")
+      .select(["platform"])
+      .where("media_id", "=", canonicalTarget.id)
+      .execute(),
+    trx
+      .selectFrom("associations")
+      .where("is_external_id", "=", false)
+      .select("namespace")
+      .where("media_id", "=", canonicalTarget.id)
+      .where("status", "=", "confirmed")
+      .execute(),
+  ]);
 
-    if (flaggedSegmentCount > 0) {
-      await recordOpenReviewAlert(trx, {
-        alertType: REVIEW_ALERT_TYPES.SEGMENTS_NEEDS_REVIEW,
-        mediaId: canonicalTarget.id,
-        details: {
-          reason: "media_merged_baseline_mismatch",
-          sourceMediaId: source.id,
-          sourceBaseline: source.baseline,
-          targetBaseline: canonicalTarget.baseline,
-          flaggedSegmentCount,
-          actorUserId: input.actorUserId,
-          mergeReason: reason,
-          detectedAt: now.toISOString(),
-        },
-        dedupeByMediaAndType: true,
-      });
+  const targetCheckedPlatforms = new Set(targetChecks.map((row) => row.platform));
+  for (const check of sourceChecks) {
+    if (!targetCheckedPlatforms.has(check.platform)) {
+      await trx
+        .updateTable("platform_checks")
+        .set({ media_id: canonicalTarget.id, updated_at: now })
+        .where("id", "=", check.id)
+        .execute();
+      targetCheckedPlatforms.add(check.platform);
     }
+  }
+  await trx.deleteFrom("platform_checks").where("media_id", "=", source.id).execute();
 
-    return {
-      sourceMediaId: source.id,
-      targetMediaId: canonicalTarget.id,
-      movedExternalIdCount,
-      movedVariantCount,
-      movedAssociationCount,
-      flaggedSegmentCount,
-      resolvedAlertCount: resolvedAlerts.length,
-      alreadyMerged: false,
-    };
+  const coveredPlatforms = targetConfirmedPlatforms
+    .map((row) => row.namespace)
+    .filter(isPlatformNamespace);
+  if (coveredPlatforms.length > 0) {
+    await trx
+      .deleteFrom("platform_checks")
+      .where("media_id", "=", canonicalTarget.id)
+      .where("platform", "in", coveredPlatforms)
+      .execute();
+  }
+
+  // 6. Coalesce demands from source into canonicalTarget and fulfill newly covered catalog demands
+  await coalesceMediaDemandsInTx(trx, {
+    sourceMediaId: source.id,
+    targetMediaId: canonicalTarget.id,
+    now,
   });
+
+  // 7. Resolve open tmdb_missing_or_merged alerts & pairwise external-id conflict alerts; move the rest
+  const resolvedMissingAlerts = await trx
+    .updateTable("review_alerts")
+    .set({
+      status: "resolved",
+      resolved_at: now,
+      resolved_by_user_id: input.actorUserId,
+    })
+    .where("media_id", "=", source.id)
+    .where("alert_type", "=", REVIEW_ALERT_TYPES.TMDB_MISSING_OR_MERGED)
+    .where("status", "=", "open")
+    .returning("id")
+    .execute();
+
+  const resolvedPairwiseConflictAlerts = await trx
+    .updateTable("review_alerts")
+    .set({
+      status: "resolved",
+      resolved_at: now,
+      resolved_by_user_id: input.actorUserId,
+    })
+    .where("alert_type", "=", REVIEW_ALERT_TYPES.AGENT_EXTERNAL_ID_CONFLICT)
+    .where("status", "=", "open")
+    .where((eb) =>
+      eb.or([
+        eb.and([
+          eb("media_id", "=", source.id),
+          eb.or([
+            eb(eb.ref("details", "->>").key("otherMediaId"), "=", canonicalTarget.id),
+            eb(eb.ref("details", "->>").key("conflictingMediaId"), "=", canonicalTarget.id),
+          ]),
+        ]),
+        eb.and([
+          eb("media_id", "=", canonicalTarget.id),
+          eb.or([
+            eb(eb.ref("details", "->>").key("otherMediaId"), "=", source.id),
+            eb(eb.ref("details", "->>").key("conflictingMediaId"), "=", source.id),
+          ]),
+        ]),
+      ]),
+    )
+    .returning("id")
+    .execute();
+
+  await trx
+    .updateTable("review_alerts")
+    .set({ media_id: canonicalTarget.id })
+    .where("media_id", "=", source.id)
+    .where("status", "=", "open")
+    .execute();
+
+  // 8. Mark any migrated/existing segments whose baseline mismatches target.baseline as needs_review
+  const flaggedSegmentCount = await flagBaselineMismatchedSegments(
+    trx,
+    canonicalTarget.id,
+    canonicalTarget.baseline,
+    now,
+  );
+
+  if (flaggedSegmentCount > 0) {
+    await recordOpenReviewAlert(trx, {
+      alertType: REVIEW_ALERT_TYPES.SEGMENTS_NEEDS_REVIEW,
+      mediaId: canonicalTarget.id,
+      details: {
+        reason: "media_merged_baseline_mismatch",
+        sourceMediaId: source.id,
+        sourceBaseline: source.baseline,
+        targetBaseline: canonicalTarget.baseline,
+        flaggedSegmentCount,
+        actorUserId: input.actorUserId,
+        mergeReason: reason,
+        detectedAt: now.toISOString(),
+      },
+      dedupeByMediaAndType: true,
+    });
+  }
+
+  await fulfillCoveredCatalogDemandsInTx(trx, {
+    mediaId: canonicalTarget.id,
+    now,
+  });
+
+  return {
+    sourceMediaId: source.id,
+    targetMediaId: canonicalTarget.id,
+    movedExternalIdCount,
+    movedVariantCount,
+    movedAssociationCount,
+    flaggedSegmentCount,
+    resolvedAlertCount: resolvedMissingAlerts.length + resolvedPairwiseConflictAlerts.length,
+    alreadyMerged: false,
+  };
+}
+
+export async function mergeMedia(db: Db, input: MergeMediaInput): Promise<MergeMediaResult> {
+  return db.transaction().execute((trx) => mergeMediaInTx(trx, input));
 }
 
 export async function switchMediaBaseline(

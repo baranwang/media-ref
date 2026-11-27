@@ -2,6 +2,7 @@ import {
   EXTERNAL_ID_NAMESPACES,
   formatExternalKey,
   getNamespaceCapabilities,
+  isCatalogNamespace,
   isExternalIdNamespace,
   isNamespace,
   isPlatformNamespace,
@@ -39,13 +40,28 @@ import {
   resolveCatalogTargetSnapshot,
   selectBaseline,
   type CatalogGatewayConfig,
+  type CatalogTargetInitialAssociation,
   type CatalogTargetSnapshot,
 } from "./catalog-gateway.ts";
+import {
+  isPlausibleCatalogDuplicateOverlapForSubmit,
+  verifyAndAutoMergeDuplicateMediaInTx,
+} from "./duplicate-merge.ts";
+import {
+  collectionPositionsOverlap,
+  doesCatalogTargetMatchMediaSnapshot,
+  findReusableMediaForPrefetchedCatalogInTx,
+  loadMediaMergeCandidateSnapshotInTx,
+  parseMediaSeasonsJson,
+  resolveCanonicalMediaIdInTx,
+} from "./duplicate-merge-policy.ts";
 import {
   fulfillCoveredDemandsForAssociationInTx,
   mergeExternalKeyDemandsIntoMedia,
   reopenDemandAfterRejectionInTx,
 } from "./demands.ts";
+import { backfillMissingExternalIdsInTx } from "./external-ids.ts";
+export { backfillMissingExternalIdsInTx } from "./external-ids.ts";
 import { enqueueJob } from "./jobs.ts";
 import { MAX_LEAD_VARIANT_DESCRIPTION_LENGTH } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
@@ -458,6 +474,7 @@ async function resolveExistingMediaByTarget(
       .select("media_id")
       .where("namespace", "=", target.namespace)
       .where("native_id", "=", target.nativeId)
+      .where("status", "=", "confirmed")
       .executeTakeFirst();
 
     if (ext) {
@@ -474,6 +491,7 @@ async function resolveExistingMediaByTarget(
       .where("namespace", "=", target.namespace)
       .where("native_id", "=", target.nativeId)
       .where("status", "=", "confirmed")
+      .orderBy("needs_review", "asc")
       .orderBy("created_at", "asc")
       .orderBy("id", "asc")
       .execute();
@@ -500,7 +518,7 @@ async function resolveExistingMediaByTarget(
   return null;
 }
 
-async function loadActiveAssociationsWithSegments(
+export async function loadActiveAssociationsWithSegments(
   db: DbExecutor,
   filter: {
     variantId?: string;
@@ -597,12 +615,16 @@ export async function validateSubmissionOnSharedCollection(
   const existing = await loadActiveAssociationsWithSegments(db, {
     collection: { namespace, nativeId },
   });
-  return validateSharedCollectionSegments([
-    ...existing
-      .filter((e) => e.mediaId !== mediaId)
-      .map((e) => ({ mediaId: e.mediaId, associationId: e.id, segments: e.segments })),
+  const otherMediaOnCollection = existing.filter((entry) => entry.mediaId !== mediaId);
+  const check = validateSharedCollectionSegments([
+    ...otherMediaOnCollection.map((e) => ({
+      mediaId: e.mediaId,
+      associationId: e.id,
+      segments: e.segments,
+    })),
     { mediaId: mediaId ?? "__pending_media__", associationId: "candidate", segments },
   ]);
+  return check.valid ? check : { ...check, otherMediaOnCollection };
 }
 
 function classifyValidationErrorStatus(
@@ -1070,13 +1092,37 @@ export async function createChangeRequest(
     normalizedSegments,
   );
   if (!sharedCheck.valid) {
-    const classified = classifyValidationErrorStatus(sharedCheck.errors, 400);
-    throw new MediaServiceError(
-      classified.code,
-      classified.status,
-      sharedCheck.errors[0].message,
-      sharedCheck.errors,
-    );
+    const canConvergeDuplicate =
+      isCatalogNamespace(namespace) &&
+      !sharedCheck.errors.some((error) => error.code === "SHARED_COLLECTION_NON_LINEAR_SEGMENT") &&
+      (await isPlausibleCatalogDuplicateOverlapForSubmit(dbWrite, {
+        targetMedia: existingMedia
+          ? {
+              id: existingMedia.id,
+              type: existingMedia.type,
+              title: existingMedia.title,
+              originalTitle: existingMedia.original_title,
+              year: existingMedia.year,
+              seasons: parseMediaSeasonsJson(existingMedia.seasons),
+            }
+          : null,
+        targetExternalKey:
+          !existingMedia && target.kind === "external_key"
+            ? { namespace: target.namespace, nativeId: target.nativeId }
+            : null,
+        overlappingMediaIds: sharedCheck.otherMediaOnCollection
+          .filter((entry) => collectionPositionsOverlap(entry.segments, normalizedSegments))
+          .map((entry) => entry.mediaId),
+      }));
+    if (!canConvergeDuplicate) {
+      const classified = classifyValidationErrorStatus(sharedCheck.errors, 400);
+      throw new MediaServiceError(
+        classified.code,
+        classified.status,
+        sharedCheck.errors[0].message,
+        sharedCheck.errors,
+      );
+    }
   }
 
   const hasTier2Adapter = Boolean(adapter && adapter.tier >= 2);
@@ -1663,84 +1709,104 @@ function mergeApprovedSegments(
   );
 }
 
-/** Report only keys confirmed on this media, including which ones this call inserted. */
-export async function backfillMissingExternalIdsInTx(
+export async function ensureInitialCatalogAssociationInTx(
   trx: Transaction<Database>,
-  input: {
-    mediaId: string;
-    externalIds: Partial<Record<ExternalIdNamespace, string | null>>;
-    requiredExistingKey?: string;
-    now?: Date;
-  },
-): Promise<{ ownedKeys: string[]; insertedKeys: string[] }> {
-  const candidates = EXTERNAL_ID_NAMESPACES.flatMap((namespace) => {
-    const nativeId = input.externalIds[namespace];
-    return nativeId ? [{ namespace, nativeId }] : [];
-  });
-  if (candidates.length === 0) {
-    return { ownedKeys: [], insertedKeys: [] };
-  }
-
-  const rows = await trx
+  media: Pick<ResolvedMediaRow, "id" | "type" | "baseline" | "seasons">,
+  association: CatalogTargetInitialAssociation,
+  snapshot: CatalogTargetSnapshot["snapshot"],
+  reused: boolean,
+  now: Date,
+): Promise<boolean> {
+  const { namespace, nativeId } = association;
+  await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE, `${media.id}:${namespace}`);
+  await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.COLLECTION, `${namespace}:${nativeId}`);
+  const existing = await trx
     .selectFrom("associations")
-    .select(["media_id", "namespace", "native_id as nativeId", "is_external_id", "status"])
-    .where(
-      "namespace",
-      "in",
-      candidates.map((entry) => entry.namespace),
-    )
-    .where((eb) =>
-      eb.or([
-        eb.and({ media_id: input.mediaId, is_external_id: true }),
-        ...candidates.map(({ namespace, nativeId }) => eb.and({ namespace, native_id: nativeId })),
-      ]),
-    )
-    .orderBy("id")
-    .forShare()
-    .$narrowType<{ namespace: ExternalIdNamespace }>()
-    .execute();
-  const local = rows.filter((row) => row.media_id === input.mediaId);
-  const ownedKeys = local
-    .filter(
-      (row) =>
-        row.is_external_id &&
-        row.status === "confirmed" &&
-        row.nativeId === input.externalIds[row.namespace],
-    )
-    .map(formatExternalKey);
-  // A regular association with the same key also occupies (media_id, namespace, native_id).
-  const missing = candidates.filter(
-    ({ namespace }) => !local.some((row) => row.namespace === namespace),
-  );
-  if (
-    missing.length === 0 ||
-    (input.requiredExistingKey !== undefined && !ownedKeys.includes(input.requiredExistingKey)) ||
-    local.some((row) => row.is_external_id && row.nativeId !== input.externalIds[row.namespace]) ||
-    rows.some(
-      (row) => row.media_id !== input.mediaId && (row.is_external_id || row.status === "confirmed"),
-    )
-  ) {
-    return { ownedKeys, insertedKeys: [] };
-  }
+    .select("status")
+    .where("media_id", "=", media.id)
+    .where("namespace", "=", namespace)
+    .where("native_id", "=", nativeId)
+    .executeTakeFirst();
+  if (existing) return existing.status === "confirmed";
+  if (media.type !== snapshot.type) return false;
 
-  // One insert makes a concurrent claim roll back the whole batch.
-  const inserted = await trx
-    .insertInto("associations")
-    .values(
-      missing.map(({ namespace, nativeId }) => ({
-        media_id: input.mediaId,
-        namespace,
-        native_id: nativeId,
-        status: "confirmed" as const,
-        is_external_id: true,
-        source: "sync" as const,
-        ...(input.now ? { created_at: input.now, updated_at: input.now } : {}),
-      })),
+  const segments: NormalizedSegment[] = [];
+  if (media.type === "tv") {
+    // Douban/Bangumi describe their own entry as season 1, not necessarily the canonical show's first season.
+    const regular = parseMediaSeasonsJson(media.seasons).filter((s) => s.season > 0);
+    const count = snapshot.seasons.find((s) => s.season === 1)?.episodeCount;
+    if (
+      reused &&
+      (!media.baseline || regular.length !== 1 || !count || regular[0]!.episodeCount !== count)
     )
-    .returning(["namespace", "native_id as nativeId"])
+      return false;
+    if (media.baseline)
+      segments.push({
+        season: reused ? regular[0]!.season : 1,
+        episodeStart: 1,
+        episodeEnd: count || null,
+        targetEpisodeStart: 1,
+        baseline: media.baseline,
+        nonLinear: false,
+        needsReview: false,
+      });
+  }
+  const siblings = await loadActiveAssociationsWithSegments(trx, {
+    mediaId: media.id,
+    catalogNamespace: namespace,
+  });
+  const shared = await loadActiveAssociationsWithSegments(trx, { collection: association });
+  if (
+    !validateVariantSegments([...siblings, { segments }], { baseline: media.baseline }).valid ||
+    !validateSharedCollectionSegments([...shared, { mediaId: media.id, segments }]).valid
+  )
+    return false;
+
+  const row = await trx
+    .insertInto("associations")
+    .values({ media_id: media.id, namespace, native_id: nativeId, status: "confirmed" })
+    .returning("id")
+    .executeTakeFirstOrThrow();
+  if (segments.length > 0) {
+    await trx
+      .insertInto("segments")
+      .values(
+        segments.map((s) => ({
+          association_id: row.id,
+          season: s.season,
+          episode_start: s.episodeStart,
+          episode_end: s.episodeEnd,
+          target_episode_start: s.targetEpisodeStart,
+          baseline: s.baseline,
+          non_linear: s.nonLinear,
+          needs_review: s.needsReview,
+        })),
+      )
+      .execute();
+  }
+  const revision = await trx
+    .insertInto("association_revisions")
+    .values({
+      association_id: row.id,
+      revision_number: 1,
+      status: "confirmed",
+      segments: JSON.stringify(segments),
+      reason: "initial_catalog_target",
+    })
+    .returning("id")
+    .executeTakeFirstOrThrow();
+  await trx
+    .updateTable("associations")
+    .set({ current_revision_id: revision.id })
+    .where("id", "=", row.id)
     .execute();
-  const insertedKeys = inserted.map(formatExternalKey);
-  return { ownedKeys: [...ownedKeys, ...insertedKeys], insertedKeys };
+  await fulfillCoveredDemandsForAssociationInTx(trx, {
+    mediaId: media.id,
+    namespace,
+    segments,
+    now,
+  });
+  return true;
 }
 
 export async function approveChangeRequestInTransaction(
@@ -1791,14 +1857,50 @@ export async function approveChangeRequestInTransaction(
     media = await resolveCanonicalMediaById(trx, cr.media_id);
   }
 
-  let resolvedExistingMedia = Boolean(media);
+  if (media && prefetchedCatalog) {
+    const snapshot = await loadMediaMergeCandidateSnapshotInTx(trx, media.id);
+    if (
+      snapshot &&
+      doesCatalogTargetMatchMediaSnapshot(snapshot, [], {
+        ...prefetchedCatalog,
+        aliases: prefetchedCatalog.evidence.aliases,
+      })
+    ) {
+      const { insertedKeys } = await backfillMissingExternalIdsInTx(trx, {
+        mediaId: media.id,
+        externalIds: prefetchedCatalog.externalIds,
+      });
+      if (insertedKeys.length > 0) {
+        await mergeExternalKeyDemandsIntoMedia(trx, {
+          mediaId: media.id,
+          externalKeys: insertedKeys,
+          seasons: media.seasons,
+          mediaType: media.type,
+          now: input.now,
+        });
+      }
+    }
+  }
   if (!media) {
     await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_KEY, target.canonicalKey);
-    const existingInTx = await resolveExistingMediaByTarget(trx, target);
-    if (existingInTx) {
-      media = existingInTx.media;
-      resolvedExistingMedia = true;
-    } else {
+
+    const initAssoc = prefetchedCatalog?.initialAssociation ?? null;
+    const existingConfirmedInTx = await resolveExistingMediaByTarget(trx, target);
+    let resolvedOrCreatedMedia: ResolvedMediaRow | null = existingConfirmedInTx?.media ?? null;
+    let reusedExisting = existingConfirmedInTx !== null;
+
+    if (!resolvedOrCreatedMedia && prefetchedCatalog) {
+      const reusable = await findReusableMediaForPrefetchedCatalogInTx(trx, {
+        ...prefetchedCatalog,
+        aliases: prefetchedCatalog.evidence.aliases,
+      });
+      if (reusable) {
+        resolvedOrCreatedMedia = reusable;
+        reusedExisting = true;
+      }
+    }
+
+    if (!resolvedOrCreatedMedia) {
       if (!prefetchedCatalog) {
         throw new MediaServiceError(
           "MEDIA_NOT_FOUND",
@@ -1807,7 +1909,7 @@ export async function approveChangeRequestInTransaction(
         );
       }
 
-      const createdMedia = await trx
+      resolvedOrCreatedMedia = await trx
         .insertInto("media")
         .values({
           type: prefetchedCatalog.type,
@@ -1828,154 +1930,114 @@ export async function approveChangeRequestInTransaction(
           "merged_into_media_id",
         ])
         .executeTakeFirstOrThrow();
+    }
 
-      // Sync external IDs (TMDB, IMDb, TVDB, Trakt) discovered from target catalog
-      const primaryExternalNamespace: ExternalIdNamespace | null = isExternalIdNamespace(
-        prefetchedCatalog.sourceNamespace,
-      )
-        ? prefetchedCatalog.sourceNamespace
-        : null;
-
-      if (primaryExternalNamespace && prefetchedCatalog.externalIds[primaryExternalNamespace]) {
-        await trx
-          .insertInto("associations")
-          .values({
-            status: "confirmed",
-            is_external_id: true,
-            media_id: createdMedia.id,
-            namespace: primaryExternalNamespace,
-            native_id: prefetchedCatalog.externalIds[primaryExternalNamespace]!,
-            source: "sync",
-          })
-          .execute();
-      }
-
-      const { ownedKeys: demandExternalKeys } = await backfillMissingExternalIdsInTx(trx, {
-        mediaId: createdMedia.id,
-        externalIds: prefetchedCatalog.externalIds,
-      });
-
-      // When created from a Douban or Bangumi catalog entry, establish the initial confirmed
-      // catalog association immediately so GET /v1/media/douban:<id> or bangumi:<id> finds it.
-      const initAssoc = prefetchedCatalog.initialAssociation;
-      let createdInitSegments: NormalizedSegment[] = [];
-      let createdInitAssociation = false;
-      if (
-        initAssoc &&
-        (cr.namespace !== initAssoc.namespace || cr.native_id !== initAssoc.nativeId)
-      ) {
-        const createdInitAssoc = await trx
-          .insertInto("associations")
-          .values({
-            media_id: createdMedia.id,
-            namespace: initAssoc.namespace,
-            native_id: initAssoc.nativeId,
-            variant_id: null,
-            status: "confirmed",
-            needs_review: false,
-            locked: false,
-          })
-          .returning("id")
-          .executeTakeFirstOrThrow();
-
-        const initSegments: NormalizedSegment[] = [];
-        if (createdMedia.type === "tv" && createdMedia.baseline !== null) {
-          const season1 = prefetchedCatalog.snapshot.seasons.find((s) => s.season === 1);
-          initSegments.push({
-            season: 1,
-            episodeStart: 1,
-            episodeEnd: season1 && season1.episodeCount > 0 ? season1.episodeCount : null,
-            targetEpisodeStart: 1,
-            baseline: createdMedia.baseline,
-            nonLinear: false,
-            needsReview: false,
-          });
-          await trx
-            .insertInto("segments")
-            .values(
-              initSegments.map((seg) => ({
-                association_id: createdInitAssoc.id,
-                season: seg.season,
-                episode_start: seg.episodeStart,
-                episode_end: seg.episodeEnd,
-                target_episode_start: seg.targetEpisodeStart,
-                baseline: seg.baseline,
-                non_linear: seg.nonLinear,
-                needs_review: seg.needsReview,
-              })),
-            )
-            .execute();
+    if (prefetchedCatalog) {
+      const catalog = { ...prefetchedCatalog, aliases: prefetchedCatalog.evidence.aliases };
+      if (reusedExisting) {
+        const snapshot = await loadMediaMergeCandidateSnapshotInTx(trx, resolvedOrCreatedMedia.id);
+        if (!snapshot || !doesCatalogTargetMatchMediaSnapshot(snapshot, [], catalog)) {
+          throw new MediaServiceError(
+            "INVALID_SEGMENTS",
+            409,
+            `Catalog evidence no longer matches the target ${catalog.canonicalKey}`,
+          );
         }
-
-        const initRev = await trx
-          .insertInto("association_revisions")
-          .values({
-            association_id: createdInitAssoc.id,
-            revision_number: 1,
-            change_request_id: null,
-            variant_id: null,
-            status: "confirmed",
-            segments: JSON.stringify(initSegments),
-            actor_user_id: null,
-            reason: "initial_catalog_target",
-          })
-          .returning("id")
-          .executeTakeFirstOrThrow();
-
-        await trx
-          .updateTable("associations")
-          .set({ current_revision_id: initRev.id })
-          .where("id", "=", createdInitAssoc.id)
-          .execute();
-
-        createdInitSegments = initSegments;
-        createdInitAssociation = true;
       }
-
-      if (initAssoc) {
-        demandExternalKeys.push(
-          formatExternalKey({ namespace: initAssoc.namespace, nativeId: initAssoc.nativeId }),
-        );
-      }
-
-      await mergeExternalKeyDemandsIntoMedia(trx, {
-        mediaId: createdMedia.id,
-        externalKeys: demandExternalKeys,
-        seasons: prefetchedCatalog.snapshot.seasons,
-        mediaType: createdMedia.type,
-        now: input.now,
-      });
-
-      if (initAssoc && createdInitAssociation) {
-        await fulfillCoveredDemandsForAssociationInTx(trx, {
-          mediaId: createdMedia.id,
-          namespace: initAssoc.namespace,
-          segments: createdInitSegments,
-          now: input.now,
+      // A new media's source key is independently verified and participates in canonical target selection.
+      const primary = prefetchedCatalog.sourceNamespace;
+      if (!reusedExisting && isExternalIdNamespace(primary)) {
+        await backfillMissingExternalIdsInTx(trx, {
+          mediaId: resolvedOrCreatedMedia.id,
+          externalIds: { [primary]: prefetchedCatalog.externalIds[primary] },
         });
       }
-
-      media = createdMedia;
-    }
-  }
-
-  if (resolvedExistingMedia && prefetchedCatalog) {
-    const { insertedKeys } = await backfillMissingExternalIdsInTx(trx, {
-      mediaId: media.id,
-      externalIds: prefetchedCatalog.externalIds,
-    });
-    if (insertedKeys.length > 0) {
+      // Resolve qualified duplicates before any secondary ID from this snapshot is written.
+      for (const namespace of EXTERNAL_ID_NAMESPACES) {
+        const nativeId = prefetchedCatalog.externalIds[namespace];
+        if (!nativeId) continue;
+        const claimed = await trx
+          .selectFrom("associations")
+          .select("media_id")
+          .where("is_external_id", "=", true)
+          .where("status", "=", "confirmed")
+          .where("namespace", "=", namespace)
+          .where("native_id", "=", nativeId)
+          .where("media_id", "!=", resolvedOrCreatedMedia.id)
+          .executeTakeFirst();
+        if (!claimed) continue;
+        const otherId = await resolveCanonicalMediaIdInTx(trx, claimed.media_id);
+        if (!otherId || otherId === resolvedOrCreatedMedia.id) continue;
+        const other = await loadMediaMergeCandidateSnapshotInTx(trx, otherId);
+        if (!other || !doesCatalogTargetMatchMediaSnapshot(other, [], catalog)) continue;
+        const merge = await verifyAndAutoMergeDuplicateMediaInTx(trx, {
+          mediaIdA: resolvedOrCreatedMedia.id,
+          mediaIdB: otherId,
+          actorUserId: input.reviewerUserId,
+          reason: `cr_target_external_id_duplicate:${namespace}:${nativeId}`,
+          acquireMergeLocks: true,
+          now: input.now,
+        });
+        if (merge.merged) {
+          const canonical = await resolveCanonicalMediaById(trx, merge.targetMediaId);
+          if (!canonical)
+            throw new MediaServiceError(
+              "MEDIA_NOT_FOUND",
+              404,
+              `Canonical target media not found: ${merge.targetMediaId}`,
+            );
+          resolvedOrCreatedMedia = canonical;
+          reusedExisting = true;
+        }
+      }
+      const { ownedKeys, hasConflict } = await backfillMissingExternalIdsInTx(trx, {
+        mediaId: resolvedOrCreatedMedia.id,
+        externalIds: catalog.externalIds,
+      });
+      const submittingInitial =
+        initAssoc && cr.namespace === initAssoc.namespace && cr.native_id === initAssoc.nativeId;
+      if (initAssoc) {
+        if (
+          hasConflict ||
+          (!submittingInitial &&
+            !(await ensureInitialCatalogAssociationInTx(
+              trx,
+              resolvedOrCreatedMedia,
+              initAssoc,
+              catalog.snapshot,
+              reusedExisting,
+              input.now ?? new Date(),
+            )))
+        ) {
+          throw new MediaServiceError(
+            "INVALID_SEGMENTS",
+            409,
+            `Cannot verify the target scope for ${catalog.canonicalKey}`,
+          );
+        }
+        // The submitted association's own key is merged only after its confirmed row is written.
+        if (!submittingInitial) ownedKeys.push(formatExternalKey(initAssoc));
+      }
+      if (!submittingInitial && !ownedKeys.includes(catalog.canonicalKey)) {
+        throw new MediaServiceError(
+          "INVALID_SEGMENTS",
+          409,
+          `Target key ${catalog.canonicalKey} is not bound to the approved media`,
+        );
+      }
       await mergeExternalKeyDemandsIntoMedia(trx, {
-        mediaId: media.id,
-        externalKeys: insertedKeys,
-        seasons: media.seasons,
-        mediaType: media.type,
+        mediaId: resolvedOrCreatedMedia.id,
+        externalKeys: ownedKeys,
+        seasons: resolvedOrCreatedMedia.seasons,
+        mediaType: resolvedOrCreatedMedia.type,
         now: input.now,
       });
     }
+
+    media = resolvedOrCreatedMedia;
   }
 
-  const mediaId = media.id;
+  let mediaId = media.id;
   const namespace = cr.namespace;
   const nativeId = cr.native_id;
   const now = input.now ?? new Date();
@@ -2110,115 +2172,264 @@ export async function approveChangeRequestInTransaction(
     );
   }
 
-  const existingAssociation = await trx
-    .selectFrom("associations")
-    .where("is_external_id", "=", false)
-    .select(["id", "variant_id", "status", "locked", "native_id"])
-    .where("media_id", "=", mediaId)
-    .where("namespace", "=", namespace)
-    .where("native_id", "=", nativeId)
-    .forUpdate()
-    .executeTakeFirst();
+  let existingAssociation:
+    | {
+        id: string;
+        variant_id: string | null;
+        status: "confirmed" | "seed_unconfirmed" | "delisted";
+        locked: boolean;
+        native_id: string;
+      }
+    | undefined;
+  let normalizedSegments: NormalizedSegment[] = requestedSegments;
+  let replacedAssociation:
+    | {
+        id: string;
+        variant_id: string | null;
+        status: "confirmed" | "seed_unconfirmed" | "delisted";
+        locked: boolean;
+        native_id: string;
+        namespace: AssociationNamespace;
+      }
+    | undefined;
 
-  const normalizedSegments =
-    existingAssociation?.status === "confirmed"
-      ? mergeApprovedSegments(
-          await loadSegments(trx, existingAssociation.id),
-          requestedSegments,
-          media.seasons,
-        )
-      : requestedSegments;
+  for (let pass = 0; pass < 2; pass += 1) {
+    existingAssociation = await trx
+      .selectFrom("associations")
+      .where("is_external_id", "=", false)
+      .select(["id", "variant_id", "status", "locked", "native_id"])
+      .where("media_id", "=", mediaId)
+      .where("namespace", "=", namespace)
+      .where("native_id", "=", nativeId)
+      .forUpdate()
+      .executeTakeFirst();
 
-  const replacedAssociation =
-    effectiveReplacesAssociationId &&
-    effectiveReplacesAssociationId !== existingAssociation?.id &&
-    isUuid(effectiveReplacesAssociationId)
-      ? await trx
-          .selectFrom("associations")
-          .where("is_external_id", "=", false)
-          .select(["id", "variant_id", "status", "locked", "native_id", "namespace"])
-          .where("id", "=", effectiveReplacesAssociationId)
-          .where("media_id", "=", mediaId)
-          .forUpdate()
-          .executeTakeFirst()
-      : undefined;
+    normalizedSegments =
+      existingAssociation?.status === "confirmed"
+        ? mergeApprovedSegments(
+            await loadSegments(trx, existingAssociation.id),
+            requestedSegments,
+            media.seasons,
+          )
+        : requestedSegments;
 
-  if (input.enforceUnlockedCheck) {
-    if (existingAssociation?.locked) {
-      throw new MediaServiceError(
-        "ASSOCIATION_LOCKED",
-        409,
-        `Association ${existingAssociation.id} is locked and cannot be automatically modified`,
-      );
+    replacedAssociation =
+      effectiveReplacesAssociationId &&
+      effectiveReplacesAssociationId !== existingAssociation?.id &&
+      isUuid(effectiveReplacesAssociationId)
+        ? await trx
+            .selectFrom("associations")
+            .where("is_external_id", "=", false)
+            .select(["id", "variant_id", "status", "locked", "native_id", "namespace"])
+            .where("id", "=", effectiveReplacesAssociationId)
+            .where("media_id", "=", mediaId)
+            .forUpdate()
+            .executeTakeFirst()
+        : undefined;
+
+    if (input.enforceUnlockedCheck) {
+      if (existingAssociation?.locked) {
+        throw new MediaServiceError(
+          "ASSOCIATION_LOCKED",
+          409,
+          `Association ${existingAssociation.id} is locked and cannot be automatically modified`,
+        );
+      }
+      if (replacedAssociation?.locked) {
+        throw new MediaServiceError(
+          "ASSOCIATION_LOCKED",
+          409,
+          `Association ${replacedAssociation.id} is locked and cannot be automatically replaced`,
+        );
+      }
     }
-    if (replacedAssociation?.locked) {
-      throw new MediaServiceError(
-        "ASSOCIATION_LOCKED",
-        409,
-        `Association ${replacedAssociation.id} is locked and cannot be automatically replaced`,
-      );
-    }
-  }
 
-  const excludeAssociationIds = [
-    ...(existingAssociation ? [existingAssociation.id] : []),
-    ...(replacedAssociation ? [replacedAssociation.id] : []),
-  ];
+    const excludeAssociationIds = [
+      ...(existingAssociation ? [existingAssociation.id] : []),
+      ...(replacedAssociation ? [replacedAssociation.id] : []),
+    ];
 
-  const siblingAssociations = isPlatformNamespace(namespace)
-    ? await loadActiveAssociationsWithSegments(trx, {
-        variantId: resolvedVariantId!,
-        excludeAssociationIds,
-      })
-    : await loadActiveAssociationsWithSegments(trx, {
-        mediaId,
-        catalogNamespace: namespace,
-        excludeAssociationIds,
-      });
+    const siblingAssociations = isPlatformNamespace(namespace)
+      ? await loadActiveAssociationsWithSegments(trx, {
+          variantId: resolvedVariantId!,
+          excludeAssociationIds,
+        })
+      : await loadActiveAssociationsWithSegments(trx, {
+          mediaId,
+          catalogNamespace: namespace,
+          excludeAssociationIds,
+        });
 
-  const variantValidation = validateVariantSegments(
-    [
-      ...siblingAssociations.map((a) => ({ associationId: a.id, segments: a.segments })),
+    const variantValidation = validateVariantSegments(
+      [
+        ...siblingAssociations.map((a) => ({ associationId: a.id, segments: a.segments })),
+        {
+          associationId: existingAssociation?.id ?? "candidate",
+          segments: normalizedSegments,
+        },
+      ],
       {
+        baseline: media.baseline,
+        allowHierarchicalScopes: getNamespaceCapabilities(namespace).allowHierarchicalScopes,
+      },
+    );
+
+    if (!variantValidation.valid) {
+      const classified = classifyValidationErrorStatus(variantValidation.errors, 409);
+      throw new MediaServiceError(
+        classified.code,
+        classified.status,
+        variantValidation.errors[0].message,
+        variantValidation.errors,
+      );
+    }
+
+    const collectionAssociations = await loadActiveAssociationsWithSegments(trx, {
+      collection: { namespace, nativeId },
+      excludeAssociationId: existingAssociation?.id,
+    });
+
+    const sharedValidation = validateSharedCollectionSegments([
+      ...collectionAssociations.map((a) => ({
+        mediaId: a.mediaId,
+        associationId: a.id,
+        segments: a.segments,
+      })),
+      {
+        mediaId,
         associationId: existingAssociation?.id ?? "candidate",
         segments: normalizedSegments,
       },
-    ],
-    {
-      baseline: media.baseline,
-      allowHierarchicalScopes: getNamespaceCapabilities(namespace).allowHierarchicalScopes,
-    },
-  );
+    ]);
 
-  if (!variantValidation.valid) {
-    const classified = classifyValidationErrorStatus(variantValidation.errors, 409);
-    throw new MediaServiceError(
-      classified.code,
-      classified.status,
-      variantValidation.errors[0].message,
-      variantValidation.errors,
-    );
-  }
+    if (sharedValidation.valid) {
+      break;
+    }
 
-  const collectionAssociations = await loadActiveAssociationsWithSegments(trx, {
-    collection: { namespace, nativeId },
-    excludeAssociationId: existingAssociation?.id,
-  });
+    if (pass === 0 && isCatalogNamespace(namespace)) {
+      const candidateOtherIds = [
+        ...new Set(
+          collectionAssociations
+            .filter(
+              (a) =>
+                a.mediaId !== mediaId && collectionPositionsOverlap(a.segments, normalizedSegments),
+            )
+            .map((a) => a.mediaId),
+        ),
+      ];
+      let mergedAny = false;
+      let allMerged = candidateOtherIds.length > 0;
 
-  const sharedValidation = validateSharedCollectionSegments([
-    ...collectionAssociations.map((a) => ({
-      mediaId: a.mediaId,
-      associationId: a.id,
-      segments: a.segments,
-    })),
-    {
-      mediaId,
-      associationId: existingAssociation?.id ?? "candidate",
-      segments: normalizedSegments,
-    },
-  ]);
+      const rawEvidence = input.evidence !== undefined ? input.evidence : cr.evidence;
+      const collectionEvidenceRaw = parseJsonObject(parseJsonObject(rawEvidence)?.collection);
+      const collectionTitles = collectionEvidenceRaw
+        ? [
+            collectionEvidenceRaw.title,
+            collectionEvidenceRaw.originalTitle,
+            ...(Array.isArray(collectionEvidenceRaw.aliases) ? collectionEvidenceRaw.aliases : []),
+          ].filter((title): title is string => typeof title === "string" && title.trim().length > 0)
+        : [];
 
-  if (!sharedValidation.valid) {
+      const targetSnapshot = prefetchedCatalog
+        ? await loadMediaMergeCandidateSnapshotInTx(trx, mediaId)
+        : null;
+      const targetExtra =
+        prefetchedCatalog &&
+        targetSnapshot &&
+        doesCatalogTargetMatchMediaSnapshot(targetSnapshot, [], {
+          ...prefetchedCatalog,
+          aliases: prefetchedCatalog.evidence.aliases,
+        })
+          ? [
+              prefetchedCatalog.snapshot.title,
+              prefetchedCatalog.snapshot.originalTitle,
+              ...(prefetchedCatalog.evidence.aliases ?? []),
+            ].filter((t): t is string => Boolean(t))
+          : [];
+      for (const otherId of candidateOtherIds) {
+        const extraTitlesByMediaId = new Map<string, readonly string[]>();
+        if (targetExtra.length > 0) {
+          extraTitlesByMediaId.set(mediaId, targetExtra);
+        }
+        if (collectionTitles.length > 0 && collectionEvidenceRaw) {
+          const otherSnap = await loadMediaMergeCandidateSnapshotInTx(trx, otherId);
+          const colTitle =
+            typeof collectionEvidenceRaw.title === "string"
+              ? collectionEvidenceRaw.title
+              : collectionTitles[0]!;
+          const colOrigTitle =
+            typeof collectionEvidenceRaw.originalTitle === "string"
+              ? collectionEvidenceRaw.originalTitle
+              : null;
+          const colYear =
+            typeof collectionEvidenceRaw.year === "number" ? collectionEvidenceRaw.year : null;
+          const colType =
+            collectionEvidenceRaw.mediaType === "movie" || collectionEvidenceRaw.mediaType === "tv"
+              ? collectionEvidenceRaw.mediaType
+              : media.type;
+          const colExtRaw =
+            collectionEvidenceRaw.externalIds &&
+            typeof collectionEvidenceRaw.externalIds === "object" &&
+            !Array.isArray(collectionEvidenceRaw.externalIds)
+              ? (collectionEvidenceRaw.externalIds as Partial<Record<ExternalIdNamespace, string>>)
+              : undefined;
+          if (
+            otherSnap &&
+            doesCatalogTargetMatchMediaSnapshot(otherSnap, [], {
+              type: colType,
+              snapshot: {
+                title: colTitle,
+                originalTitle: colOrigTitle,
+                year: colYear,
+                seasons: [],
+              },
+              externalIds: colExtRaw,
+              aliases: collectionTitles,
+            })
+          ) {
+            extraTitlesByMediaId.set(otherId, collectionTitles);
+          }
+        }
+
+        const mergeAttempt = await verifyAndAutoMergeDuplicateMediaInTx(trx, {
+          mediaIdA: mediaId,
+          mediaIdB: otherId,
+          actorUserId: input.reviewerUserId,
+          reason: `cr_approve_catalog_duplicate:${namespace}:${nativeId}`,
+          extraTitlesByMediaId,
+          acquireMergeLocks: true,
+          now,
+        });
+
+        if (!mergeAttempt.merged) {
+          allMerged = false;
+          break;
+        }
+        mergedAny = true;
+        if (mergeAttempt.targetMediaId !== mediaId) {
+          mediaId = mergeAttempt.targetMediaId;
+          const reloaded = await resolveCanonicalMediaById(trx, mediaId);
+          if (!reloaded) {
+            throw new MediaServiceError(
+              "MEDIA_NOT_FOUND",
+              404,
+              `Canonical target media not found: ${mediaId}`,
+            );
+          }
+          media = reloaded;
+          await acquireAdvisoryLock(
+            trx,
+            ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE,
+            `${mediaId}:${namespace}`,
+          );
+        }
+      }
+
+      if (mergedAny && allMerged) {
+        continue;
+      }
+    }
+
     const classified = classifyValidationErrorStatus(sharedValidation.errors, 409);
     throw new MediaServiceError(
       classified.code,
@@ -2367,6 +2578,19 @@ export async function approveChangeRequestInTransaction(
     .where("id", "=", associationId)
     .execute();
 
+  if (
+    !cr.media_id &&
+    prefetchedCatalog?.initialAssociation?.namespace === namespace &&
+    prefetchedCatalog.initialAssociation.nativeId === nativeId
+  ) {
+    await mergeExternalKeyDemandsIntoMedia(trx, {
+      mediaId,
+      externalKeys: [formatExternalKey(prefetchedCatalog.initialAssociation)],
+      seasons: media.seasons,
+      mediaType: media.type,
+      now,
+    });
+  }
   await fulfillCoveredDemandsForAssociationInTx(trx, {
     mediaId,
     namespace,

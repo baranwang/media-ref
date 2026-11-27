@@ -7,6 +7,7 @@ import {
   claimDueJobs,
   startLeasedJob,
   completeJobWithFencing,
+  convergeDuplicateMedia,
   createEvidenceCheckJobHandler,
   createExplorationAgentExecutor,
   createExplorationJobHandler,
@@ -329,6 +330,18 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
             logJobError("dispatch_lease_release_failed", job.id, job.jobType, error);
           }
         }
+      }
+
+      if (shouldScheduleExploration) {
+        await runScheduledStep("duplicate_convergence_failed", EXPLORATION_JOB_TYPE, () =>
+          convergeDuplicateMedia(deps.db, {
+            now,
+            outbound: deps.outbound,
+            catalogConfig: deps.config?.catalog,
+            tmdbConfig: deps.config?.tmdb,
+            tmdbGateway: deps.tmdbGateway,
+          }),
+        );
       }
 
       return {
