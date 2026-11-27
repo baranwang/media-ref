@@ -7,7 +7,8 @@
  * - Requests no review can approve (a clash with an existing or locked association, a shared-ID
  *   conflict, missing evidence) are rejected at once, without a model.
  * - Gate conflicts get one model session, reusing the exploration agent's loop, budget, wrap-up and
- *   query tools. It ends with `approve`, `reject_with_correction` or `reject`.
+ *   query tools. It ends with `approve`, `reject_with_correction` or `reject`. The same work's
+ *   `needs_review` requests share one job and one session, each concluded by its number (修订三).
  * - Code confirms an approval (§3) and a correction (§4); anything it does not confirm, no
  *   conclusion or a spent session is a plain rejection: the demand backs off and exploration tries
  *   again later. A model or catalog outage, or a spent daily budget, retries the job instead.
@@ -240,19 +241,47 @@ interface ReviewConclusion {
   correction: ReviewCorrection | null;
 }
 
+/** Most `needs_review` requests one session decides; the rest wait for the cron's next job. */
+const MAX_REVIEW_GROUP = 5;
+/** How long, from its submission, a review waits for a same-work request still collecting evidence. */
+const SAME_WORK_EVIDENCE_WAIT_MS = 10 * 60_000;
+const SAME_WORK_EVIDENCE_RETRY_MS = 60_000;
+
 /**
- * Queues the review of a change request that just turned `needs_review`. Call inside that
- * transaction. Every such request is queued: the review decides it, even when the answer can only
- * be a rejection.
+ * `needs_review` requests for the same work are reviewed together: by media, or by catalog key
+ * before a media exists. Mirrored in SQL by `REVIEW_GROUP_KEY_SQL`.
+ */
+function reviewGroupKey(cr: { mediaId: string | null; targetExternalKey: string }): string {
+  return cr.mediaId ? `media:${cr.mediaId}` : `target:${cr.targetExternalKey}`;
+}
+
+const REVIEW_GROUP_KEY_SQL = sql<string>`case when change_requests.media_id is not null
+  then 'media:' || change_requests.media_id::text
+  else 'target:' || change_requests.target_external_key end`;
+
+/**
+ * Queues the review of a change request that just turned `needs_review`, or of one someone
+ * commented on. Call inside that transaction. Every such request is queued: the review decides it,
+ * even when the answer can only be a rejection. A `needs_review` request shares one job with the
+ * same work's others; a decided one has its own.
  */
 export async function enqueueReviewAgentJobInTx(
   trx: Transaction<Database>,
   input: { changeRequestId: string; now: Date },
 ): Promise<void> {
+  const row = await trx
+    .selectFrom("change_requests")
+    .select(["status", "media_id", "target_external_key"])
+    .where("id", "=", input.changeRequestId)
+    .executeTakeFirst();
+  const key =
+    row?.status === "needs_review"
+      ? reviewGroupKey({ mediaId: row.media_id, targetExternalKey: row.target_external_key })
+      : input.changeRequestId;
   await enqueueJob(trx, {
     jobType: REVIEW_AGENT_JOB_TYPE,
     payload: { changeRequestId: input.changeRequestId },
-    dedupeKey: `${REVIEW_AGENT_JOB_TYPE}:${input.changeRequestId}`,
+    dedupeKey: `${REVIEW_AGENT_JOB_TYPE}:${key}`,
     runAfter: input.now,
   });
 }
@@ -291,10 +320,11 @@ export async function enqueuePendingReviews(
             .select("background_jobs.id")
             .where("background_jobs.job_type", "=", REVIEW_AGENT_JOB_TYPE)
             .where("background_jobs.status", "in", ["pending", "leased"])
-            .whereRef(
-              "background_jobs.dedupe_key",
-              "=",
-              sql<string>`${REVIEW_AGENT_JOB_TYPE} || ':' || change_requests.id::text`,
+            // Its own job, or the job its work's `needs_review` requests share.
+            .where(
+              sql<boolean>`background_jobs.dedupe_key in (
+                ${REVIEW_AGENT_JOB_TYPE} || ':' || change_requests.id::text,
+                ${REVIEW_AGENT_JOB_TYPE} || ':' || ${REVIEW_GROUP_KEY_SQL})`,
             ),
         ),
       ),
@@ -473,14 +503,24 @@ function buildSystemPrompt(
   conclusions: string,
   hasComments: boolean,
   movie: boolean,
+  count = 1,
 ): string {
   const correction = conclusions.includes("_with_correction");
   const decide = [
     mode === "rejected"
       ? "You review one change request that was rejected earlier; people have commented on it since. It maps a catalog's episodes to a video platform collection. approve approves it after all; reject keeps it rejected. Your decision is final: nobody reviews after you."
-      : "You review one change request the automatic Evidence Gate could not approve. It maps a catalog's episodes to a video platform collection. Your decision is final: nobody reviews after you.",
+      : count > 1
+        ? `You review ${count} change requests the automatic Evidence Gate could not approve. Each maps the same catalog entry's episodes to a different video platform collection, so the catalog seasons you fetch serve them all. Judge each request on its own collection and conflicts. Your decisions are final: nobody reviews after you.`
+        : "You review one change request the automatic Evidence Gate could not approve. It maps a catalog's episodes to a video platform collection. Your decision is final: nobody reviews after you.",
     "Rules:",
-    `1. End with exactly one conclusion: ${conclusions}.`,
+    count > 1
+      ? `1. End every request with exactly one conclusion: ${conclusions}, naming the request by its number. Every rule below applies to each request and its own collection.`
+      : `1. End with exactly one conclusion: ${conclusions}.`,
+    ...(count > 1 && correction
+      ? [
+          "   A request with correctionUsed already had its correction: approve or reject it, do not correct it again.",
+        ]
+      : []),
     "2. approve only counts if, in this session, you fetched the collection with get_collection and every season the segments name with get_catalog_season, and you give one reason per conflict code saying why that conflict does not make the mapping wrong. Otherwise it counts as reject.",
     ...(correction
       ? [
@@ -526,14 +566,42 @@ function buildSystemPrompt(
   ].join("\n");
 }
 
+/** A session over one request. */
 function buildUserPrompt(
   cr: ChangeRequestRecord,
   conflictCodes: readonly string[],
   comments: readonly PendingComment[],
 ): string {
+  return `Review this change request:\n${JSON.stringify(requestPayload(cr, conflictCodes, comments), null, 2)}`;
+}
+
+function buildGroupUserPrompt(
+  reviews: ReadonlyArray<{
+    cr: ChangeRequestRecord;
+    conflictCodes: readonly string[];
+    comments: readonly PendingComment[];
+    correctionUsed: boolean;
+  }>,
+): string {
+  const payload = {
+    // The same work: its catalog evidence once, not per request.
+    catalog: reviews[0]!.cr.evidence?.catalog ?? null,
+    changeRequests: reviews.map((r, i) => {
+      const { catalog: _, ...rest } = requestPayload(r.cr, r.conflictCodes, r.comments);
+      return { request: i + 1, ...rest, ...(r.correctionUsed ? { correctionUsed: true } : {}) };
+    }),
+  };
+  return `Review these change requests for the same catalog entry:\n${JSON.stringify(payload, null, 2)}`;
+}
+
+function requestPayload(
+  cr: ChangeRequestRecord,
+  conflictCodes: readonly string[],
+  comments: readonly PendingComment[],
+) {
   const evidence = cr.evidence ?? {};
   const gate = (evidence.gate ?? {}) as JsonObject;
-  const payload = {
+  return {
     changeRequest: {
       targetExternalKey: cr.targetExternalKey,
       namespace: cr.namespace,
@@ -557,7 +625,22 @@ function buildUserPrompt(
         }
       : {}),
   };
-  return `Review this change request:\n${JSON.stringify(payload, null, 2)}`;
+}
+
+/** A conclusion tool for a group session: it names the request it decides. */
+function withRequestNumber(tool: ModelToolDefinition): ModelToolDefinition {
+  const parameters = tool.parameters as { properties?: object; required?: string[] };
+  return {
+    ...tool,
+    parameters: {
+      ...parameters,
+      properties: {
+        request: { type: "integer", description: "The number of the request this concludes." },
+        ...parameters.properties,
+      },
+      required: ["request", ...(parameters.required ?? [])],
+    },
+  };
 }
 
 const REPLY_PROPERTY = {
@@ -865,6 +948,40 @@ function stopReason(stop: SessionStop): string {
   return stop.kind === "model_error" ? `model_error: ${stop.reason}` : stop.kind;
 }
 
+/** A request in a review session, and what the session concluded on it. */
+interface ReviewMember {
+  cr: ChangeRequestRecord;
+  comments: PendingComment[];
+  conflictCodes: string[];
+  mediaId: string | null;
+  /** A correction was already handed over for this collection: only a plain verdict is left. */
+  correctionUsed: boolean;
+  conclusion: ReviewConclusion | null;
+  conclusionStep: number;
+}
+
+/**
+ * The work's requests still awaiting a decision, this one included, oldest first: overlapping
+ * sessions decide them in the same order, so their transactions lock rows without deadlocking.
+ */
+async function sameWorkRequests(db: Db, cr: ChangeRequestRecord) {
+  return db
+    .selectFrom("change_requests")
+    .select(["id", "status", "created_at"])
+    .where("status", "in", ["needs_review", "pending_evidence"])
+    .where((eb) =>
+      cr.mediaId
+        ? eb("media_id", "=", cr.mediaId)
+        : eb.and([
+            eb("media_id", "is", null),
+            eb("target_external_key", "=", cr.targetExternalKey),
+          ]),
+    )
+    .orderBy("created_at")
+    .orderBy("id")
+    .execute();
+}
+
 export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {}): JobHandler {
   const config = resolveExplorationAgentConfig({
     ...options,
@@ -917,61 +1034,123 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         errorMessage: "comment_sessions_exhausted",
       };
     }
-    const evidence = cr.evidence ?? {};
+
+    // The same work's other `needs_review` requests are decided in this session too (ADR 0003
+    // 修订三). Platforms submitted together finish their evidence at different times: wait a little.
+    let group: Array<{ cr: ChangeRequestRecord; comments: PendingComment[] }> = [{ cr, comments }];
+    if (mode === "needs_review") {
+      const work = await sameWorkRequests(ctx.db, cr);
+      if (
+        work.some(
+          (o) =>
+            o.status === "pending_evidence" &&
+            ctx.now.getTime() - o.created_at.getTime() < SAME_WORK_EVIDENCE_WAIT_MS,
+        )
+      ) {
+        const retryAt = new Date(ctx.now.getTime() + SAME_WORK_EVIDENCE_RETRY_MS);
+        // Waiting is not an attempt: refund it, as for a lease too short.
+        await releaseLeaseOnDispatchFailure(ctx.db, {
+          jobId: ctx.job.id,
+          leaseGeneration: ctx.job.leaseGeneration,
+          retryAt,
+          now: ctx.now,
+        });
+        return { status: "retry", runAfter: retryAt, errorMessage: "same_work_evidence_pending" };
+      }
+      group = [];
+      for (const row of work) {
+        if (row.id === cr.id) {
+          group.push({ cr, comments });
+          continue;
+        }
+        const record =
+          row.status === "needs_review" ? await getChangeRequestById(ctx.db, row.id) : null;
+        if (record?.status === "needs_review") {
+          group.push({ cr: record, comments: await unansweredComments(ctx.db, record.id) });
+        }
+      }
+      if (!group.some((m) => m.cr.id === cr.id)) {
+        group.unshift({ cr, comments }); // Its work changed meanwhile (a media merge).
+      }
+    }
+
+    // The job's result: the triggering request's verdict, and every request's when it decided several.
+    const outcomes = new Map<string, { verdict: ReviewVerdict | null; fallback: string | null }>();
+    const result = () => {
+      const own = outcomes.get(changeRequestId);
+      return {
+        changeRequestId,
+        verdict: own?.verdict ?? null,
+        fallback: own?.fallback ?? null,
+        ...(outcomes.size > 1
+          ? { reviews: [...outcomes].map(([id, o]) => ({ changeRequestId: id, ...o })) }
+          : {}),
+      };
+    };
     const reply = async (
       trx: Transaction<Database>,
+      member: { cr: ChangeRequestRecord; comments: PendingComment[] },
       record: JsonObject,
       intended?: ReviewVerdict,
     ) => {
       if (intended && record.verdict !== intended) {
         // The fenced job row was written before onCommit; record what actually took effect.
+        outcomes.set(member.cr.id, {
+          verdict: record.verdict as ReviewVerdict,
+          fallback: (record.fallback ?? null) as string | null,
+        });
         await trx
           .updateTable("background_jobs")
-          .set({
-            result: JSON.stringify({
-              changeRequestId,
-              verdict: record.verdict,
-              fallback: record.fallback,
-            }),
-          })
+          .set({ result: JSON.stringify(result()) })
           .where("id", "=", ctx.job.id)
           .execute();
       }
-      await writeReplyInTx(trx, { cr, comments, record, now: ctx.now });
+      await writeReplyInTx(trx, { cr: member.cr, comments: member.comments, record, now: ctx.now });
     };
 
+    // A request awaiting review that another session decided meanwhile stays as that one left it.
+    const decidable: DecidableStatuses =
+      mode === "needs_review" ? ["needs_review"] : DECIDABLE_STATUSES;
     // Nothing a review could approve: reject now, without a model or a daily slot.
-    const unreviewable = mode === "approved" ? null : unreviewableReason(cr);
-    if (unreviewable) {
+    const unreviewable = group.flatMap((m) => {
+      const reason = mode === "approved" ? null : unreviewableReason(m.cr);
+      return reason ? [{ ...m, reason }] : [];
+    });
+    for (const m of unreviewable) {
+      outcomes.set(m.cr.id, { verdict: "reject", fallback: m.reason });
+    }
+    const rejectUnreviewable = async (trx: Transaction<Database>) => {
+      for (const m of unreviewable) {
+        const reviewAgent: JsonObject = {
+          verdict: "reject",
+          concluded: null,
+          reasons: [],
+          opinion: null,
+          reply: null,
+          fallback: m.reason,
+          queries: [],
+          jobId: ctx.job.id,
+          reviewedAt: ctx.now.toISOString(),
+        };
+        if (
+          await rejectPlainlyInTx(
+            trx,
+            m.cr,
+            `无法自动通过：${m.reason}`,
+            { ...m.cr.evidence, reviewAgent },
+            ctx.now,
+            decidable,
+          )
+        ) {
+          await reply(trx, m, reviewAgent);
+        }
+      }
+    };
+    // shortcut: a fixed cap under one session's budget; the rest get the cron's next job.
+    const reviewable = group.filter((m) => !outcomes.has(m.cr.id)).slice(0, MAX_REVIEW_GROUP);
+    if (reviewable.length === 0) {
       await ensureReviewAgentUser(ctx.db);
-      const reviewAgent: JsonObject = {
-        verdict: "reject",
-        concluded: null,
-        reasons: [],
-        opinion: null,
-        reply: null,
-        fallback: unreviewable,
-        queries: [],
-        jobId: ctx.job.id,
-        reviewedAt: ctx.now.toISOString(),
-      };
-      return {
-        status: "completed",
-        result: { changeRequestId, verdict: "reject", fallback: unreviewable },
-        async onCommit(trx) {
-          if (
-            await rejectPlainlyInTx(
-              trx,
-              cr,
-              `无法自动通过：${unreviewable}`,
-              { ...evidence, reviewAgent },
-              ctx.now,
-            )
-          ) {
-            await reply(trx, reviewAgent);
-          }
-        },
-      };
+      return { status: "completed", result: result(), onCommit: rejectUnreviewable };
     }
 
     const leaseLeftMs = ctx.job.leaseExpiresAt
@@ -998,17 +1177,32 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       };
     }
 
-    const conflictCodes = gateConflictCodes(cr);
-    const modeTools =
-      mode === "approved" ? APPROVED_CONCLUSION_TOOL_DEFINITIONS : CONCLUSION_TOOL_DEFINITIONS;
-    const mediaId = await correctionMediaId(ctx.db, cr.mediaId, cr.targetExternalKey);
+    // The work's catalog, from a request the session reviews: the triggering one may be unreviewable.
+    const evidence = reviewable[0]!.cr.evidence ?? {};
     // A movie has no season or episodes a correction could name.
     const movie = (evidence.catalog as { mediaType?: unknown } | undefined)?.mediaType === "movie";
-    const conclusionTools =
-      movie || (await correctedBefore(ctx.db, { ...cr, mediaId }))
+    const members: ReviewMember[] = [];
+    for (const m of reviewable) {
+      const mediaId = await correctionMediaId(ctx.db, m.cr.mediaId, m.cr.targetExternalKey);
+      members.push({
+        ...m,
+        conflictCodes: gateConflictCodes(m.cr),
+        mediaId,
+        correctionUsed: !movie && (await correctedBefore(ctx.db, { ...m.cr, mediaId })),
+        conclusion: null,
+        conclusionStep: 0,
+      });
+    }
+    const single = members.length === 1;
+    const modeTools =
+      mode === "approved" ? APPROVED_CONCLUSION_TOOL_DEFINITIONS : CONCLUSION_TOOL_DEFINITIONS;
+    const conclusionTools = (
+      movie || members.every((m) => m.correctionUsed)
         ? modeTools.filter((t) => !t.name.endsWith("_with_correction"))
-        : modeTools;
+        : modeTools
+    ).map((t) => (single ? t : withRequestNumber(t)));
     const conclusionNames = conclusionTools.map((t) => t.name).join(", ");
+    const open = () => members.flatMap((m, i) => (m.conclusion ? [] : [i + 1])).join(", ");
     const catalog = (evidence.catalog ?? {}) as {
       namespace?: string;
       canonicalId?: string;
@@ -1031,8 +1225,6 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       lastAired: number | null;
     }> = [];
     const queries: Array<{ tool: string; arguments: Record<string, unknown> }> = [];
-    let conclusion: ReviewConclusion | null = null;
-    let conclusionStep = 0;
 
     const budget = createSessionBudget(ctx.outbound, clockMs() + config.maxDurationMs, clockMs);
     const usage: SessionUsage = { tokens: 0, byModel: new Map() };
@@ -1042,7 +1234,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         outbound: budget.outbound,
         registry,
         tmdb: tmdbGateway,
-        collectionNamespaces: [cr.namespace],
+        collectionNamespaces: [...new Set(members.map((m) => m.cr.namespace))],
         reportLiveFetch: true,
         now: ctx.now,
         seasons: catalog.seasons ?? [],
@@ -1061,14 +1253,18 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       const offered = new Set(queryTools.map((t) => t.name));
 
       const conclude = async (call: ModelToolCall, step: number): Promise<unknown> => {
-        if (conclusion) {
+        const args = call.arguments ?? {};
+        const member = single ? members[0] : members[Number(args.request) - 1];
+        if (!member) {
+          return { ok: false, error: "UNKNOWN_REQUEST", message: `Still open: ${open()}` };
+        }
+        if (member.conclusion) {
           return { ok: false, error: "ALREADY_CONCLUDED" };
         }
-        conclusionStep = step;
-        const args = call.arguments ?? {};
+        member.conclusionStep = step;
         const text = (value: unknown) =>
           typeof value === "string" && value.trim() ? value.trim() : null;
-        conclusion = {
+        member.conclusion = {
           verdict: call.name as ReviewVerdict,
           reasons: parseReasons(args.reasons),
           opinion: text(args.opinion),
@@ -1085,9 +1281,20 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         messages: [
           {
             role: "system",
-            content: buildSystemPrompt(mode, conclusionNames, comments.length > 0, movie),
+            content: buildSystemPrompt(
+              mode,
+              conclusionNames,
+              members.some((m) => m.comments.length > 0),
+              movie,
+              members.length,
+            ),
           },
-          { role: "user", content: buildUserPrompt(cr, conflictCodes, comments) },
+          {
+            role: "user",
+            content: single
+              ? buildUserPrompt(members[0]!.cr, members[0]!.conflictCodes, members[0]!.comments)
+              : buildGroupUserPrompt(members),
+          },
         ],
         tools: [...queryTools, ...conclusionTools],
         conclusionToolNames: new Set(conclusionTools.map((t) => t.name)),
@@ -1146,12 +1353,16 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           }
         },
         wrapUpMessage: () =>
-          `The time, step or token budget is almost used up. Stop searching and conclude now with ${conclusionNames}.`,
+          single
+            ? `The time, step or token budget is almost used up. Stop searching and conclude now with ${conclusionNames}.`
+            : `The time, step or token budget is almost used up. Stop searching and conclude now with ${conclusionNames}, once for each request still open: ${open()}.`,
         wrapUpRefusal: `No more searching: conclude with ${conclusionNames}.`,
         noDecisionNudge: () =>
-          `You stopped without a conclusion. End now by calling exactly one of: ${conclusionNames}.`,
+          single
+            ? `You stopped without a conclusion. End now by calling exactly one of: ${conclusionNames}.`
+            : `You stopped before concluding every request. End now by calling one of ${conclusionNames} for each request still open: ${open()}.`,
         conclude,
-        done: () => conclusion !== null,
+        done: () => members.every((m) => m.conclusion !== null),
       });
     } catch (error) {
       stop = {
@@ -1167,53 +1378,61 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       });
     }
 
-    const concluded = conclusion as ReviewConclusion | null;
-    // An outage says nothing about the request: review it again later, and reply then.
-    if (!concluded && stop.kind === "model_error") {
+    // An outage says nothing about the requests: review them again later, and reply then.
+    if (stop.kind === "model_error" && members.every((m) => !m.conclusion)) {
       return {
         status: "retry",
         runAfter: new Date(ctx.now.getTime() + OUTAGE_RETRY_MS),
         errorMessage: stopReason(stop),
       };
     }
-    // Only what the model saw before the turn it concluded in counts.
-    const seasonEpisodes: Record<number, SeasonEpisode[]> = {};
-    const lastAired: Record<number, number> = {};
-    for (const { season, step, episodes, lastAired: aired } of seasonWindows) {
-      if (step >= conclusionStep) continue;
-      // From the whole TMDB list, as the model was told, not only the windows it read.
-      if (aired !== null) lastAired[season] = aired;
-      const byEpisode = new Map((seasonEpisodes[season] ?? []).map((e) => [e.episode, e]));
-      for (const episode of episodes) byEpisode.set(episode.episode, episode);
-      seasonEpisodes[season] = [...byEpisode.values()];
-    }
-    const fetched: SessionFetches = {
-      fetchedCollections: new Map(
-        [...fetchedCollections]
-          .filter(([, f]) => f.step < conclusionStep)
-          .map(([key, f]) => [key, f.info]),
-      ),
-      seasonEpisodes,
-      lastAired,
+    /** Only what the model saw before the turn it concluded in counts. */
+    const fetchedBefore = (conclusionStep: number): SessionFetches => {
+      const seasonEpisodes: Record<number, SeasonEpisode[]> = {};
+      const lastAired: Record<number, number> = {};
+      for (const { season, step, episodes, lastAired: aired } of seasonWindows) {
+        if (step >= conclusionStep) continue;
+        // From the whole TMDB list, as the model was told, not only the windows it read.
+        if (aired !== null) lastAired[season] = aired;
+        const byEpisode = new Map((seasonEpisodes[season] ?? []).map((e) => [e.episode, e]));
+        for (const episode of episodes) byEpisode.set(episode.episode, episode);
+        seasonEpisodes[season] = [...byEpisode.values()];
+      }
+      return {
+        fetchedCollections: new Map(
+          [...fetchedCollections]
+            .filter(([, f]) => f.step < conclusionStep)
+            .map(([key, f]) => [key, f.info]),
+        ),
+        seasonEpisodes,
+        lastAired,
+      };
     };
-    let correction = concluded?.correction ?? null;
-    const record = (verdict: ReviewVerdict, fallback: string | null, extra: JsonObject = {}) =>
-      ({
-        verdict,
-        concluded: concluded?.verdict ?? null,
-        reasons: concluded?.reasons ?? [],
-        opinion: concluded?.opinion ?? null,
-        reply: concluded?.reply ?? null,
-        // Why the session's conclusion was not followed, or why there was none.
-        fallback,
-        queries: queries as unknown as JsonObject[],
-        jobId: ctx.job.id,
-        reviewedAt: ctx.now.toISOString(),
-        ...extra,
-      }) as JsonObject;
+    const recordFor =
+      (member: ReviewMember) =>
+      (verdict: ReviewVerdict, fallback: string | null, extra: JsonObject = {}) =>
+        ({
+          verdict,
+          concluded: member.conclusion?.verdict ?? null,
+          reasons: member.conclusion?.reasons ?? [],
+          opinion: member.conclusion?.opinion ?? null,
+          reply: member.conclusion?.reply ?? null,
+          // Why the session's conclusion was not followed, or why there was none.
+          fallback,
+          queries: queries as unknown as JsonObject[],
+          jobId: ctx.job.id,
+          reviewedAt: ctx.now.toISOString(),
+          ...extra,
+        }) as JsonObject;
     await ensureReviewAgentUser(ctx.db);
 
     if (mode === "approved") {
+      // Comments on a decided request: always a session of its own.
+      const member = members[0]!;
+      const concluded = member.conclusion;
+      const fetched = fetchedBefore(member.conclusionStep);
+      const record = recordFor(member);
+      let correction = concluded?.correction ?? null;
       // Either revocation needs the collection and every revoked season fetched, and a reason. Only
       // then is a correction checked on its own; one that does not hold still revokes.
       const revokeBlocker =
@@ -1225,8 +1444,8 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         verdict = fallback === null ? "revoke" : "keep";
       }
       if (concluded?.verdict === "revoke_with_correction" && revokeBlocker === null) {
-        fallback = await correctionBlocker(ctx.db, mediaId, cr, correction, fetched, {
-          submittedCodes: conflictCodes,
+        fallback = await correctionBlocker(ctx.db, member.mediaId, cr, correction, fetched, {
+          submittedCodes: member.conflictCodes,
           reasons: concluded.reasons,
         });
         verdict = fallback === null ? "revoke_with_correction" : "revoke";
@@ -1241,13 +1460,14 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           ? { correction: correction as unknown as JsonObject }
           : {},
       );
+      outcomes.set(cr.id, { verdict, fallback });
       return {
         status: "completed",
-        result: { changeRequestId, verdict, fallback },
+        result: result(),
         async onCommit(trx) {
           if (verdict === "keep") {
             await keepInTx(trx, cr, { ...evidence, reviewAgent }, ctx.now);
-            await reply(trx, reviewAgent);
+            await reply(trx, member, reviewAgent);
             return;
           }
           await sql`savepoint sp_review_agent_revoke`.execute(trx);
@@ -1285,32 +1505,47 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
               `revoke_failed: ${error.code}${detail ? `: ${detail.message}` : ""}`,
             );
             await keepInTx(trx, cr, { ...evidence, reviewAgent: kept }, ctx.now);
-            await reply(trx, kept, verdict);
+            await reply(trx, member, kept, verdict);
             return;
           }
-          await reply(trx, applied, verdict);
+          await reply(trx, member, applied, verdict);
         },
       };
     }
 
-    let fallback: string | null = concluded ? null : stopReason(stop);
-    if (concluded?.verdict === "approve") {
-      fallback = approvalBlocker(cr, conflictCodes, concluded.reasons, fetched);
-    }
-    if (concluded?.verdict === "reject_with_correction") {
-      fallback = await correctionBlocker(ctx.db, mediaId, cr, correction, fetched, {
-        submittedCodes: conflictCodes,
-        reasons: concluded.reasons,
-      });
-      if (fallback === null) {
-        correction = boundToCollection(cr, correction!, fetched);
+    const decisions = [];
+    for (const member of members) {
+      const concluded = member.conclusion;
+      if (!concluded && stop.kind === "model_error") {
+        continue; // Left undecided by an outage: the cron queues it again.
       }
+      const fetched = fetchedBefore(member.conclusionStep);
+      let correction = concluded?.correction ?? null;
+      let fallback: string | null = concluded ? null : stopReason(stop);
+      if (concluded?.verdict === "approve") {
+        fallback = approvalBlocker(member.cr, member.conflictCodes, concluded.reasons, fetched);
+      }
+      if (concluded?.verdict === "reject_with_correction") {
+        fallback = await correctionBlocker(ctx.db, member.mediaId, member.cr, correction, fetched, {
+          submittedCodes: member.conflictCodes,
+          reasons: concluded.reasons,
+        });
+        if (fallback === null) {
+          correction = boundToCollection(member.cr, correction!, fetched);
+        }
+      }
+      decisions.push({ member, concluded, correction, fallback });
     }
 
+    // Approval creates the media from the catalog: fetch it outside the transaction, once for
+    // the work's requests without a media.
     let prefetchedCatalog: CatalogTargetSnapshot | null = null;
-    if (concluded?.verdict === "approve" && fallback === null && cr.mediaId === null) {
-      // Approval creates the media from the catalog: fetch it outside the transaction.
-      const key = parseCatalogTargetKey(cr.targetExternalKey);
+    const creating = decisions.find(
+      (d) =>
+        d.concluded?.verdict === "approve" && d.fallback === null && d.member.cr.mediaId === null,
+    );
+    if (creating) {
+      const key = parseCatalogTargetKey(creating.member.cr.targetExternalKey);
       const resolved = key
         ? await resolveCatalogTargetSnapshot(key.canonicalKey, ctx.outbound, {
             ...options.catalogConfig,
@@ -1321,7 +1556,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       if (resolved?.status === "found") {
         prefetchedCatalog = resolved.target;
       } else {
-        // A catalog outage says nothing about the request either.
+        // A catalog outage says nothing about the requests either.
         return {
           status: "retry",
           runAfter: new Date(ctx.now.getTime() + OUTAGE_RETRY_MS),
@@ -1330,54 +1565,58 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       }
     }
 
-    const approved = concluded?.verdict === "approve" && fallback === null;
-    const rejected = concluded?.verdict === "reject_with_correction" && fallback === null;
-    let opinion = concluded?.opinion ?? null;
-    if (!rejected && correction) {
-      // Rejected plainly: the opinion keeps the correction that did not hold (§4).
-      opinion = `${opinion ?? ""}\n改正建议：${describeCorrection(correction)}`.trim();
-    }
-    const reviewAgent = record(
-      approved ? "approve" : rejected ? "reject_with_correction" : "reject",
-      fallback,
-      { opinion, ...(rejected ? { correction: correction as unknown as JsonObject } : {}) },
-    );
-    // No approval and no confirmed correction: reject, and exploration tries again later.
-    const rejectPlainly = async (trx: Transaction<Database>, rec: JsonObject) => {
-      if (
-        await rejectPlainlyInTx(
-          trx,
-          cr,
-          rec.opinion ? String(rec.opinion) : `无法确认这条对应：${String(rec.fallback)}`,
-          { ...evidence, reviewAgent: rec },
-          ctx.now,
-        )
-      ) {
-        await reply(trx, rec, reviewAgent.verdict as ReviewVerdict);
+    const applies = decisions.map(({ member, concluded, correction, fallback }) => {
+      const record = recordFor(member);
+      const memberCr = member.cr;
+      const memberEvidence = memberCr.evidence ?? {};
+      const approved = concluded?.verdict === "approve" && fallback === null;
+      const rejected = concluded?.verdict === "reject_with_correction" && fallback === null;
+      let opinion = concluded?.opinion ?? null;
+      if (!rejected && correction) {
+        // Rejected plainly: the opinion keeps the correction that did not hold (§4).
+        opinion = `${opinion ?? ""}\n改正建议：${describeCorrection(correction)}`.trim();
       }
-    };
+      const reviewAgent = record(
+        approved ? "approve" : rejected ? "reject_with_correction" : "reject",
+        fallback,
+        { opinion, ...(rejected ? { correction: correction as unknown as JsonObject } : {}) },
+      );
+      outcomes.set(memberCr.id, { verdict: reviewAgent.verdict as ReviewVerdict, fallback });
+      // No approval and no confirmed correction: reject, and exploration tries again later.
+      const rejectPlainly = async (trx: Transaction<Database>, rec: JsonObject) => {
+        if (
+          await rejectPlainlyInTx(
+            trx,
+            memberCr,
+            rec.opinion ? String(rec.opinion) : `无法确认这条对应：${String(rec.fallback)}`,
+            { ...memberEvidence, reviewAgent: rec },
+            ctx.now,
+            decidable,
+          )
+        ) {
+          await reply(trx, member, rec, reviewAgent.verdict as ReviewVerdict);
+        }
+      };
 
-    return {
-      status: "completed",
-      result: { changeRequestId, verdict: reviewAgent.verdict, fallback },
-      async onCommit(trx) {
+      return async (trx: Transaction<Database>) => {
         if (rejected) {
           await sql`savepoint sp_review_agent_correct`.execute(trx);
-          if (!(await claimCorrectionInTx(trx, cr))) {
+          if (!(await claimCorrectionInTx(trx, memberCr))) {
             await rejectPlainly(trx, record("reject", "already_corrected"));
             return;
           }
           if (
             await rejectWithCorrectionInTx(
               trx,
-              cr,
+              memberCr,
               correction!,
               opinion,
-              { ...evidence, reviewAgent },
+              { ...memberEvidence, reviewAgent },
               ctx.now,
+              decidable,
             )
           ) {
-            await reply(trx, reviewAgent);
+            await reply(trx, member, reviewAgent);
           } else {
             // A stale decision did not correct anything.
             await sql`rollback to savepoint sp_review_agent_correct`.execute(trx);
@@ -1391,14 +1630,14 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         await sql`savepoint sp_review_agent_approve`.execute(trx);
         try {
           await approveChangeRequestInTransaction(trx, {
-            changeRequestId: cr.id,
+            changeRequestId: memberCr.id,
             reviewerUserId: REVIEW_AGENT_USER_ID,
             reason: concluded!.reasons.map((r) => `${r.code}: ${r.reason}`).join("; "),
-            evidence: { ...evidence, reviewAgent },
-            conflictReason: cr.conflictReason,
-            prefetchedCatalog,
-            allowedStatuses: DECIDABLE_STATUSES,
-            replacesAssociationId: cr.replacesAssociationId,
+            evidence: { ...memberEvidence, reviewAgent },
+            conflictReason: memberCr.conflictReason,
+            prefetchedCatalog: memberCr.mediaId === null ? prefetchedCatalog : null,
+            allowedStatuses: decidable,
+            replacesAssociationId: memberCr.replacesAssociationId,
             enforceUnlockedCheck: true,
             now: ctx.now,
           });
@@ -1418,7 +1657,18 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           });
           return;
         }
-        await reply(trx, reviewAgent);
+        await reply(trx, member, reviewAgent);
+      };
+    });
+
+    return {
+      status: "completed",
+      result: result(),
+      async onCommit(trx) {
+        await rejectUnreviewable(trx);
+        for (const apply of applies) {
+          await apply(trx);
+        }
       },
     };
   };
@@ -1426,6 +1676,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
 
 /** A request the review agent may approve or reject: awaiting review, or rejected and commented on. */
 const DECIDABLE_STATUSES = ["needs_review", "rejected"] as const;
+type DecidableStatuses = ReadonlyArray<(typeof DECIDABLE_STATUSES)[number]>;
 
 /** Keeps an approved request: only the latest verdict is recorded. */
 async function keepInTx(
@@ -1510,6 +1761,7 @@ async function rejectPlainlyInTx(
   reason: string,
   evidence: JsonObject,
   now: Date,
+  allowedStatuses: DecidableStatuses = DECIDABLE_STATUSES,
 ): Promise<boolean> {
   try {
     await rejectChangeRequestInTx(trx, {
@@ -1517,7 +1769,7 @@ async function rejectPlainlyInTx(
       reviewerUserId: REVIEW_AGENT_USER_ID,
       reason,
       evidence,
-      allowedStatuses: DECIDABLE_STATUSES,
+      allowedStatuses,
       now,
     });
     return true;
@@ -1716,6 +1968,7 @@ async function rejectWithCorrectionInTx(
   opinion: string | null,
   evidence: JsonObject,
   now: Date,
+  allowedStatuses: DecidableStatuses,
 ): Promise<boolean> {
   const reason = `${opinion ?? "提交有误"}\n改正：${describeCorrection(correction)}`;
   try {
@@ -1725,7 +1978,7 @@ async function rejectWithCorrectionInTx(
       reason,
       evidence,
       correctedSeason: correction.season,
-      allowedStatuses: DECIDABLE_STATUSES,
+      allowedStatuses,
       now,
     });
   } catch (error) {
