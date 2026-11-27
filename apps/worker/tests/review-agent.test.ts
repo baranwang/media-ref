@@ -1058,6 +1058,46 @@ describe("review agent: reject with correction (#76)", () => {
     },
   );
 
+  test("an open-ended correction runs to the collection's end: a season still airing on the platform", async () => {
+    // TMDB season 8 has 10 episodes; the platform has the first 7 so far.
+    const airing = createAdapterRegistry([
+      {
+        ...bilibiliAdapter,
+        async fetchCollection(id, outbound) {
+          const result = await bilibiliAdapter.fetchCollection(id, outbound);
+          return result.status === "found"
+            ? {
+                ...result,
+                info: { ...result.info, featureEpisodes: result.info.featureEpisodes.slice(0, 7) },
+              }
+            : result;
+        },
+      },
+    ]);
+    const openEnded = {
+      season: 8,
+      segments: [{ season: 8, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 }],
+    };
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 8 }],
+        ]);
+      }
+      return reply(turn, [["reject_with_correction", { opinion: WIFE_OPINION, ...openEnded }]]);
+    };
+    const ctx = track(await setup(model, {}, airing));
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: { verdict: "reject_with_correction", correction: openEnded, fallback: null },
+    });
+  });
+
   test("without a reason for it, the submission's own title or year conflict still blocks the correction", async () => {
     const ctx = track(
       await setup(correctsTo(8), {}, relabelled({ year: 2031, title: "妻子的浪漫旅行" })),

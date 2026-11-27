@@ -131,15 +131,25 @@ function positionMisfit(
   seasons: CatalogEvidence["seasons"],
 ): string | null {
   const count = (season: number) => seasons.find((s) => s.season === season)?.episodeCount ?? null;
-  const misfit = checkSegmentsFitCollection(segments, collection, count);
+  // An open end runs to the collection's end (a season still airing), at most to the season's end.
+  const available = collection.featureEpisodes.length;
+  const ended = segments.map((s) => ({
+    ...s,
+    episodeEnd:
+      s.episodeEnd ??
+      Math.min(
+        count(s.season) ?? Number.POSITIVE_INFINITY,
+        s.episodeStart + available - s.targetEpisodeStart,
+      ),
+  }));
+  const misfit = checkSegmentsFitCollection(ended, collection, count);
   if (misfit) {
     return misfit;
   }
-  const ranges = segments
-    .map((s) => {
-      const end = s.episodeEnd ?? count(s.season)!;
-      return [s.targetEpisodeStart, s.targetEpisodeStart + end - s.episodeStart] as const;
-    })
+  const ranges = ended
+    .map(
+      (s) => [s.targetEpisodeStart, s.targetEpisodeStart + s.episodeEnd - s.episodeStart] as const,
+    )
     .sort((a, b) => a[0] - b[0]);
   return ranges.some((r, i) => i > 0 && r[0] <= ranges[i - 1]![1])
     ? "segments overlap on platform positions"
