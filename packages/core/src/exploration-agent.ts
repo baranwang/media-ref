@@ -1596,12 +1596,9 @@ async function exploreTmdbExternalId(
         .where("status", "!=", "delisted")
         .executeTakeFirst();
       return {
-        outcome: {
-          namespace,
-          status: "submitted",
-          nativeId: targetTmdb?.native_id ?? `${candidate.namespace}:${candidate.nativeId}`,
-          directWrite: true,
-        },
+        outcome: targetTmdb
+          ? { namespace, status: "submitted", nativeId: targetTmdb.native_id, directWrite: true }
+          : { namespace, status: "transient_error", reason: "merged_target_missing_tmdb" },
         mergedIntoMediaId: mergeAttempt.targetMediaId,
       };
     }
@@ -1716,7 +1713,7 @@ async function exploreTmdbExternalId(
           mediaIdB: canonicalOtherId,
           actorUserId: EXPLORATION_AGENT_USER_ID,
           reason: `exploration_external_id_match:${ns}:${nativeId}`,
-          extraTitlesByMediaId: new Map([[canonicalOtherId, tmdbSnapshotTitles]]),
+          extraTitlesByMediaId: new Map([[mediaId, tmdbSnapshotTitles]]),
           acquireMergeLocks: true,
           now: ctx.now,
         });

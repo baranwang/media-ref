@@ -11,7 +11,6 @@ import {
 } from "@media-ref/client";
 import type {
   AssociationNamespaceRow,
-  AssociationStatusRow,
   Database,
   Db,
   JsonObject,
@@ -28,6 +27,8 @@ import {
 } from "./demands.ts";
 import { backfillMissingExternalIdsInTx } from "./external-ids.ts";
 import {
+  preferSourceAssociation,
+  retainedTargetVariantSegments,
   resolveCanonicalMediaIdInTx,
   verifyAutoMergeEligibilityInTx,
 } from "./duplicate-merge-policy.ts";
@@ -135,6 +136,7 @@ export type MediaSyncErrorCode =
   | "MEDIA_NOT_FOUND"
   | "ALERT_NOT_FOUND"
   | "MERGE_SELF_NOT_ALLOWED"
+  | "SEGMENT_OVERLAP"
   | "MERGE_CYCLE"
   | "MEDIA_ALREADY_MERGED";
 
@@ -1407,12 +1409,6 @@ async function flagBaselineMismatchedSegments(
   return flagged.length;
 }
 
-const ASSOCIATION_STATUS_RANK: Record<AssociationStatusRow, number> = {
-  delisted: 1,
-  seed_unconfirmed: 2,
-  confirmed: 3,
-};
-
 async function recordExternalIdConflictAlertInTx(
   trx: Transaction<Database>,
   input: {
@@ -1495,10 +1491,14 @@ async function coalesceMediaDemandsInTx(
     if (existingTarget) {
       const nextStatus = isCovered
         ? "fulfilled"
-        : existingTarget.status === "open" || sd.status === "open"
-          ? "open"
-          : existingTarget.status === "fulfilled" || sd.status === "fulfilled"
-            ? "fulfilled"
+        : existingTarget.status === "leased" &&
+            existingTarget.lease_expires_at &&
+            existingTarget.lease_expires_at > input.now
+          ? "leased"
+          : existingTarget.status === "open" ||
+              sd.status === "open" ||
+              existingTarget.status === "leased"
+            ? "open"
             : existingTarget.status;
       const createdAt =
         new Date(existingTarget.created_at) <= new Date(sd.created_at)
@@ -1524,7 +1524,7 @@ async function coalesceMediaDemandsInTx(
           created_at: createdAt,
           last_demanded_at: lastDemandedAt,
           last_explored_at: lastExploredAt,
-          lease_expires_at: nextStatus === "open" ? existingTarget.lease_expires_at : null,
+          lease_expires_at: nextStatus === "leased" ? existingTarget.lease_expires_at : null,
           next_eligible_at:
             nextStatus === "open"
               ? new Date(existingTarget.next_eligible_at) <= new Date(sd.next_eligible_at)
@@ -1749,27 +1749,31 @@ export async function mergeMediaInTx(
   ];
   const segmentsByAssoc = await loadSegmentsByAssociationIds(trx, allAssocIds);
 
-  const targetAssocByKey = new Map<string, (typeof targetAssociations)[number]>();
-  for (const ta of targetAssociations) {
-    const key = `${ta.namespace}:${ta.native_id}`;
-    const prev = targetAssocByKey.get(key);
-    if (!prev || ASSOCIATION_STATUS_RANK[ta.status] > ASSOCIATION_STATUS_RANK[prev.status]) {
-      targetAssocByKey.set(key, ta);
-    }
-  }
+  const targetAssocByKey = new Map(
+    targetAssociations.map((a) => [`${a.namespace}:${a.native_id}`, a]),
+  );
   const targetDefaultPlatforms = new Set<PlatformNamespace>(
     targetVariants.filter((v) => v.is_default).map((v) => v.platform),
   );
-  const activeTargetSegmentsByVariant = new Map<
-    string,
-    Array<{ associationId: string; segments: NormalizedSegment[] }>
-  >();
-  for (const ta of targetAssociations) {
-    if (ta.variant_id && ta.status !== "delisted") {
-      const list = activeTargetSegmentsByVariant.get(ta.variant_id) ?? [];
-      list.push({ associationId: ta.id, segments: segmentsByAssoc.get(ta.id) ?? [] });
-      activeTargetSegmentsByVariant.set(ta.variant_id, list);
-    }
+  const withSegments = (a: (typeof targetAssociations)[number]) => ({
+    id: a.id,
+    namespace: a.namespace,
+    nativeId: a.native_id,
+    variantId: a.variant_id,
+    status: a.status,
+    segments: segmentsByAssoc.get(a.id) ?? [],
+  });
+  const { groups: activeTargetSegmentsByVariant, conflict } = retainedTargetVariantSegments(
+    sourceAssociations.map(withSegments),
+    targetAssociations.map(withSegments),
+    canonicalTarget.baseline,
+  );
+  if (conflict) {
+    throw new MediaSyncError(
+      "SEGMENT_OVERLAP",
+      409,
+      `Variant ${conflict.variantId}: ${conflict.errors.join("; ")}`,
+    );
   }
 
   const variantRemap = new Map<string, string>();
@@ -1858,28 +1862,11 @@ export async function mergeMediaInTx(
     } else {
       const saSegs = segmentsByAssoc.get(sa.id) ?? [];
       const tgtSegs = segmentsByAssoc.get(existingTarget.id) ?? [];
-      const srcRank = ASSOCIATION_STATUS_RANK[sa.status];
-      const tgtRank = ASSOCIATION_STATUS_RANK[existingTarget.status];
-
-      // Preserve the stronger association status (`confirmed` > `seed_unconfirmed` > `delisted`)
-      // and copy verified segments when promoting a weaker/empty target row.
-      if (
-        srcRank > tgtRank ||
-        (srcRank === tgtRank &&
-          sa.status !== "delisted" &&
-          tgtSegs.length === 0 &&
-          saSegs.length > 0)
-      ) {
-        const shouldReplaceSegments =
-          saSegs.length > 0 &&
-          (existingTarget.status === "delisted" ||
-            existingTarget.status === "seed_unconfirmed" ||
-            tgtSegs.length === 0);
-
+      if (preferSourceAssociation(sa.status, saSegs, existingTarget.status, tgtSegs)) {
         await trx
           .updateTable("associations")
           .set({
-            status: srcRank > tgtRank ? sa.status : existingTarget.status,
+            status: sa.status,
             variant_id: existingTarget.variant_id ?? nextVariantId,
             needs_review:
               sa.status === "confirmed" && !sa.needs_review ? false : existingTarget.needs_review,
@@ -1890,12 +1877,8 @@ export async function mergeMediaInTx(
           .where("id", "=", existingTarget.id)
           .execute();
 
-        let finalSegs = tgtSegs;
-        if (shouldReplaceSegments) {
-          await trx
-            .deleteFrom("segments")
-            .where("association_id", "=", existingTarget.id)
-            .execute();
+        await trx.deleteFrom("segments").where("association_id", "=", existingTarget.id).execute();
+        if (saSegs.length > 0) {
           await trx
             .insertInto("segments")
             .values(
@@ -1911,8 +1894,6 @@ export async function mergeMediaInTx(
               })),
             )
             .execute();
-          finalSegs = saSegs;
-          segmentsByAssoc.set(existingTarget.id, saSegs);
         }
 
         const maxRevRow = await trx
@@ -1927,8 +1908,8 @@ export async function mergeMediaInTx(
             revision_number: (maxRevRow?.max_rev ?? 0) + 1,
             change_request_id: null,
             variant_id: existingTarget.variant_id ?? nextVariantId,
-            status: srcRank > tgtRank ? sa.status : existingTarget.status,
-            segments: JSON.stringify(finalSegs),
+            status: sa.status,
+            segments: JSON.stringify(saSegs),
             actor_user_id: input.actorUserId,
             reason: reason ?? "media_merge_promoted_association",
           })
@@ -1939,10 +1920,6 @@ export async function mergeMediaInTx(
           .set({ current_revision_id: revRow.id, updated_at: now })
           .where("id", "=", existingTarget.id)
           .execute();
-
-        if (srcRank > tgtRank) {
-          existingTarget.status = sa.status;
-        }
       }
 
       if (sa.status !== "delisted") {
