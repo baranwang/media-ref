@@ -1165,6 +1165,9 @@ async function submitMapping(
     return { namespace, status: "submitted", changeRequestId: cr.id, nativeId: cr.nativeId };
   } catch (error) {
     if (error instanceof MediaServiceError) {
+      if (error.code === "NO_CHANGE") {
+        return { namespace, status: "already_confirmed", reason: "already_confirmed" };
+      }
       if (error.code === "PLATFORM_UPSTREAM_ERROR") {
         target.transient = new PlatformTransient(error.message);
       }
