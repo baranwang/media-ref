@@ -466,11 +466,16 @@ export function checkSegmentsFitCollection(
     if (rawEnd !== null && (!Number.isInteger(rawEnd) || rawEnd < start)) {
       return "episodeEnd must not be before episodeStart";
     }
-    if (seg.nonLinear) {
-      const seasonCount = seasonEpisodeCount(seg.season);
-      if (rawEnd !== null && seasonCount !== null && rawEnd > seasonCount) {
+    const seasonCount = seasonEpisodeCount(seg.season);
+    if (seasonCount !== null) {
+      if (start > seasonCount) {
+        return `episodeStart ${start} exceeds season ${seg.season} length ${seasonCount}`;
+      }
+      if (rawEnd !== null && rawEnd > seasonCount) {
         return `episodeEnd ${rawEnd} exceeds season ${seg.season} length ${seasonCount}`;
       }
+    }
+    if (seg.nonLinear) {
       if (available === 0) {
         return `${info.canonicalId} has 0 fetched feature episodes`;
       }
@@ -478,7 +483,7 @@ export function checkSegmentsFitCollection(
     }
     let end = rawEnd;
     if (end === null) {
-      end = seasonEpisodeCount(seg.season);
+      end = seasonCount;
       if (end === null) {
         return `episodeEnd is required: season ${seg.season} has no known episode count`;
       }

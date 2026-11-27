@@ -96,6 +96,22 @@ describe("checkSegmentsFitCollection", () => {
         seasonOf47,
       ),
     ).toMatch(/exceeds season 3 length 47/);
+    expect(
+      checkSegmentsFitCollection(
+        [
+          {
+            season: 1,
+            episodeStart: 25,
+            episodeEnd: null,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+            nonLinear: true,
+          },
+        ],
+        collection(20),
+        seasonOf24,
+      ),
+    ).toMatch(/episodeStart 25 exceeds season 1 length 24/);
   });
 });
 

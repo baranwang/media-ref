@@ -1058,6 +1058,27 @@ describe("Evidence Gate Step 2", () => {
     expect(
       nonLinearWrongYear.step2?.conflicts.some((c) => c.code === "segment_year_mismatch"),
     ).toBe(true);
+
+    // Non-linear segment whose episodeStart exceeds season episodeCount -> needs_review
+    const nonLinearOutOfRange = evaluateEvidenceGate({
+      catalog: varietyCatalog,
+      collection: makeBilibiliCollection({ year: 2023, featureEpisodeCount: 30 }),
+      segments: [
+        {
+          season: 1,
+          episodeStart: 13,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: true,
+          needsReview: false,
+        },
+      ],
+    });
+    expect(nonLinearOutOfRange.decision).toBe("needs_review");
+    expect(
+      nonLinearOutOfRange.step2?.conflicts.some((c) => c.code === "segment_episode_out_of_range"),
+    ).toBe(true);
   });
 
   test.each([
