@@ -237,6 +237,20 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
       },
     });
   }
+  if (request.namespace === "bilibili" && url.includes("season_id=46073")) {
+    // The same film on a page that lists no feature episode, as Youku does for some films.
+    return jsonResponse(url, {
+      code: 0,
+      message: "success",
+      result: {
+        season_id: 46073,
+        title: "死侍2",
+        type: 2,
+        publish: { pub_time: "2018-05-10 00:00:00" },
+        episodes: [],
+      },
+    });
+  }
   if (request.namespace === "bilibili" && url.includes("season_id=404404")) {
     return jsonResponse(url, { code: -404, message: "啥都木有" });
   }
@@ -504,6 +518,28 @@ describe("review agent (#75)", () => {
     expect(toolNames).toEqual(expect.arrayContaining(["approve", "reject"]));
     expect(toolNames).not.toContain("reject_with_correction");
     expect(first.messages[0]!.content).toContain("The catalog entry is a movie");
+    const cr = await changeRequest(id);
+    expect(cr.status).toBe("approved");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "approve",
+      fallback: null,
+    });
+  });
+
+  test("恐怖游轮 (#81cce62f): a film whose collection lists no feature episode still counts as fetched, so the approval holds", async () => {
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [["get_collection", { namespace: "bilibili", id: "ss46073" }]]);
+      }
+      return reply(turn, [["approve", { reasons: reasonsFor(request) }]]);
+    };
+    const { submit, drain, changeRequest, outbound } = track(await setup(model));
+    const id = await submit("ss46073", { targetExternalKey: "tmdb:movie:383498", segments: [] });
+
+    await drain();
+
+    expect(conflictCodes(outbound.modelRequests[0]!)).toContain("episode_count_missing");
     const cr = await changeRequest(id);
     expect(cr.status).toBe("approved");
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
