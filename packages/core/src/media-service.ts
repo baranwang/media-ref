@@ -80,6 +80,8 @@ export type MediaServiceErrorCode =
   | "ASSOCIATION_SUPERSEDED"
   | "CHANGE_REQUEST_NOT_FOUND"
   | "INVALID_CHANGE_REQUEST_STATE"
+  | "NO_CHANGE"
+  | "DUPLICATE_CHANGE_REQUEST"
   | "TMDB_MEDIA_NOT_FOUND"
   | "TMDB_UPSTREAM_ERROR"
   | "CATALOG_MEDIA_NOT_FOUND"
@@ -966,14 +968,17 @@ export async function createChangeRequest(
   let existingSameCollection: {
     id: string;
     native_id: string;
+    variant_id: string | null;
+    status: "confirmed" | "seed_unconfirmed" | "delisted";
     locked: boolean;
+    needs_review: boolean;
   } | null = null;
   if (existingMedia) {
     existingSameCollection =
       (await dbWrite
         .selectFrom("associations")
         .where("is_external_id", "=", false)
-        .select(["id", "native_id", "locked"])
+        .select(["id", "native_id", "variant_id", "status", "locked", "needs_review"])
         .where("media_id", "=", existingMedia.id)
         .where("namespace", "=", namespace)
         .where("native_id", "=", nativeId)
@@ -1120,6 +1125,64 @@ export async function createChangeRequest(
       }
     }
 
+    // The target can gain a media ID while a submission waits for this collection.
+    await acquireAdvisoryLock(
+      trx,
+      ADVISORY_LOCK_CLASSES.CHANGE_REQUEST_DEDUPE,
+      `${namespace}:${nativeId}`,
+    );
+
+    const mediaInTx = (await resolveExistingMediaByTarget(trx, target))?.media ?? null;
+    let resolvedVariantIdInTx = resolvedVariantId;
+    if (
+      !resolvedVariantIdInTx &&
+      mediaInTx &&
+      isPlatformNamespace(namespace) &&
+      variantDescription
+    ) {
+      const matchedVariantInTx = await trx
+        .selectFrom("variants")
+        .select("id")
+        .where("media_id", "=", mediaInTx.id)
+        .where("platform", "=", namespace)
+        .where("description", "=", variantDescription)
+        .executeTakeFirst();
+      if (matchedVariantInTx) {
+        resolvedVariantIdInTx = matchedVariantInTx.id;
+      }
+    }
+    const sameCollectionInTx = mediaInTx
+      ? ((await trx
+          .selectFrom("associations")
+          .where("is_external_id", "=", false)
+          .select(["id", "native_id", "variant_id", "status", "locked", "needs_review"])
+          .where("media_id", "=", mediaInTx.id)
+          .where("namespace", "=", namespace)
+          .where("native_id", "=", nativeId)
+          .executeTakeFirst()) ?? null)
+      : null;
+
+    await assertNotNoOpSubmission(trx, {
+      existingMedia: mediaInTx,
+      existingSameCollection: sameCollectionInTx,
+      replacesAssociationId: replacesAssociation?.id ?? null,
+      resolvedVariantId: resolvedVariantIdInTx,
+      setDefaultVariant,
+      normalizedSegments,
+      namespace,
+    });
+    await assertNoDuplicateInFlightChangeRequest(trx, {
+      existingMedia: mediaInTx,
+      canonicalTargetKey,
+      namespace,
+      nativeId,
+      resolvedVariantId: resolvedVariantIdInTx,
+      variantDescription,
+      setDefaultVariant,
+      replacesAssociationId: replacesAssociation?.id ?? null,
+      normalizedSegments,
+    });
+
     let referenceNow: Date;
     if (submitterType === "agent") {
       // Agent exploration submissions are capped by exploration_daily_budget,
@@ -1143,12 +1206,12 @@ export async function createChangeRequest(
         submitter_type: submitterType,
         task_id: input.taskId ?? null,
         demand_id: input.demandId ?? null,
-        media_id: existingMedia?.id ?? null,
+        media_id: mediaInTx?.id ?? null,
         target_external_key: canonicalTargetKey,
         namespace,
         raw_native_id: rawNativeId,
         native_id: nativeId,
-        variant_id: resolvedVariantId,
+        variant_id: resolvedVariantIdInTx,
         variant_description: variantDescription,
         set_default_variant: setDefaultVariant,
         segments: JSON.stringify(normalizedSegments),
@@ -1359,11 +1422,8 @@ export async function approveChangeRequest(
   );
 }
 
-async function loadSegments(
-  trx: Transaction<Database>,
-  associationId: string,
-): Promise<NormalizedSegment[]> {
-  const rows = await trx
+async function loadSegments(db: DbExecutor, associationId: string): Promise<NormalizedSegment[]> {
+  const rows = await db
     .selectFrom("segments")
     .select([
       "season",
@@ -1388,6 +1448,182 @@ async function loadSegments(
     nonLinear: Boolean(seg.non_linear),
     needsReview: Boolean(seg.needs_review),
   }));
+}
+
+function parseStoredNormalizedSegments(rawSegments: unknown): NormalizedSegment[] {
+  return parseJsonArray<StoredSegmentJson>(rawSegments).map((seg) => ({
+    season: seg.season,
+    episodeStart: seg.episodeStart,
+    episodeEnd: seg.episodeEnd ?? null,
+    targetEpisodeStart: seg.targetEpisodeStart,
+    baseline: seg.baseline,
+    nonLinear: Boolean(seg.nonLinear),
+    needsReview: Boolean(seg.needsReview),
+  }));
+}
+
+function canonicalSegmentsKey(segments: readonly NormalizedSegment[]): string {
+  const entries = segments
+    .map(
+      (s) =>
+        [
+          s.baseline,
+          s.season,
+          s.episodeStart,
+          s.episodeEnd ?? null,
+          s.targetEpisodeStart,
+          Boolean(s.nonLinear),
+          Boolean(s.needsReview),
+        ] as const,
+    )
+    .sort(
+      (a, b) =>
+        a[1] - b[1] ||
+        a[2] - b[2] ||
+        a[4] - b[4] ||
+        (a[3] ?? Number.POSITIVE_INFINITY) - (b[3] ?? Number.POSITIVE_INFINITY) ||
+        a[0].localeCompare(b[0]) ||
+        Number(a[5]) - Number(b[5]) ||
+        Number(a[6]) - Number(b[6]),
+    );
+  return JSON.stringify(entries);
+}
+
+async function assertNotNoOpSubmission(
+  db: DbExecutor,
+  input: {
+    existingMedia: ResolvedMediaRow | null;
+    existingSameCollection: {
+      id: string;
+      variant_id: string | null;
+      status: "confirmed" | "seed_unconfirmed" | "delisted";
+      needs_review: boolean;
+    } | null;
+    replacesAssociationId: string | null;
+    resolvedVariantId: string | null;
+    setDefaultVariant: boolean;
+    normalizedSegments: readonly NormalizedSegment[];
+    namespace: AssociationNamespace;
+  },
+): Promise<void> {
+  const { existingMedia, existingSameCollection } = input;
+  if (
+    !existingMedia ||
+    !existingSameCollection ||
+    existingSameCollection.status !== "confirmed" ||
+    existingSameCollection.needs_review
+  ) {
+    return;
+  }
+  if (input.replacesAssociationId && input.replacesAssociationId !== existingSameCollection.id) {
+    return;
+  }
+  if (existingSameCollection.variant_id !== input.resolvedVariantId) {
+    return;
+  }
+  if (input.setDefaultVariant && isPlatformNamespace(input.namespace) && input.resolvedVariantId) {
+    const variantRow = await db
+      .selectFrom("variants")
+      .select("is_default")
+      .where("id", "=", input.resolvedVariantId)
+      .executeTakeFirst();
+    if (!variantRow?.is_default) {
+      return;
+    }
+  }
+  const existingSegments = await loadSegments(db, existingSameCollection.id);
+  if (existingSegments.some((seg) => seg.needsReview)) {
+    return;
+  }
+  const resultingSegments = mergeApprovedSegments(
+    existingSegments,
+    input.normalizedSegments,
+    existingMedia.seasons,
+  );
+  if (canonicalSegmentsKey(resultingSegments) === canonicalSegmentsKey(existingSegments)) {
+    throw new MediaServiceError(
+      "NO_CHANGE",
+      409,
+      "Submission matches the already confirmed association; no changes to apply",
+    );
+  }
+}
+
+async function assertNoDuplicateInFlightChangeRequest(
+  db: DbExecutor,
+  input: {
+    existingMedia: ResolvedMediaRow | null;
+    canonicalTargetKey: string;
+    namespace: AssociationNamespace;
+    nativeId: string;
+    resolvedVariantId: string | null;
+    variantDescription: string | null;
+    setDefaultVariant: boolean;
+    replacesAssociationId: string | null;
+    normalizedSegments: readonly NormalizedSegment[];
+  },
+): Promise<void> {
+  const pendingRows = await db
+    .selectFrom("change_requests")
+    .select([
+      "id",
+      "media_id",
+      "target_external_key",
+      "variant_id",
+      "variant_description",
+      "set_default_variant",
+      "segments",
+      "evidence",
+    ])
+    .where("status", "in", ["pending_evidence", "needs_review"])
+    .where("namespace", "=", input.namespace)
+    .where("native_id", "=", input.nativeId)
+    .where((eb) =>
+      input.existingMedia
+        ? eb.or([eb("media_id", "=", input.existingMedia.id), eb("media_id", "is", null)])
+        : eb.and([
+            eb("media_id", "is", null),
+            eb("target_external_key", "=", input.canonicalTargetKey),
+          ]),
+    )
+    .execute();
+
+  if (pendingRows.length === 0) {
+    return;
+  }
+
+  const requestedKey = canonicalSegmentsKey(input.normalizedSegments);
+  const requestedDesc = input.variantDescription?.trim() || null;
+
+  for (const row of pendingRows) {
+    const sameVariant = !isPlatformNamespace(input.namespace)
+      ? true
+      : row.variant_id !== null && input.resolvedVariantId !== null
+        ? row.variant_id === input.resolvedVariantId
+        : (row.variant_description?.trim() || null) === requestedDesc;
+    if (!sameVariant) {
+      continue;
+    }
+    const rowSetDefault = Boolean(row.set_default_variant);
+    if (rowSetDefault !== input.setDefaultVariant) {
+      continue;
+    }
+    if (extractReplacesAssociationId(row.evidence) !== input.replacesAssociationId) {
+      continue;
+    }
+    const rowKey = canonicalSegmentsKey(parseStoredNormalizedSegments(row.segments));
+    if (rowKey !== requestedKey) continue;
+    if (!row.media_id && row.target_external_key !== input.canonicalTargetKey) {
+      const target = parseTargetKey(row.target_external_key);
+      const resolved = target && (await resolveExistingMediaByTarget(db, target));
+      if (!resolved || resolved.media.id !== input.existingMedia?.id) continue;
+    }
+    throw new MediaServiceError(
+      "DUPLICATE_CHANGE_REQUEST",
+      409,
+      `An identical pending change request (${row.id}) is already in progress`,
+    );
+  }
 }
 
 /**

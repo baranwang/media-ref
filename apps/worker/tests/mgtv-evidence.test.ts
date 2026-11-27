@@ -416,12 +416,12 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
       "510924",
     ];
     const submittedIds: string[] = [];
-    for (const rawInput of urlVariants) {
+    for (const [index, rawInput] of urlVariants.entries()) {
       const submitBody = await submitRpc.changeRequest.createChangeRequest({
         target: mediaRef({ tmdb: { type: "tv", id: 217492 } }),
         namespace: "mgtv",
         nativeId: rawInput,
-        variantDescription: "原声",
+        variantDescription: index === 0 ? "原声" : `原声-${index}`,
         segments: [
           toProtoSegmentInput({
             season: 1,

@@ -18,6 +18,8 @@ export interface CoverageSegment {
   /** 1-based inclusive end episode (or season in all-seasons mode) */
   end: number;
   targetStart?: number;
+  /** An authority catalog ID is independent of change requests. */
+  isExternalId?: boolean;
   status: "confirmed" | "pending" | "muted";
   changeRequestId?: string;
   /** Association that backs this bar (for version history). */
@@ -27,6 +29,7 @@ export interface CoverageSegment {
 export interface PlatformVariantRow {
   id: string;
   namespace: PlatformNamespace;
+  variantId: string | null;
   label: string;
   isDefault?: boolean;
   /** Season-keyed coverage segments; key 0 represents whole-movie coverage */
@@ -44,6 +47,8 @@ export interface CatalogDirectoryRow {
   isBaseline?: boolean;
   wholeMediaNativeId?: string;
   wholeMediaLabel?: string;
+  /** The directory shows one label. Review needs the evidence state of every whole entry. */
+  wholeMediaEntries?: Omit<CoverageSegment, "start" | "end">[];
   note?: string;
   segmentsBySeason?: Record<number, CoverageSegment[]>;
   allSeasonSegments?: CoverageSegment[];
@@ -203,8 +208,10 @@ export interface ChangeRequestItem {
   /** Title of the platform page, from the evidence check. */
   pageTitle: string | null;
   pageEpisodeCount: number | null;
+  variantId: string | null;
   variantLabel: string | null;
   segments: ChangeRequestSegmentView[];
+  replacesAssociationId?: string | null;
   conflictReason: string | null;
   decisionReason: string | null;
   /** Null when the evidence gate approved it automatically. */
