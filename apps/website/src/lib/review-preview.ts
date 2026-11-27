@@ -74,6 +74,7 @@ export function buildReviewCoveragePreview(
           start: s.start,
           end: s.end ?? totalSeasonEpisodes,
           targetStart: s.targetStart,
+          ...(s.nonLinear ? { nonLinear: true } : {}),
           status: "pending" as const,
           changeRequestId: cr.id,
         }))

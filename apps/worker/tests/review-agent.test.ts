@@ -1048,7 +1048,11 @@ describe("review agent: reject with correction (#76)", () => {
     }
   });
 
-  async function submitAsHuman(ctx: Awaited<ReturnType<typeof setup>>, season = 6) {
+  async function submitAsHuman(
+    ctx: Awaited<ReturnType<typeof setup>>,
+    season = 6,
+    segments = wifeSegments(season),
+  ) {
     await ctx.testDb.writeDb
       .insertInto("user")
       .values({
@@ -1066,7 +1070,7 @@ describe("review agent: reject with correction (#76)", () => {
       submitterUserId: "user-human",
       submitterType: "human",
       targetExternalKey: WIFE_KEY,
-      segments: wifeSegments(season),
+      segments,
     });
   }
 
@@ -1074,6 +1078,56 @@ describe("review agent: reject with correction (#76)", () => {
     ctx.testDb.readDb.selectFrom("leads").selectAll().execute();
   const demands = (ctx: Awaited<ReturnType<typeof setup>>) =>
     ctx.testDb.readDb.selectFrom("demands").selectAll().orderBy("season").execute();
+
+  test.each([0, 1])(
+    "a human whole-season nonLinear submission with %i actual episodes cannot be approved",
+    async (available) => {
+      const ctx = track(
+        await setup((request) => {
+          const turn = turnOf(request);
+          return turn === 0
+            ? reply(turn, [
+                ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+                ["get_catalog_season", { season: 8 }],
+              ])
+            : reply(turn, [["approve", { reasons: reasonsFor(request) }]]);
+        }),
+      );
+      const fetch = ctx.outbound.fetchExternal.bind(ctx.outbound);
+      ctx.outbound.fetchExternal = async (request) => {
+        const response = await fetch(request);
+        if (!request.url.includes("season_id=77777")) return response;
+        const collection = JSON.parse(response.body);
+        collection.result.episodes = collection.result.episodes.slice(0, available);
+        return jsonResponse(request.url, collection);
+      };
+      const id = await submitAsHuman(ctx, 8, [
+        {
+          season: 8,
+          episodeStart: 1,
+          episodeEnd: null,
+          nonLinear: true,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        },
+      ]);
+      await ctx.drain();
+      const cr = await ctx.changeRequest(id);
+      expect(cr.status).toBe("rejected");
+      expect((cr.evidence as Record<string, any>).gate.conflicts).toContainEqual(
+        expect.objectContaining({
+          code: available ? "season_finale_unverified" : "segment_episode_count_missing",
+        }),
+      );
+      expect(
+        await ctx.testDb.readDb
+          .selectFrom("associations")
+          .select("id")
+          .where("native_id", "=", "ss77777")
+          .execute(),
+      ).toEqual([]);
+    },
+  );
 
   test("妻子的浪漫旅行: a human submitted season 6, the correction to season 8 passes step 2, so the request is rejected, a lead written and a demand opened now", async () => {
     const ctx = track(await setup(correctsTo(8)));
@@ -2947,4 +3001,165 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
       expect.objectContaining({ content: expect.stringContaining("维持通过") }),
     ]);
   });
+
+  test.each(["complete", "partial", "shared"])(
+    "rechecks the live finale and shared collection before handing over a %s season correction",
+    async (scenario) => {
+      const correctsToNonLinear: ScriptedModel = (request) => {
+        const turn = turnOf(request);
+        if (turn === 0) {
+          return reply(turn, [
+            ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+            ["get_catalog_season", { season: 8 }],
+          ]);
+        }
+        return reply(turn, [
+          [
+            "revoke_with_correction",
+            {
+              opinion: "这是整季综艺合集，与 TMDB 分集口径不同，应按整季不拆集关联",
+              season: 8,
+              segments: [
+                {
+                  season: 8,
+                  episodeStart: 1,
+                  episodeEnd: scenario === "shared" ? 20 : null,
+                  targetEpisodeStart: 1,
+                  nonLinear: true,
+                },
+              ],
+              reasons: [],
+              reply: "核实后已撤下原分段映射，改为整季不按集对应并重开探索。",
+            },
+          ],
+        ]);
+      };
+      const ctx = track(await setup(byComments(approvesSeason6, correctsToNonLinear)));
+      const media = await createWifeMedia(ctx);
+      let updatedBroadcastLabels = false;
+      const fetch = ctx.outbound.fetchExternal.bind(ctx.outbound);
+      ctx.outbound.fetchExternal = async (request) => {
+        const response = await fetch(request);
+        if (request.namespace !== "tmdb" || !request.url.includes("/tv/70001")) return response;
+        const body = JSON.parse(response.body);
+        if (request.url.includes("/season/8")) {
+          body.episodes = Array.from({ length: 20 }, (_, i) => ({
+            episode_number: i + 1,
+            name: updatedBroadcastLabels
+              ? `第${Math.ceil((i + 1) / 2)}期${i % 2 ? "下" : "上"}`
+              : `第${i + 1}期`,
+            air_date: "2026-03-01",
+          }));
+        } else if (body.seasons) {
+          body.seasons.find((s: { season_number: number }) => s.season_number === 8).episode_count =
+            20;
+        }
+        return jsonResponse(request.url, body);
+      };
+      // The original catalog numbered 20 installments; the platform listed the first ten.
+      const id = await ctx.submit("ss77777", {
+        targetExternalKey: media.id,
+        segments: wifeSegments(8, 10),
+      });
+      await ctx.drain();
+      const approved = await ctx.changeRequest(id);
+      expect(approved.status).toBe("approved");
+
+      updatedBroadcastLabels = scenario !== "partial";
+      if (scenario === "shared") {
+        const other = await ctx.testDb.writeDb
+          .insertInto("media")
+          .values({ type: "tv", baseline: "tmdb", title: "另一部", seasons: "[]" })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+        const variant = await ctx.testDb.writeDb
+          .insertInto("variants")
+          .values({
+            media_id: other.id,
+            platform: "bilibili",
+            description: "原声",
+            is_default: true,
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+        const assoc = await ctx.testDb.writeDb
+          .insertInto("associations")
+          .values({
+            media_id: other.id,
+            namespace: "bilibili",
+            variant_id: variant.id,
+            native_id: "ss77777",
+            status: "confirmed",
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+        await ctx.testDb.writeDb
+          .insertInto("segments")
+          .values({
+            association_id: assoc.id,
+            season: 1,
+            episode_start: 1,
+            episode_end: 5,
+            target_episode_start: 11,
+            baseline: "tmdb",
+          })
+          .execute();
+      }
+      const commentId = await comment(ctx, id, "明明整季都在这，不用拆集看");
+      await ctx.drain();
+
+      const cr = await ctx.changeRequest(id);
+      expect(cr.status).toBe("rejected");
+      if (scenario !== "complete") {
+        expect(cr.evidence).toMatchObject({
+          reviewAgent: {
+            verdict: "revoke",
+            fallback: expect.stringContaining(
+              scenario === "partial"
+                ? "season_finale_unverified"
+                : "SHARED_COLLECTION_NON_LINEAR_SEGMENT",
+            ),
+          },
+        });
+        expect(await ctx.testDb.readDb.selectFrom("leads").select("id").execute()).toEqual([]);
+        return;
+      }
+      expect(cr.decision_reason).toContain("整季（不按集对应）");
+      expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+        verdict: "revoke_with_correction",
+        fallback: null,
+        correction: {
+          season: 8,
+          segments: [
+            {
+              season: 8,
+              episodeStart: 1,
+              episodeEnd: null,
+              targetEpisodeStart: 1,
+              nonLinear: true,
+            },
+          ],
+        },
+      });
+      expect(
+        await ctx.testDb.readDb.selectFrom("leads").select(["season", "segments"]).execute(),
+      ).toEqual([
+        {
+          season: 8,
+          segments: [
+            {
+              season: 8,
+              episodeStart: 1,
+              episodeEnd: null,
+              targetEpisodeStart: 1,
+              nonLinear: true,
+            },
+          ],
+        },
+      ]);
+      expect(await replyTo(ctx, id, commentId)).toEqual([
+        expect.objectContaining({ content: expect.stringContaining("整季（不按集对应）") }),
+      ]);
+    },
+  );
 });

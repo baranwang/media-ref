@@ -37,6 +37,11 @@ import {
   type Tier3Adapter,
 } from "./adapters/index.ts";
 import {
+  seasonCoverageConflict,
+  seasonCoverageScopes,
+  type SeasonEpisode,
+} from "./season-coverage.ts";
+import {
   discoverCandidates,
   lookupDoubanSubjectByImdb,
   type DiscoveryMediaInput,
@@ -72,6 +77,7 @@ import {
 import {
   DEFAULT_AI_MODEL,
   DEFAULT_AI_PROVIDER,
+  raceWithAbortSignal,
   type ModelMessage,
   type ModelToolCall,
   type ModelToolDefinition,
@@ -434,9 +440,10 @@ function parseModelSegments(
 }
 
 /**
- * Evidence door: every segment must land inside the collection's fetched feature episodes.
- * An open-ended segment runs to the end of its baseline season, so that season's episode count
- * must be known. Returns a reason when a segment does not fit.
+ * Evidence door: every linear segment must land inside the collection's fetched feature episodes
+ * (with an open end resolved against its baseline season length). Non-linear segments map the
+ * season at collection level rather than 1:1 to episode indexes, requiring only a non-empty
+ * collection and valid segment bounds. Returns a reason when a segment does not fit.
  */
 export function checkSegmentsFitCollection(
   segments: readonly SegmentInput[],
@@ -445,18 +452,45 @@ export function checkSegmentsFitCollection(
 ): string | null {
   const available = info.featureEpisodes.length;
   for (const seg of segments) {
+    if (!Number.isInteger(seg.season) || seg.season < 0) {
+      return "season must be a non-negative integer";
+    }
+    const start = seg.episodeStart ?? 1;
+    if (!Number.isInteger(start) || start < 1) {
+      return "episodeStart must be a positive integer";
+    }
     const targetStart = seg.targetEpisodeStart ?? 1;
     if (!Number.isInteger(targetStart) || targetStart < 1) {
       return "targetEpisodeStart must be a positive integer";
     }
-    let end = seg.episodeEnd ?? null;
+    const rawEnd = seg.episodeEnd ?? null;
+    if (rawEnd !== null && (!Number.isInteger(rawEnd) || rawEnd < start)) {
+      return "episodeEnd must not be before episodeStart";
+    }
+    const count = seasonEpisodeCount(seg.season);
+    const seasonCount = count !== null && count > 0 ? count : null;
+    if (seasonCount !== null) {
+      if (start > seasonCount) {
+        return `episodeStart ${start} exceeds season ${seg.season} length ${seasonCount}`;
+      }
+      if (rawEnd !== null && rawEnd > seasonCount) {
+        return `episodeEnd ${rawEnd} exceeds season ${seg.season} length ${seasonCount}`;
+      }
+    }
+    if (seg.nonLinear) {
+      if (available === 0) {
+        return `${info.canonicalId} has 0 fetched feature episodes`;
+      }
+      continue;
+    }
+    let end = rawEnd;
     if (end === null) {
-      end = seasonEpisodeCount(seg.season);
+      end = seasonCount;
       if (end === null) {
         return `episodeEnd is required: season ${seg.season} has no known episode count`;
       }
     }
-    const span = end - (seg.episodeStart ?? 1);
+    const span = end - start;
     if (!Number.isInteger(span) || span < 0) {
       return "episodeEnd must not be before episodeStart";
     }
@@ -482,7 +516,7 @@ function platformPositions(
 /** An already-mapped season of a collection and the platform positions it holds. */
 interface MappedSeason {
   season: number;
-  positions: [number, number];
+  positions: [number, number] | null;
 }
 
 /**
@@ -508,6 +542,7 @@ async function loadMappedSeasons(
       "segments.episode_start",
       "segments.episode_end",
       "segments.target_episode_start",
+      "segments.non_linear",
     ])
     .where("associations.media_id", "=", media.id)
     .where("associations.namespace", "=", namespace)
@@ -516,15 +551,17 @@ async function loadMappedSeasons(
     .orderBy("segments.target_episode_start")
     .execute();
   for (const row of rows) {
-    const positions = platformPositions(
-      {
-        season: row.season,
-        episodeStart: row.episode_start,
-        episodeEnd: row.episode_end,
-        targetEpisodeStart: row.target_episode_start,
-      } as SegmentInput,
-      (s) => seasonLength(media, s),
-    );
+    const positions = row.non_linear
+      ? null
+      : platformPositions(
+          {
+            season: row.season,
+            episodeStart: row.episode_start,
+            episodeEnd: row.episode_end,
+            targetEpisodeStart: row.target_episode_start,
+          } as SegmentInput,
+          (s) => seasonLength(media, s),
+        );
     mapped.set(row.native_id, [
       ...(mapped.get(row.native_id) ?? []),
       { season: row.season, positions },
@@ -554,10 +591,14 @@ function lostSeasons(
   segments: readonly SegmentInput[],
 ): number[] {
   const restated = new Set(segments.map((s) => s.season));
-  const claimed = segments.map((s) => platformPositions(s, (x) => seasonLength(media, x)));
+  const claimed = segments
+    .filter((s) => !s.nonLinear)
+    .map((s) => platformPositions(s, (x) => seasonLength(media, x)));
   const lost = (target.mappedSeasons.get(canonicalId) ?? []).filter(
-    ({ season, positions: [a, b] }) =>
-      !restated.has(season) && claimed.some(([c, d]) => a <= d && c <= b),
+    ({ season, positions }) =>
+      !restated.has(season) &&
+      positions &&
+      claimed.some(([c, d]) => positions[0] <= d && c <= positions[1]),
   );
   return [...new Set(lost.map((s) => s.season))];
 }
@@ -583,6 +624,7 @@ function summarizeCandidate(run: JobRun, target: OpenTarget, candidate: FetchedC
               episodeStart: s.episodeStart,
               episodeEnd: s.episodeEnd,
               targetEpisodeStart: s.targetEpisodeStart,
+              ...(s.nonLinear ? { nonLinear: true } : {}),
             })),
             passesAutomaticCheck: run.passesGate(info, suggestedSegments),
             variantDescription: candidate.suggestedVariantDescription ?? null,
@@ -602,7 +644,10 @@ function buildAgentSystemPrompt(namespaces: readonly Namespace[]): string {
     "3. Leads: Douban's platform links, 360kan's play links, platform search, web search.",
     "   Douban has one subject per TV season. Video platforms often split or merge seasons.",
     "4. Check title, year, media type and episode count against the target. Prefer original audio over dubs or recuts.",
-    "5. A collection may hold several seasons, or a season may be split; express that with segments.",
+    "5. A collection may hold several seasons, or a season may be split; express that with linear segments when episodes correspond 1:1.",
+    "   When episode counts differ because the platform and catalog count variety broadcasts/extras differently (e.g. platform has 第1期上..第10期下 = 20 while TMDB includes 先导片/加更 = 47, and the collection spans the whole season),",
+    "   NEVER truncate to a shorter linear prefix like 1..20; inspect get_catalog_season + get_collection and submit { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.",
+    "   Match a substantive finale subtitle or final broadcast installment before claiming the whole season. Platform publication dates can be delayed. Map only the verified finite range for Part 1, using nonLinear when its episodes are grouped differently.",
     "6. passesAutomaticCheckWithDefaultMapping is a hint from a deterministic check, not a decision.",
     "   alreadyMappedToSeasons lists seasons of this media the collection already holds, with their platform positions:",
     "   it is not this season's unless it really holds both; then map this season onto positions those seasons do not use.",
@@ -753,6 +798,10 @@ interface OpenTarget {
 interface JobRun {
   ctx: ExplorationExecutionContext;
   budget: SessionBudget;
+  checkCoverage(
+    info: CollectionInfo,
+    segments: readonly SegmentInput[],
+  ): Promise<ReturnType<typeof seasonCoverageConflict>>;
   passesGate(info: CollectionInfo, segments: readonly SegmentInput[]): boolean;
   segmentMisfit(info: CollectionInfo, segments: readonly SegmentInput[]): string | null;
   baseSegments: SegmentInput[];
@@ -763,18 +812,39 @@ function createJobRun(
   catalog: CatalogEvidence,
   budget: SessionBudget,
 ): JobRun {
+  const seasonEpisodes: Record<number, readonly SeasonEpisode[]> = { ...catalog.seasonEpisodes };
+  const evidence = { ...catalog, seasonEpisodes };
+  const tmdbTvId = catalog.canonicalId.match(/^tv:(\d+)$/)?.[1];
   const segmentMisfit = (info: CollectionInfo, segments: readonly SegmentInput[]) =>
     checkSegmentsFitCollection(segments, info, (season) => seasonLength(ctx.media, season));
   return {
     ctx,
     budget,
     segmentMisfit,
+    async checkCoverage(info, segments) {
+      // Other catalogs provide their live episode list in the change request's evidence job.
+      if (catalog.namespace !== "tmdb") return null;
+      for (const { season } of seasonCoverageScopes(catalog, info.namespace, segments)) {
+        if (tmdbTvId && !seasonEpisodes[season]) {
+          seasonEpisodes[season] =
+            (await raceWithAbortSignal(
+              ctx.tmdbGateway.fetchSeasonEpisodes(tmdbTvId, season, budget.signal),
+              budget.signal,
+              BUDGET_EXCEEDED,
+            )) ?? [];
+        }
+      }
+      return seasonCoverageConflict(evidence, info, segments);
+    },
     // The whole gate, not Step 1 alone: Step 1 accepts the year and episode count of any season,
     // so another season's collection (same count, its own year) would pass as this season.
     passesGate: (info, segments) =>
       segmentMisfit(info, segments) === null &&
-      evaluateEvidenceGate({ catalog, collection: info, segments: normalizeSegments(segments) })
-        .decision === "pass",
+      evaluateEvidenceGate({
+        catalog: evidence,
+        collection: info,
+        segments: normalizeSegments(segments),
+      }).decision === "pass",
     baseSegments: defaultSegments(ctx.media, ctx.season),
   };
 }
@@ -813,6 +883,17 @@ async function submitMapping(
 ): Promise<PlatformExplorationOutcome | { error: string; message: string }> {
   const { ctx } = run;
   const namespace = target.namespace;
+  if (run.budget.expired()) return transientOutcome(run, target, BUDGET_EXCEEDED);
+  try {
+    const conflict = await run.checkCoverage(info, segments);
+    if (conflict) return { error: conflict.code.toUpperCase(), message: conflict.message };
+  } catch (error) {
+    target.transient = new PlatformTransient(
+      error instanceof Error ? error.message : "catalog_unavailable",
+    );
+    return transientOutcome(run, target, "catalog_unavailable");
+  }
+  if (run.budget.expired()) return transientOutcome(run, target, BUDGET_EXCEEDED);
   await ensureExplorationAgentUser(ctx.db);
   const variant = await resolveAgentVariantSubmission(
     ctx.db,
@@ -820,6 +901,7 @@ async function submitMapping(
     namespace,
     rawVariantDescription,
   );
+  if (run.budget.expired()) return transientOutcome(run, target, BUDGET_EXCEEDED);
   try {
     const cr = await createChangeRequest(
       ctx.db,
@@ -838,7 +920,7 @@ async function submitMapping(
         segments,
         now: ctx.now,
       },
-      { adapterRegistry: ctx.adapterRegistry, outbound: ctx.outbound, now: ctx.now },
+      { adapterRegistry: ctx.adapterRegistry, outbound: run.budget.outbound, now: ctx.now },
     );
     return { namespace, status: "submitted", changeRequestId: cr.id, nativeId: cr.nativeId };
   } catch (error) {
@@ -972,11 +1054,25 @@ async function prepareTarget(
   // Fast path: the others failed the same check (title, year, type or episode count). A
   // candidate a review corrected is checked, and submitted, with its corrected segments.
   const mapping = (c: FetchedCandidate) => c.suggestedSegments ?? run.baseSegments;
-  const passing = [...target.fetched.values()].filter(
-    (c) =>
-      lostSeasons(target, run.ctx.media, c.info.canonicalId, mapping(c)).length === 0 &&
-      run.passesGate(c.info, mapping(c)),
-  );
+  const passing: FetchedCandidate[] = [];
+  for (const candidate of target.fetched.values()) {
+    const segments = mapping(candidate);
+    if (
+      lostSeasons(target, ctx.media, candidate.info.canonicalId, segments).length ||
+      run.segmentMisfit(candidate.info, segments)
+    )
+      continue;
+    try {
+      if (candidate.suggestedSegments && (await run.checkCoverage(candidate.info, segments)))
+        continue;
+    } catch (error) {
+      target.transient = new PlatformTransient(
+        error instanceof Error ? error.message : "catalog_unavailable",
+      );
+      continue;
+    }
+    if (run.passesGate(candidate.info, segments)) passing.push(candidate);
+  }
   if (passing.length === 1) {
     const result = await submitMapping(
       run,
@@ -1057,7 +1153,7 @@ async function runAgentSession(
     {
       name: "submit_mapping",
       description:
-        "Conclude a namespace with a fetched collection. For TV, segments map baseline episodes to the collection's episode indexes: baseline episodes episodeStart..episodeEnd of `season` play as collection episodes targetEpisodeStart onward. Omit segments to map the requested season 1:1.",
+        "Conclude a namespace with a fetched collection. For TV, linear segments map baseline episodes episodeStart..episodeEnd of `season` to collection episodes targetEpisodeStart onward. Omit segments to map the requested season 1:1. Set nonLinear: true with { episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 } when a collection holds the full season whose episode granularity differs from the baseline catalog (e.g. variety shows where TMDB counts extras/prologues alongside broadcast parts); never truncate a full season to a shorter linear prefix unless the collection genuinely stops at that episode.",
       parameters: {
         type: "object",
         properties: {
@@ -1076,7 +1172,11 @@ async function runAgentSession(
                 episodeStart: { type: "integer" },
                 episodeEnd: { type: ["integer", "null"] },
                 targetEpisodeStart: { type: "integer" },
-                nonLinear: { type: "boolean" },
+                nonLinear: {
+                  type: "boolean",
+                  description:
+                    "True when the segment links the collection at season level without 1:1 episode mapping (e.g. variety shows).",
+                },
               },
               required: ["season", "episodeStart", "targetEpisodeStart"],
             },

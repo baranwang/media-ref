@@ -293,6 +293,15 @@ test("issue #98 repro: pending CR injected by includeUnconfirmed is excluded fro
   ]);
 });
 
+test("preserves non-linear season coverage in the proposed bar", () => {
+  const cr = makeChangeRequest({
+    segments: [{ season: 1, start: 1, end: null, targetStart: 1, nonLinear: true }],
+  });
+  const preview = buildReviewCoveragePreview(cr, makeMedia([]));
+  expect(preview.existingSegments).toEqual([]);
+  expect(preview.afterSegments).toMatchObject([{ start: 1, end: 121, nonLinear: true }]);
+});
+
 test("excludes other pending CRs and seeds from '现在' while reporting otherPendingCount", () => {
   const cr = makeChangeRequest();
   const confirmedSeg: CoverageSegment = {

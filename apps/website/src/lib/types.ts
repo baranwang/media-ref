@@ -18,6 +18,7 @@ export interface CoverageSegment {
   /** 1-based inclusive end episode (or season in all-seasons mode) */
   end: number;
   targetStart?: number;
+  nonLinear?: boolean;
   /** An authority catalog ID is independent of change requests. */
   isExternalId?: boolean;
   status: "confirmed" | "pending" | "muted";
@@ -165,6 +166,7 @@ export interface ChangeRequestSegmentView {
   start: number;
   end: number | null;
   targetStart: number;
+  nonLinear?: boolean;
 }
 
 /** What the review agent concluded, from `evidence.reviewAgent`. */

@@ -6,6 +6,8 @@ import type {
   SeasonSnapshot,
 } from "@media-ref/client";
 import type { CollectionInfo } from "./adapters/types.ts";
+import { isPlatformNamespace } from "@media-ref/client";
+import { seasonCoverageConflict, type SeasonEpisode } from "./season-coverage.ts";
 
 export type EvidenceGateDecision = "pass" | "needs_review";
 
@@ -18,6 +20,8 @@ export interface CatalogEvidence {
   aliases?: readonly string[];
   year: number | null;
   seasons: readonly SeasonSnapshot[];
+  /** Fetched catalog episodes used to verify the last broadcast and part-season ranges. */
+  seasonEpisodes?: Readonly<Record<number, readonly SeasonEpisode[]>>;
   /**
    * Air year per episode, by season then episode number. Fetched only for seasons a submitted
    * segment starts partway through; segment year checks fall back to the season premiere year.
@@ -63,6 +67,9 @@ export type Step2ConflictCode =
   | "segment_season_episode_count_missing"
   | "segment_episode_out_of_range"
   | "segment_episode_count_mismatch"
+  | "partial_segment_spans_full_season"
+  | "partial_segment_outside_prefix"
+  | "season_finale_unverified"
   | "target_episode_start_mismatch";
 
 export interface EvaluateEvidenceGateStep1Options {
@@ -695,7 +702,11 @@ function segmentStartYear(
   catalog: CatalogEvidence,
   segment: Pick<NormalizedSegment, "season" | "episodeStart">,
 ): number | null {
+  const airDate = catalog.seasonEpisodes?.[segment.season]?.find(
+    (e) => e.episode === segment.episodeStart,
+  )?.airDate;
   const year =
+    (airDate ? Number(airDate.slice(0, 4)) : null) ??
     catalog.episodeAirYears?.[segment.season]?.[segment.episodeStart] ??
     catalog.seasons.find((s) => s.season === segment.season)?.airYear ??
     null;
@@ -1128,6 +1139,36 @@ export function isNonOriginalVariantDescription(description: string | null | und
   return LANGUAGE_DUB_HINT_PATTERN.test(normalized);
 }
 
+function checkSegmentEpisodeBounds(
+  seg: NormalizedSegment,
+  seasonSnapshot: SeasonSnapshot,
+  conflicts: EvidenceGateConflict[],
+): boolean {
+  if (seg.episodeStart > seasonSnapshot.episodeCount) {
+    conflicts.push({
+      step: 2,
+      code: "segment_episode_out_of_range",
+      field: "segments.episodeStart",
+      message: `Segment episodeStart (${seg.episodeStart}) exceeds season ${seg.season} episodeCount (${seasonSnapshot.episodeCount})`,
+      catalogValue: seasonSnapshot.episodeCount,
+      collectionValue: seg.episodeStart,
+    });
+    return false;
+  }
+  if (seg.episodeEnd !== null && seg.episodeEnd > seasonSnapshot.episodeCount) {
+    conflicts.push({
+      step: 2,
+      code: "segment_episode_out_of_range",
+      field: "segments.episodeEnd",
+      message: `Segment episodeEnd (${seg.episodeEnd}) exceeds season ${seg.season} episodeCount (${seasonSnapshot.episodeCount})`,
+      catalogValue: seasonSnapshot.episodeCount,
+      collectionValue: seg.episodeEnd,
+    });
+    return false;
+  }
+  return true;
+}
+
 export function evaluateEvidenceGateStep2(
   context: EvidenceGateStep2Context,
 ): EvidenceGateStep2Result {
@@ -1250,6 +1291,37 @@ export function evaluateEvidenceGateStep2(
     }
   }
 
+  // 3. Validate baseline episode bounds for non-linear segments too when season length is known
+  for (const seg of context.segments) {
+    if (!seg.nonLinear) {
+      continue;
+    }
+    const seasonSnapshot = seasonMap.get(seg.season);
+    if (
+      seasonSnapshot &&
+      Number.isInteger(seasonSnapshot.episodeCount) &&
+      seasonSnapshot.episodeCount > 0
+    ) {
+      checkSegmentEpisodeBounds(seg, seasonSnapshot, conflicts);
+    }
+  }
+
+  if (
+    isPlatformNamespace(context.collection.namespace) &&
+    context.segments.some((s) => s.nonLinear) &&
+    context.collection.featureEpisodes.length === 0
+  ) {
+    conflicts.push({
+      step: 2,
+      code: "segment_episode_count_missing",
+      field: "featureEpisodes",
+      message: `${context.collection.canonicalId} has no fetched feature episodes.`,
+    });
+  } else {
+    const coverage = seasonCoverageConflict(context.catalog, context.collection, context.segments);
+    if (coverage) conflicts.push({ step: 2, field: "segments", ...coverage });
+  }
+
   // Non-linear segments have no one-to-one episode mapping.
   const linearSegments = context.segments.filter((s) => !s.nonLinear);
   if (linearSegments.length === 0) {
@@ -1317,29 +1389,8 @@ export function evaluateEvidenceGateStep2(
       continue;
     }
 
-    if (seg.episodeStart > seasonSnapshot.episodeCount) {
+    if (!checkSegmentEpisodeBounds(seg, seasonSnapshot, conflicts)) {
       canVerifyTotals = false;
-      conflicts.push({
-        step: 2,
-        code: "segment_episode_out_of_range",
-        field: "segments.episodeStart",
-        message: `Segment episodeStart (${seg.episodeStart}) exceeds season ${seg.season} episodeCount (${seasonSnapshot.episodeCount})`,
-        catalogValue: seasonSnapshot.episodeCount,
-        collectionValue: seg.episodeStart,
-      });
-      continue;
-    }
-
-    if (seg.episodeEnd !== null && seg.episodeEnd > seasonSnapshot.episodeCount) {
-      canVerifyTotals = false;
-      conflicts.push({
-        step: 2,
-        code: "segment_episode_out_of_range",
-        field: "segments.episodeEnd",
-        message: `Segment episodeEnd (${seg.episodeEnd}) exceeds season ${seg.season} episodeCount (${seasonSnapshot.episodeCount})`,
-        catalogValue: seasonSnapshot.episodeCount,
-        collectionValue: seg.episodeEnd,
-      });
       continue;
     }
 

@@ -690,4 +690,183 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
     ]);
     expect(result.info.featureEpisodeCount).toBe(4);
   });
+
+  test("follows cursor pagination via module_params.has_next and next_page_context when tabs are absent", async () => {
+    const requestedContexts: string[] = [];
+    const makeBroadcastItems = (startPeriod: number, endPeriod: number) => {
+      const items: Array<Record<string, unknown>> = [];
+      for (let p = startPeriod; p <= endPeriod; p += 1) {
+        for (const part of ["上", "下"]) {
+          items.push({
+            vid: `v_p${p}_${part}`,
+            title: `第${p}期${part}`,
+            c_title_output: `第${p}期${part}`,
+            play_title: `第${p}期${part}`,
+            is_trailer: "0",
+            publish_date: `2025-11-${String(p).padStart(2, "0")}`,
+          });
+        }
+      }
+      return items;
+    };
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const body = JSON.parse(request.body ?? "{}") as {
+          page_params?: { page_id?: string; page_context?: string };
+        };
+        if (body.page_params?.page_id === "detail_page_introduction") {
+          return jsonResponse(
+            request.url,
+            makeIntroPayload({ title: "现在就出发", year: "2025", type: "10", type_name: "综艺" }),
+          );
+        }
+        const ctx = body.page_params?.page_context ?? "";
+        requestedContexts.push(ctx);
+        if (ctx === "") {
+          return jsonResponse(request.url, {
+            ret: 0,
+            msg: "",
+            data: {
+              module_list_datas: [
+                {
+                  module_datas: [
+                    {
+                      module_params: { has_next: "1", next_page_context: "cursor_2" },
+                      item_data_lists: {
+                        item_datas: makeBroadcastItems(1, 6).map((item_params) => ({
+                          item_params,
+                        })),
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          });
+        }
+        if (ctx === "cursor_2") {
+          return jsonResponse(request.url, {
+            ret: 0,
+            msg: "",
+            data: {
+              module_list_datas: [
+                {
+                  module_datas: [
+                    {
+                      module_params: { has_next: "0", next_page_context: "" },
+                      item_data_lists: {
+                        item_datas: makeBroadcastItems(7, 10).map((item_params) => ({
+                          item_params,
+                        })),
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          });
+        }
+        throw new Error(`Unexpected page_context: ${ctx}`);
+      },
+    });
+
+    const result = await tencentAdapter.fetchCollection("mzc00200znyfa5u", outbound);
+    expect(result.status).toBe("found");
+    if (result.status !== "found") return;
+    expect(requestedContexts).toEqual(["", "cursor_2"]);
+    expect(result.info.featureEpisodeCount).toBe(20);
+    expect(result.info.featureEpisodes[0]?.title).toBe("第1期上");
+    expect(result.info.featureEpisodes[19]?.title).toBe("第10期下");
+  });
+
+  test("keeps module and tab order through independent cursors, including empty intermediate pages", async () => {
+    const module = (numbers: number[], params: Record<string, unknown> = {}) => ({
+      module_params: params,
+      item_data_lists: {
+        item_datas: numbers.map((n) => ({
+          item_params: { vid: `v${n}`, title: String(n), is_trailer: "0" },
+        })),
+      },
+    });
+    const next = (cursor: string) => ({ has_next: true, next_page_context: cursor });
+    const tabs = [
+      { selected: false, page_context: "first" },
+      { selected: true, page_context: "second" },
+    ];
+    const pages: Record<string, ReturnType<typeof module>[]> = {
+      "": [module([3], { tabs, ...next("second_more") }), module([5], next("last_more"))],
+      first: [module([1], { tabs, ...next("empty") })],
+      empty: [module([], next("first_more"))],
+      first_more: [module([2], next("empty"))],
+      second_more: [module([4])],
+      last_more: [module([6])],
+    };
+    const seen: string[] = [];
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const { page_params: params } = JSON.parse(request.body!);
+        if (params.page_id === "detail_page_introduction")
+          return jsonResponse(request.url, makeIntroPayload({ title: "剧集", type: "2" }));
+        seen.push(params.page_context);
+        return jsonResponse(request.url, {
+          ret: 0,
+          data: { module_list_datas: [{ module_datas: pages[params.page_context] }] },
+        });
+      },
+    });
+    const result = await tencentAdapter.fetchCollection("mzc002007knmh3g", outbound);
+    expect(result.status).toBe("found");
+    if (result.status === "found")
+      expect(result.info.featureEpisodes.map((e) => e.title)).toEqual([
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+      ]);
+    expect(seen).toEqual(["", "first", "empty", "first_more", "second_more", "last_more"]);
+  });
+
+  test("preserves tab order when a non-first tab is initially selected", async () => {
+    const makeEps = (from: number, to: number) =>
+      Array.from({ length: to - from + 1 }, (_, i) => ({
+        vid: `v_${from + i}`,
+        title: String(from + i),
+        c_title_output: String(from + i),
+        is_trailer: "0",
+      }));
+    const tabs = [
+      { begin: "1", end: "30", selected: false, page_context: "ctx_1_30" },
+      { begin: "31", end: "40", selected: true, page_context: "ctx_31_40" },
+    ];
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const body = JSON.parse(request.body ?? "{}") as {
+          page_params?: { page_id?: string; page_context?: string };
+        };
+        if (body.page_params?.page_id === "detail_page_introduction") {
+          return jsonResponse(
+            request.url,
+            makeIntroPayload({ title: "长剧", year: "2025", type: "2" }),
+          );
+        }
+        const ctx = body.page_params?.page_context ?? "";
+        if (ctx === "") {
+          return jsonResponse(request.url, makeEpisodePagePayload(makeEps(31, 40), tabs));
+        }
+        if (ctx === "ctx_1_30") {
+          return jsonResponse(request.url, makeEpisodePagePayload(makeEps(1, 30), tabs));
+        }
+        throw new Error(`Unexpected page_context: ${ctx}`);
+      },
+    });
+
+    const result = await tencentAdapter.fetchCollection("mzc00200orderby", outbound);
+    expect(result.status).toBe("found");
+    if (result.status !== "found") return;
+    expect(result.info.featureEpisodeCount).toBe(40);
+    expect(result.info.featureEpisodes[0]?.title).toBe("1");
+    expect(result.info.featureEpisodes[30]?.title).toBe("31");
+  });
 });

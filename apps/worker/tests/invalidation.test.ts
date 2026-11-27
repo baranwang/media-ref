@@ -1415,6 +1415,14 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     const outbound = createFakeOutboundClient({
       fetchExternal: (request) => {
         if (request.kind === "catalog" && request.namespace === "tmdb") {
+          if (new URL(request.url).pathname.endsWith("/tv/95479/season/1")) {
+            return jsonResponse(request.url, {
+              episodes: Array.from({ length: 47 }, (_, i) => ({
+                episode_number: i + 1,
+                name: i === 46 ? "重逢之约" : `原版故事 ${i + 1}`,
+              })),
+            });
+          }
           if (request.url.includes("/tv/95479")) {
             // TMDB S1 has 47 episodes; platform splits S1 into a 24-ep collection (part 1)
             return jsonResponse(request.url, {
@@ -1472,7 +1480,9 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
                 jp_title: "呪術廻戦",
                 type: 1,
                 publish: { pub_time: "2020-10-03 01:25:00" },
-                episodes: makeBilibiliEpisodes(10),
+                episodes: makeBilibiliEpisodes(10).map((ep, i) =>
+                  i === 9 ? { ...ep, long_title: "重逢之约" } : ep,
+                ),
               },
             });
           }

@@ -28,7 +28,7 @@ import { CommentComposer, CommentThread } from "#/components/comment-thread";
 import { ReviewAgentNote } from "#/components/review-agent-note";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
-import { formatDateTime, formatEpisodeRange } from "#/lib/format";
+import { formatDateTime, formatSegmentEpisodeLabel } from "#/lib/format";
 import { conflictTagFor } from "#/lib/mappers";
 import { cardsByKeyQuery, changeRequestQuery } from "#/lib/queries";
 import type { ChangeRequestItem } from "#/lib/types";
@@ -45,7 +45,7 @@ function isMissing(error: unknown): boolean {
 }
 
 function segmentLabel(s: ChangeRequestItem["segments"][number]): string {
-  return `第 ${s.season} 季 ${formatEpisodeRange(s.start, s.end)}`;
+  return `第 ${s.season} 季 ${formatSegmentEpisodeLabel(s.start, s.end, s.nonLinear)}`;
 }
 
 function elapsedLabel(from: string, to: string): string {
@@ -297,7 +297,7 @@ function ChangeRequestDetailPage() {
                       {cr.segments.map((s) => (
                         <span key={`${s.season}-${s.start}`}>
                           {segmentLabel(s)}
-                          {s.targetStart !== s.start && (
+                          {!s.nonLinear && s.targetStart !== s.start && (
                             <span className="font-normal text-muted-foreground">
                               {" "}
                               · 平台从第 {s.targetStart} 集起

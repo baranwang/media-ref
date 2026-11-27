@@ -33,6 +33,7 @@ import {
   type CatalogTargetSnapshot,
 } from "./catalog-gateway.ts";
 import { fulfillCoveredDemandsForAssociationInTx } from "./demands.ts";
+import { fetchSegmentEpisodeEvidence } from "./season-coverage.ts";
 import { evaluateEvidenceGate, type EvidenceGateStep2Evaluator } from "./evidence-gate.ts";
 import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
 import { recordLead } from "./leads.ts";
@@ -40,6 +41,7 @@ import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { extractCollectionDisplay, isUuid, type AssociationNamespace } from "./media-service.ts";
 import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
 import {
+  createTmdbGateway,
   DEFAULT_TMDB_API_BASE_URL,
   DEFAULT_TMDB_LANGUAGE,
   type TmdbGateway,
@@ -2218,7 +2220,13 @@ export function createSeedEvidenceCheckJobHandler(
     }));
 
     const gate = evaluateEvidenceGate({
-      catalog: catalogEvidence,
+      catalog: await fetchSegmentEpisodeEvidence(
+        options.catalogConfig?.tmdbGateway ??
+          options.tmdbGateway ??
+          createTmdbGateway(ctx.outbound, options.catalogConfig?.tmdb ?? options.tmdbConfig),
+        catalogEvidence,
+        [{ namespace: assoc.namespace, segments }],
+      ),
       collection: collectionResult.info,
       segments,
       setDefaultVariant: Boolean(variantRow?.is_default),
