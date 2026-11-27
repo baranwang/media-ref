@@ -45,7 +45,7 @@ export interface ExplorationActivitySummary {
 export type ExplorationActivityFilter = "all" | "found" | "not_found";
 
 const MAX_REASON_LENGTH = 200;
-const SUBMITTED_FILTER = sql<boolean>`result->'platformOutcomes' @> '[{"status":"submitted"}]'::jsonb`;
+const FOUND_FILTER = sql<boolean>`(result->'platformOutcomes' @> '[{"status":"submitted"}]'::jsonb or result->'platformOutcomes' @> '[{"status":"already_confirmed"}]'::jsonb)`;
 
 /** Internal outcome codes → what a visitor reads. */
 const REASON_TEXT: Record<string, string> = {
@@ -188,9 +188,9 @@ export async function listExplorationActivity(
     recentQuery = recentQuery.where("completed_at", "<", options.before);
   }
   if (filter === "found") {
-    recentQuery = recentQuery.where(SUBMITTED_FILTER);
+    recentQuery = recentQuery.where(FOUND_FILTER);
   } else if (filter === "not_found") {
-    recentQuery = recentQuery.where(sql<boolean>`not (${SUBMITTED_FILTER})`);
+    recentQuery = recentQuery.where(sql<boolean>`not (${FOUND_FILTER})`);
   }
   const recentRows = await recentQuery.execute();
   const page = recentRows.slice(0, options.limit);
@@ -507,7 +507,7 @@ export async function listExplorationActivity(
       .selectFrom("background_jobs")
       .select([
         sql<string>`count(*)`.as("explored"),
-        sql<string>`count(*) filter (where ${SUBMITTED_FILTER})`.as("found"),
+        sql<string>`count(*) filter (where ${FOUND_FILTER})`.as("found"),
       ])
       .where("job_type", "=", EXPLORATION_JOB_TYPE)
       .where("status", "=", "completed")

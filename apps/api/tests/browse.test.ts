@@ -268,6 +268,7 @@ describe("BrowseService", () => {
           { namespace: "youku", status: "transient_error", reason: "AI Gateway (x) error: 502" },
         ]),
         job(30, [{ namespace: "tencent", status: "not_found", reason: "no_discovery_candidates" }]),
+        job(40, [{ namespace: "mgtv", status: "already_confirmed" }]),
         {
           job_type: "exploration",
           status: "leased" as const,
@@ -289,7 +290,7 @@ describe("BrowseService", () => {
       ["iqiyi", "not_found", "Only user uploads, no series."],
       ["youku", "retry", "暂时出了问题，稍后再找"],
     ]);
-    expect(res.last24h).toMatchObject({ explored: 2, found: 1, approved: 1, inReview: 0 });
+    expect(res.last24h).toMatchObject({ explored: 3, found: 2, approved: 1, inReview: 0 });
     expect(JSON.stringify(res)).not.toContain('"d"');
 
     const next = await rpc.browse.listExplorationActivity({ before: res.nextBefore! });
