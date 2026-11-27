@@ -373,6 +373,7 @@ export const browseServiceImpl: ServiceImpl<typeof proto.BrowseService> = {
               status: p.status,
               ...(p.reason ? { reason: p.reason } : {}),
               ...(p.changeRequestId ? { changeRequestId: p.changeRequestId } : {}),
+              ...(p.liveChangeRequestId ? { liveChangeRequestId: p.liveChangeRequestId } : {}),
             }),
           ),
         }),

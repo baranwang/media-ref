@@ -26,7 +26,7 @@ describe("TmdbGateway", () => {
             status: 200,
             headers: { "content-type": "application/json" },
             url: request.url,
-            body: JSON.stringify({ imdb_id: "tt0000042", tvdb_id: 4242 }),
+            body: JSON.stringify({ imdb_id: "tt0000042", tvdb_id: 4242, trakt_id: "0042" }),
           };
         }
         if (request.namespace === "tmdb" && request.url.includes("/tv/42")) {
@@ -284,5 +284,115 @@ describe("TmdbGateway", () => {
     await expect(
       lookupTraktId(outbound, { traktClientId: "cid" }, "tv", "1429"),
     ).resolves.toBeNull();
+  });
+
+  test("search maps year parameter by media type and fetchIdentityDetails extracts aliases and credits", async () => {
+    const requestedUrls: string[] = [];
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        requestedUrls.push(request.url);
+        const parsed = new URL(request.url);
+        if (parsed.pathname.endsWith("/search/tv")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              results: [
+                {
+                  id: 311842,
+                  name: "FX战士久留美",
+                  original_name: "FX戦士くるみちゃん",
+                  first_air_date: "2026-10-01",
+                },
+              ],
+            }),
+          };
+        }
+        if (
+          parsed.pathname.endsWith("/search/movie") ||
+          parsed.pathname.endsWith("/search/multi")
+        ) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({ results: [] }),
+          };
+        }
+        if (parsed.pathname.endsWith("/find/889900")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({ movie_results: [], tv_results: [{ id: 311842 }] }),
+          };
+        }
+        if (parsed.pathname.endsWith("/tv/311842")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 311842,
+              name: "FX战士久留美",
+              original_name: "FX戦士くるみちゃん",
+              first_air_date: "2026-10-01",
+              seasons: [{ season_number: 1, episode_count: 12, air_date: "2026-10-01" }],
+              external_ids: { tvdb_id: 889900 },
+              alternative_titles: {
+                results: [{ title: "FX Fighter Kurumi-chan" }],
+              },
+              translations: {
+                translations: [{ data: { name: "FX戰士久留美" } }, { data: { name: "" } }],
+              },
+              credits: {
+                crew: [{ job: "Director", name: "小川優樹" }],
+                cast: [{ name: "鈴木愛奈" }],
+              },
+              production_companies: [{ name: "Passione" }],
+            }),
+          };
+        }
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+
+    const gateway = createTmdbGateway(outbound, { accessToken: "tok", syncTrakt: false });
+
+    const tvHits = await gateway.search("FX战士久留美", { type: "tv", year: 2026 });
+    expect(tvHits).toEqual([
+      {
+        nativeId: "tv:311842",
+        type: "tv",
+        title: "FX战士久留美",
+        originalTitle: "FX戦士くるみちゃん",
+        year: 2026,
+      },
+    ]);
+    await gateway.search("Fight Club", { type: "movie", year: 1999 });
+    await gateway.search("Fight Club", { year: 1999 });
+
+    expect(new URL(requestedUrls[0]!).searchParams.get("first_air_date_year")).toBe("2026");
+    expect(new URL(requestedUrls[1]!).searchParams.get("year")).toBe("1999");
+    expect(new URL(requestedUrls[2]!).searchParams.get("year")).toBeNull();
+    expect(new URL(requestedUrls[2]!).searchParams.get("first_air_date_year")).toBeNull();
+
+    expect(await gateway.findByTvdbId?.("889900")).toEqual([{ type: "tv", id: "311842" }]);
+
+    const details = await gateway.fetchIdentityDetails?.("tv", "311842");
+    expect(details).toMatchObject({
+      type: "tv",
+      snapshot: {
+        title: "FX战士久留美",
+        originalTitle: "FX戦士くるみちゃん",
+        year: 2026,
+      },
+      aliases: ["FX Fighter Kurumi-chan", "FX戰士久留美"],
+      directorsAndCreators: ["小川優樹"],
+      productionCompanies: ["Passione"],
+      cast: ["鈴木愛奈"],
+      externalIds: { tmdb: "tv:311842", imdb: null, tvdb: "889900", trakt: null },
+    });
   });
 });

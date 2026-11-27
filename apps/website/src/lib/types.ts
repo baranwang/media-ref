@@ -118,6 +118,7 @@ export interface DemandItem {
 
 export type ExplorationStatus =
   | "approved"
+  | "covered"
   | "in_review"
   | "rejected"
   | "not_found"
@@ -129,6 +130,7 @@ export interface ExplorationPlatformView {
   status: ExplorationStatus;
   reason: string | null;
   changeRequestId: string | null;
+  liveChangeRequestId: string | null;
 }
 
 export interface ExplorationItem {

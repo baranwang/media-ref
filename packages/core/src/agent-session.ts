@@ -93,8 +93,10 @@ export function createSessionBudget(
   };
 }
 
-/** Totals for one agent session. */
+/** Totals across the tool sessions of one task. */
 export interface SessionUsage {
+  /** Model turns attempted, including calls that time out. */
+  steps?: number;
   tokens: number;
   /** Per routed model, for the tokens.ci report. */
   byModel: Map<string, PiUsageBucket>;
@@ -163,7 +165,7 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
   // Searching may use the time up to the wrap-up reserve, not beyond: a slow model turn or tool
   // batch started just before wrap-up would otherwise eat the reserve and end in a timeout.
   const searchLeftMs = () => budget.remainingMs() - config.maxDurationMs * WRAP_UP_REMAINING_SHARE;
-  for (let step = 0; step < config.maxSteps; step += 1) {
+  for (let step = usage.steps ?? 0; step < config.maxSteps; step += 1) {
     if (budget.expired()) {
       return { kind: "time_up" };
     }
@@ -179,6 +181,7 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
       wrappingUp = true;
       messages.push({ role: "user", content: input.wrapUpMessage() });
     }
+    usage.steps = step + 1;
     let response;
     try {
       response = await budget.outbound.invokeModel({
@@ -276,6 +279,9 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
         continue;
       }
       reply(call.id, call.name, await input.conclude(call, step));
+      if (!input.done() && budget.expired()) {
+        return { kind: "time_up" };
+      }
     }
     if (input.done()) {
       return { kind: "concluded" };

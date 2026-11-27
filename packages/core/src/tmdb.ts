@@ -29,8 +29,16 @@ export interface TmdbMediaFetchResult {
   externalIds: TmdbExternalIdsSync;
 }
 
+export interface TmdbIdentityDetails extends TmdbMediaFetchResult {
+  aliases: string[];
+  directorsAndCreators: string[];
+  productionCompanies: string[];
+  cast: string[];
+}
+
 export interface TmdbFetchMediaOptions {
   throwOnNotFound?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface TmdbChangesOptions {
@@ -68,10 +76,28 @@ export interface TmdbGateway {
     options?: TmdbFetchMediaOptions,
   ): Promise<TmdbMediaFetchResult | null>;
   fetchChanges(mediaType: MediaType, options: TmdbChangesOptions): Promise<TmdbChangesResult>;
-  /** TMDB entries whose IMDb ID is `imdbId` (`/find`); empty when there are none. */
-  findByImdbId(imdbId: string): Promise<Array<{ type: MediaType; id: string }>>;
+  /** Movie/TV matches; the optional count includes other /find result types too. */
+  findByImdbId(
+    imdbId: string,
+    reportCount?: (count: number) => void,
+    signal?: AbortSignal,
+  ): Promise<ParsedTmdbNativeId[]>;
+  findByTvdbId?(
+    tvdbId: string,
+    reportCount?: (count: number) => void,
+    signal?: AbortSignal,
+  ): Promise<ParsedTmdbNativeId[]>;
+  /** Rich identity metadata (translations, alternative titles, credits) for matching without an IMDb ID. */
+  fetchIdentityDetails?(
+    tmdbType: MediaType,
+    tmdbId: string,
+    signal?: AbortSignal,
+  ): Promise<TmdbIdentityDetails | null>;
   /** TMDB title search (`/search/{tv,movie,multi}`), at most 10 hits. */
-  search(query: string, options?: { type?: MediaType; year?: number }): Promise<CatalogSearchHit[]>;
+  search(
+    query: string,
+    options?: { type?: MediaType; year?: number; onTruncated?: () => void; signal?: AbortSignal },
+  ): Promise<CatalogSearchHit[]>;
   /** Trakt title search, at most 10 hits. */
   searchTrakt(query: string, options?: { type?: MediaType }): Promise<CatalogSearchHit[]>;
   /** One Trakt entry by native ID (`show:123` / `movie:123`); null when Trakt does not have it. */
@@ -207,12 +233,111 @@ function extractExternalIdsBlock(
     trakt = `${tmdbType === "movie" ? "movie" : "show"}:${rawTraktId}`;
   } else {
     const rawTraktString = nonEmptyString(record.trakt_id);
-    if (rawTraktString) {
+    if (rawTraktString && !/^\d+$/.test(rawTraktString)) {
       trakt = rawTraktString;
     }
   }
 
   return { imdb, tvdb, trakt };
+}
+
+function extractTmdbAliases(
+  data: Record<string, unknown>,
+  primaryTitle: string,
+  originalTitle: string | null,
+): string[] {
+  const seen = new Set<string>([primaryTitle]);
+  if (originalTitle) {
+    seen.add(originalTitle);
+  }
+  const aliases: string[] = [];
+  const push = (val: unknown) => {
+    const str = nonEmptyString(val);
+    if (!str || seen.has(str)) {
+      return;
+    }
+    seen.add(str);
+    aliases.push(str);
+  };
+
+  const alt = data.alternative_titles as Record<string, unknown> | undefined;
+  const altRows = Array.isArray(alt?.titles)
+    ? alt.titles
+    : Array.isArray(alt?.results)
+      ? alt.results
+      : [];
+  for (const row of altRows) {
+    if (row && typeof row === "object") {
+      push((row as Record<string, unknown>).title);
+    }
+  }
+
+  const trans = data.translations as Record<string, unknown> | undefined;
+  const transRows = Array.isArray(trans?.translations) ? trans.translations : [];
+  for (const row of transRows) {
+    const entry = row && typeof row === "object" ? (row as Record<string, unknown>) : null;
+    const tData = entry?.data as Record<string, unknown> | undefined;
+    if (tData) {
+      push(tData.title);
+      push(tData.name);
+    }
+  }
+
+  return aliases;
+}
+
+function extractTmdbCredits(data: Record<string, unknown>): {
+  directorsAndCreators: string[];
+  productionCompanies: string[];
+  cast: string[];
+} {
+  const directors: string[] = [];
+  const cast: string[] = [];
+  const companies: string[] = [];
+  const pushUnique = (list: string[], val: unknown) => {
+    const s = nonEmptyString(val);
+    if (s && !list.includes(s)) {
+      list.push(s);
+    }
+  };
+
+  const credits = data.credits as Record<string, unknown> | undefined;
+  if (Array.isArray(credits?.crew)) {
+    for (const member of credits.crew) {
+      const m = member && typeof member === "object" ? (member as Record<string, unknown>) : null;
+      if (m && m.job === "Director") {
+        pushUnique(directors, m.name);
+      }
+    }
+  }
+  if (Array.isArray(data.created_by)) {
+    for (const creator of data.created_by) {
+      const c =
+        creator && typeof creator === "object" ? (creator as Record<string, unknown>) : null;
+      if (c) {
+        pushUnique(directors, c.name);
+      }
+    }
+  }
+  if (Array.isArray(credits?.cast)) {
+    for (const actor of credits.cast.slice(0, 15)) {
+      const a = actor && typeof actor === "object" ? (actor as Record<string, unknown>) : null;
+      if (a) {
+        pushUnique(cast, a.name);
+      }
+    }
+  }
+  if (Array.isArray(data.production_companies)) {
+    for (const company of data.production_companies) {
+      const p =
+        company && typeof company === "object" ? (company as Record<string, unknown>) : null;
+      if (p) {
+        pushUnique(companies, p.name);
+      }
+    }
+  }
+
+  return { directorsAndCreators: directors, productionCompanies: companies, cast };
 }
 
 export function isTraktSyncEnabled(config?: TmdbGatewayConfig): boolean {
@@ -289,6 +414,7 @@ export async function lookupTraktId(
   config: TmdbGatewayConfig,
   tmdbType: MediaType,
   tmdbId: string,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   const traktType = tmdbType === "movie" ? "movie" : "show";
   const baseUrl = trimTrailingSlash(config.traktApiBaseUrl ?? DEFAULT_TRAKT_API_BASE_URL);
@@ -303,6 +429,7 @@ export async function lookupTraktId(
       method: "GET",
       headers,
       timeoutMs: config.timeoutMs,
+      signal,
     });
     if (response.status < 200 || response.status >= 300) {
       return null;
@@ -425,43 +552,188 @@ export function createTmdbGateway(
     return { ok: true, data: payload as Record<string, unknown> };
   }
 
+  const findByExternalId = async (
+    externalId: string,
+    externalSource: "imdb_id" | "tvdb_id",
+    reportCount?: (count: number) => void,
+    signal?: AbortSignal,
+  ): Promise<ParsedTmdbNativeId[]> => {
+    const fetched = await fetchTmdbJson(
+      buildTmdbUrl(`/find/${encodeURIComponent(externalId)}`, { external_source: externalSource }),
+      `find:${externalSource}:${externalId}`,
+      signal,
+    );
+    if (!fetched.ok) {
+      return [];
+    }
+    reportCount?.(
+      Object.entries(fetched.data).reduce(
+        (count, [key, rows]) =>
+          count + (key.endsWith("_results") && Array.isArray(rows) ? rows.length : 0),
+        0,
+      ),
+    );
+    const found: ParsedTmdbNativeId[] = [];
+    for (const [key, type] of [
+      ["movie_results", "movie"],
+      ["tv_results", "tv"],
+    ] as const) {
+      const rows = fetched.data[key];
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const id = parsePositiveIdString((row as Record<string, unknown> | null)?.id);
+        if (id) {
+          found.push({ type, id });
+        }
+      }
+    }
+    return found;
+  };
+
+  const fetchMediaWithAppend = async (
+    tmdbType: MediaType,
+    tmdbId: string,
+    appendToResponse: string,
+    options?: TmdbFetchMediaOptions,
+  ): Promise<{ base: TmdbMediaFetchResult; data: Record<string, unknown> } | null> => {
+    const detailsUrl = buildTmdbUrl(`/${tmdbType}/${encodeURIComponent(tmdbId)}`, {
+      append_to_response: appendToResponse,
+      language,
+    });
+
+    const fetched = await fetchTmdbJson(detailsUrl, `${tmdbType}:${tmdbId}`, options?.signal);
+    if (!fetched.ok) {
+      if (options?.throwOnNotFound) {
+        throw new TmdbGatewayError(
+          "TMDB_NOT_FOUND",
+          `TMDB media not found for ${tmdbType}:${tmdbId}`,
+          404,
+        );
+      }
+      return null;
+    }
+
+    const data = fetched.data;
+    const title =
+      tmdbType === "movie"
+        ? (nonEmptyString(data.title) ?? nonEmptyString(data.original_title))
+        : (nonEmptyString(data.name) ?? nonEmptyString(data.original_name));
+
+    if (!title) {
+      throw new TmdbGatewayError(
+        "TMDB_INVALID_RESPONSE",
+        `TMDB response missing title for ${tmdbType}:${tmdbId}`,
+        502,
+      );
+    }
+
+    const originalTitle =
+      tmdbType === "movie"
+        ? nonEmptyString(data.original_title)
+        : nonEmptyString(data.original_name);
+    const year =
+      tmdbType === "movie" ? parseYear(data.release_date) : parseYear(data.first_air_date);
+    const seasons = tmdbType === "tv" ? parseSeasons(data.seasons) : [];
+
+    let externalBlock: unknown = data.external_ids;
+    if (externalBlock === undefined) {
+      const extUrl = buildTmdbUrl(`/${tmdbType}/${encodeURIComponent(tmdbId)}/external_ids`, {});
+      try {
+        const extResponse = await outbound.fetchExternal({
+          kind: "catalog",
+          namespace: "tmdb",
+          url: extUrl,
+          method: "GET",
+          headers: buildTmdbHeaders(),
+          timeoutMs: config.timeoutMs,
+          signal: options?.signal,
+        });
+        if (extResponse.status >= 200 && extResponse.status < 300) {
+          externalBlock = JSON.parse(extResponse.body);
+        }
+      } catch {
+        externalBlock = undefined;
+      }
+    }
+
+    const extracted = extractExternalIdsBlock(externalBlock, tmdbType);
+    const shouldSyncTrakt = extracted.trakt === null && isTraktSyncEnabled(config);
+
+    const trakt = shouldSyncTrakt
+      ? await lookupTraktId(outbound, config, tmdbType, tmdbId, options?.signal)
+      : extracted.trakt;
+
+    return {
+      base: {
+        type: tmdbType,
+        snapshot: {
+          title,
+          originalTitle,
+          year,
+          type: tmdbType,
+          seasons,
+        },
+        externalIds: {
+          tmdb: `${tmdbType}:${tmdbId}`,
+          imdb: extracted.imdb,
+          tvdb: extracted.tvdb,
+          trakt,
+        },
+      },
+      data,
+    };
+  };
+
   return {
     async search(query, options = {}) {
       const kind = options.type ?? "multi";
       const params: Record<string, string> = { query, language };
       if (options.year !== undefined) {
-        params[kind === "movie" ? "year" : "first_air_date_year"] = String(options.year);
+        if (kind === "movie") {
+          params["year"] = String(options.year);
+        } else if (kind === "tv") {
+          params["first_air_date_year"] = String(options.year);
+        }
       }
       const fetched = await fetchTmdbJson(
         buildTmdbUrl(`/search/${kind}`, params),
         `search:${query}`,
+        options.signal,
       );
       const rows = fetched.ok && Array.isArray(fetched.data.results) ? fetched.data.results : [];
-      return rows
-        .slice(0, 20)
-        .flatMap((raw): CatalogSearchHit[] => {
-          const row = raw as Record<string, unknown>;
-          const type = (kind === "multi" ? row.media_type : kind) as string;
-          const id = parsePositiveIdString(row.id);
-          if ((type !== "movie" && type !== "tv") || !id) {
-            return [];
-          }
-          const title = nonEmptyString(type === "movie" ? row.title : row.name);
-          return title
-            ? [
-                {
-                  nativeId: `${type}:${id}`,
-                  type,
-                  title,
-                  originalTitle: nonEmptyString(
-                    type === "movie" ? row.original_title : row.original_name,
-                  ),
-                  year: parseYear(type === "movie" ? row.release_date : row.first_air_date),
-                },
-              ]
-            : [];
-        })
-        .slice(0, 10);
+      const hits = rows.slice(0, 20).flatMap((raw): CatalogSearchHit[] => {
+        const row = raw as Record<string, unknown>;
+        const type = (kind === "multi" ? row.media_type : kind) as string;
+        const id = parsePositiveIdString(row.id);
+        if ((type !== "movie" && type !== "tv") || !id) {
+          return [];
+        }
+        const title =
+          nonEmptyString(type === "movie" ? row.title : row.name) ??
+          nonEmptyString(type === "movie" ? row.original_title : row.original_name);
+        return title
+          ? [
+              {
+                nativeId: `${type}:${id}`,
+                type,
+                title,
+                originalTitle: nonEmptyString(
+                  type === "movie" ? row.original_title : row.original_name,
+                ),
+                year: parseYear(type === "movie" ? row.release_date : row.first_air_date),
+              },
+            ]
+          : [];
+      });
+      if (
+        hits.length > 10 ||
+        rows.length > 20 ||
+        (fetched.ok &&
+          (Number(fetched.data.total_pages) > 1 ||
+            Number(fetched.data.total_results) > rows.length))
+      ) {
+        options.onTruncated?.();
+      }
+      return hits.slice(0, 10);
     },
 
     async searchTrakt(query, options = {}) {
@@ -513,112 +785,37 @@ export function createTmdbGateway(
       });
     },
 
-    async findByImdbId(imdbId) {
-      const fetched = await fetchTmdbJson(
-        buildTmdbUrl(`/find/${encodeURIComponent(imdbId)}`, { external_source: "imdb_id" }),
-        `find:${imdbId}`,
-      );
-      if (!fetched.ok) {
-        return [];
-      }
-      const found: Array<{ type: MediaType; id: string }> = [];
-      for (const [key, type] of [
-        ["movie_results", "movie"],
-        ["tv_results", "tv"],
-      ] as const) {
-        const rows = fetched.data[key];
-        for (const row of Array.isArray(rows) ? rows : []) {
-          const id = parsePositiveIdString((row as Record<string, unknown> | null)?.id);
-          if (id) {
-            found.push({ type, id });
-          }
-        }
-      }
-      return found;
+    findByImdbId(imdbId, reportCount, signal) {
+      return findByExternalId(imdbId, "imdb_id", reportCount, signal);
+    },
+
+    findByTvdbId(tvdbId, reportCount, signal) {
+      return findByExternalId(tvdbId, "tvdb_id", reportCount, signal);
     },
 
     async fetchMediaSnapshotAndExternalIds(tmdbType, tmdbId, options) {
-      const detailsUrl = buildTmdbUrl(`/${tmdbType}/${encodeURIComponent(tmdbId)}`, {
-        append_to_response: "external_ids",
-        language,
-      });
+      const fetched = await fetchMediaWithAppend(tmdbType, tmdbId, "external_ids", options);
+      return fetched ? fetched.base : null;
+    },
 
-      const fetched = await fetchTmdbJson(detailsUrl, `${tmdbType}:${tmdbId}`);
-      if (!fetched.ok) {
-        if (options?.throwOnNotFound) {
-          throw new TmdbGatewayError(
-            "TMDB_NOT_FOUND",
-            `TMDB media not found for ${tmdbType}:${tmdbId}`,
-            404,
-          );
-        }
+    async fetchIdentityDetails(tmdbType, tmdbId, signal) {
+      const fetched = await fetchMediaWithAppend(
+        tmdbType,
+        tmdbId,
+        "external_ids,alternative_titles,translations,credits",
+        { signal },
+      );
+      if (!fetched) {
         return null;
       }
-
-      const data = fetched.data;
-      const title =
-        tmdbType === "movie"
-          ? (nonEmptyString(data.title) ?? nonEmptyString(data.original_title))
-          : (nonEmptyString(data.name) ?? nonEmptyString(data.original_name));
-
-      if (!title) {
-        throw new TmdbGatewayError(
-          "TMDB_INVALID_RESPONSE",
-          `TMDB response missing title for ${tmdbType}:${tmdbId}`,
-          502,
-        );
-      }
-
-      const originalTitle =
-        tmdbType === "movie"
-          ? nonEmptyString(data.original_title)
-          : nonEmptyString(data.original_name);
-      const year =
-        tmdbType === "movie" ? parseYear(data.release_date) : parseYear(data.first_air_date);
-      const seasons = tmdbType === "tv" ? parseSeasons(data.seasons) : [];
-
-      let externalBlock: unknown = data.external_ids;
-      if (externalBlock === undefined) {
-        const extUrl = buildTmdbUrl(`/${tmdbType}/${encodeURIComponent(tmdbId)}/external_ids`, {});
-        try {
-          const extResponse = await outbound.fetchExternal({
-            kind: "catalog",
-            namespace: "tmdb",
-            url: extUrl,
-            method: "GET",
-            headers: buildTmdbHeaders(),
-            timeoutMs: config.timeoutMs,
-          });
-          if (extResponse.status >= 200 && extResponse.status < 300) {
-            externalBlock = JSON.parse(extResponse.body);
-          }
-        } catch {
-          externalBlock = undefined;
-        }
-      }
-
-      const extracted = extractExternalIdsBlock(externalBlock, tmdbType);
-      const shouldSyncTrakt = extracted.trakt === null && isTraktSyncEnabled(config);
-
-      const trakt = shouldSyncTrakt
-        ? await lookupTraktId(outbound, config, tmdbType, tmdbId)
-        : extracted.trakt;
-
       return {
-        type: tmdbType,
-        snapshot: {
-          title,
-          originalTitle,
-          year,
-          type: tmdbType,
-          seasons,
-        },
-        externalIds: {
-          tmdb: `${tmdbType}:${tmdbId}`,
-          imdb: extracted.imdb,
-          tvdb: extracted.tvdb,
-          trakt,
-        },
+        ...fetched.base,
+        aliases: extractTmdbAliases(
+          fetched.data,
+          fetched.base.snapshot.title,
+          fetched.base.snapshot.originalTitle,
+        ),
+        ...extractTmdbCredits(fetched.data),
       };
     },
 

@@ -594,7 +594,7 @@ function trailingYearPattern(year: number | null): RegExp | null {
   return year === null ? null : new RegExp(`\\s*(?<!\\d)${year}\\s*$`, "u");
 }
 
-function stripTrailingQualifiers(raw: string, year: number | null): string {
+export function stripTrailingQualifiers(raw: string, year: number | null): string {
   const trailingYear = trailingYearPattern(year);
   let current = raw.trim();
   for (let i = 0; i < 4; i += 1) {
@@ -622,7 +622,7 @@ export function normalizeTitleForComparison(raw: string): string {
   return folded.replace(/[\p{P}\p{S}\s]+/gu, "");
 }
 
-function collectNormalizedTitleCandidates(
+export function collectNormalizedTitleCandidates(
   primary: string | null | undefined,
   original: string | null | undefined,
   aliases: readonly string[] | undefined,

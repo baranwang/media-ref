@@ -129,9 +129,18 @@ function createQueueBatch(bodies: JobQueueMessage[], timestamp: Date = new Date(
 
 function createConflictTestStub(
   customBilibili?: (seasonId: string, url: string) => ExternalHttpResponse | undefined,
+  finaleTitle?: string,
 ) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     if (request.kind === "catalog" && request.namespace === "tmdb") {
+      if (finaleTitle && new URL(request.url).pathname.endsWith("/tv/95479/season/1")) {
+        return jsonResponse(request.url, {
+          episodes: Array.from({ length: 24 }, (_, i) => ({
+            episode_number: i + 1,
+            name: i === 23 ? finaleTitle : `故事章节 ${i + 1}`,
+          })),
+        });
+      }
       if (request.url.includes("/tv/95479")) {
         return jsonResponse(request.url, {
           id: 95479,
@@ -173,7 +182,9 @@ function createConflictTestStub(
             jp_title: "呪術廻戦",
             type: 1,
             publish: { pub_time: "2020-10-03 01:25:00" },
-            episodes: makeBilibiliEpisodes(24),
+            episodes: makeBilibiliEpisodes(24).map((ep, i) =>
+              finaleTitle && i === 23 ? { ...ep, long_title: finaleTitle } : ep,
+            ),
           },
         });
       }
@@ -221,6 +232,7 @@ async function seedConfirmedAssociation(
       episodeEnd: number | null;
       targetEpisodeStart: number;
       baseline: "tmdb";
+      nonLinear?: boolean;
     }>;
     now: Date;
     /** Approve through core after the evidence check, as the review agent would. */
@@ -487,6 +499,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       } else {
         expect(state.status).toBe("approved");
       }
+      return state.status;
     };
     const resolve = async (season: number, episode: number) =>
       resolveEpisode((await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479")).document, {
@@ -497,6 +510,11 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
 
     // Season 1 on positions 1–12, then season 2 on positions 13–24 of the same collection.
     await land([{ season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1 }]);
+    expect(
+      await land([
+        { season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13, nonLinear: true },
+      ]),
+    ).toBe("needs_review");
     await land([{ season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13 }]);
     expect(await resolve(1, 5)).toMatchObject({
       kind: "mapped",
@@ -1445,5 +1463,177 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       .where("id", "=", existing.associationId)
       .executeTakeFirstOrThrow();
     expect(oldAssoc.status).toBe("delisted");
+  });
+
+  test("idempotent duplicate on the same unlocked confirmed collection auto-approves instead of triggering both_passed_evidence_gate", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-27T10:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+        submitBaseHourlyLimit: 20,
+      },
+    });
+
+    const user = await setupUser(app, outbound, "idem-user@example.com");
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
+    const mapping = {
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    };
+    // Both requests precede confirmation. Only the first asks to change the default variant.
+    const first = await submitRpc.changeRequest.createChangeRequest({
+      ...mapping,
+      setDefaultVariant: true,
+    });
+    await worker.scheduled(createScheduledController(t0));
+    const firstBatch = emitted.splice(0);
+    const dupRes = await submitRpc.changeRequest.createChangeRequest(mapping);
+    await worker.queue(createQueueBatch(firstBatch, t0).batch);
+    const firstState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      first.changeRequest!.id,
+    );
+    expect(firstState.status).toBe("approved");
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0), t0).batch);
+
+    const dupState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      dupRes.changeRequest!.id,
+    );
+    expect(dupState.status).toBe("approved");
+    expect(dupState.conflictReason).toBeNull();
+    expect(dupState.evidence?.conflict).toMatchObject({
+      newPassed: true,
+      oldPassed: true,
+      outcome: "auto_replace",
+    });
+  });
+
+  test("changing nonLinear flag on the same unlocked confirmed collection goes through conflict review instead of auto-approving", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-27T10:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(undefined, "命运交汇之夜"),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+        submitBaseHourlyLimit: 20,
+      },
+    });
+
+    const user = await setupUser(app, outbound, "nonlinear-user@example.com");
+    const reviewer = await setupUser(app, outbound, "nonlinear-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss34430",
+      segments: [
+        {
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: true,
+        },
+      ],
+      now: t0,
+    });
+
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
+    const changeFlagRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: false,
+        }),
+      ],
+    });
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+
+    const changeFlagState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      changeFlagRes.changeRequest!.id,
+    );
+    expect(changeFlagState.status).toBe("needs_review");
+    expect(changeFlagState.conflictReason).toBe("both_passed_evidence_gate");
   });
 });

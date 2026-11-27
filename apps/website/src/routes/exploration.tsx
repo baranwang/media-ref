@@ -13,6 +13,7 @@ import { NAMESPACE_LABELS, NamespaceLogo } from "#/components/brand-logos";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
 import { formatRelativeTime } from "#/lib/format";
+import { explorationResultText } from "#/lib/mappers";
 import { fetchExplorationActivity, type ExplorationFilter } from "#/lib/server-fns";
 import type { ExplorationItem, ExplorationPlatformView, ExplorationStatus } from "#/lib/types";
 
@@ -44,6 +45,7 @@ const STATUS_BADGE: Record<
   { label: string; variant: "confirmed" | "warning" | "outline" | "secondary" | "destructive" }
 > = {
   approved: { label: "已生效", variant: "confirmed" },
+  covered: { label: "已收录", variant: "confirmed" },
   in_review: { label: "待审核", variant: "warning" },
   rejected: { label: "被驳回", variant: "destructive" },
   not_found: { label: "没有", variant: "outline" },
@@ -81,28 +83,7 @@ const found = (p: ExplorationPlatformView) => p.status === "approved" || p.statu
 
 /** One sentence for a finished job, as the list row shows it. */
 function resultText(item: ExplorationItem): string {
-  const approved = item.platforms
-    .filter((p) => p.status === "approved")
-    .map((p) => label(p.namespace));
-  const review = item.platforms
-    .filter((p) => p.status === "in_review")
-    .map((p) => label(p.namespace));
-  const scope = scopeText(item);
-  if (approved.length > 0 || review.length > 0) {
-    const names = [...approved, ...review].join("、");
-    const tail =
-      review.length === 0
-        ? "已生效"
-        : approved.length === 0
-          ? "等审核 agent 判定"
-          : "部分等审核 agent 判定";
-    return `找到${names}上的${scope}，${tail}`;
-  }
-  const retry = item.platforms.filter((p) => p.status === "retry");
-  if (retry.length > 0) {
-    return `${retry.map((p) => label(p.namespace)).join("、")}这次没查完，稍后再看一次`;
-  }
-  return item.platforms.length > 1 ? `${item.platforms.length} 个平台都没有找到` : "没有找到";
+  return explorationResultText(item, label);
 }
 
 function durationText(ms: number): string {
@@ -215,7 +196,11 @@ function ActivityRow({
 }) {
   const [open, setOpen] = useState(false);
   const foundPlatforms = item.platforms.filter(found);
-  const changeRequest = item.platforms.find((p) => p.changeRequestId)?.changeRequestId;
+  const primaryChangeRequest =
+    item.platforms.find((p) => p.status === "approved" && p.changeRequestId)?.changeRequestId ??
+    item.platforms.find((p) => p.status === "in_review" && p.changeRequestId)?.changeRequestId ??
+    item.platforms.find((p) => p.liveChangeRequestId)?.liveChangeRequestId ??
+    item.platforms.find((p) => p.changeRequestId)?.changeRequestId;
   return (
     <div>
       <button
@@ -267,6 +252,30 @@ function ActivityRow({
                     {p.reason && (
                       <p className="text-xs leading-5 text-muted-foreground">{p.reason}</p>
                     )}
+                    {canSeeChangeRequests && (p.changeRequestId || p.liveChangeRequestId) && (
+                      <div className="flex flex-wrap gap-3 text-xs">
+                        {p.liveChangeRequestId && (
+                          <Link
+                            to="/change-requests/$id"
+                            params={{ id: p.liveChangeRequestId }}
+                            className="inline-flex items-center gap-0.5 text-foreground/90 underline underline-offset-4 hover:text-foreground"
+                          >
+                            查看生效变更单
+                            <RiArrowRightUpLine className="size-3" />
+                          </Link>
+                        )}
+                        {p.changeRequestId && (
+                          <Link
+                            to="/change-requests/$id"
+                            params={{ id: p.changeRequestId }}
+                            className="inline-flex items-center gap-0.5 text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                          >
+                            {p.liveChangeRequestId ? "查看原变更单" : "查看变更单"}
+                            <RiArrowRightUpLine className="size-3" />
+                          </Link>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </li>
               );
@@ -281,10 +290,10 @@ function ActivityRow({
               打开作品页
               <RiArrowRightUpLine className="size-3.5" />
             </Link>
-            {canSeeChangeRequests && changeRequest && (
+            {canSeeChangeRequests && primaryChangeRequest && (
               <Link
                 to="/change-requests/$id"
-                params={{ id: changeRequest }}
+                params={{ id: primaryChangeRequest }}
                 className="inline-flex items-center gap-1 text-foreground hover:underline"
               >
                 查看变更单

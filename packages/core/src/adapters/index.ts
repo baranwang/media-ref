@@ -8,7 +8,16 @@ import { tencentAdapter } from "./tencent.ts";
 import type { AdapterRegistry, AdapterTier, MediaAdapter } from "./types.ts";
 import { youkuAdapter } from "./youku.ts";
 
-export { bangumiAdapter, parseBangumiInput } from "./bangumi.ts";
+export {
+  bangumiAdapter,
+  DEFAULT_BANGUMI_API_BASE_URL,
+  fetchBangumiCollection,
+  fetchBangumiSubjectMetadata,
+  parseBangumiInput,
+  type BangumiFetchOptions,
+  type BangumiSubjectMetadata,
+  type BangumiSubjectMetadataResult,
+} from "./bangumi.ts";
 export { bilibiliAdapter, parseBilibiliInput } from "./bilibili.ts";
 export { doubanAdapter, parseDoubanInput } from "./douban.ts";
 export { iqiyiAdapter, parseIqiyiInput } from "./iqiyi.ts";

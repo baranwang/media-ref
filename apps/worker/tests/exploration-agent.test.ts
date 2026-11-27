@@ -1274,6 +1274,85 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(room.scheduledCount).toBe(1);
   });
 
+  async function confirmBilibiliSeasonOne(testDb: TestDbHandle, mediaId: string) {
+    const variant = await testDb.writeDb
+      .insertInto("variants")
+      .values({ media_id: mediaId, platform: "bilibili", description: "原声", is_default: true })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const assoc = await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: mediaId,
+        namespace: "bilibili",
+        native_id: "ss34430",
+        variant_id: variant.id,
+        status: "confirmed",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("segments")
+      .values({
+        association_id: assoc.id,
+        season: 1,
+        episode_start: 1,
+        episode_end: 24,
+        target_episode_start: 1,
+        baseline: "tmdb",
+      })
+      .execute();
+  }
+
+  test("skips platforms that already have a confirmed association for the target season without creating duplicate change requests", async () => {
+    const { testDb, mediaId, explore } = await setup({
+      kan360Rows: [["咒术回战", "2020", "34430"]],
+    });
+    await confirmBilibiliSeasonOne(testDb, mediaId);
+    await explore();
+
+    const requests = await testDb.readDb.selectFrom("change_requests").selectAll().execute();
+    expect(requests.filter((r) => r.namespace === "bilibili")).toHaveLength(0);
+
+    const job = await testDb.readDb
+      .selectFrom("background_jobs")
+      .select("result")
+      .where("job_type", "=", EXPLORATION_JOB_TYPE)
+      .executeTakeFirstOrThrow();
+    const outcomes = (
+      job.result as { platformOutcomes?: Array<{ namespace: string; status: string }> }
+    ).platformOutcomes;
+    expect(outcomes?.find((o) => o.namespace === "bilibili")?.status).toBe("already_confirmed");
+  });
+
+  test("settles a mapping confirmed during candidate lookup as already_confirmed", async () => {
+    const { testDb, mediaId, outbound, explore, explorationMessage } = await setup({
+      kan360Rows: [["咒术回战", "2020", "34430"]],
+    });
+    const fetchExternal = outbound.fetchExternal.bind(outbound);
+    outbound.fetchExternal = async (request) => {
+      if (request.namespace === "bilibili" && request.url.endsWith("season_id=34430")) {
+        await confirmBilibiliSeasonOne(testDb, mediaId);
+      }
+      return fetchExternal(request);
+    };
+
+    await explore();
+    const job = await testDb.readDb
+      .selectFrom("background_jobs")
+      .select("result")
+      .where("id", "=", explorationMessage.jobId)
+      .executeTakeFirstOrThrow();
+    expect(job.result?.platformOutcomes).toContainEqual(
+      expect.objectContaining({ namespace: "bilibili", status: "already_confirmed" }),
+    );
+    expect(openNamespaces(outbound.modelRequests[0]!)).not.toContain("bilibili");
+    expect(await testDb.readDb.selectFrom("change_requests").select("id").execute()).toHaveLength(
+      0,
+    );
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("fulfilled");
+  });
+
   test("variety shows: rejects truncated 1..20 linear prefix, accepts whole-season nonLinear, and fast-paths nonLinear review leads", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

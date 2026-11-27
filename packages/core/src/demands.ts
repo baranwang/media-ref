@@ -1129,12 +1129,33 @@ export async function isCoveredByAssociationsInTx(
 ): Promise<boolean> {
   const namespaces: readonly AssociationNamespaceRow[] =
     input.namespaceGroup === "platform" ? PLATFORM_NAMESPACES : ASSOCIATION_CATALOG_NAMESPACES;
+  return hasConfirmedAssociationCoveringSeason(executor, input.mediaId, namespaces, input.season);
+}
 
+/** Checks whether a single namespace already has a confirmed association covering `season`. */
+export async function isNamespaceCoveredInTx(
+  executor: DbExecutor,
+  input: { mediaId: string; namespace: AssociationNamespaceRow; season: number | null },
+): Promise<boolean> {
+  return hasConfirmedAssociationCoveringSeason(
+    executor,
+    input.mediaId,
+    [input.namespace],
+    input.season,
+  );
+}
+
+async function hasConfirmedAssociationCoveringSeason(
+  executor: DbExecutor,
+  mediaId: string,
+  namespaces: readonly AssociationNamespaceRow[],
+  season: number | null,
+): Promise<boolean> {
   const confirmedAssociations = await executor
     .selectFrom("associations")
     .where("is_external_id", "=", false)
     .select("id")
-    .where("media_id", "=", input.mediaId)
+    .where("media_id", "=", mediaId)
     .where("status", "=", "confirmed")
     .where("namespace", "in", [...namespaces])
     .execute();
@@ -1143,7 +1164,7 @@ export async function isCoveredByAssociationsInTx(
     return false;
   }
 
-  if (input.season === null) {
+  if (season === null) {
     return true;
   }
 
@@ -1157,7 +1178,7 @@ export async function isCoveredByAssociationsInTx(
   const assocIdsWithSegments = new Set<string>();
   for (const seg of segmentRows) {
     assocIdsWithSegments.add(seg.association_id);
-    if (seg.season === input.season) {
+    if (seg.season === season) {
       return true;
     }
   }
