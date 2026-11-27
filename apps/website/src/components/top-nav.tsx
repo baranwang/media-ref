@@ -52,7 +52,7 @@ export function TopNav({ hideSearch = false, transparent = false }: TopNavProps)
     >
       <div className="container flex h-full items-center justify-between gap-4">
         <div className="flex shrink-0 items-center gap-5">
-          <Link to="/" className="transition-opacity hover:opacity-90">
+          <Link to="/" className="flex transition-opacity hover:opacity-90">
             <BrandLogo />
           </Link>
 
