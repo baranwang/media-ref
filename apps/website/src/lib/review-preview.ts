@@ -5,6 +5,7 @@ export interface ReviewCoveragePreview {
   season: number;
   isMovie: boolean;
   totalSeasonEpisodes: number;
+  variantLabel: string | null;
   /** Only currently confirmed coverage for this platform/variant (excludes pending CRs and seeds). */
   existingSegments: CoverageSegment[];
   /** Projected coverage after approving `cr` (removes replaced/updated bars, adds `cr`). */
@@ -31,19 +32,29 @@ export function buildReviewCoveragePreview(
   const seasonSegments = cr.segments.filter((s) => s.season === season);
   const totalSeasonEpisodes = isMovie
     ? 1
-    : (media?.seasons.find((s) => s.season === season)?.episodeCount ??
-      cr.pageEpisodeCount ??
-      Math.max(1, ...seasonSegments.map((s) => s.end ?? s.start)));
+    : media?.seasons.find((s) => s.season === season)?.episodeCount ||
+      cr.pageEpisodeCount ||
+      Math.max(1, ...seasonSegments.map((s) => s.end ?? s.start));
 
-  const matchedRow = !isCatalog
-    ? media?.platformRows.find(
-        (row) =>
-          row.namespace === cr.namespace &&
-          (cr.variantLabel ? row.label === cr.variantLabel : row.isDefault),
-      )
-    : media?.catalogRows.find((row) => row.namespace === cr.namespace);
+  const catalogRow = isCatalog
+    ? media?.catalogRows.find((row) => row.namespace === cr.namespace)
+    : undefined;
+  const platformRow = !isCatalog
+    ? media?.platformRows.find((row) => {
+        if (row.namespace !== cr.namespace) return false;
+        if (cr.variantId) return row.variantId === cr.variantId;
+        return cr.variantLabel ? row.label === cr.variantLabel : row.isDefault;
+      })
+    : undefined;
 
-  const rawExisting = matchedRow?.segmentsBySeason?.[season] ?? [];
+  const rawExisting = platformRow?.segmentsBySeason[season] ?? [
+    ...(catalogRow?.wholeMediaEntries ?? []).map((entry) => ({
+      ...entry,
+      start: 1,
+      end: totalSeasonEpisodes,
+    })),
+    ...(catalogRow?.segmentsBySeason?.[season] ?? []),
+  ];
   const existingSegments = rawExisting.filter((seg) => seg.status === "confirmed");
 
   const otherPendingIds = new Set(
@@ -105,6 +116,7 @@ export function buildReviewCoveragePreview(
     season,
     isMovie,
     totalSeasonEpisodes,
+    variantLabel: platformRow?.label ?? cr.variantLabel,
     existingSegments,
     afterSegments,
     otherPendingCount: otherPendingIds.size,
