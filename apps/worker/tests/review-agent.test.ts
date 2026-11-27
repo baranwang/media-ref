@@ -585,6 +585,41 @@ describe("review agent (#75)", () => {
     });
   });
 
+  test("a job queued by an unreviewable request reviews its work's reviewable one, with that one's prompt", async () => {
+    const { testDb, submit, tick, drain, changeRequest, outbound } = track(
+      await setup(approvesLikeLinglong),
+    );
+    const full = await submit();
+    const half = await submit("ss28889", {
+      segments: [
+        { season: 1, episodeStart: 7, episodeEnd: 12, targetEpisodeStart: 2, baseline: "tmdb" },
+      ],
+    });
+    await tick(); // Evidence for both: one shared review job.
+    // The job came from the half request, which no review can approve.
+    await testDb.writeDb
+      .updateTable("change_requests")
+      .set({ conflict_reason: "locked_association_challenged" })
+      .where("id", "=", half)
+      .execute();
+    await testDb.writeDb
+      .updateTable("background_jobs")
+      .set({ payload: JSON.stringify({ changeRequestId: half }) })
+      .where("job_type", "=", "review_agent")
+      .execute();
+
+    await drain();
+
+    const prompt = outbound.modelRequests[0]!.messages.find((m) => m.role === "user")!.content;
+    expect(prompt).toContain("ss28888");
+    expect(prompt).not.toContain("ss28889");
+    expect((await changeRequest(full)).status).toBe("approved");
+    expect(await changeRequest(half)).toMatchObject({
+      status: "rejected",
+      evidence: { reviewAgent: { verdict: "reject", fallback: "locked_association_challenged" } },
+    });
+  });
+
   test("a review waits, without a session or an attempt, for a same-work request still collecting evidence", async () => {
     const { testDb, worker, emitted, submit, tick, outbound } = track(
       await setup(approvesLikeLinglong),

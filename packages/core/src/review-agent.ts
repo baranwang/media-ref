@@ -1175,7 +1175,8 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       };
     }
 
-    const evidence = cr.evidence ?? {};
+    // The work's catalog, from a request the session reviews: the triggering one may be unreviewable.
+    const evidence = reviewable[0]!.cr.evidence ?? {};
     // A movie has no season or episodes a correction could name.
     const movie = (evidence.catalog as { mediaType?: unknown } | undefined)?.mediaType === "movie";
     const members: ReviewMember[] = [];
@@ -1289,7 +1290,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           {
             role: "user",
             content: single
-              ? buildUserPrompt(cr, members[0]!.conflictCodes, comments)
+              ? buildUserPrompt(members[0]!.cr, members[0]!.conflictCodes, members[0]!.comments)
               : buildGroupUserPrompt(members),
           },
         ],
