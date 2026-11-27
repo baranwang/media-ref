@@ -7,7 +7,13 @@ import type { TmdbGateway } from "./tmdb.ts";
 export type SeasonEpisode = NonNullable<
   Awaited<ReturnType<TmdbGateway["fetchSeasonEpisodes"]>>
 >[number];
-type CoverageScope = { season: number; count: number; prefixEnd: number | null };
+type CoverageScope = {
+  season: number;
+  count: number;
+  prefixEnd: number | null;
+  targetStart: number;
+  targetEnd: number;
+};
 
 /** Split but contiguous linear segments describe the same prefix as a single segment. */
 export function seasonCoverageScopes(
@@ -16,12 +22,21 @@ export function seasonCoverageScopes(
   segments: readonly SegmentInput[],
 ): CoverageScope[] {
   if (!segments.length || !isPlatformNamespace(namespace)) return [];
+  const firstTargets = new Map<number, number>();
+  for (const { season, targetEpisodeStart = 1 } of segments) {
+    firstTargets.set(season, Math.min(firstTargets.get(season) ?? Infinity, targetEpisodeStart));
+  }
   const scopes: CoverageScope[] = [];
   for (const { season, episodeCount: count } of catalog.seasons) {
     const own = segments
       .filter((s) => s.season === season)
       .toSorted((a, b) => (a.episodeStart ?? 1) - (b.episodeStart ?? 1));
     if (!own.length) continue;
+    const targetStart = firstTargets.get(season)!;
+    let targetEnd = Infinity;
+    for (const start of firstTargets.values()) {
+      if (start > targetStart) targetEnd = Math.min(targetEnd, start - 1);
+    }
     if (own.some((s) => s.nonLinear)) {
       let end = 0;
       for (const s of own) {
@@ -29,23 +44,28 @@ export function seasonCoverageScopes(
         end = Math.max(end, s.episodeEnd ?? Infinity);
       }
       if (end === Infinity || (count > 0 && end >= count))
-        scopes.push({ season, count, prefixEnd: null });
+        scopes.push({ season, count, prefixEnd: null, targetStart, targetEnd });
       continue;
     }
-    if (own.length !== segments.length || count <= 0) continue;
+    if (count <= 0) continue;
     let end = 0;
     for (const s of own) {
       if (
         s.episodeEnd == null ||
         (s.episodeStart ?? 1) !== end + 1 ||
-        (s.targetEpisodeStart ?? 1) !== end + 1
+        (s.targetEpisodeStart ?? 1) !== targetStart + end
       ) {
         end = 0;
         break;
       }
       end = s.episodeEnd;
     }
-    if (end > 0 && end < count) scopes.push({ season, count, prefixEnd: end });
+    if (end > 0 && end < count) {
+      // A lone prefix starting at position 1 can be contradicted by the rest of the collection.
+      if (firstTargets.size > 1 || targetStart > 1)
+        targetEnd = Math.min(targetEnd, targetStart + end - 1);
+      scopes.push({ season, count, prefixEnd: end, targetStart, targetEnd });
+    }
   }
   return scopes;
 }
@@ -120,7 +140,10 @@ function matchesSeasonEpisodes(
   const platformTitles = new Set<string>();
   const periods = new Map<number, Set<string>>();
   const labeledEpisodes = new Set<number>();
-  for (const ep of info.featureEpisodes) {
+  const featureEpisodes = info.featureEpisodes.filter(
+    (ep) => ep.index >= scope.targetStart && ep.index <= scope.targetEnd,
+  );
+  for (const ep of featureEpisodes) {
     const labels = [ep.title, ep.longTitle];
     if (scope.season !== 0 && labels.some((label) => label && hasVarietyExtraMarker(label)))
       continue;
@@ -163,10 +186,16 @@ function matchesSeasonEpisodes(
     const parts = periods.get(number);
     const covered =
       parts?.has("") || (part ? parts?.has(part) : parts?.has("上") && parts.has("下"));
-    if (!covered) coversBroadcasts = false;
+    const parent = part.charAt(0);
+    const coveredByParent = part.length > 1 && parts?.has(parent);
+    if (!covered && !coveredByParent) coversBroadcasts = false;
     const key = `${number}:${part}`;
     if (scope.prefixEnd !== null && ep.episode <= scope.prefixEnd) prefixInstallments.add(key);
-    if (covered && !prefixInstallments.has(key) && !prefixInstallments.has(`${number}:`)) {
+    if (
+      (covered || (coveredByParent && !prefixInstallments.has(`${number}:${parent}`))) &&
+      !prefixInstallments.has(key) &&
+      !prefixInstallments.has(`${number}:`)
+    ) {
       matchedEpisode = Math.max(matchedEpisode, ep.episode);
       if (ep === finale) finalePeriod = number;
     }
@@ -183,8 +212,8 @@ function matchesSeasonEpisodes(
     regular.every((ep) => ep.title && !/^\d+$/u.test(ep.title) && platformTitles.has(ep.title));
   const titleMatchesFinale =
     matchedTitleEpisode === finale?.episode &&
-    (labeledEpisodes.size < info.featureEpisodes.length || coversBroadcasts) &&
-    (regular.length === 1 || info.featureEpisodes.length > 1);
+    (labeledEpisodes.size < featureEpisodes.length || coversBroadcasts) &&
+    (regular.length === 1 || featureEpisodes.length > 1);
   return {
     finale,
     matchedEpisode: Math.max(matchedEpisode, matchedTitleEpisode),
