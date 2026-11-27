@@ -1402,6 +1402,13 @@ describe("review agent: reject with correction (#76)", () => {
 
     await ctx.drain();
 
+    // Every episode has aired: the catalog reply does not call the season airing.
+    const catalogReply = ctx.outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool")
+      .map((m) => JSON.parse(m.content) as Record<string, unknown>)
+      .find((r) => r.season === 8);
+    expect(catalogReply).toMatchObject({ season: 8, live: true });
+    expect(catalogReply).not.toHaveProperty("stillAiring");
+
     // Positions 1–7 are what the session saw: exploration resubmits exactly that, and its own
     // segment check (which reads an open end as the whole 10-episode season) accepts it.
     const bounded = {
@@ -1459,6 +1466,14 @@ describe("review agent: reject with correction (#76)", () => {
 
     await ctx.drain();
 
+    // The model is told the season is still airing, and how open ends on such a season read.
+    const [system] = ctx.outbound.modelRequests[0]!.messages;
+    expect(system!.content).toContain("stillAiring");
+    const catalogReply = ctx.outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool")
+      .map((m) => JSON.parse(m.content) as Record<string, unknown>)
+      .find((r) => r.season === 8);
+    expect(catalogReply).toMatchObject({ stillAiring: { lastAiredEpisode: 7 } });
+
     // Exploration accepts an open end on a season still airing once every aired episode is there.
     expect((await ctx.changeRequest(id)).evidence).toMatchObject({
       reviewAgent: { verdict: "reject_with_correction", correction: openEnded, fallback: null },
@@ -1466,6 +1481,67 @@ describe("review agent: reject with correction (#76)", () => {
     expect(await leads(ctx)).toEqual([
       expect.objectContaining({ season: 8, segments: openEnded.segments }),
     ]);
+  });
+
+  test("an open end on a long airing season stays open though the model read only the first window", async () => {
+    // TMDB season 8 lists 100 episodes: 1–90 aired, 91–100 scheduled ahead. The platform has 90.
+    const long: typeof httpStub = (request) => {
+      const response = httpStub(request);
+      const season8 = /\/tv\/70001\/season\/8/.test(request.url);
+      if (!season8 && !/\/tv\/70001(\?|$)/.test(request.url)) return response;
+      const body = JSON.parse(response.body) as Record<string, any>;
+      if (season8) {
+        body.episodes = Array.from({ length: 100 }, (_, i) => ({
+          episode_number: i + 1,
+          name: `第${i + 1}期`,
+          air_date: i < 90 ? "2026-03-01" : "2026-12-31",
+        }));
+      } else {
+        for (const s of body.seasons) if (s.season_number === 8) s.episode_count = 100;
+      }
+      return { ...response, body: JSON.stringify(body) };
+    };
+    const ninety = createAdapterRegistry([
+      {
+        ...bilibiliAdapter,
+        async fetchCollection(id, outbound) {
+          const result = await bilibiliAdapter.fetchCollection(id, outbound);
+          if (result.status !== "found") return result;
+          const featureEpisodes = Array.from({ length: 90 }, (_, i) => ({ index: i + 1 }));
+          return { ...result, info: { ...result.info, featureEpisodes, featureEpisodeCount: 90 } };
+        },
+      },
+    ]);
+    const openEnded = {
+      season: 8,
+      segments: [{ season: 8, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 }],
+    };
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 8 }],
+        ]);
+      }
+      return reply(turn, [["reject_with_correction", { opinion: WIFE_OPINION, ...openEnded }]]);
+    };
+    const ctx = track(await setup(model, {}, ninety, {}, long));
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    const catalogReply = ctx.outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool")
+      .map((m) => JSON.parse(m.content) as Record<string, unknown>)
+      .find((r) => r.season === 8);
+    expect(catalogReply).toMatchObject({
+      stillAiring: { lastAiredEpisode: 90 },
+      episodesTruncated: { total: 100, nextFromEpisode: 81 },
+    });
+    // The airing state comes from the whole list, so the correction is not cut to 1–90.
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: { verdict: "reject_with_correction", correction: openEnded, fallback: null },
+    });
   });
 
   test("without a reason for it, the submission's own title or year conflict still blocks the correction", async () => {

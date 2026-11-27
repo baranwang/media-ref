@@ -3,6 +3,7 @@ import {
   createDefaultAdapterRegistry,
   createFakeOutboundClient,
   createLiveOutboundClient,
+  getExplorationTargetNamespaces,
   InvalidNativeIdError,
   isTier2Adapter,
   isTier3Adapter,
@@ -10,6 +11,7 @@ import {
   tencentAdapter,
   type ExternalHttpResponse,
 } from "../src/index.ts";
+import mbSearchFanhua from "./fixtures/tencent/mbsearch-fanhua.json" with { type: "json" };
 
 const TENCENT_PAGE_DATA_URL =
   "https://pbaccess.video.qq.com/trpc.universal_backend_service.page_server_rpc.PageServer/GetPageData?video_appid=3000010&vplatform=2";
@@ -145,15 +147,15 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
     expect(outbound.httpRequests).toHaveLength(0);
   });
 
-  test("registers tencentAdapter at Tier 2 in the default adapter registry", () => {
+  test("registers tencentAdapter at Tier 3 in the default adapter registry", () => {
     const registry = createDefaultAdapterRegistry();
     const tencent = registry.get("tencent");
     expect(tencent).toBeDefined();
-    expect(tencent?.tier).toBe(2);
+    expect(tencent?.tier).toBe(3);
     expect(tencent && isTier2Adapter(tencent)).toBe(true);
-    expect(tencent && isTier3Adapter(tencent)).toBe(false);
-    expect(registry.listByMinTier(2).map((a) => a.namespace)).toContain("tencent");
-    expect(registry.listByMinTier(3).map((a) => a.namespace)).not.toContain("tencent");
+    expect(tencent && isTier3Adapter(tencent)).toBe(true);
+    expect(registry.listByMinTier(3).map((a) => a.namespace)).toContain("tencent");
+    expect(getExplorationTargetNamespaces(registry, "platform")).toContain("tencent");
   });
 
   test("fetches TV collection metadata and strictly excludes trailers and bonus 彩蛋 clips from feature episodes", async () => {
@@ -950,5 +952,144 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
       "第1期：廖俊涛到访",
       "第2期：杨迪带搬家礼",
     ]);
+  });
+});
+
+describe("Tencent Tier 3 search", () => {
+  const TENCENT_SEARCH_URL =
+    "https://pbaccess.video.qq.com/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2";
+
+  function searchWith(payload: unknown, status = 200) {
+    return createFakeOutboundClient({
+      fetchExternal: (request) => jsonResponse(request.url, payload, status),
+    });
+  }
+
+  test("posts MbSearch without cookies and keeps only Tencent-hosted covers (real 繁花 response, trimmed)", async () => {
+    const outbound = searchWith(mbSearchFanhua);
+    const result = await tencentAdapter.search({ title: " 繁花 " }, outbound);
+
+    expect(outbound.httpRequests).toHaveLength(1);
+    const request = outbound.httpRequests[0]!;
+    expect(request).toMatchObject({ kind: "platform", namespace: "tencent", method: "POST" });
+    expect(request.url).toBe(TENCENT_SEARCH_URL);
+    expect(request.headers?.cookie).toBeUndefined();
+    expect(JSON.parse(request.body!)).toEqual({
+      version: "25071701",
+      clientType: 1,
+      query: "繁花",
+      pagenum: 0,
+      pagesize: 30,
+      isPrefetch: true,
+      extraInfo: { multi_terminal_pc: "1" },
+    });
+
+    // Dropped: year-0 clips and short-video vids, the rec_query card, the 短剧, a qiyi-only
+    // title, and related-film recommendations whose title lacks the keyword.
+    expect(result).toEqual({
+      status: "ok",
+      candidates: [
+        {
+          canonicalId: "mzc00200whsp9r6",
+          title: "繁花",
+          year: 2023,
+          mediaType: "tv",
+          episodeCount: 30,
+          url: "https://v.qq.com/x/cover/mzc00200whsp9r6.html",
+        },
+        {
+          canonicalId: "mzc00200zm78rjz",
+          title: "繁花剧场版",
+          year: 2024,
+          mediaType: "tv",
+          episodeCount: 6,
+          url: "https://v.qq.com/x/cover/mzc00200zm78rjz.html",
+        },
+        {
+          canonicalId: "mzc002006wiw7ll",
+          title: "繁花",
+          year: 2023,
+          mediaType: "tv",
+          episodeCount: 30,
+          url: "https://v.qq.com/x/cover/mzc002006wiw7ll.html",
+        },
+      ],
+    });
+  });
+
+  test("strips <em> highlights and filters by host, type and 纯享 clips", async () => {
+    const item = (id: string, videoInfo: Record<string, unknown>) => ({
+      doc: { id, dataType: 2 },
+      videoInfo: {
+        title: "测试",
+        typeName: "电影",
+        year: 2020,
+        playSites: [{ enName: "qq" }],
+        ...videoInfo,
+      },
+    });
+    const outbound = searchWith({
+      ret: 0,
+      data: {
+        errcode: 0,
+        normalList: {
+          itemList: [
+            item("aaaaaaaaaaaaaaa", { title: "<em>测试</em>：电影版" }),
+            item("bbbbbbbbbbbbbbb", { playSites: [{ enName: "qiyi" }] }),
+            item("ccccccccccccccc", { typeName: "短剧" }),
+            item("ddddddddddddddd", { title: "纯享：测试" }),
+            item("eeeeeeeeeeeeeee", { year: 0 }),
+            item("aaaaaaaaaaaaaaa", { title: "重复" }),
+          ],
+        },
+      },
+    });
+
+    const result = await tencentAdapter.search({ title: "测试" }, outbound);
+    expect(result).toEqual({
+      status: "ok",
+      candidates: [
+        {
+          canonicalId: "aaaaaaaaaaaaaaa",
+          title: "测试：电影版",
+          year: 2020,
+          mediaType: "movie",
+          episodeCount: null,
+          url: "https://v.qq.com/x/cover/aaaaaaaaaaaaaaa.html",
+        },
+      ],
+    });
+  });
+
+  test("honours page and limit", async () => {
+    const outbound = searchWith(mbSearchFanhua);
+    const result = await tencentAdapter.search({ title: "繁花", page: 2, limit: 1 }, outbound);
+    expect(JSON.parse(outbound.httpRequests[0]!.body!).pagenum).toBe(1);
+    expect(result.status === "ok" && result.candidates.map((c) => c.canonicalId)).toEqual([
+      "mzc00200whsp9r6",
+    ]);
+  });
+
+  test("reports blocked or failed searches as transient, and skips the request for an empty title", async () => {
+    expect(
+      await tencentAdapter.search(
+        { title: "繁花" },
+        searchWith({ ret: 10401, msg: "unknow error." }),
+      ),
+    ).toEqual({ status: "transient_error", reason: "tencent_rpc_ret_10401" });
+    expect(
+      await tencentAdapter.search({ title: "繁花" }, searchWith({ ret: 0, data: { errcode: 1 } })),
+    ).toEqual({ status: "transient_error", reason: "tencent_search_errcode_1" });
+    expect(await tencentAdapter.search({ title: "繁花" }, searchWith({}, 503))).toEqual({
+      status: "transient_error",
+      reason: "http_503",
+    });
+
+    const empty = searchWith({});
+    expect(await tencentAdapter.search({ title: "  " }, empty)).toEqual({
+      status: "ok",
+      candidates: [],
+    });
+    expect(empty.httpRequests).toHaveLength(0);
   });
 });
