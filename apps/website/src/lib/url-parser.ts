@@ -300,10 +300,11 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     const m = path.match(/\/(series|movies|dereferrer\/(?:series|movie))\/([a-z0-9-]+)/i);
     if (m) {
       const mt: MediaType = m[1]!.toLowerCase().includes("movie") ? "movie" : "tv";
+      const nativeId = mt === "movie" ? `movie:${m[2]!}` : m[2]!;
       return {
         namespace: "tvdb",
-        nativeId: m[2]!,
-        url: buildExternalUrl("tvdb", m[2]!, mt),
+        nativeId,
+        url: buildExternalUrl("tvdb", nativeId, mt),
         isCatalog: true,
         ...(mt === "movie" ? { mediaTypeHint: "movie" as const } : {}),
       };
@@ -326,10 +327,11 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     const m = path.match(/\/(shows|movies)\/([a-z0-9-]+)/i);
     if (m) {
       const mt: MediaType = m[1]!.toLowerCase() === "movies" ? "movie" : "tv";
+      const nativeId = `${mt === "movie" ? "movie" : "show"}:${m[2]!}`;
       return {
         namespace: "trakt",
-        nativeId: m[2]!,
-        url: buildExternalUrl("trakt", m[2]!, mt),
+        nativeId,
+        url: buildExternalUrl("trakt", nativeId, mt),
         isCatalog: true,
         mediaTypeHint: mt,
       };

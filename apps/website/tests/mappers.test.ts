@@ -472,6 +472,29 @@ test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with ca
     },
   ]);
 
+  const withPending = {
+    ...movieDoc,
+    associations: [
+      ...movieDoc.associations,
+      {
+        id: "change-request:cr-imdb",
+        namespace: "imdb",
+        nativeId: "tt0000001",
+        variantId: null,
+        status: "confirmed",
+        unconfirmed: true,
+        changeRequestId: "cr-imdb",
+        segments: [],
+      },
+    ],
+  } as unknown as MediaDocument;
+  expect(
+    mediaItemFrom("m-avengers", withPending, null)!.catalogRows.find((r) => r.namespace === "imdb"),
+  ).toMatchObject({
+    wholeMediaNativeId: "tt0848228",
+    roleLabel: "2 个条目",
+  });
+
   const tvDoc = {
     media: {
       id: "m-aot",

@@ -282,7 +282,9 @@ function buildCatalogRows(
     (namespace) => {
       const ext = externalIdByNamespace.get(namespace);
       const assocs = byNamespace.get(namespace) ?? [];
-      const whole = assocs.find((a) => a.segments.length === 0);
+      const whole = assocs.find(
+        (a) => a.segments.length === 0 && (!ext || a.nativeId === ext.nativeId),
+      );
       const segmented = assocs.filter((a) => a.segments.length > 0);
       const isBaseline = baseline === namespace;
       const hasWhole = Boolean(whole || ext);
