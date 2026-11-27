@@ -54,7 +54,3 @@ RATE_LIMIT_REPUTATION_TIERS=
 RATE_LIMIT_ROLE_HOURLY_LIMITS=
 # Anonymous invalidation report threshold for a recheck.
 INVALIDATION_ANON_THRESHOLD=
-# Cloudflare account containing the API usage dataset.
-CF_ACCOUNT_ID=
-# Token for querying API usage in Analytics Engine.
-ANALYTICS_API_TOKEN=
