@@ -1,6 +1,7 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import {
   createExplorationAgentExecutor,
+  convergeDuplicateMedia,
   createDefaultAdapterRegistry,
   createTmdbGateway,
   createFakeOutboundClient,
@@ -340,7 +341,7 @@ describe("catalog-group exploration", () => {
   ] as const)(
     "a conflicting %s ID does not lend the IMDb-verified title to its owner",
     async (namespace, nativeId) => {
-      const { testDb, mediaId, runJobs } = await setup({
+      const { testDb, mediaId, outbound, runJobs } = await setup({
         baseline: "douban",
         externalIds: [["imdb", "tt0137523"]],
         doubanAssociation: "1292000",
@@ -369,6 +370,14 @@ describe("catalog-group exploration", () => {
         .execute();
 
       expect(await runJobs()).toContain(EXPLORATION_JOB_TYPE);
+      expect(
+        (
+          await convergeDuplicateMedia(db, {
+            outbound,
+            now: new Date(T0.getTime() + 7 * 86_400_000),
+          })
+        ).mergedCount,
+      ).toBe(0);
       expect(
         await db
           .selectFrom("media")
