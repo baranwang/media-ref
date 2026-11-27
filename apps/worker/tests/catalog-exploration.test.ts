@@ -1282,23 +1282,29 @@ describe("catalog-group exploration", () => {
   });
 
   test.each([
-    { alias: "Example TV", expectedId: null },
-    { alias: "另一个名字", expectedId: "movie:90003" },
+    { alias: "Example TV", expectedId: null, expireAt: null },
+    { alias: "另一个名字", expectedId: "movie:90003", expireAt: null },
+    { alias: "另一个名字", expectedId: null, expireAt: "search" },
+    { alias: "另一个名字", expectedId: null, expireAt: "detail" },
   ])(
-    "TMDB verifies an alias search for $alias independently of the title's punctuation",
-    async ({ alias, expectedId }) => {
+    "TMDB verifies an alias search for $alias within the task deadline (expire at $expireAt)",
+    async ({ alias, expectedId, expireAt }) => {
+      let clockMs = 0;
       const { testDb, mediaId, outbound, runJobs } = await setup({
         baseline: "douban",
         doubanAssociation: "1292000",
         externalIds: [],
         title: "Example (TV)",
         originalTitle: null,
+        explorationAgent: { maxDurationMs: 1000, clockMs: () => clockMs },
         extraHttpStub(request) {
           const url = new URL(request.url);
           if (url.pathname.endsWith("/subject/1292000")) {
             return json(request.url, { title: "Example (TV)", aka: ["Example TV", alias] });
           }
           if (url.pathname.endsWith("/search/movie")) {
+            expect(request.signal).toBeDefined();
+            if (expireAt === "search") clockMs = 1001;
             const hit = { id: 90003, title: "Example (TV)" };
             return json(request.url, {
               results:
@@ -1306,6 +1312,8 @@ describe("catalog-group exploration", () => {
             });
           }
           if (url.pathname.endsWith("/movie/90003")) {
+            expect(request.signal).toBeDefined();
+            if (expireAt === "detail") clockMs = 1001;
             return json(request.url, {
               id: 90003,
               title: "Example (TV)",
@@ -1319,9 +1327,17 @@ describe("catalog-group exploration", () => {
       });
 
       expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+      if (expireAt)
+        expect(await platformOutcomes(testDb)).toMatchObject([
+          {
+            namespace: "tmdb",
+            status: "transient_error",
+            reason: "exploration_time_budget_exceeded",
+          },
+        ]);
       const ids = (await externalIds(testDb, mediaId)).map((row) => row.native_id);
       expect(ids).toEqual(expectedId ? [expectedId] : []);
-      expect(outbound.modelRequests).toHaveLength(expectedId ? 0 : 1);
+      expect(outbound.modelRequests).toHaveLength(expectedId || expireAt ? 0 : 1);
     },
   );
 

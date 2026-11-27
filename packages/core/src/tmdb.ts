@@ -38,6 +38,7 @@ export interface TmdbIdentityDetails extends TmdbMediaFetchResult {
 
 export interface TmdbFetchMediaOptions {
   throwOnNotFound?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface TmdbChangesOptions {
@@ -79,17 +80,23 @@ export interface TmdbGateway {
   findByImdbId(
     imdbId: string,
     reportCount?: (count: number) => void,
+    signal?: AbortSignal,
   ): Promise<ParsedTmdbNativeId[]>;
   findByTvdbId?(
     tvdbId: string,
     reportCount?: (count: number) => void,
+    signal?: AbortSignal,
   ): Promise<ParsedTmdbNativeId[]>;
   /** Rich identity metadata (translations, alternative titles, credits) for matching without an IMDb ID. */
-  fetchIdentityDetails?(tmdbType: MediaType, tmdbId: string): Promise<TmdbIdentityDetails | null>;
+  fetchIdentityDetails?(
+    tmdbType: MediaType,
+    tmdbId: string,
+    signal?: AbortSignal,
+  ): Promise<TmdbIdentityDetails | null>;
   /** TMDB title search (`/search/{tv,movie,multi}`), at most 10 hits. */
   search(
     query: string,
-    options?: { type?: MediaType; year?: number; onTruncated?: () => void },
+    options?: { type?: MediaType; year?: number; onTruncated?: () => void; signal?: AbortSignal },
   ): Promise<CatalogSearchHit[]>;
   /** Trakt title search, at most 10 hits. */
   searchTrakt(query: string, options?: { type?: MediaType }): Promise<CatalogSearchHit[]>;
@@ -407,6 +414,7 @@ export async function lookupTraktId(
   config: TmdbGatewayConfig,
   tmdbType: MediaType,
   tmdbId: string,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   const traktType = tmdbType === "movie" ? "movie" : "show";
   const baseUrl = trimTrailingSlash(config.traktApiBaseUrl ?? DEFAULT_TRAKT_API_BASE_URL);
@@ -421,6 +429,7 @@ export async function lookupTraktId(
       method: "GET",
       headers,
       timeoutMs: config.timeoutMs,
+      signal,
     });
     if (response.status < 200 || response.status >= 300) {
       return null;
@@ -547,10 +556,12 @@ export function createTmdbGateway(
     externalId: string,
     externalSource: "imdb_id" | "tvdb_id",
     reportCount?: (count: number) => void,
+    signal?: AbortSignal,
   ): Promise<ParsedTmdbNativeId[]> => {
     const fetched = await fetchTmdbJson(
       buildTmdbUrl(`/find/${encodeURIComponent(externalId)}`, { external_source: externalSource }),
       `find:${externalSource}:${externalId}`,
+      signal,
     );
     if (!fetched.ok) {
       return [];
@@ -589,7 +600,7 @@ export function createTmdbGateway(
       language,
     });
 
-    const fetched = await fetchTmdbJson(detailsUrl, `${tmdbType}:${tmdbId}`);
+    const fetched = await fetchTmdbJson(detailsUrl, `${tmdbType}:${tmdbId}`, options?.signal);
     if (!fetched.ok) {
       if (options?.throwOnNotFound) {
         throw new TmdbGatewayError(
@@ -634,6 +645,7 @@ export function createTmdbGateway(
           method: "GET",
           headers: buildTmdbHeaders(),
           timeoutMs: config.timeoutMs,
+          signal: options?.signal,
         });
         if (extResponse.status >= 200 && extResponse.status < 300) {
           externalBlock = JSON.parse(extResponse.body);
@@ -647,7 +659,7 @@ export function createTmdbGateway(
     const shouldSyncTrakt = extracted.trakt === null && isTraktSyncEnabled(config);
 
     const trakt = shouldSyncTrakt
-      ? await lookupTraktId(outbound, config, tmdbType, tmdbId)
+      ? await lookupTraktId(outbound, config, tmdbType, tmdbId, options?.signal)
       : extracted.trakt;
 
     return {
@@ -685,6 +697,7 @@ export function createTmdbGateway(
       const fetched = await fetchTmdbJson(
         buildTmdbUrl(`/search/${kind}`, params),
         `search:${query}`,
+        options.signal,
       );
       const rows = fetched.ok && Array.isArray(fetched.data.results) ? fetched.data.results : [];
       const hits = rows.slice(0, 20).flatMap((raw): CatalogSearchHit[] => {
@@ -772,12 +785,12 @@ export function createTmdbGateway(
       });
     },
 
-    findByImdbId(imdbId, reportCount) {
-      return findByExternalId(imdbId, "imdb_id", reportCount);
+    findByImdbId(imdbId, reportCount, signal) {
+      return findByExternalId(imdbId, "imdb_id", reportCount, signal);
     },
 
-    findByTvdbId(tvdbId, reportCount) {
-      return findByExternalId(tvdbId, "tvdb_id", reportCount);
+    findByTvdbId(tvdbId, reportCount, signal) {
+      return findByExternalId(tvdbId, "tvdb_id", reportCount, signal);
     },
 
     async fetchMediaSnapshotAndExternalIds(tmdbType, tmdbId, options) {
@@ -785,11 +798,12 @@ export function createTmdbGateway(
       return fetched ? fetched.base : null;
     },
 
-    async fetchIdentityDetails(tmdbType, tmdbId) {
+    async fetchIdentityDetails(tmdbType, tmdbId, signal) {
       const fetched = await fetchMediaWithAppend(
         tmdbType,
         tmdbId,
         "external_ids,alternative_titles,translations,credits",
+        { signal },
       );
       if (!fetched) {
         return null;

@@ -1936,10 +1936,18 @@ async function writeTmdbExternalIdsInTx(
   );
 }
 
+async function withinTmdbBudget<T>(budget: SessionBudget, read: () => Promise<T>): Promise<T> {
+  if (budget.expired()) throw new Error(BUDGET_EXCEEDED);
+  const result = await raceWithAbortSignal(read(), budget.signal, BUDGET_EXCEEDED);
+  if (budget.expired()) throw new Error(BUDGET_EXCEEDED);
+  return result;
+}
+
 function createTmdbLookup(
   ctx: ExplorationExecutionContext,
   source: TmdbLookupSourceContext,
   finds: TmdbFindResults,
+  taskBudget: SessionBudget,
 ) {
   // Undefined is a known hit still to inspect; null is a fetched 404.
   const candidates = new Map<string, TmdbIdentityDetails | null | undefined>();
@@ -1956,24 +1964,31 @@ function createTmdbLookup(
   const tmdb = {
     ...gateway,
     async search(query, options) {
-      const hits = await gateway.search(query, {
-        ...options,
-        onTruncated: () => {
-          if (!options?.type || options.type === ctx.media.type) truncated = true;
-        },
-      });
+      const hits = await withinTmdbBudget(taskBudget, () =>
+        gateway.search(query, {
+          ...options,
+          signal: options?.signal ?? taskBudget.signal,
+          onTruncated: () => {
+            if (!options?.type || options.type === ctx.media.type) truncated = true;
+          },
+        }),
+      );
       for (const hit of hits) remember(hit.nativeId);
       return hits;
     },
-    async fetchIdentityDetails(type, id) {
+    async fetchIdentityDetails(type, id, signal = taskBudget.signal) {
       const key = `${type}:${id}`;
       const cached = candidates.get(key);
       if (cached !== undefined) return cached;
       if (!parseTmdbNativeId(key)) return null;
       remember(key);
-      let detail = await gateway.fetchIdentityDetails?.(type, id);
+      let detail = gateway.fetchIdentityDetails
+        ? await withinTmdbBudget(taskBudget, () => gateway.fetchIdentityDetails!(type, id, signal))
+        : null;
       if (!detail) {
-        const basic = await gateway.fetchMediaSnapshotAndExternalIds(type, id);
+        const basic = await withinTmdbBudget(taskBudget, () =>
+          gateway.fetchMediaSnapshotAndExternalIds(type, id, { signal }),
+        );
         detail = basic && {
           ...basic,
           aliases: [],
@@ -1990,7 +2005,8 @@ function createTmdbLookup(
     },
   } satisfies TmdbGateway;
 
-  const submit = async (candidate: TmdbIdentityDetails, budget?: SessionBudget) => {
+  const submit = async (candidate: TmdbIdentityDetails, budget = taskBudget) => {
+    if (budget.expired()) throw new Error(BUDGET_EXCEEDED);
     const match = evaluateTmdbIdentityMatch(ctx.media, source, finds, candidate);
     if ("reason" in match) return match;
     const byTitle = match.matchedBy === "title";
@@ -2139,7 +2155,7 @@ async function runTmdbAgentFallback(
         return { ok: false, error: "BAD_TMDB_ID", message: 'Use "tv:123" or "movie:123".' };
       }
       const candidate = await raceWithAbortSignal(
-        lookup.tmdb.fetchIdentityDetails(parsed.type, parsed.id),
+        lookup.tmdb.fetchIdentityDetails(parsed.type, parsed.id, budget.signal),
         budget.signal,
         BUDGET_EXCEEDED,
       );
@@ -2215,6 +2231,7 @@ async function exploreTmdbExternalId(
   ctx: ExplorationExecutionContext,
   config: ResolvedExplorationAgentConfig,
   task: ExplorationTaskBudget,
+  budget: SessionBudget,
 ): Promise<TmdbExplorationStepResult> {
   const namespace = "tmdb";
   await ensureExplorationAgentUser(ctx.db);
@@ -2252,11 +2269,13 @@ async function exploreTmdbExternalId(
     return { namespace, status: "submitted", nativeId: acquiredTmdb, directWrite: true };
   }
 
-  const source = await loadTmdbLookupSourceContext(ctx, externalIds);
-  if (!source) return { namespace, status: "not_found", reason: "external_id_conflict" };
-  let fallbackReason = source.externalIds.imdb ? "imdb_not_on_tmdb" : "no_tmdb_candidates";
-
   try {
+    const source = await withinTmdbBudget(budget, () =>
+      loadTmdbLookupSourceContext({ ...ctx, outbound: budget.outbound }, externalIds),
+    );
+    if (!source) return { namespace, status: "not_found", reason: "external_id_conflict" };
+    let fallbackReason = source.externalIds.imdb ? "imdb_not_on_tmdb" : "no_tmdb_candidates";
+
     // Keep the full cardinality of each reverse lookup for every later submission.
     const finds: TmdbFindResults = {};
     for (const ns of ["imdb", "tvdb"] as const) {
@@ -2268,11 +2287,17 @@ async function exploreTmdbExternalId(
       };
       const hits =
         ns === "imdb"
-          ? await ctx.tmdbGateway.findByImdbId(id, reportCount)
-          : await ctx.tmdbGateway.findByTvdbId?.(id, reportCount);
+          ? await withinTmdbBudget(budget, () =>
+              ctx.tmdbGateway.findByImdbId(id, reportCount, budget.signal),
+            )
+          : ctx.tmdbGateway.findByTvdbId
+            ? await withinTmdbBudget(budget, () =>
+                ctx.tmdbGateway.findByTvdbId!(id, reportCount, budget.signal),
+              )
+            : undefined;
       if (hits) finds[ns] = { hits, count: Math.max(count, hits.length) };
     }
-    const lookup = createTmdbLookup(ctx, source, finds);
+    const lookup = createTmdbLookup(ctx, source, finds, budget);
     for (const ns of ["imdb", "tvdb"] as const) {
       const found = finds[ns];
       if (!found?.hits.length) continue;
@@ -2323,6 +2348,7 @@ async function exploreTmdbExternalId(
       fallbackReason = "tmdb_identity_unverified";
     return await runTmdbAgentFallback(ctx, source, lookup, config, task, fallbackReason);
   } catch (error) {
+    if (budget.expired()) return { namespace, status: "transient_error", reason: BUDGET_EXCEEDED };
     return {
       namespace,
       status: "transient_error",
@@ -2348,13 +2374,18 @@ export function createExplorationAgentExecutor(
       clockMs,
       usage: { tokens: 0, byModel: new Map() },
     };
-    let budget: SessionBudget | undefined;
+    const budget = createSessionBudget(ctx.outbound, task.deadlineMs, clockMs);
     try {
       // The TMDB external ID has no adapter: it is looked up and written directly.
       const hasTmdb = ctx.media.externalIds.some((e) => e.namespace === "tmdb");
       if (ctx.targetNamespaces.includes("tmdb") && !hasTmdb) {
         const stepStartMs = clockMs();
-        const { mergedIntoMediaId, ...outcome } = await exploreTmdbExternalId(ctx, config, task);
+        const { mergedIntoMediaId, ...outcome } = await exploreTmdbExternalId(
+          ctx,
+          config,
+          task,
+          budget,
+        );
         platformOutcomes.push({ ...outcome, durationMs: Math.max(0, clockMs() - stepStartMs) });
         if (mergedIntoMediaId) {
           return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
@@ -2402,7 +2433,6 @@ export function createExplorationAgentExecutor(
           )
         : null;
 
-      budget = createSessionBudget(ctx.outbound, task.deadlineMs, clockMs);
       const run = createJobRun(ctx, catalog, budget);
       const open: OpenTarget[] = [];
       for (const adapter of targets) {
@@ -2428,7 +2458,7 @@ export function createExplorationAgentExecutor(
         platformOutcomes.push(...outcomes.map((o) => ({ ...o, durationMs })));
       }
     } finally {
-      budget?.dispose();
+      budget.dispose();
       await recordExplorationTokens(ctx.db, ctx.now, task.usage.tokens);
       await reportPiUsage(ctx.db, ctx.outbound, [...task.usage.byModel.values()], {
         now: ctx.now,
