@@ -1,5 +1,7 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import {
+  acquireAdvisoryLock,
+  ADVISORY_LOCK_CLASSES,
   createExplorationAgentExecutor,
   createDefaultAdapterRegistry,
   createTmdbGateway,
@@ -858,8 +860,53 @@ describe("catalog-group exploration", () => {
     expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("not_found");
   });
 
+  test.each([
+    { alias: "Example TV", expectedId: null },
+    { alias: "另一个名字", expectedId: "movie:90003" },
+  ])(
+    "TMDB verifies an alias search for $alias independently of the title's punctuation",
+    async ({ alias, expectedId }) => {
+      const { testDb, mediaId, outbound, runJobs } = await setup({
+        baseline: "douban",
+        doubanAssociation: "1292000",
+        externalIds: [],
+        title: "Example (TV)",
+        originalTitle: null,
+        extraHttpStub(request) {
+          const url = new URL(request.url);
+          if (url.pathname.endsWith("/subject/1292000")) {
+            return json(request.url, { title: "Example (TV)", aka: ["Example TV", alias] });
+          }
+          if (url.pathname.endsWith("/search/movie")) {
+            const hit = { id: 90003, title: "Example (TV)" };
+            return json(request.url, {
+              results:
+                url.searchParams.get("query") === (expectedId ? alias : hit.title) ? [hit] : [],
+            });
+          }
+          if (url.pathname.endsWith("/movie/90003")) {
+            return json(request.url, {
+              id: 90003,
+              title: "Example (TV)",
+              original_title: alias,
+              release_date: "1999-03-01",
+              external_ids: {},
+            });
+          }
+          return null;
+        },
+      });
+
+      expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+      const ids = (await externalIds(testDb, mediaId)).map((row) => row.native_id);
+      expect(ids).toEqual(expectedId ? [expectedId] : []);
+      expect(outbound.modelRequests).toHaveLength(expectedId ? 0 : 1);
+    },
+  );
+
   test("TMDB fallback session keeps search tools available even when explorationAgent maxDurationMs exceeds 6 minutes", async () => {
     let seenToolNames: string[] = [];
+    let searchTimeoutMs: number | undefined;
     const { testDb, mediaId, runJobs } = await setup({
       baseline: "bangumi",
       type: "tv",
@@ -869,7 +916,7 @@ describe("catalog-group exploration", () => {
       seasons: [{ season: 1, episodeCount: 12, airYear: 2026 }],
       externalIds: [],
       bangumiAssociation: "499997",
-      explorationAgent: { maxDurationMs: 10 * 60_000 },
+      explorationAgent: { maxDurationMs: 10 * 60_000, clockMs: () => T0.getTime() },
       extraHttpStub(request) {
         const url = new URL(request.url);
         if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/499997")) {
@@ -883,6 +930,7 @@ describe("catalog-group exploration", () => {
       invokeModel(request: ModelInvocationRequest): ModelInvocationResponse {
         if (seenToolNames.length === 0) {
           seenToolNames = (request.tools ?? []).map((t) => t.name);
+          searchTimeoutMs = request.timeoutMs;
         }
         return {
           content: null,
@@ -893,6 +941,7 @@ describe("catalog-group exploration", () => {
     });
 
     expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(searchTimeoutMs).toBe(67_500);
     expect(seenToolNames).toEqual(
       expect.arrayContaining([
         "search_catalog",
@@ -1005,6 +1054,80 @@ describe("catalog-group exploration", () => {
     expect(await externalIds(testDb, mediaId)).toEqual([]);
     expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("open");
   });
+
+  test.each([
+    { effect: "every ID", holderTitle: null },
+    { effect: "a duplicate merge", holderTitle: "Fight Club" },
+    { effect: "a conflict alert", holderTitle: "The Matrix" },
+  ])(
+    "TMDB fallback rolls back $effect when the deadline passes while waiting on a database lock",
+    async ({ holderTitle }) => {
+      let clockMs = T0.getTime();
+      const { testDb, mediaId, runJobs } = await setup({
+        baseline: "douban",
+        doubanAssociation: "1292000",
+        externalIds: [],
+        tmdbSearchEmpty: true,
+        explorationAgent: { maxDurationMs: 10_000, clockMs: () => clockMs },
+        extraHttpStub(request) {
+          if (new URL(request.url).pathname.endsWith("/movie/550")) {
+            return json(request.url, {
+              id: 550,
+              title: "搏击俱乐部",
+              original_title: "Fight Club",
+              release_date: "1999-10-15",
+              external_ids: { tvdb_id: 123 },
+            });
+          }
+          return null;
+        },
+        invokeModel: () => ({
+          content: null,
+          toolCalls: [{ id: "c1", name: "submit_tmdb_id", arguments: { nativeId: "movie:550" } }],
+          model: "test-model",
+        }),
+      });
+
+      const holder = holderTitle
+        ? await addMovieIdHolder(testDb, holderTitle, "tmdb", "movie:550")
+        : null;
+      const { job } = await testDb.readDb.transaction().execute(async (trx) => {
+        if (holder) {
+          await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_MERGE, holder.id);
+        } else {
+          await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE, `${mediaId}:tvdb`);
+        }
+        const job = runJobs();
+        const sessions = testDb.readDb.withTables<{
+          pg_stat_activity: { datname: string; wait_event: string | null };
+        }>();
+        await expect
+          .poll(() =>
+            sessions
+              .selectFrom("pg_stat_activity")
+              .select("wait_event")
+              .where("datname", "=", testDb.dbName)
+              .where("wait_event", "=", "advisory")
+              .executeTakeFirst(),
+          )
+          .toBeDefined();
+        clockMs += 10_000;
+        return { job };
+      });
+
+      expect(await job).toEqual([EXPLORATION_JOB_TYPE]);
+      expect(await externalIds(testDb, mediaId)).toEqual([]);
+      expect(
+        await testDb.readDb
+          .selectFrom("media")
+          .select("id")
+          .where("merged_into_media_id", "is not", null)
+          .execute(),
+      ).toEqual([]);
+      expect(await testDb.readDb.selectFrom("review_alerts").select("id").execute()).toEqual([]);
+      expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("open");
+    },
+  );
 
   test("TMDB lookup falls back to agent session and enforces identity gate on submit_tmdb_id", async () => {
     let step = 0;

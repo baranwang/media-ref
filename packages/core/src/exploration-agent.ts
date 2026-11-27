@@ -27,7 +27,8 @@ import {
   type Namespace,
   type SegmentInput,
 } from "@media-ref/client";
-import type { Db } from "@media-ref/db";
+import type { Database, Db } from "@media-ref/db";
+import { sql, type Transaction } from "kysely";
 import { fetchBangumiSubjectMetadata } from "./adapters/bangumi.ts";
 import { fetchDoubanFrodo } from "./adapters/douban-api.ts";
 import {
@@ -1825,55 +1826,41 @@ async function loadTmdbLookupSourceContext(
   };
 }
 
-function groupNormalizedTitles(
-  rawTitles: readonly (string | null | undefined)[],
-  year: number | null,
-): Map<string, Set<string>> {
-  const groups = new Map<string, Set<string>>();
-  for (const raw of rawTitles) {
-    if (!raw || raw.trim().length === 0) {
-      continue;
-    }
-    const forms = collectNormalizedTitleCandidates(raw, null, undefined, year);
-    if (forms.size === 0) {
-      continue;
-    }
-    const stripped = normalizeTitleForComparison(stripTrailingQualifiers(raw, year));
-    const full = normalizeTitleForComparison(raw);
-    const key = stripped.length >= 2 ? stripped : full;
-    if (!key) {
-      continue;
-    }
-    const existing = groups.get(key);
-    if (existing) {
-      for (const form of forms) {
-        existing.add(form);
-      }
-    } else {
-      groups.set(key, forms);
-    }
-  }
-  return groups;
-}
-
 function countMatchedIndependentTitles(
-  targetGroups: ReadonlyMap<string, ReadonlySet<string>>,
-  candidateGroups: ReadonlyMap<string, ReadonlySet<string>>,
+  media: ExplorationTargetMedia,
+  source: TmdbLookupSourceContext,
+  candidate: TmdbCandidateDetail,
 ): number {
-  const matchedTarget = new Set<string>();
-  const matchedCandidate = new Set<string>();
-  for (const [targetKey, targetForms] of targetGroups) {
-    for (const [candidateKey, candidateForms] of candidateGroups) {
-      for (const form of targetForms) {
-        if (candidateForms.has(form)) {
-          matchedTarget.add(targetKey);
-          matchedCandidate.add(candidateKey);
-          break;
+  const groupByForm = new Map<string, Set<string>>();
+  const collect = (titles: readonly (string | null)[], year: number | null) => {
+    const catalogForms = new Set<string>();
+    for (const title of titles) {
+      const forms = collectNormalizedTitleCandidates(title, null, undefined, year);
+      const group = new Set(forms);
+      // An alias can repeat either the full title or its qualifier-stripped form.
+      for (const form of forms) {
+        catalogForms.add(form);
+        for (const equivalent of groupByForm.get(form) ?? []) {
+          group.add(equivalent);
         }
       }
+      for (const form of group) groupByForm.set(form, group);
     }
+    return catalogForms;
+  };
+  const targetForms = collect(
+    [media.snapshot.title, media.snapshot.originalTitle, ...source.aliases],
+    source.year,
+  );
+  const candidateForms = collect(
+    [candidate.title, candidate.originalTitle, ...candidate.aliases],
+    candidate.year,
+  );
+  const matchedGroups = new Set<Set<string>>();
+  for (const form of targetForms) {
+    if (candidateForms.has(form)) matchedGroups.add(groupByForm.get(form)!);
   }
-  return Math.min(matchedTarget.size, matchedCandidate.size);
+  return matchedGroups.size;
 }
 
 function evaluateTmdbIdentityMatch(
@@ -1964,15 +1951,7 @@ function evaluateTmdbIdentityMatch(
   }
   const exactYear = yearGap === 0;
 
-  const targetTitles = groupNormalizedTitles(
-    [media.snapshot.title, media.snapshot.originalTitle, ...source.aliases],
-    source.year,
-  );
-  const candidateTitles = groupNormalizedTitles(
-    [candidate.title, candidate.originalTitle, ...candidate.aliases],
-    candidate.year,
-  );
-  const matchedTitleCount = countMatchedIndependentTitles(targetTitles, candidateTitles);
+  const matchedTitleCount = countMatchedIndependentTitles(media, source, candidate);
 
   const directorHits = intersectNormalizedNames(source.directors, candidate.directorsAndCreators);
   const studioHits = intersectNormalizedNames(source.studios, candidate.productionCompanies);
@@ -2045,6 +2024,7 @@ async function writeTmdbExternalIdsInTx(
   ctx: ExplorationExecutionContext,
   entry: TmdbCandidateDetail,
   matchedBy: Record<string, string>,
+  budget?: SessionBudget,
 ): Promise<TmdbExplorationStepResult> {
   const namespace = "tmdb";
   const submitted = {
@@ -2059,12 +2039,13 @@ async function writeTmdbExternalIdsInTx(
     ...(entry.externalIds.trakt ? { trakt: entry.externalIds.trakt } : {}),
   };
 
-  return ctx.db.transaction().execute(async (trx): Promise<TmdbExplorationStepResult> => {
+  const write = async (trx: Transaction<Database>): Promise<TmdbExplorationStepResult> => {
     const mediaId = ctx.media.id;
     for (const [ns, nativeId] of Object.entries(nativeIds) as Array<
       ["tmdb" | "tvdb" | "trakt", string]
     >) {
       await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE, `${mediaId}:${ns}`);
+      if (budget?.expired()) throw new Error(BUDGET_EXCEEDED);
       const held = await trx
         .selectFrom("associations")
         .select(["id", "media_id", "native_id"])
@@ -2171,7 +2152,24 @@ async function writeTmdbExternalIdsInTx(
     }
     await fulfillCoveredCatalogDemandsInTx(trx, { mediaId, now: ctx.now });
     return submitted;
-  });
+  };
+  return ctx.db.connection().execute(
+    (db) =>
+      db.transaction().execute(async (trx) => {
+        if (budget) {
+          const remaining = Math.ceil(budget.remainingMs());
+          if (remaining <= 0) throw new Error(BUDGET_EXCEEDED);
+          await sql`select set_config('transaction_timeout', ${String(remaining)}, true)`.execute(
+            trx,
+          );
+        }
+        const result = await write(trx);
+        // Redirects and conflict alerts can also wait for merge locks before returning.
+        if (budget?.expired()) throw new Error(BUDGET_EXCEEDED);
+        return result;
+      }),
+    { signal: budget?.signal },
+  );
 }
 
 async function runTmdbAgentFallback(
@@ -2353,9 +2351,14 @@ async function runTmdbAgentFallback(
           reason: check.disqualifiedReason ?? "insufficient_identity_evidence",
         };
       }
-      outcome = await writeTmdbExternalIdsInTx(ctx, candidate, {
-        agentSearch: typeof args.rationale === "string" ? args.rationale.slice(0, 120) : "agent",
-      });
+      outcome = await writeTmdbExternalIdsInTx(
+        ctx,
+        candidate,
+        {
+          agentSearch: typeof args.rationale === "string" ? args.rationale.slice(0, 120) : "agent",
+        },
+        budget,
+      );
       return { ok: true };
     };
 
@@ -2402,6 +2405,9 @@ async function runTmdbAgentFallback(
       case "concluded":
         return { namespace, status: "not_found", reason: fallbackNotFoundReason };
     }
+  } catch (error) {
+    if (budget.expired()) return { namespace, status: "transient_error", reason: BUDGET_EXCEEDED };
+    throw error;
   } finally {
     budget.dispose();
     if (usage.tokens > 0) {
