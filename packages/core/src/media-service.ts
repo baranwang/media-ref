@@ -1419,66 +1419,84 @@ function mergeApprovedSegments(
   );
 }
 
+/** Report only keys confirmed on this media, including which ones this call inserted. */
 export async function backfillMissingExternalIdsInTx(
   trx: Transaction<Database>,
   input: {
     mediaId: string;
-    externalIds: Partial<Record<ExternalIdNamespace, string>>;
-    skipNamespace?: ExternalIdNamespace | null;
+    externalIds: Partial<Record<ExternalIdNamespace, string | null>>;
+    requiredExistingKey?: string;
     now?: Date;
   },
-): Promise<string[]> {
-  const candidates = EXTERNAL_ID_NAMESPACES.flatMap((ns) => {
-    if (ns === input.skipNamespace) {
-      return [];
-    }
-    const nativeId = input.externalIds[ns];
-    return nativeId ? [{ namespace: ns, nativeId }] : [];
+): Promise<{ ownedKeys: string[]; insertedKeys: string[] }> {
+  const candidates = EXTERNAL_ID_NAMESPACES.flatMap((namespace) => {
+    const nativeId = input.externalIds[namespace];
+    return nativeId ? [{ namespace, nativeId }] : [];
   });
   if (candidates.length === 0) {
-    return [];
+    return { ownedKeys: [], insertedKeys: [] };
   }
 
-  const existingRows = await trx
+  const rows = await trx
     .selectFrom("associations")
-    .select("namespace")
-    .where("is_external_id", "=", true)
-    .where("media_id", "=", input.mediaId)
+    .select(["media_id", "namespace", "native_id as nativeId", "is_external_id", "status"])
     .where(
       "namespace",
       "in",
       candidates.map((entry) => entry.namespace),
     )
+    .where((eb) =>
+      eb.or([
+        eb.and({ media_id: input.mediaId, is_external_id: true }),
+        ...candidates.map(({ namespace, nativeId }) => eb.and({ namespace, native_id: nativeId })),
+      ]),
+    )
+    .orderBy("id")
+    .forShare()
+    .$narrowType<{ namespace: ExternalIdNamespace }>()
     .execute();
-  const existingNamespaces = new Set(existingRows.map((row) => row.namespace));
-  const insertedKeys: string[] = [];
-
-  for (const entry of candidates) {
-    if (existingNamespaces.has(entry.namespace)) {
-      continue;
-    }
-    const inserted = await trx
-      .insertInto("associations")
-      .values({
-        status: "confirmed",
-        is_external_id: true,
-        media_id: input.mediaId,
-        namespace: entry.namespace,
-        native_id: entry.nativeId,
-        source: "sync",
-        ...(input.now ? { created_at: input.now, updated_at: input.now } : {}),
-      })
-      .onConflict((oc) => oc.doNothing())
-      .returning("id")
-      .executeTakeFirst();
-    if (inserted) {
-      insertedKeys.push(
-        formatExternalKey({ namespace: entry.namespace, nativeId: entry.nativeId }),
-      );
-    }
+  const local = rows.filter((row) => row.media_id === input.mediaId);
+  const ownedKeys = local
+    .filter(
+      (row) =>
+        row.is_external_id &&
+        row.status === "confirmed" &&
+        row.nativeId === input.externalIds[row.namespace],
+    )
+    .map(formatExternalKey);
+  // A regular association with the same key also occupies (media_id, namespace, native_id).
+  const missing = candidates.filter(
+    ({ namespace }) => !local.some((row) => row.namespace === namespace),
+  );
+  if (
+    missing.length === 0 ||
+    (input.requiredExistingKey !== undefined && !ownedKeys.includes(input.requiredExistingKey)) ||
+    local.some((row) => row.is_external_id && row.nativeId !== input.externalIds[row.namespace]) ||
+    rows.some(
+      (row) => row.media_id !== input.mediaId && (row.is_external_id || row.status === "confirmed"),
+    )
+  ) {
+    return { ownedKeys, insertedKeys: [] };
   }
 
-  return insertedKeys;
+  // One insert makes a concurrent claim roll back the whole batch.
+  const inserted = await trx
+    .insertInto("associations")
+    .values(
+      missing.map(({ namespace, nativeId }) => ({
+        media_id: input.mediaId,
+        namespace,
+        native_id: nativeId,
+        status: "confirmed" as const,
+        is_external_id: true,
+        source: "sync" as const,
+        ...(input.now ? { created_at: input.now, updated_at: input.now } : {}),
+      })),
+    )
+    .returning(["namespace", "native_id as nativeId"])
+    .execute();
+  const insertedKeys = inserted.map(formatExternalKey);
+  return { ownedKeys: [...ownedKeys, ...insertedKeys], insertedKeys };
 }
 
 export async function approveChangeRequestInTransaction(
@@ -1588,10 +1606,9 @@ export async function approveChangeRequestInTransaction(
           .execute();
       }
 
-      await backfillMissingExternalIdsInTx(trx, {
+      const { ownedKeys: demandExternalKeys } = await backfillMissingExternalIdsInTx(trx, {
         mediaId: createdMedia.id,
         externalIds: prefetchedCatalog.externalIds,
-        skipNamespace: primaryExternalNamespace,
       });
 
       // When created from a Douban or Bangumi catalog entry, establish the initial confirmed
@@ -1671,22 +1688,15 @@ export async function approveChangeRequestInTransaction(
         createdInitAssociation = true;
       }
 
-      const demandExternalKeys = new Set<string>([prefetchedCatalog.canonicalKey]);
-      for (const extNs of EXTERNAL_ID_NAMESPACES) {
-        const extNativeId = prefetchedCatalog.externalIds[extNs];
-        if (extNativeId) {
-          demandExternalKeys.add(formatExternalKey({ namespace: extNs, nativeId: extNativeId }));
-        }
-      }
       if (initAssoc) {
-        demandExternalKeys.add(
+        demandExternalKeys.push(
           formatExternalKey({ namespace: initAssoc.namespace, nativeId: initAssoc.nativeId }),
         );
       }
 
       await mergeExternalKeyDemandsIntoMedia(trx, {
         mediaId: createdMedia.id,
-        externalKeys: [...demandExternalKeys],
+        externalKeys: demandExternalKeys,
         seasons: prefetchedCatalog.snapshot.seasons,
         mediaType: createdMedia.type,
         now: input.now,
@@ -1706,15 +1716,15 @@ export async function approveChangeRequestInTransaction(
   }
 
   if (resolvedExistingMedia && prefetchedCatalog) {
-    const addedKeys = await backfillMissingExternalIdsInTx(trx, {
+    const { insertedKeys } = await backfillMissingExternalIdsInTx(trx, {
       mediaId: media.id,
       externalIds: prefetchedCatalog.externalIds,
     });
-    if (addedKeys.length > 0) {
+    if (insertedKeys.length > 0) {
       await mergeExternalKeyDemandsIntoMedia(trx, {
         mediaId: media.id,
-        externalKeys: addedKeys,
-        seasons: prefetchedCatalog.snapshot.seasons,
+        externalKeys: insertedKeys,
+        seasons: media.seasons,
         mediaType: media.type,
         now: input.now,
       });
