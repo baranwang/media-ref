@@ -495,6 +495,8 @@ export const DUPLICATE_CONVERGENCE_SYNC_KEY = "duplicate_convergence";
 interface CatalogConvergenceCursor {
   namespace: "douban" | "bangumi";
   nativeId: string;
+  lastMediaIdA: string | null;
+  lastMediaIdB: string | null;
 }
 
 function parseCatalogConvergenceCursor(metadata: unknown): CatalogConvergenceCursor | null {
@@ -509,7 +511,13 @@ function parseCatalogConvergenceCursor(metadata: unknown): CatalogConvergenceCur
     typeof rec.nativeId === "string" &&
     rec.nativeId.length > 0
   ) {
-    return { namespace: rec.namespace, nativeId: rec.nativeId };
+    const lastMediaIdA =
+      typeof rec.lastMediaIdA === "string" && rec.lastMediaIdA.length > 0 ? rec.lastMediaIdA : null;
+    const lastMediaIdB =
+      lastMediaIdA !== null && typeof rec.lastMediaIdB === "string" && rec.lastMediaIdB.length > 0
+        ? rec.lastMediaIdB
+        : null;
+    return { namespace: rec.namespace, nativeId: rec.nativeId, lastMediaIdA, lastMediaIdB };
   }
   return null;
 }
@@ -531,12 +539,13 @@ async function fetchDuplicateCatalogGroups(
     .where("m.merged_into_media_id", "is", null);
 
   if (afterCursor) {
+    const inclusiveCurrentGroup = afterCursor.lastMediaIdA !== null;
     query = query.where((eb) =>
       eb.or([
         eb("a.namespace", ">", afterCursor.namespace),
         eb.and([
           eb("a.namespace", "=", afterCursor.namespace),
-          eb("a.native_id", ">", afterCursor.nativeId),
+          eb("a.native_id", inclusiveCurrentGroup ? ">=" : ">", afterCursor.nativeId),
         ]),
       ]),
     );
@@ -639,9 +648,10 @@ export async function convergeDuplicateMedia(
   await collectOpenAlerts(reservedAlertQuota);
 
   // 2. Collect pairs sharing an active exclusive catalog (`douban`/`bangumi`) association starting
-  //    after the persisted keyset cursor so blocked groups never stall subsequent groups.
-  const catalogLimit = Math.max(0, batchSize - candidatePairs.length);
-  if (catalogLimit > 0) {
+  //    after the persisted keyset cursor, bounded strictly by `batchSize` candidate pairs so
+  //    large multi-member groups never perform quadratic work or starve remaining groups/members.
+  const catalogPairBudget = Math.max(0, batchSize - candidatePairs.length);
+  if (catalogPairBudget > 0) {
     const stateRow = await db
       .selectFrom("sync_state")
       .select("metadata")
@@ -649,23 +659,50 @@ export async function convergeDuplicateMedia(
       .executeTakeFirst();
     const initialCursor = stateRow ? parseCatalogConvergenceCursor(stateRow.metadata) : null;
 
-    let duplicateCatalogGroups = await fetchDuplicateCatalogGroups(db, catalogLimit, initialCursor);
+    let duplicateCatalogGroups = await fetchDuplicateCatalogGroups(
+      db,
+      catalogPairBudget,
+      initialCursor,
+    );
     if (initialCursor !== null && duplicateCatalogGroups.length === 0) {
-      duplicateCatalogGroups = await fetchDuplicateCatalogGroups(db, catalogLimit, null);
+      duplicateCatalogGroups = await fetchDuplicateCatalogGroups(db, catalogPairBudget, null);
     }
 
-    const nextCursor: CatalogConvergenceCursor | null =
-      duplicateCatalogGroups.length === catalogLimit && duplicateCatalogGroups.length > 0
-        ? {
-            namespace: duplicateCatalogGroups[duplicateCatalogGroups.length - 1]!.namespace as
-              | "douban"
-              | "bangumi",
-            nativeId: duplicateCatalogGroups[duplicateCatalogGroups.length - 1]!.native_id,
-          }
-        : null;
+    let nextCursor: CatalogConvergenceCursor | null = null;
+    let reachedPairLimit = false;
 
-    for (const group of duplicateCatalogGroups) {
-      const members = await db
+    const addGroupPair = (
+      group: { namespace: AssociationNamespaceRow; native_id: string },
+      a: string,
+      b: string,
+    ): boolean => {
+      const pairKey = [a, b].sort().join(":");
+      if (!seenPairs.has(pairKey)) {
+        seenPairs.add(pairKey);
+        candidatePairs.push({
+          mediaIdA: a,
+          mediaIdB: b,
+          reason: `converge_shared_catalog:${group.namespace}:${group.native_id}`,
+        });
+      }
+      if (candidatePairs.length >= batchSize) {
+        nextCursor = {
+          namespace: group.namespace as "douban" | "bangumi",
+          nativeId: group.native_id,
+          lastMediaIdA: a,
+          lastMediaIdB: b,
+        };
+        reachedPairLimit = true;
+        return true;
+      }
+      return false;
+    };
+
+    const baseGroupMembersQuery = (group: {
+      namespace: AssociationNamespaceRow;
+      native_id: string;
+    }) =>
+      db
         .selectFrom("associations as a")
         .innerJoin("media as m", "m.id", "a.media_id")
         .where("a.is_external_id", "=", false)
@@ -674,28 +711,100 @@ export async function convergeDuplicateMedia(
         .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
         .where("m.merged_into_media_id", "is", null)
         .select("m.id as media_id")
-        .distinct()
-        .orderBy("m.id", "asc")
-        .execute();
+        .distinct();
 
-      if (members.length < 2) {
-        continue;
-      }
-      for (let i = 0; i < members.length; i += 1) {
-        for (let j = i + 1; j < members.length; j += 1) {
-          const a = members[i]!.media_id;
-          const b = members[j]!.media_id;
-          const pairKey = [a, b].sort().join(":");
-          if (!seenPairs.has(pairKey)) {
-            seenPairs.add(pairKey);
-            candidatePairs.push({
-              mediaIdA: a,
-              mediaIdB: b,
-              reason: `converge_shared_catalog:${group.namespace}:${group.native_id}`,
-            });
+    const collectPairsForAnchor = async (
+      group: { namespace: AssociationNamespaceRow; native_id: string },
+      anchorId: string,
+      initialAfterId: string,
+    ): Promise<boolean> => {
+      let afterId = initialAfterId;
+      while (candidatePairs.length < batchSize) {
+        const limit = batchSize - candidatePairs.length;
+        const partners = await baseGroupMembersQuery(group)
+          .where("m.id", ">", afterId)
+          .orderBy("m.id", "asc")
+          .limit(limit)
+          .execute();
+        for (const partner of partners) {
+          afterId = partner.media_id;
+          if (addGroupPair(group, anchorId, partner.media_id)) {
+            return true;
           }
         }
+        if (partners.length < limit) {
+          break;
+        }
       }
+      return false;
+    };
+
+    for (const group of duplicateCatalogGroups) {
+      if (candidatePairs.length >= batchSize) {
+        reachedPairLimit = true;
+        break;
+      }
+
+      const isResumingGroup =
+        initialCursor !== null &&
+        group.namespace === initialCursor.namespace &&
+        group.native_id === initialCursor.nativeId &&
+        initialCursor.lastMediaIdA !== null;
+
+      const resumeA = isResumingGroup ? initialCursor!.lastMediaIdA : null;
+      const resumeB = isResumingGroup ? initialCursor!.lastMediaIdB : null;
+
+      if (resumeA !== null && resumeB !== null) {
+        const anchorActive = await baseGroupMembersQuery(group)
+          .where("m.id", "=", resumeA)
+          .executeTakeFirst();
+
+        if (anchorActive && (await collectPairsForAnchor(group, resumeA, resumeB))) {
+          break;
+        }
+      }
+
+      let afterAnchorId = resumeA;
+      while (candidatePairs.length < batchSize) {
+        const fetchLimit = batchSize - candidatePairs.length + 1;
+        let anchorQuery = baseGroupMembersQuery(group);
+        if (afterAnchorId !== null) {
+          anchorQuery = anchorQuery.where("m.id", ">", afterAnchorId);
+        }
+        const anchors = await anchorQuery.orderBy("m.id", "asc").limit(fetchLimit).execute();
+
+        if (anchors.length < 2) {
+          break;
+        }
+
+        for (let i = 0; i < anchors.length - 1; i += 1) {
+          const anchorId = anchors[i]!.media_id;
+          afterAnchorId = anchorId;
+          if (await collectPairsForAnchor(group, anchorId, anchorId)) {
+            break;
+          }
+        }
+        if (reachedPairLimit || anchors.length < fetchLimit) {
+          break;
+        }
+      }
+      if (reachedPairLimit) {
+        break;
+      }
+    }
+
+    if (
+      !reachedPairLimit &&
+      duplicateCatalogGroups.length === catalogPairBudget &&
+      duplicateCatalogGroups.length > 0
+    ) {
+      const lastGroup = duplicateCatalogGroups[duplicateCatalogGroups.length - 1]!;
+      nextCursor = {
+        namespace: lastGroup.namespace as "douban" | "bangumi",
+        nativeId: lastGroup.native_id,
+        lastMediaIdA: null,
+        lastMediaIdB: null,
+      };
     }
 
     if (initialCursor !== null || nextCursor !== null) {

@@ -1531,24 +1531,20 @@ export async function approveChangeRequestInTransaction(
     let reusedExisting = existingConfirmedInTx !== null;
 
     if (!resolvedOrCreatedMedia && prefetchedCatalog) {
+      const prefetchedAliasesRaw = (prefetchedCatalog.evidence as { aliases?: unknown } | undefined)
+        ?.aliases;
+      const prefetchedAliases = Array.isArray(prefetchedAliasesRaw)
+        ? prefetchedAliasesRaw.filter((a): a is string => typeof a === "string")
+        : [];
       const reusable = await findReusableMediaForPrefetchedCatalogInTx(trx, {
         type: prefetchedCatalog.type,
         snapshot: prefetchedCatalog.snapshot,
         externalIds: prefetchedCatalog.externalIds,
+        aliases: prefetchedAliases,
         initialAssociation: initAssoc,
       });
       if (reusable) {
         resolvedOrCreatedMedia = reusable;
-        reusedExisting = true;
-      }
-    }
-
-    if (!resolvedOrCreatedMedia) {
-      const existingUnconfirmedInTx = await resolveExistingMediaByTarget(trx, target, {
-        includeUnconfirmedCatalog: true,
-      });
-      if (existingUnconfirmedInTx) {
-        resolvedOrCreatedMedia = existingUnconfirmedInTx.media;
         reusedExisting = true;
       }
     }
@@ -1586,6 +1582,30 @@ export async function approveChangeRequestInTransaction(
     }
 
     if (prefetchedCatalog) {
+      // Only sync external IDs onto a reused media if its identity independently matches
+      // `prefetchedCatalog` (guards against writing wrong IMDb/TMDB IDs onto unverified rows).
+      let allowPrefetchedExternalIdSync = !reusedExisting;
+      if (reusedExisting) {
+        const reusedSnap = await loadMediaMergeCandidateSnapshotInTx(
+          trx,
+          resolvedOrCreatedMedia.id,
+        );
+        if (reusedSnap) {
+          const prefetchedAliasesRaw = (
+            prefetchedCatalog.evidence as { aliases?: unknown } | undefined
+          )?.aliases;
+          const prefetchedAliases = Array.isArray(prefetchedAliasesRaw)
+            ? prefetchedAliasesRaw.filter((a): a is string => typeof a === "string")
+            : [];
+          allowPrefetchedExternalIdSync = doesCatalogTargetMatchMediaSnapshot(reusedSnap, [], {
+            type: prefetchedCatalog.type,
+            snapshot: prefetchedCatalog.snapshot,
+            externalIds: prefetchedCatalog.externalIds,
+            aliases: prefetchedAliases,
+          });
+        }
+      }
+
       // Sync external IDs (TMDB, IMDb, TVDB, Trakt) discovered from target catalog and
       // auto-merge compatible duplicates rather than silently dropping conflicting IDs.
       const primaryExternalNamespace: ExternalIdNamespace | null = isExternalIdNamespace(
@@ -1594,81 +1614,83 @@ export async function approveChangeRequestInTransaction(
         ? prefetchedCatalog.sourceNamespace
         : null;
 
-      for (const extNs of EXTERNAL_ID_NAMESPACES) {
-        const extNativeId = prefetchedCatalog.externalIds[extNs];
-        if (!extNativeId) {
-          continue;
-        }
-        const alreadyOnMedia = await trx
-          .selectFrom("associations")
-          .where("is_external_id", "=", true)
-          .select(["id", "native_id"])
-          .where("media_id", "=", resolvedOrCreatedMedia.id)
-          .where("namespace", "=", extNs)
-          .where("status", "!=", "delisted")
-          .executeTakeFirst();
-        if (alreadyOnMedia) {
-          continue;
-        }
+      if (allowPrefetchedExternalIdSync) {
+        for (const extNs of EXTERNAL_ID_NAMESPACES) {
+          const extNativeId = prefetchedCatalog.externalIds[extNs];
+          if (!extNativeId) {
+            continue;
+          }
+          const alreadyOnMedia = await trx
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
+            .select(["id", "native_id"])
+            .where("media_id", "=", resolvedOrCreatedMedia.id)
+            .where("namespace", "=", extNs)
+            .where("status", "!=", "delisted")
+            .executeTakeFirst();
+          if (alreadyOnMedia) {
+            continue;
+          }
 
-        const claimedByOther = await trx
-          .selectFrom("associations")
-          .where("is_external_id", "=", true)
-          .select(["id", "media_id"])
-          .where("namespace", "=", extNs)
-          .where("native_id", "=", extNativeId)
-          .where("status", "!=", "delisted")
-          .where("media_id", "!=", resolvedOrCreatedMedia.id)
-          .executeTakeFirst();
-        if (claimedByOther) {
-          const canonicalOtherId =
-            (await resolveCanonicalMediaIdInTx(trx, claimedByOther.media_id)) ??
-            claimedByOther.media_id;
-          if (canonicalOtherId !== resolvedOrCreatedMedia.id) {
-            const mergeAttempt = await verifyAndAutoMergeDuplicateMediaInTx(trx, {
-              mediaIdA: resolvedOrCreatedMedia.id,
-              mediaIdB: canonicalOtherId,
-              actorUserId: input.reviewerUserId,
-              reason: `cr_target_external_id_duplicate:${extNs}:${extNativeId}`,
-              extraTitlesByMediaId: new Map([
-                [
-                  resolvedOrCreatedMedia.id,
-                  [prefetchedCatalog.snapshot.title, prefetchedCatalog.snapshot.originalTitle],
-                ],
-              ]),
-              acquireMergeLocks: true,
-              now: input.now,
-            });
-            if (mergeAttempt.merged && mergeAttempt.targetMediaId !== resolvedOrCreatedMedia.id) {
-              const reloaded = await resolveCanonicalMediaById(trx, mergeAttempt.targetMediaId);
-              if (reloaded) {
-                resolvedOrCreatedMedia = reloaded;
+          const claimedByOther = await trx
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
+            .select(["id", "media_id"])
+            .where("namespace", "=", extNs)
+            .where("native_id", "=", extNativeId)
+            .where("status", "!=", "delisted")
+            .where("media_id", "!=", resolvedOrCreatedMedia.id)
+            .executeTakeFirst();
+          if (claimedByOther) {
+            const canonicalOtherId =
+              (await resolveCanonicalMediaIdInTx(trx, claimedByOther.media_id)) ??
+              claimedByOther.media_id;
+            if (canonicalOtherId !== resolvedOrCreatedMedia.id) {
+              const mergeAttempt = await verifyAndAutoMergeDuplicateMediaInTx(trx, {
+                mediaIdA: resolvedOrCreatedMedia.id,
+                mediaIdB: canonicalOtherId,
+                actorUserId: input.reviewerUserId,
+                reason: `cr_target_external_id_duplicate:${extNs}:${extNativeId}`,
+                extraTitlesByMediaId: new Map([
+                  [
+                    resolvedOrCreatedMedia.id,
+                    [prefetchedCatalog.snapshot.title, prefetchedCatalog.snapshot.originalTitle],
+                  ],
+                ]),
+                acquireMergeLocks: true,
+                now: input.now,
+              });
+              if (mergeAttempt.merged && mergeAttempt.targetMediaId !== resolvedOrCreatedMedia.id) {
+                const reloaded = await resolveCanonicalMediaById(trx, mergeAttempt.targetMediaId);
+                if (reloaded) {
+                  resolvedOrCreatedMedia = reloaded;
+                }
               }
             }
           }
-        }
 
-        const stillClaimed = await trx
-          .selectFrom("associations")
-          .where("is_external_id", "=", true)
-          .select("id")
-          .where("namespace", "=", extNs)
-          .where("native_id", "=", extNativeId)
-          .where("status", "!=", "delisted")
-          .executeTakeFirst();
-        if (!stillClaimed) {
-          await trx
-            .insertInto("associations")
-            .values({
-              status: "confirmed",
-              is_external_id: true,
-              media_id: resolvedOrCreatedMedia.id,
-              namespace: extNs,
-              native_id: extNativeId,
-              source: extNs === primaryExternalNamespace ? "sync" : "sync",
-            })
-            .onConflict((oc) => oc.doNothing())
-            .execute();
+          const stillClaimed = await trx
+            .selectFrom("associations")
+            .where("is_external_id", "=", true)
+            .select("id")
+            .where("namespace", "=", extNs)
+            .where("native_id", "=", extNativeId)
+            .where("status", "!=", "delisted")
+            .executeTakeFirst();
+          if (!stillClaimed) {
+            await trx
+              .insertInto("associations")
+              .values({
+                status: "confirmed",
+                is_external_id: true,
+                media_id: resolvedOrCreatedMedia.id,
+                namespace: extNs,
+                native_id: extNativeId,
+                source: extNs === primaryExternalNamespace ? "sync" : "sync",
+              })
+              .onConflict((oc) => oc.doNothing())
+              .execute();
+          }
         }
       }
 
@@ -1717,44 +1739,42 @@ export async function approveChangeRequestInTransaction(
             });
           }
         } else if (resolvedOrCreatedMedia.type === prefetchedCatalog.type) {
-          let canInsertInitAssoc = !reusedExisting;
-          if (!canInsertInitAssoc) {
-            const [siblingAssocs, sharedCollectionAssocs] = await Promise.all([
-              loadActiveAssociationsWithSegments(trx, {
-                mediaId: resolvedOrCreatedMedia.id,
-                catalogNamespace: initAssoc.namespace,
-              }),
-              loadActiveAssociationsWithSegments(trx, {
-                collection: { namespace: initAssoc.namespace, nativeId: initAssoc.nativeId },
-              }),
-            ]);
-            const variantCheck = validateVariantSegments(
-              [
-                ...siblingAssocs.map((a) => ({ associationId: a.id, segments: a.segments })),
-                { associationId: "candidate", segments: initSegments },
-              ],
-              {
-                baseline: resolvedOrCreatedMedia.baseline,
-                allowHierarchicalScopes: getNamespaceCapabilities(initAssoc.namespace)
-                  .allowHierarchicalScopes,
-              },
-            );
-            const sharedCheck = validateSharedCollectionSegments([
-              ...sharedCollectionAssocs.map((a) => ({
-                mediaId: a.mediaId,
-                associationId: a.id,
-                segments: a.segments,
-              })),
-              {
-                mediaId: resolvedOrCreatedMedia.id,
-                associationId: "candidate",
-                segments: initSegments,
-              },
-            ]);
-            canInsertInitAssoc = variantCheck.valid && sharedCheck.valid;
-          }
+          const [siblingAssocs, sharedCollectionAssocs] = await Promise.all([
+            reusedExisting
+              ? loadActiveAssociationsWithSegments(trx, {
+                  mediaId: resolvedOrCreatedMedia.id,
+                  catalogNamespace: initAssoc.namespace,
+                })
+              : Promise.resolve([]),
+            loadActiveAssociationsWithSegments(trx, {
+              collection: { namespace: initAssoc.namespace, nativeId: initAssoc.nativeId },
+            }),
+          ]);
+          const variantCheck = validateVariantSegments(
+            [
+              ...siblingAssocs.map((a) => ({ associationId: a.id, segments: a.segments })),
+              { associationId: "candidate", segments: initSegments },
+            ],
+            {
+              baseline: resolvedOrCreatedMedia.baseline,
+              allowHierarchicalScopes: getNamespaceCapabilities(initAssoc.namespace)
+                .allowHierarchicalScopes,
+            },
+          );
+          const sharedCheck = validateSharedCollectionSegments([
+            ...sharedCollectionAssocs.map((a) => ({
+              mediaId: a.mediaId,
+              associationId: a.id,
+              segments: a.segments,
+            })),
+            {
+              mediaId: resolvedOrCreatedMedia.id,
+              associationId: "candidate",
+              segments: initSegments,
+            },
+          ]);
 
-          if (canInsertInitAssoc) {
+          if (variantCheck.valid && sharedCheck.valid) {
             const createdInitAssoc = await trx
               .insertInto("associations")
               .values({

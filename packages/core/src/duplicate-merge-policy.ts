@@ -686,6 +686,7 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
       seasons: readonly SeasonSnapshot[];
     };
     externalIds: Partial<Record<ExternalIdNamespace, string>>;
+    aliases?: readonly (string | null | undefined)[];
     initialAssociation?: { namespace: AssociationNamespaceRow; nativeId: string } | null;
   },
 ): Promise<{
@@ -770,23 +771,38 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
       return row;
     }
 
-    const compat = areMediaSnapshotsCompatibleForAutoMerge(
+    const rowExtRows = await trx
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
+      .select(["namespace", "native_id"])
+      .where("media_id", "=", row.id)
+      .where("status", "!=", "delisted")
+      .$narrowType<{ namespace: ExternalIdNamespace }>()
+      .execute();
+
+    const matches = doesCatalogTargetMatchMediaSnapshot(
       {
         type: row.type,
         title: row.title,
         originalTitle: row.original_title,
         year: row.year,
         seasons: parseMediaSeasonsJson(row.seasons),
+        externalIds: rowExtRows.map((ext) => ({
+          id: "",
+          namespace: ext.namespace,
+          nativeId: ext.native_id,
+          locked: false,
+        })),
       },
+      [],
       {
         type: input.type,
-        title: input.snapshot.title,
-        originalTitle: input.snapshot.originalTitle,
-        year: input.snapshot.year,
-        seasons: [...input.snapshot.seasons],
+        snapshot: input.snapshot,
+        externalIds: input.externalIds,
+        aliases: input.aliases,
       },
     );
-    if (compat.compatible) {
+    if (matches) {
       return row;
     }
   }

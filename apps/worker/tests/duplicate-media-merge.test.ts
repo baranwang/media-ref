@@ -2302,4 +2302,249 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     expect(laterRefreshed.merged_into_media_id).toBe(targetLater.id);
     expect(alertRefreshed.merged_into_media_id).toBe(alertTarget.id);
   });
+
+  test("approving a new-target CR for douban:35235320 never reuses a mismatched seed_unconfirmed media or writes IMDb/TMDB IDs onto it", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    const now = new Date("2026-11-24T10:00:00.000Z");
+
+    // Unrelated media holding a wrong seed_unconfirmed douban:35235320 (e.g. from bad seed import)
+    const wrongMedia = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "douban",
+        title: "完全不同的错误电影",
+        original_title: "Completely Wrong Film",
+        year: 2015,
+        seasons: JSON.stringify([]),
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    await db
+      .insertInto("associations")
+      .values({
+        media_id: wrongMedia.id,
+        namespace: "douban",
+        native_id: "35235320",
+        is_external_id: false,
+        status: "seed_unconfirmed",
+        needs_review: false,
+        locked: false,
+      })
+      .execute();
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (url.hostname === "frodo.douban.com" && url.pathname.includes("35235320")) {
+          return createDoubanSubjectResponse(request, {
+            id: "35235320",
+            title: "两京十五日",
+            year: "2026",
+            type: "tv",
+            episodesCount: 40,
+            imdbId: "tt9915020",
+          });
+        }
+        if (url.hostname === "movie.douban.com" && url.pathname.includes("/subject/35235320")) {
+          return createDoubanHtmlResponse(request, {
+            id: "35235320",
+            title: "两京十五日",
+            year: "2026",
+            type: "tv",
+            episodesCount: 40,
+            imdbId: "tt9915020",
+          });
+        }
+        if (url.pathname.endsWith("/find/tt9915020")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              movie_results: [],
+              tv_results: [{ id: 203483, name: "两京十五日" }],
+            }),
+          };
+        }
+        if (url.pathname.endsWith("/tv/203483")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 203483,
+              name: "两京十五日",
+              original_name: "两京十五日",
+              first_air_date: "2026-06-01",
+              seasons: [{ season_number: 1, episode_count: 40, air_date: "2026-06-01" }],
+              external_ids: { imdb_id: "tt9915020" },
+            }),
+          };
+        }
+        throw new Error(`Unexpected outbound URL: ${request.url}`);
+      },
+    });
+
+    const userId = "cr-wrong-seed-submitter";
+    await db
+      .insertInto("user")
+      .values({
+        id: userId,
+        name: "Submitter",
+        email: "cr-wrong-seed@example.com",
+        emailVerified: true,
+        role: "reviewer",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .execute();
+
+    const cr = await createChangeRequest(db, {
+      submitterUserId: userId,
+      targetExternalKey: "douban:35235320",
+      namespace: "tencent",
+      nativeId: "mzc00200888",
+      variantDescription: "国语",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 40, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now,
+    });
+
+    const approved = await approveChangeRequest(db, outbound, {
+      changeRequestId: cr.id,
+      reviewerUserId: userId,
+      reason: "Confirmed",
+      now,
+      tmdbConfig: { accessToken: "test-tmdb-token" },
+    });
+
+    // Must NOT pollute wrongMedia with prefetched TMDB/IMDb external IDs or the tencent association
+    expect(approved.mediaId).not.toBe(wrongMedia.id);
+
+    const wrongExtIds = await db
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
+      .selectAll()
+      .where("media_id", "=", wrongMedia.id)
+      .execute();
+    expect(wrongExtIds).toHaveLength(0);
+
+    const wrongPlatformAssocs = await db
+      .selectFrom("associations")
+      .where("is_external_id", "=", false)
+      .selectAll()
+      .where("media_id", "=", wrongMedia.id)
+      .where("namespace", "=", "tencent")
+      .execute();
+    expect(wrongPlatformAssocs).toHaveLength(0);
+
+    const approvedExtIds = await db
+      .selectFrom("associations")
+      .where("is_external_id", "=", true)
+      .select(["namespace", "native_id"])
+      .where("media_id", "=", approved.mediaId)
+      .execute();
+    expect(approvedExtIds).toEqual([{ namespace: "imdb", native_id: "tt9915020" }]);
+  });
+
+  test("convergeDuplicateMedia caps inspectedPairs at batchSize within a large multi-member group and resumes across sweeps", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    const now = new Date("2026-11-24T10:00:00.000Z");
+
+    // Create 5 active media sharing douban:555000 (10 distinct pairs total):
+    // 3 incompatible works + 2 compatible duplicates that only appear later in UUID order or after blocked pairs
+    const blockedIds: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const m = await db
+        .insertInto("media")
+        .values({
+          type: "movie",
+          baseline: "douban",
+          title: `不兼容独立电影-${i}`,
+          year: 2000 + i * 5,
+          seasons: JSON.stringify([]),
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      blockedIds.push(m.id);
+    }
+    const compatA = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "tmdb",
+        title: "多成员收敛目标电影",
+        original_title: "Multi-Member Convergence Target",
+        year: 2026,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const compatB = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "douban",
+        title: "多成员收敛目标电影",
+        original_title: "Multi-Member Convergence Target",
+        year: 2026,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    await db
+      .insertInto("associations")
+      .values({
+        media_id: compatA.id,
+        namespace: "tmdb",
+        native_id: "movie:777888",
+        is_external_id: true,
+        status: "confirmed",
+        needs_review: false,
+        locked: false,
+      })
+      .execute();
+
+    for (const id of [...blockedIds, compatA.id, compatB.id]) {
+      await db
+        .insertInto("associations")
+        .values({
+          media_id: id,
+          namespace: "douban",
+          native_id: "555000",
+          is_external_id: false,
+          status: "seed_unconfirmed",
+          needs_review: false,
+          locked: false,
+        })
+        .execute();
+    }
+
+    // With 6 members (15 pairs) and batchSize=2, every run must inspect <= 2 pairs and eventually merge compatB -> compatA
+    let totalMerged = 0;
+    for (let step = 0; step < 12; step += 1) {
+      const res = await convergeDuplicateMedia(db, { batchSize: 2, now });
+      expect(res.inspectedPairs).toBeLessThanOrEqual(2);
+      totalMerged += res.mergedCount;
+      if (totalMerged > 0) {
+        break;
+      }
+    }
+    expect(totalMerged).toBe(1);
+
+    const mergedCompat = await db
+      .selectFrom("media")
+      .select("merged_into_media_id")
+      .where("id", "=", compatB.id)
+      .executeTakeFirstOrThrow();
+    expect(mergedCompat.merged_into_media_id).toBe(compatA.id);
+  });
 });

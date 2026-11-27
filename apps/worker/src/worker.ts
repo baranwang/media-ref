@@ -299,12 +299,6 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
         jobTypes: deps.config?.jobTypes,
       });
 
-      if (shouldScheduleExploration) {
-        await runScheduledStep("duplicate_convergence_failed", EXPLORATION_JOB_TYPE, () =>
-          convergeDuplicateMedia(deps.db, { now }),
-        );
-      }
-
       let dispatched = 0;
       let dispatchFailed = 0;
 
@@ -336,6 +330,12 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
             logJobError("dispatch_lease_release_failed", job.id, job.jobType, error);
           }
         }
+      }
+
+      if (shouldScheduleExploration) {
+        await runScheduledStep("duplicate_convergence_failed", EXPLORATION_JOB_TYPE, () =>
+          convergeDuplicateMedia(deps.db, { now }),
+        );
       }
 
       return {
