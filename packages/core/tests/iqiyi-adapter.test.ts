@@ -459,6 +459,78 @@ describe("iQIYI Tier 1 & Tier 2 adapter (#14)", () => {
     expect(result.info.featureEpisodes[119]).toMatchObject({ index: 120, title: "第120集" });
   });
 
+  describe("episode numbers from avlistinfo `order`", () => {
+    async function fetchWithOrders(orders: number[]) {
+      const outbound = createFakeOutboundClient({
+        fetchExternal(request) {
+          if (request.url === "https://pcw-api.iqiyi.com/album/album/baseinfo/204166101") {
+            return jsonResponse(request.url, {
+              code: "A00000",
+              data: { albumId: 204166101, name: "熊出没全集", channelId: 15 },
+            });
+          }
+          if (request.url.includes("avlistinfo?aid=204166101&page=1&")) {
+            return jsonResponse(request.url, {
+              code: "A00000",
+              data: {
+                total: orders.length,
+                epsodelist: orders.map((order, i) => ({
+                  tvId: 438724200 + i * 100,
+                  order,
+                  name: `熊出没全集 第${order}集`,
+                  contentType: 1,
+                })),
+              },
+            });
+          }
+          throw new Error(`Unexpected request: ${request.url}`);
+        },
+      });
+      const result = await iqiyiAdapter.fetchCollection("204166101", outbound);
+      if (result.status !== "found") {
+        throw new Error(`expected found, got ${result.status}`);
+      }
+      return result.info;
+    }
+
+    test("a taken-down episode leaves a gap in the numbers, so the count is unknown", async () => {
+      // Live 熊出没全集 (204166101): …522, 524… after 第523集 went offline.
+      const info = await fetchWithOrders([521, 522, 524, 525]);
+      expect(info.featureEpisodeCount).toBeNull();
+      expect(info.featureEpisodes.map((ep) => [ep.index, ep.title])).toEqual([
+        [1, "熊出没全集 第521集"],
+        [2, "熊出没全集 第522集"],
+        [3, "熊出没全集 第524集"],
+        [4, "熊出没全集 第525集"],
+      ]);
+    });
+
+    test("distinct numbers are sorted; an album numbered from N without gaps keeps its count", async () => {
+      const info = await fetchWithOrders([42, 41, 43]);
+      expect(info.featureEpisodeCount).toBe(3);
+      expect(info.featureEpisodes.map((ep) => [ep.index, ep.title])).toEqual([
+        [1, "熊出没全集 第41集"],
+        [2, "熊出没全集 第42集"],
+        [3, "熊出没全集 第43集"],
+      ]);
+    });
+
+    test("all-zero or shared numbers declare no numbering, so the API order stands", async () => {
+      for (const orders of [
+        [0, 0, 0],
+        [7, 7, 7],
+      ]) {
+        const info = await fetchWithOrders(orders);
+        expect(info.featureEpisodeCount).toBe(3);
+        expect(info.featureEpisodes.map((ep) => ep.nativeEpisodeId)).toEqual([
+          "438724200",
+          "438724300",
+          "438724400",
+        ]);
+      }
+    });
+  });
+
   test("prefers firstVideo.period, falls back to CST publishTime, and returns null year/episodeCount when missing on TV", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
