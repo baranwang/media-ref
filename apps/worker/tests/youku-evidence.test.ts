@@ -42,56 +42,68 @@ function jsonResponse(url: string, payload: unknown, status = 200): ExternalHttp
   };
 }
 
-function htmlResponse(url: string, body: string, status = 200): ExternalHttpResponse {
-  return {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8" },
-    body,
-    url,
-  };
+/** Feature episodes as the open API's `shows/videos.json` lists them. */
+function makeYoukuVideos(count: number, from = 1) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `XEPISODE${from + i}`,
+    seq: String(from + i),
+    title: `第${from + i}集`,
+    duration: "2700.00",
+    published: "2017-08-30 20:00:00",
+  }));
 }
 
-function buildYoukuSsrHtml(initialData: unknown, title = "优酷"): string {
-  return `<!doctype html><html><head><title>${title}</title></head><body><script>window.__INITIAL_DATA__ = ${JSON.stringify(initialData)};</script></body></html>`;
-}
+/** Show metadata (`shows/show.json`) and episode total for each stubbed show. */
+const YOUKU_SHOWS: Record<string, { show: Record<string, unknown>; episodes: number }> = {
+  [YOUKU_SHOW_COMPLETE_TV]: {
+    show: { name: "白夜追凶", category: "电视剧", released: "2017-08-30" },
+    episodes: 32,
+  },
+  [YOUKU_SHOW_MOVIE]: {
+    show: { name: "流浪地球", category: "电影", released: "2019-02-05" },
+    episodes: 1,
+  },
+  // Expired copyright: the show exists but lists no episodes.
+  [YOUKU_SHOW_GEO_LOCKED]: {
+    show: { name: "火影忍者", category: "动漫", released: "2002-10-03" },
+    episodes: 0,
+  },
+  // Longer than the 20 pages of 100 the adapter reads.
+  [YOUKU_SHOW_TRUNCATED_LONG]: {
+    show: { name: "火影忍者", category: "动漫", released: "2002-10-03" },
+    episodes: 2100,
+  },
+  [YOUKU_SHOW_MISSING_YEAR]: {
+    show: { name: "白夜追凶", category: "电视剧" },
+    episodes: 32,
+  },
+  [YOUKU_SHOW_FLAKY_RETRY]: {
+    show: { name: "边水往事", category: "电视剧", released: "2024-08-16" },
+    episodes: 21,
+  },
+};
 
-function makeYoukuFeatureItems(count: number, includeNonFeature = true) {
-  const items: Array<Record<string, unknown>> = [];
-  for (let i = 1; i <= count; i += 1) {
-    items.push({
-      id: String(200_000 + i),
-      action_value: `XEPISODE${i}`,
-      title: `第${i}集`,
-      stage: i,
-      stageIndex: i - 1,
-      videoType: "正片",
-      mark: { text: i > 1 ? "VIP" : "" },
-    });
+function youkuOpenApiResponse(url: string): ExternalHttpResponse {
+  const parsed = new URL(url);
+  const params = parsed.searchParams;
+  if (parsed.pathname === "/v2/videos/show.json") {
+    return params.get("video_id") === "XMzAwMDAwMDE="
+      ? jsonResponse(url, { id: "XMzAwMDAwMDE=", show: { id: YOUKU_SHOW_COMPLETE_TV } })
+      : jsonResponse(url, { error: { code: 120020101, description: "invalid ID" } });
   }
-  if (includeNonFeature) {
-    items.push({
-      id: "990001",
-      action_value: "XTRAILER01",
-      title: "预告片",
-      videoType: "预告片",
-      mark: { text: "预告" },
-    });
-    items.push({
-      id: "990002",
-      action_value: "XEXTRA01",
-      title: "幕后花絮",
-      videoType: "花絮",
-      mark: { text: "花絮" },
-    });
-    items.push({
-      id: "990003",
-      action_value: "XHIGHLIGHT01",
-      title: "精彩看点",
-      videoType: "精彩看点",
-      mark: { text: "" },
-    });
+  const entry = YOUKU_SHOWS[params.get("show_id") ?? ""];
+  if (!entry) {
+    return jsonResponse(url, []);
   }
-  return items;
+  if (parsed.pathname === "/v2/shows/show.json") {
+    return jsonResponse(url, { id: params.get("show_id"), ...entry.show });
+  }
+  const size = Number(params.get("count"));
+  const from = (Number(params.get("page")) - 1) * size + 1;
+  return jsonResponse(url, {
+    total: String(entry.episodes),
+    videos: makeYoukuVideos(Math.max(0, Math.min(size, entry.episodes - from + 1)), from),
+  });
 }
 
 async function setupVerifiedUserAndKeys(
@@ -219,229 +231,12 @@ function createYoukuAndTmdbStub() {
       return jsonResponse(request.url, []);
     }
 
-    if (request.kind === "platform" && request.namespace === "youku") {
-      if (request.url === "https://v.youku.com/v_show/id_XMzAwMDAwMDE=.html") {
-        return htmlResponse(
-          request.url,
-          buildYoukuSsrHtml({
-            pageMap: {
-              extra: {
-                showId: `z${YOUKU_SHOW_COMPLETE_TV}`,
-                showName: "白夜追凶",
-              },
-            },
-          }),
-        );
-      }
-
-      if (request.url === `https://list.youku.com/show/id_z${YOUKU_SHOW_COMPLETE_TV}.html`) {
-        return htmlResponse(
-          request.url,
-          buildYoukuSsrHtml({
-            pageMap: {
-              extra: {
-                showId: YOUKU_SHOW_COMPLETE_TV,
-                showName: "白夜追凶",
-                showReleaseTime: "2017-08-30 20:00:00",
-                showCategory: "电视剧",
-                showCategoryId: 97,
-                episodeTotal: 32,
-                episodeLast: 32,
-                completed: true,
-              },
-            },
-            moduleList: [
-              {
-                components: [
-                  {
-                    type: 10013,
-                    componentId: "pc_detail_kuflix_anthology",
-                    pageSize: 60,
-                    pageIndex: 1,
-                    itemList: makeYoukuFeatureItems(32, true),
-                  },
-                ],
-              },
-            ],
-          }),
-        );
-      }
-
-      if (request.url === `https://list.youku.com/show/id_z${YOUKU_SHOW_MOVIE}.html`) {
-        return htmlResponse(
-          request.url,
-          buildYoukuSsrHtml({
-            pageMap: {
-              extra: {
-                showId: YOUKU_SHOW_MOVIE,
-                showName: "流浪地球",
-                showReleaseTime: "2019-02-05",
-                showCategory: "电影",
-                showCategoryId: 96,
-                episodeTotal: 1,
-                episodeLast: 1,
-                completed: true,
-              },
-            },
-            moduleList: [
-              {
-                components: [
-                  {
-                    type: 10013,
-                    itemList: makeYoukuFeatureItems(1, true),
-                  },
-                ],
-              },
-            ],
-          }),
-        );
-      }
-
-      if (request.url === `https://list.youku.com/show/id_z${YOUKU_SHOW_GEO_LOCKED}.html`) {
-        // Region-locked overseas response: only 预告片 items, episodeLast: 0
-        return htmlResponse(
-          request.url,
-          buildYoukuSsrHtml({
-            pageMap: {
-              extra: {
-                showId: YOUKU_SHOW_GEO_LOCKED,
-                showName: "火影忍者",
-                showReleaseTime: "2002-10-03",
-                showCategory: "动漫",
-                episodeTotal: 720,
-                episodeLast: 0,
-                completed: true,
-              },
-            },
-            moduleList: [
-              {
-                components: [
-                  {
-                    type: 10013,
-                    pageSize: 60,
-                    pageIndex: 1,
-                    itemList: [
-                      {
-                        action_value: "XTR1",
-                        title: "第1集预告",
-                        videoType: "预告片",
-                        mark: { text: "预告" },
-                      },
-                      {
-                        action_value: "XTR2",
-                        title: "第2集预告",
-                        videoType: "预告片",
-                        mark: { text: "预告" },
-                      },
-                    ],
-                  },
-                ],
-              },
-            ],
-          }),
-        );
-      }
-
-      if (request.url === `https://list.youku.com/show/id_z${YOUKU_SHOW_TRUNCATED_LONG}.html`) {
-        // Long series (>60 episodes): SSR page 1 only embeds 60 正片 items
-        return htmlResponse(
-          request.url,
-          buildYoukuSsrHtml({
-            pageMap: {
-              extra: {
-                showId: YOUKU_SHOW_TRUNCATED_LONG,
-                showName: "火影忍者",
-                showReleaseTime: "2002-10-03",
-                showCategory: "动漫",
-                episodeTotal: 720,
-                episodeLast: 720,
-                completed: true,
-              },
-            },
-            moduleList: [
-              {
-                components: [
-                  {
-                    type: 10013,
-                    pageSize: 60,
-                    pageIndex: 1,
-                    itemList: makeYoukuFeatureItems(60, false),
-                  },
-                ],
-              },
-            ],
-          }),
-        );
-      }
-
-      if (request.url === `https://list.youku.com/show/id_z${YOUKU_SHOW_MISSING_YEAR}.html`) {
-        // Missing showReleaseTime -> year: null -> must route to needs_review
-        return htmlResponse(
-          request.url,
-          buildYoukuSsrHtml({
-            pageMap: {
-              extra: {
-                showId: YOUKU_SHOW_MISSING_YEAR,
-                showName: "白夜追凶",
-                showCategory: "电视剧",
-                episodeTotal: 32,
-                episodeLast: 32,
-              },
-            },
-            moduleList: [
-              {
-                components: [
-                  {
-                    type: 10013,
-                    pageSize: 60,
-                    pageIndex: 1,
-                    itemList: makeYoukuFeatureItems(32, false),
-                  },
-                ],
-              },
-            ],
-          }),
-        );
-      }
-
-      if (request.url === `https://list.youku.com/show/id_z${YOUKU_SHOW_NOT_FOUND}.html`) {
-        return htmlResponse(
-          request.url,
-          "<!doctype html><html><head><title>404 Not Found</title></head><body>Not Found</body></html>",
-          200,
-        );
-      }
-
-      if (request.url === `https://list.youku.com/show/id_z${YOUKU_SHOW_FLAKY_RETRY}.html`) {
-        return htmlResponse(
-          request.url,
-          buildYoukuSsrHtml({
-            pageMap: {
-              extra: {
-                showId: YOUKU_SHOW_FLAKY_RETRY,
-                showName: "边水往事",
-                showReleaseTime: "2024-08-16 12:00:00",
-                showCategory: "电视剧",
-                episodeTotal: 21,
-                episodeLast: 21,
-                completed: true,
-              },
-            },
-            moduleList: [
-              {
-                components: [
-                  {
-                    type: 10013,
-                    pageSize: 60,
-                    pageIndex: 1,
-                    itemList: makeYoukuFeatureItems(21, true),
-                  },
-                ],
-              },
-            ],
-          }),
-        );
-      }
+    if (
+      request.kind === "platform" &&
+      request.namespace === "youku" &&
+      request.url.startsWith("https://openapi.youku.com/v2/")
+    ) {
+      return youkuOpenApiResponse(request.url);
     }
 
     throw new Error(
@@ -624,7 +419,7 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     });
   });
 
-  test("routes region-locked trailer-only, >60-episode truncated, missing-year, and 404 Youku collections to needs_review instead of auto-approving", async () => {
+  test("routes empty, over-long, missing-year, and unknown Youku collections to needs_review instead of auto-approving", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -746,7 +541,7 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     }
   });
 
-  test("retries Alibaba CAPTCHA and 5xx responses while keeping change request in pending_evidence until recovery", async () => {
+  test("retries Youku API errors and 5xx responses while keeping change request in pending_evidence until recovery", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -759,18 +554,17 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
       fetchExternal(request) {
         if (
           request.namespace === "youku" &&
-          request.url.includes(`id_z${YOUKU_SHOW_FLAKY_RETRY}.html`)
+          request.url.includes("/v2/shows/show.json") &&
+          request.url.includes(`show_id=${YOUKU_SHOW_FLAKY_RETRY}`)
         ) {
           youkuCalls += 1;
           if (youkuCalls === 1) {
-            return htmlResponse(
-              "https://list.youku.com/show/_____tmd_____/punish?x5secdata=test",
-              '<html><script>window._config_={"action":"captcha"};</script></html>',
-              200,
-            );
+            return jsonResponse(request.url, {
+              error: { code: 1012, type: "SystemException", description: "Service busy" },
+            });
           }
           if (youkuCalls === 2) {
-            return htmlResponse(request.url, "Upstream 503", 503);
+            return jsonResponse(request.url, "Upstream 503", 503);
           }
         }
         return baseStub(request);
@@ -825,7 +619,7 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
       now: () => now,
     });
 
-    // Attempt 1: CAPTCHA -> rescheduled, CR remains pending_evidence
+    // Attempt 1: API error -> rescheduled, CR remains pending_evidence
     await worker.scheduled(createScheduledController(now));
     expect(emitted).toHaveLength(1);
     const attempt1 = await worker.queue(createQueueBatch([emitted.shift()!], now).batch);
@@ -844,7 +638,7 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     const status2 = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, changeRequest.id);
     expect(status2.status).toBe("pending_evidence");
 
-    // Attempt 3: clean SSR response -> auto-approved!
+    // Attempt 3: clean response -> auto-approved!
     now = new Date(now.getTime() + 30_000);
     await worker.scheduled(createScheduledController(now));
     expect(emitted).toHaveLength(1);
