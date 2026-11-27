@@ -411,6 +411,161 @@ test("keeps a visible sliver for small non-zero chart segments without overflowi
   expect(maxed.foundPct + maxed.notFoundPct + maxed.submitPct).toBeCloseTo(100, 6);
 });
 
+test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with catalog associations in CATALOG_ORDER", () => {
+  const movieDoc = {
+    media: {
+      id: "m-avengers",
+      type: "movie",
+      baseline: "tmdb",
+      snapshot: { title: "复仇者联盟", originalTitle: "The Avengers", year: 2012, seasons: [] },
+    },
+    variants: [],
+    externalIds: [
+      { namespace: "trakt", nativeId: "movie:727" },
+      { namespace: "imdb", nativeId: "tt0848228" },
+      { namespace: "tmdb", nativeId: "movie:24428" },
+    ],
+    associations: [
+      {
+        id: "assoc-douban",
+        namespace: "douban",
+        nativeId: "1866479",
+        title: "复仇者联盟",
+        segments: [],
+        status: "confirmed",
+      },
+    ],
+  } as unknown as MediaDocument;
+
+  const movieItem = mediaItemFrom("tmdb:movie:24428", movieDoc, null)!;
+  expect(movieItem.catalogRows).toEqual([
+    {
+      id: "catalog:tmdb",
+      namespace: "tmdb",
+      isBaseline: true,
+      roleLabel: "基准",
+      wholeMediaNativeId: "movie:24428",
+      wholeMediaLabel: "整部 · movie:24428",
+    },
+    {
+      id: "catalog:imdb",
+      namespace: "imdb",
+      isBaseline: false,
+      roleLabel: "1 个条目",
+      wholeMediaNativeId: "tt0848228",
+      wholeMediaLabel: "整部 · tt0848228",
+      note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）",
+    },
+    {
+      id: "catalog:trakt",
+      namespace: "trakt",
+      isBaseline: false,
+      roleLabel: "1 个条目",
+      wholeMediaNativeId: "movie:727",
+      wholeMediaLabel: "整部 · movie:727",
+    },
+    {
+      id: "catalog:douban",
+      namespace: "douban",
+      isBaseline: false,
+      roleLabel: "1 个条目",
+      wholeMediaNativeId: "1866479",
+      wholeMediaLabel: "整部 · 复仇者联盟",
+    },
+  ]);
+
+  const withPending = {
+    ...movieDoc,
+    associations: [
+      ...movieDoc.associations,
+      {
+        id: "change-request:cr-imdb",
+        namespace: "imdb",
+        nativeId: "tt0000001",
+        variantId: null,
+        status: "confirmed",
+        unconfirmed: true,
+        changeRequestId: "cr-imdb",
+        segments: [],
+      },
+    ],
+  } as unknown as MediaDocument;
+  expect(
+    mediaItemFrom("m-avengers", withPending, null)!.catalogRows.find((r) => r.namespace === "imdb"),
+  ).toMatchObject({
+    wholeMediaNativeId: "tt0848228",
+    roleLabel: "2 个条目",
+  });
+
+  const tvDoc = {
+    media: {
+      id: "m-aot",
+      type: "tv",
+      baseline: "tmdb",
+      snapshot: {
+        title: "进击的巨人",
+        originalTitle: "進撃の巨人",
+        year: 2013,
+        seasons: [
+          { season: 1, episodeCount: 25 },
+          { season: 2, episodeCount: 12 },
+        ],
+      },
+    },
+    variants: [],
+    externalIds: [
+      { namespace: "tmdb", nativeId: "tv:1429" },
+      { namespace: "tvdb", nativeId: "267440" },
+      { namespace: "imdb", nativeId: "tt2560140" },
+      { namespace: "trakt", nativeId: "show:1417" },
+    ],
+    associations: [
+      {
+        id: "assoc-imdb-ep",
+        namespace: "imdb",
+        nativeId: "tt2822876",
+        status: "confirmed",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 1, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+      {
+        id: "assoc-douban-s1",
+        namespace: "douban",
+        nativeId: "26647087",
+        status: "confirmed",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 25, targetEpisodeStart: 1, baseline: "tmdb" },
+        ],
+      },
+      {
+        id: "assoc-bgm-delisted",
+        namespace: "bangumi",
+        nativeId: "55770",
+        status: "delisted",
+        segments: [],
+      },
+    ],
+  } as unknown as MediaDocument;
+
+  const tvItem = mediaItemFrom("tmdb:tv:1429", tvDoc, null)!;
+  expect(tvItem.catalogRows.map((r) => r.namespace)).toEqual([
+    "tmdb",
+    "tvdb",
+    "imdb",
+    "trakt",
+    "douban",
+  ]);
+  expect(tvItem.catalogRows[2]).toMatchObject({
+    namespace: "imdb",
+    roleLabel: "整部 + 季",
+    wholeMediaNativeId: "tt2560140",
+    wholeMediaLabel: "整部 · tt2560140",
+    note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）",
+  });
+  expect(tvItem.catalogRows[2]?.segmentsBySeason?.[1]).toHaveLength(1);
+});
+
 test("exploration activity maps covered platforms and formats unambiguous summary text", () => {
   const mapped = explorationFromProto({
     id: "job-1",

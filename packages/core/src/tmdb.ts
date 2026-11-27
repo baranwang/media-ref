@@ -324,6 +324,13 @@ function extractTmdbCredits(data: Record<string, unknown>): {
   return { directorsAndCreators: directors, productionCompanies: companies, cast };
 }
 
+export function isTraktSyncEnabled(config?: TmdbGatewayConfig): boolean {
+  return (
+    config?.syncTrakt !== false &&
+    (config?.syncTrakt === true || nonEmptyString(config?.traktClientId) !== null)
+  );
+}
+
 function traktHeaders(config: TmdbGatewayConfig): Record<string, string> {
   const headers: Record<string, string> = {
     accept: "application/json",
@@ -331,8 +338,9 @@ function traktHeaders(config: TmdbGatewayConfig): Record<string, string> {
     // Trakt's edge returns 403 to requests without a User-Agent
     "user-agent": "media-ref",
   };
-  if (config.traktClientId) {
-    headers["trakt-api-key"] = config.traktClientId;
+  const traktClientId = nonEmptyString(config.traktClientId);
+  if (traktClientId) {
+    headers["trakt-api-key"] = traktClientId;
   }
   return headers;
 }
@@ -385,7 +393,7 @@ function traktHit(type: "movie" | "show", raw: unknown): CatalogSearchHit | null
   };
 }
 
-async function lookupTraktId(
+export async function lookupTraktId(
   outbound: OutboundClient,
   config: TmdbGatewayConfig,
   tmdbType: MediaType,
@@ -412,6 +420,7 @@ async function lookupTraktId(
     if (!Array.isArray(parsed)) {
       return null;
     }
+    let fallbackTraktId: string | null = null;
     for (const item of parsed) {
       if (!item || typeof item !== "object") {
         continue;
@@ -422,11 +431,18 @@ async function lookupTraktId(
         | undefined;
       const ids = nested?.ids as Record<string, unknown> | undefined;
       const traktId = parsePositiveIdString(ids?.trakt);
-      if (traktId) {
+      if (!traktId) {
+        continue;
+      }
+      const returnedTmdbId = parsePositiveIdString(ids?.tmdb);
+      if (returnedTmdbId === tmdbId) {
         return `${traktType}:${traktId}`;
       }
+      if (returnedTmdbId === null && fallbackTraktId === null) {
+        fallbackTraktId = `${traktType}:${traktId}`;
+      }
     }
-    return null;
+    return fallbackTraktId;
   } catch {
     return null;
   }
@@ -609,10 +625,7 @@ export function createTmdbGateway(
     }
 
     const extracted = extractExternalIdsBlock(externalBlock, tmdbType);
-    const shouldSyncTrakt =
-      extracted.trakt === null &&
-      config.syncTrakt !== false &&
-      (config.syncTrakt === true || Boolean(config.traktClientId));
+    const shouldSyncTrakt = extracted.trakt === null && isTraktSyncEnabled(config);
 
     const trakt = shouldSyncTrakt
       ? await lookupTraktId(outbound, config, tmdbType, tmdbId)

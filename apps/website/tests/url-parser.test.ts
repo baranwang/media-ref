@@ -1,5 +1,9 @@
 import { expect, test } from "vite-plus/test";
-import { buildExternalUrl, parseExternalInput } from "../src/lib/url-parser.ts";
+import {
+  buildExternalUrl,
+  contributionLinkFields,
+  parseExternalInput,
+} from "../src/lib/url-parser.ts";
 
 test("iqiyi numeric ids map to their real page slugs", () => {
   // 狂飙 albumId and 流浪地球 tvId, slugs taken from the live iqiyi.com pages.
@@ -104,7 +108,7 @@ test.each([
   {
     input: "https://trakt.tv/shows/attack-on-titan",
     namespace: "trakt",
-    nativeId: "attack-on-titan",
+    nativeId: "show:attack-on-titan",
     url: "https://trakt.tv/shows/attack-on-titan",
   },
   {
@@ -218,4 +222,39 @@ test.each([
 test("a look-alike host is not a recognised link", () => {
   expect(parseExternalInput("https://iqiyi.com.example.org/a_1fkgtbddd2x.html")).toBeNull();
   expect(parseExternalInput("https://notbilibili.com/bangumi/play/ss38221")).toBeNull();
+});
+
+test.each([
+  ["tvdb", "movie:123"],
+  ["trakt", "movie:727"],
+  ["trakt", "show:727"],
+  ["trakt", "show:attack-on-titan"],
+] as const)(
+  "pasting a %s catalog link preserves its typed key %s on submission",
+  (namespace, nativeId) => {
+    const url = buildExternalUrl(namespace, nativeId);
+    expect(contributionLinkFields(parseExternalInput(url)!)).toEqual({
+      namespace,
+      nativeId,
+      rawNativeId: url,
+    });
+  },
+);
+
+test("trakt and tvdb external IDs with type prefixes build valid external URLs", () => {
+  expect(buildExternalUrl("trakt", "movie:727", "movie")).toBe("https://trakt.tv/movies/727");
+  expect(buildExternalUrl("trakt", "show:159384", "tv")).toBe("https://trakt.tv/shows/159384");
+  expect(buildExternalUrl("trakt", "show:159384")).toBe("https://trakt.tv/shows/159384");
+  expect(buildExternalUrl("tvdb", "movie:123", "movie")).toBe(
+    "https://thetvdb.com/dereferrer/movie/123",
+  );
+  expect(buildExternalUrl("tvdb", "series:267440", "tv")).toBe(
+    "https://thetvdb.com/dereferrer/series/267440",
+  );
+  expect(parseExternalInput("trakt:movie:727")).toMatchObject({
+    namespace: "trakt",
+    nativeId: "movie:727",
+    url: "https://trakt.tv/movies/727",
+    mediaTypeHint: "movie",
+  });
 });
