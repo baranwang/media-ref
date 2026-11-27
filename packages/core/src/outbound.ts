@@ -203,13 +203,15 @@ async function fetchViaEgress(
   let target = new URL(request.url);
   let method = request.method ?? "GET";
   let body = request.body;
+  const headers = new Headers(request.headers);
   for (let hop = 0; ; hop += 1) {
     if (target.protocol !== "https:") {
       throw new Error(`Egress relay only forwards https URLs, got ${target.protocol}`);
     }
+    headers.set(EGRESS_HOST_HEADER, target.hostname);
     const response = await egress.fetch(`http://egress${target.pathname}${target.search}`, {
       method,
-      headers: { ...request.headers, [EGRESS_HOST_HEADER]: target.hostname },
+      headers,
       body,
       redirect: "manual",
       ...(signal !== undefined ? { signal } : {}),
@@ -231,7 +233,12 @@ async function fetchViaEgress(
       throw new Error(`Too many redirects through egress relay (${request.url})`);
     }
     await response.body?.cancel();
-    target = new URL(location, target);
+    const nextTarget = new URL(location, target);
+    if (nextTarget.host !== target.host) {
+      headers.delete("authorization");
+      headers.delete("cookie");
+    }
+    target = nextTarget;
     if (
       response.status === 303 ||
       ((response.status === 301 || response.status === 302) && method === "POST")

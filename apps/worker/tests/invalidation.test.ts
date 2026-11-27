@@ -1,6 +1,6 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
-import type { SegmentInput } from "@media-ref/client";
+import { resolveEpisode, type SegmentInput } from "@media-ref/client";
 import {
   createFakeOutboundClient,
   type ExternalHttpRequest,
@@ -148,6 +148,7 @@ async function runWorkerCycle(
 
 function createDefaultTmdbAndBilibiliHandler(
   bilibiliOverride?: (request: ExternalHttpRequest) => ExternalHttpResponse | null,
+  extraSeasons: { season_number: number; episode_count: number; air_date: string }[] = [],
 ) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     if (request.kind === "catalog" && request.namespace === "tmdb") {
@@ -160,6 +161,7 @@ function createDefaultTmdbAndBilibiliHandler(
           seasons: [
             { season_number: 0, episode_count: 5, air_date: "2020-12-26" },
             { season_number: 1, episode_count: 24, air_date: "2020-10-03" },
+            ...extraSeasons,
           ],
           external_ids: {
             imdb_id: "tt12343534",
@@ -228,9 +230,13 @@ async function createConfirmedBilibiliAssociation(input: {
   now: Date;
   nativeId?: string;
   variantDescription?: string;
+  segments?: SegmentInput[];
 }) {
   const nativeId = input.nativeId ?? "ss34430";
   const variantDescription = input.variantDescription ?? "原声";
+  const segments: SegmentInput[] = input.segments ?? [
+    { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+  ];
 
   await createRpcClients(input.app, {
     apiKey: input.submitKey,
@@ -239,15 +245,7 @@ async function createConfirmedBilibiliAssociation(input: {
     namespace: "bilibili",
     nativeId,
     variantDescription,
-    segments: [
-      toProtoSegmentInput({
-        season: 1,
-        episodeStart: 1,
-        episodeEnd: 24,
-        targetEpisodeStart: 1,
-        baseline: "tmdb",
-      }),
-    ],
+    segments: segments.map(toProtoSegmentInput),
   });
 
   const cycle = await runWorkerCycle(input.worker, input.dispatched, input.now);
@@ -320,8 +318,10 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       canSubmit: true,
     });
     const key1 = await createUserApiKey(app, user.cookie, { name: "Read Key 1" });
-    const key2 = await createUserApiKey(app, user.cookie, { name: "Read Key 2" });
-    const key3 = await createUserApiKey(app, user.cookie, { name: "Read Key 3" });
+    const user2 = await setupVerifiedUser(app, outbound, "second-reporter@example.com");
+    const user3 = await setupVerifiedUser(app, outbound, "third-reporter@example.com");
+    const key2 = await createUserApiKey(app, user2.cookie, { name: "Read Key 2" });
+    const key3 = await createUserApiKey(app, user3.cookie, { name: "Read Key 3" });
     const revocableKey = await createUserApiKey(app, user.cookie, { name: "Revocable Key" });
 
     // Create two confirmed associations (two variants) to test user vs anonymous flows cleanly
@@ -428,6 +428,16 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     });
     expect(k1Dup.jobId).toBeUndefined();
 
+    expect(k1Dup.reportId).toBe(k1First.reportId);
+    const sameAccountReport = await createRpcClients(app, {
+      apiKey: submitKey.key,
+    }).association.reportInvalidation({ associationId: assocAnonFlow.associationId });
+    expect(sameAccountReport).toMatchObject({
+      triggered: false,
+      reportCount: 1,
+      deduplicated: false,
+    });
+
     // Key 2 report -> count 2, NO job enqueued
     const k2Res = await k2Rpc.association.reportInvalidation({
       associationId: assocAnonFlow.associationId,
@@ -463,7 +473,7 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       .select(["id", "recheck_job_id"])
       .where("association_id", "=", assocAnonFlow.associationId)
       .execute();
-    expect(openReportsAfterTrigger).toHaveLength(3);
+    expect(openReportsAfterTrigger).toHaveLength(4);
     for (const row of openReportsAfterTrigger) {
       expect(row.recheck_job_id).toBe(k3Body.jobId);
     }
@@ -956,7 +966,7 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     expect(fromProtoReviewAlertStatus(alertsBody.alerts[0]!.status)).toBe("open");
   });
 
-  test("page still exists: matching content leaves association untouched; mismatched content keeps association confirmed with needsReview=true and creates association_content_mismatch alert", async () => {
+  async function setupContentRecheck() {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -964,23 +974,26 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     let contentChanged = false;
 
     const outbound = createFakeOutboundClient({
-      fetchExternal: createDefaultTmdbAndBilibiliHandler((request) => {
-        if (contentChanged && request.url.includes("season_id=34430")) {
-          return jsonResponse(request.url, {
-            code: 0,
-            message: "success",
-            result: {
-              season_id: 34430,
-              title: "完全不同的另一部番剧",
-              jp_title: "別の作品",
-              type: 1,
-              publish: { pub_time: "2025-04-01 00:00:00" },
-              episodes: makeBilibiliEpisodes(12),
-            },
-          });
-        }
-        return null;
-      }),
+      fetchExternal: createDefaultTmdbAndBilibiliHandler(
+        (request) => {
+          if (contentChanged && request.url.includes("season_id=34430")) {
+            return jsonResponse(request.url, {
+              code: 0,
+              message: "success",
+              result: {
+                season_id: 34430,
+                title: "完全不同的另一部番剧",
+                jp_title: "別の作品",
+                type: 1,
+                publish: { pub_time: "2025-04-01 00:00:00" },
+                episodes: makeBilibiliEpisodes(12),
+              },
+            });
+          }
+          return null;
+        },
+        [{ season_number: 2, episode_count: 12, air_date: "2023-07-06" }],
+      ),
     });
     const dispatched: JobQueueMessage[] = [];
 
@@ -1030,20 +1043,64 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       submitKey: submitKey.key,
       readKey: readKey.key,
       now: currentTime,
-      nativeId: "ss34430",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
+        { season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13, baseline: "tmdb" },
+      ],
     });
+    const { current_revision_id: revisionId } = await testDb.readDb
+      .selectFrom("associations")
+      .select("current_revision_id")
+      .where("id", "=", created.associationId)
+      .executeTakeFirstOrThrow();
+    expect(revisionId).toBeTruthy();
 
-    // 1. False-alarm report while page still exists and matches catalog -> stays confirmed & clean
     const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
-    currentTime = new Date("2026-11-23T19:00:00.000Z");
-    await reviewerRpc.association.reportInvalidation({
-      associationId: created.associationId,
-    });
+    async function recheck(content: "matching" | "mismatched") {
+      currentTime = new Date(currentTime.getTime() + 60 * 60 * 1000);
+      contentChanged = content === "mismatched";
+      const report = await reviewerRpc.association.reportInvalidation({
+        associationId: created.associationId,
+      });
+      if (!report.jobId) throw new Error("Expected a recheck job for the signed-in report");
+      const cycle = await runWorkerCycle(worker, dispatched, currentTime);
+      expect(cycle.messages.map((message) => message.jobId)).toEqual([report.jobId]);
+      expect(cycle.queue.completed).toBe(1);
+      if (content === "mismatched") {
+        const job = await testDb.readDb
+          .selectFrom("background_jobs")
+          .select("result")
+          .where("id", "=", report.jobId)
+          .executeTakeFirstOrThrow();
+        expect(job.result).toMatchObject({
+          associationId: created.associationId,
+          outcome: "content_mismatch",
+        });
+      }
+      return (await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479")).document;
+    }
+    async function recheckEpisode(content: "matching" | "mismatched") {
+      return resolveEpisode(await recheck(content), {
+        namespace: "bilibili",
+        season: 1,
+        episode: 1,
+      });
+    }
+    return {
+      testDb,
+      created,
+      revisionId,
+      reviewerRpc,
+      reviewerId: reviewer.userId,
+      recheck,
+      recheckEpisode,
+      now: () => currentTime,
+    };
+  }
 
-    const cycle1 = await runWorkerCycle(worker, dispatched, currentTime);
-    expect(cycle1.queue.completed).toBe(1);
-
-    const docAfterMatch = (await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479")).document;
+  test("a passing recheck of the same revision resolves its content mismatch and restores only the unflagged season", async () => {
+    const { testDb, created, revisionId, reviewerRpc, recheck, now } = await setupContentRecheck();
+    const docAfterMatch = await recheck("matching");
     expect(docAfterMatch.associations).toHaveLength(1);
     expect(docAfterMatch.associations[0]?.status).toBe("confirmed");
     expect(docAfterMatch.associations[0]?.needsReview).toBeUndefined();
@@ -1051,19 +1108,24 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     const alertsAfterMatch = await testDb.readDb.selectFrom("review_alerts").select("id").execute();
     expect(alertsAfterMatch).toHaveLength(0);
 
-    // 2. Page still returns found, but content changed to a different media -> NOT delisted, needsReview=true, alert created
-    currentTime = new Date("2026-11-23T21:00:00.000Z");
-    contentChanged = true;
+    await testDb.writeDb
+      .updateTable("segments")
+      .set({ needs_review: true })
+      .where("association_id", "=", created.associationId)
+      .where("season", "=", 1)
+      .execute();
+    const tmdbAlert = await testDb.writeDb
+      .insertInto("review_alerts")
+      .values({
+        alert_type: "segments_needs_review",
+        media_id: created.mediaId,
+        details: { reason: "tmdb_season_structure_changed", changedSeasons: [1] },
+        created_at: now(),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
 
-    await reviewerRpc.association.reportInvalidation({
-      associationId: created.associationId,
-    });
-
-    const cycle2 = await runWorkerCycle(worker, dispatched, currentTime);
-    expect(cycle2.queue.completed).toBe(1);
-
-    const docAfterMismatch = (await getMediaDocumentRpc(app, readKey.key, "tmdb:tv:95479"))
-      .document;
+    const docAfterMismatch = await recheck("mismatched");
     expect(docAfterMismatch.associations).toHaveLength(1);
     expect(docAfterMismatch.associations[0]).toMatchObject({
       id: created.associationId,
@@ -1080,9 +1142,269 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       alertType: "association_content_mismatch",
       mediaId: created.mediaId,
       associationId: created.associationId,
+      details: { reason: "evidence_gate_step1_mismatch", revisionId },
     });
     expect(fromProtoReviewAlertStatus(mismatchAlertsBody.alerts[0]!.status)).toBe("open");
+    const query = { namespace: "bilibili", episode: 1 } as const;
+    for (const season of [1, 2]) {
+      expect(resolveEpisode(docAfterMismatch, { ...query, season })).toMatchObject({
+        kind: "collection_only",
+        reason: "needs_review",
+      });
+    }
+
+    const recovered = await recheck("matching");
+    expect(recovered.associations[0]?.needsReview).toBeUndefined();
+    expect(resolveEpisode(recovered, { ...query, season: 1 })).toMatchObject({
+      kind: "collection_only",
+      reason: "needs_review",
+      segment: { needsReview: true },
+    });
+    expect(resolveEpisode(recovered, { ...query, season: 2 })).toMatchObject({
+      kind: "mapped",
+      targetEpisode: 13,
+    });
+    const alerts = await testDb.readDb
+      .selectFrom("review_alerts")
+      .select(["id", "status", "resolved_at", "resolved_by_user_id"])
+      .where("media_id", "=", created.mediaId)
+      .orderBy("alert_type")
+      .execute();
+    expect(alerts).toEqual([
+      {
+        id: mismatchAlertsBody.alerts[0]!.id,
+        status: "resolved",
+        resolved_at: now(),
+        resolved_by_user_id: null,
+      },
+      { id: tmdbAlert.id, status: "open", resolved_at: null, resolved_by_user_id: null },
+    ]);
   });
+
+  test.each(["open", "closed", "missing job", "revised"] as const)(
+    "a fresh mismatch can bind legacy evidence to the original confirmed revision: %s",
+    async (legacy) => {
+      const { testDb, created, revisionId, recheckEpisode, reviewerRpc } =
+        await setupContentRecheck();
+      const degraded = { kind: "collection_only", reason: "needs_review" };
+      expect(await recheckEpisode("mismatched")).toMatchObject(degraded);
+      const { id, details } = await testDb.readDb
+        .selectFrom("review_alerts")
+        .select(["id", "details"])
+        .where("association_id", "=", created.associationId)
+        .where("alert_type", "=", "association_content_mismatch")
+        .executeTakeFirstOrThrow();
+      expect(details).toMatchObject({
+        revisionId,
+        reason: "evidence_gate_step1_mismatch",
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        jobId: expect.any(String),
+      });
+      // A first detection by the original worker persisted only these fields.
+      const { reason, namespace, nativeId, conflicts, reasons, collection, checkedAt, jobId } =
+        details;
+      await testDb.writeDb
+        .updateTable("review_alerts")
+        .set({
+          details: {
+            reason,
+            namespace,
+            nativeId,
+            conflicts,
+            reasons,
+            collection,
+            checkedAt,
+            jobId: legacy === "missing job" ? crypto.randomUUID() : jobId,
+          },
+        })
+        .where("id", "=", id)
+        .execute();
+
+      if (legacy === "revised") {
+        const replacement = await testDb.writeDb
+          .insertInto("association_revisions")
+          .values({
+            association_id: created.associationId,
+            revision_number: 2,
+            status: "confirmed",
+            segments: JSON.stringify([]),
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+        await testDb.writeDb
+          .updateTable("associations")
+          .set({ current_revision_id: replacement.id })
+          .where("id", "=", created.associationId)
+          .execute();
+      }
+      if (legacy === "closed") await reviewerRpc.reviewer.resolveReviewAlert({ alertId: id });
+      expect(await recheckEpisode("matching")).toMatchObject(degraded);
+      expect(await recheckEpisode("mismatched")).toMatchObject(degraded);
+      const attributable = legacy === "open" || legacy === "closed";
+      expect(await recheckEpisode("matching")).toMatchObject(
+        attributable ? { kind: "mapped", targetEpisode: 1 } : degraded,
+      );
+      if (!attributable) {
+        await recheckEpisode("mismatched");
+        expect(await recheckEpisode("matching")).toMatchObject(degraded);
+      }
+    },
+  );
+
+  test.each(["new", "before recovery receipts"])(
+    "a pass restores mapping after reviewer RPC closure and preserves the closing user and time: %s",
+    async (format) => {
+      const { testDb, created, reviewerId, reviewerRpc, recheckEpisode, now } =
+        await setupContentRecheck();
+      expect(await recheckEpisode("mismatched")).toMatchObject({
+        kind: "collection_only",
+        reason: "needs_review",
+      });
+      const { alerts } = await reviewerRpc.reviewer.listReviewAlerts({
+        alertType: "association_content_mismatch",
+        mediaId: created.mediaId,
+      });
+      expect(alerts).toHaveLength(1);
+      const alertId = alerts[0]!.id;
+      if (format === "before recovery receipts") {
+        const { details } = await testDb.readDb
+          .selectFrom("review_alerts")
+          .select("details")
+          .where("id", "=", alertId)
+          .executeTakeFirstOrThrow();
+        const { pendingRecovery: _pending, checkedRevisionId: _checked, ...previous } = details;
+        await testDb.writeDb
+          .updateTable("review_alerts")
+          .set({ details: previous })
+          .where("id", "=", alertId)
+          .execute();
+      }
+      const closedAt = now();
+      await reviewerRpc.reviewer.resolveReviewAlert({ alertId });
+      const association = await testDb.readDb
+        .selectFrom("associations")
+        .select("needs_review")
+        .where("id", "=", created.associationId)
+        .executeTakeFirstOrThrow();
+      expect(association.needs_review).toBe(true);
+      expect
+        .soft(await recheckEpisode("matching"))
+        .toMatchObject({ kind: "mapped", targetEpisode: 1 });
+      const alert = await testDb.readDb
+        .selectFrom("review_alerts")
+        .select(["status", "resolved_at", "resolved_by_user_id"])
+        .where("id", "=", alertId)
+        .executeTakeFirstOrThrow();
+      expect(alert).toEqual({
+        status: "resolved",
+        resolved_at: closedAt,
+        resolved_by_user_id: reviewerId,
+      });
+    },
+  );
+
+  test("a locked association stays degraded on pass and recovers on the first pass after unlock", async () => {
+    const { created, reviewerRpc, recheckEpisode } = await setupContentRecheck();
+    const degraded = { kind: "collection_only", reason: "needs_review" };
+    expect(await recheckEpisode("mismatched")).toMatchObject(degraded);
+    await reviewerRpc.reviewer.setAssociationLock({
+      associationId: created.associationId,
+      locked: true,
+    });
+    expect.soft(await recheckEpisode("matching")).toMatchObject(degraded);
+    await reviewerRpc.reviewer.setAssociationLock({
+      associationId: created.associationId,
+      locked: false,
+    });
+    expect(await recheckEpisode("matching")).toMatchObject({ kind: "mapped", targetEpisode: 1 });
+  });
+
+  test.each(["receipt", "legacy reclosure"])(
+    "a mismatch that already restored mapping cannot clear a later flag of unknown origin: %s",
+    async (format) => {
+      const { created, testDb, recheckEpisode, reviewerRpc } = await setupContentRecheck();
+      const degraded = { kind: "collection_only", reason: "needs_review" };
+      expect(await recheckEpisode("mismatched")).toMatchObject(degraded);
+      expect(await recheckEpisode("matching")).toMatchObject({ kind: "mapped", targetEpisode: 1 });
+      if (format === "legacy reclosure") {
+        const alert = await testDb.readDb
+          .selectFrom("review_alerts")
+          .select(["id", "details"])
+          .where("association_id", "=", created.associationId)
+          .executeTakeFirstOrThrow();
+        const {
+          pendingRecovery: _pending,
+          checkedRevisionId: _checked,
+          ...previous
+        } = alert.details;
+        await testDb.writeDb
+          .updateTable("review_alerts")
+          .set({ details: previous })
+          .where("id", "=", alert.id)
+          .execute();
+        const jobs = await testDb.readDb
+          .selectFrom("background_jobs")
+          .select(["id", "result"])
+          .where("dedupe_key", "=", `invalidation_recheck:${created.associationId}`)
+          .execute();
+        const passed = jobs.find((job) => job.result?.outcome === "still_valid");
+        if (!passed?.result) throw new Error("Missing passing recheck");
+        const { checkedRevisionId: _revision, ...previousResult } = passed.result;
+        await testDb.writeDb
+          .updateTable("background_jobs")
+          .set({ result: previousResult })
+          .where("id", "=", passed.id)
+          .execute();
+        await reviewerRpc.reviewer.resolveReviewAlert({ alertId: alert.id });
+      }
+      await testDb.writeDb
+        .updateTable("associations")
+        .set({ needs_review: true })
+        .where("id", "=", created.associationId)
+        .execute();
+      expect(await recheckEpisode("matching")).toMatchObject(degraded);
+    },
+  );
+
+  test.each(["no reason", "no revision", "different revision"] as const)(
+    "rechecks preserve an existing association flag without proof of its origin: %s",
+    async (missingProof) => {
+      const { testDb, created, revisionId, recheck, now } = await setupContentRecheck();
+      await testDb.writeDb
+        .updateTable("associations")
+        .set({ needs_review: true })
+        .where("id", "=", created.associationId)
+        .execute();
+      const alert = await testDb.writeDb
+        .insertInto("review_alerts")
+        .values({
+          alert_type: "association_content_mismatch",
+          media_id: created.mediaId,
+          association_id: created.associationId,
+          details: {
+            ...(missingProof !== "no reason" && { reason: "evidence_gate_step1_mismatch" }),
+            ...(missingProof !== "no revision" && {
+              revisionId: missingProof === "different revision" ? crypto.randomUUID() : revisionId,
+            }),
+          },
+          created_at: now(),
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+
+      expect((await recheck("matching")).associations[0]?.needsReview).toBe(true);
+      expect(
+        await testDb.readDb
+          .selectFrom("review_alerts")
+          .select("status")
+          .where("id", "=", alert.id)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ status: "open" });
+      await recheck("mismatched");
+      expect((await recheck("matching")).associations[0]?.needsReview).toBe(true);
+    },
+  );
 
   test("invalidation recheck loads association segments so valid split-season, open-ended ongoing, and nonLinear collections are NOT falsely flagged needs_review", async () => {
     const testDb = await createTestDb();

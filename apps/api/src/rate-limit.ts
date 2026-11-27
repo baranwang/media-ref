@@ -104,25 +104,7 @@ export function createInMemoryRateLimiter(options: InMemoryRateLimiterOptions): 
 }
 
 export function extractRequestClientIp(headers: Headers): string {
-  const cfIp = headers.get("cf-connecting-ip")?.trim();
-  if (cfIp && cfIp.length > 0) {
-    return cfIp.toLowerCase();
-  }
-
-  const forwardedFor = headers.get("x-forwarded-for");
-  if (forwardedFor) {
-    const firstHop = forwardedFor.split(",")[0]?.trim();
-    if (firstHop && firstHop.length > 0) {
-      return firstHop.toLowerCase();
-    }
-  }
-
-  const realIp = headers.get("x-real-ip")?.trim();
-  if (realIp && realIp.length > 0) {
-    return realIp.toLowerCase();
-  }
-
-  return "unknown";
+  return headers.get("cf-connecting-ip")?.trim() || "unknown";
 }
 
 function parsePositiveInt(raw: string | undefined): number | undefined {
@@ -389,35 +371,39 @@ export type ReadRateLimitCheckResult =
       message: string;
     };
 
-export async function checkReadRateLimit(input: {
-  runtime: ReadRateLimitRuntime;
-  headers: Headers;
-  apiKeyId?: string;
-}): Promise<ReadRateLimitCheckResult> {
-  if (input.apiKeyId) {
-    const keyOutcome = await input.runtime.keyLimiter.limit({
-      key: `read:key:${input.apiKeyId}`,
-    });
-    if (!keyOutcome.success) {
-      return {
-        allowed: false,
-        scope: "api_key",
-        retryAfterSeconds: input.runtime.retryAfterSeconds,
-        message: `API key read rate limit exceeded; retry after ${input.runtime.retryAfterSeconds}s`,
-      };
+function ipBucket(headers: Headers): string {
+  const ip = extractRequestClientIp(headers);
+  if (!ip.includes(":")) return ip;
+  try {
+    // URL normalizes hex and dotted IPv4 tails; expand :: before taking the network prefix.
+    const address = new URL(`http://[${ip}]/`).hostname.slice(1, -1);
+    const [left, right] = address.split("::");
+    const words = left ? left.split(":") : [];
+    if (right !== undefined) {
+      const tail = right ? right.split(":") : [];
+      words.push(...Array<string>(8 - words.length - tail.length).fill("0"), ...tail);
     }
+    return `${words.slice(0, 4).join(":")}::/64`;
+  } catch {
+    return "unknown";
   }
+}
 
-  const clientIp = extractRequestClientIp(input.headers);
-  const ipOutcome = await input.runtime.ipLimiter.limit({ key: `read:ip:${clientIp}` });
-  if (!ipOutcome.success) {
-    return {
-      allowed: false,
-      scope: "ip",
-      retryAfterSeconds: input.runtime.retryAfterSeconds,
-      message: `IP read rate limit exceeded; retry after ${input.runtime.retryAfterSeconds}s`,
-    };
-  }
-
-  return { allowed: true };
+export async function checkReadRateLimit(
+  input: { runtime: ReadRateLimitRuntime } & ({ apiKeyId: string } | { headers: Headers }),
+): Promise<ReadRateLimitCheckResult> {
+  const { runtime } = input;
+  const scope = "apiKeyId" in input ? "api_key" : "ip";
+  const outcome =
+    "apiKeyId" in input
+      ? await runtime.keyLimiter.limit({ key: `read:key:${input.apiKeyId}` })
+      : await runtime.ipLimiter.limit({ key: `read:ip:${ipBucket(input.headers)}` });
+  return outcome.success
+    ? { allowed: true }
+    : {
+        allowed: false,
+        scope,
+        retryAfterSeconds: runtime.retryAfterSeconds,
+        message: `${scope === "ip" ? "IP" : "API key read"} rate limit exceeded; retry after ${runtime.retryAfterSeconds}s`,
+      };
 }

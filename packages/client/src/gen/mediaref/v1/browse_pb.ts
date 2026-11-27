@@ -419,7 +419,7 @@ export type ExplorationPlatformResult = Message<"mediaref.v1.ExplorationPlatform
   namespace: string;
 
   /**
-   * "approved" (in effect), "in_review" (being checked or waiting for a reviewer), "rejected",
+   * "approved" (in effect), "in_review" (being checked or waiting for the review agent), "rejected",
    * "not_found", "retry" (a source was down or time ran out; tried again later), "searching".
    *
    * @generated from field: string status = 2;
@@ -520,7 +520,7 @@ export type ExplorationSummary = Message<"mediaref.v1.ExplorationSummary"> & {
   approved: number;
 
   /**
-   * Platform pages found that wait for a reviewer.
+   * Platform pages found that await the review agent.
    *
    * @generated from field: int32 in_review = 4;
    */

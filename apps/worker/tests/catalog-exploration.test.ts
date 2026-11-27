@@ -165,6 +165,7 @@ describe("catalog-group exploration", () => {
           : httpStub(request),
     });
     const emitted: JobQueueMessage[] = [];
+    let now = T0;
     const worker = createBackgroundWorker({
       db: testDb.writeDb,
       outbound,
@@ -174,10 +175,11 @@ describe("catalog-group exploration", () => {
         },
       },
       config: { enableDailyTmdbSync: false, exploration: { dailyBudget: 10 } },
-      now: () => T0,
+      now: () => now,
     });
-    const runJobs = async () => {
-      await worker.scheduled(createScheduledController(T0));
+    const runJobs = async (at = T0) => {
+      now = at;
+      await worker.scheduled(createScheduledController(now));
       const batch = [...emitted];
       emitted.length = 0;
       await worker.queue(createQueueBatch(batch));
@@ -211,7 +213,7 @@ describe("catalog-group exploration", () => {
     expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("fulfilled");
   });
 
-  test("a TMDB ID that already belongs to another media is not written; a review alert is raised", async () => {
+  test("a TMDB ID held by another media is not written; a retry reuses the open alert", async () => {
     const { testDb, mediaId, runJobs } = await setup({
       baseline: "douban",
       externalIds: [["imdb", "tt0137523"]],
@@ -240,12 +242,16 @@ describe("catalog-group exploration", () => {
       })
       .execute();
 
-    await runJobs();
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    const [demand] = await listDemands(testDb.readDb, { mediaId });
+    expect(demand?.status).toBe("not_found");
+    expect(await runJobs(new Date(demand!.nextEligibleAt))).toEqual([EXPLORATION_JOB_TYPE]);
 
     expect((await externalIds(testDb, mediaId)).map((r) => r.namespace)).toEqual(["imdb"]);
     const alerts = await testDb.readDb.selectFrom("review_alerts").selectAll().execute();
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({
+      status: "open",
       alert_type: "agent_external_id_conflict",
       media_id: mediaId,
     });

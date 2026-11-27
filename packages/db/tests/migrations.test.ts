@@ -1,6 +1,7 @@
 import { sql } from "kysely";
+import { Migrator } from "kysely/migration";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { runMigrations } from "../src/index.ts";
+import { runMigrations, staticMigrationProvider } from "../src/index.ts";
 import { createTestDb, type TestDbHandle } from "../src/testing.ts";
 
 describe("packages/db migrations", () => {
@@ -114,6 +115,16 @@ describe("packages/db migrations", () => {
       },
       {
         migrationName: "0019_change_request_comments",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0020_background_job_lookup_indexes",
+        direction: "Up",
+        status: "Success",
+      },
+      {
+        migrationName: "0021_review_provenance",
         direction: "Up",
         status: "Success",
       },
@@ -268,6 +279,19 @@ describe("packages/db migrations", () => {
         })
         .execute(),
     ).rejects.toThrow();
+
+    const indexes = await sql<{ indexdef: string }>`
+      select indexdef from pg_indexes
+      where schemaname = 'public' and tablename = 'background_jobs'
+    `.execute(testDb.readDb);
+    expect(indexes.rows.map((row) => row.indexdef)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/CREATE INDEX .*\(dedupe_key\) WHERE \(dedupe_key IS NOT NULL\)$/i),
+        expect.stringMatching(
+          /\(job_type, completed_at DESC\) WHERE \(status = 'completed'::text\)$/i,
+        ),
+      ]),
+    );
 
     // Completing the job frees the partial unique index for future re-scheduling
     await testDb.writeDb
@@ -1057,6 +1081,163 @@ describe("packages/db migrations", () => {
 
     const rerunResults = await runMigrations(testDb.writeDb);
     expect(rerunResults).toEqual([]);
+  });
+
+  test("0021 preserves revisions and backfills only confirmed correction verdicts", async () => {
+    const handle = await createTestDb({ migrate: false });
+    handles.push(handle);
+    const db = handle.writeDb;
+    const migrator = new Migrator({ db, provider: staticMigrationProvider });
+    expect((await migrator.migrateTo("0020_background_job_lookup_indexes")).error).toBeUndefined();
+
+    const reviewer = "system:review-agent";
+    await db
+      .insertInto("user")
+      .values({
+        id: reviewer,
+        name: "Review agent",
+        email: "review@example.test",
+        emailVerified: false,
+      })
+      .execute();
+    const media = await db
+      .insertInto("media")
+      .values({ type: "tv", title: "Legacy" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const assoc = await db
+      .insertInto("associations")
+      .values({ media_id: media.id, namespace: "douban", native_id: "123", status: "confirmed" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const revision = {
+      association_id: assoc.id,
+      status: "confirmed" as const,
+      revision_number: 1,
+      reason: "Restored revision 1",
+    };
+    const original = await db
+      .insertInto("association_revisions")
+      .values(revision)
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const base = {
+      status: "rejected" as const,
+      submitter_user_id: reviewer,
+      reviewer_user_id: reviewer,
+      target_external_key: "tmdb:tv:10",
+      namespace: "bilibili" as const,
+      raw_native_id: "ss1",
+      native_id: "ss1",
+      media_id: media.id,
+      evidence: { reviewAgent: { verdict: "reject_with_correction" } },
+    };
+    const [later, first, external, fallback] = await db
+      .insertInto("change_requests")
+      .values([
+        { ...base, reviewed_at: new Date("2026-11-02") },
+        { ...base, reviewed_at: new Date("2026-11-01"), target_external_key: "imdb:tt1234567" },
+        { ...base, media_id: null },
+        {
+          ...base,
+          native_id: "ss2",
+          evidence: { reviewAgent: { verdict: "reject", concluded: "reject_with_correction" } },
+          decision_reason: "reject_with_correction",
+        },
+        { ...base, native_id: "ss3", status: "approved" },
+        { ...base, native_id: "ss4", reviewer_user_id: null },
+        {
+          ...base,
+          native_id: "ss5",
+          evidence: { reviewAgent: { verdict: "revoke_with_correction" } },
+        },
+      ])
+      .returning("id")
+      .execute();
+    const lead = await db
+      .insertInto("leads")
+      .values({
+        target_external_key: base.target_external_key,
+        namespace: base.namespace,
+        native_id: "ss2",
+        reporter_user_id: reviewer,
+        reporter_key_id: reviewer,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    await runMigrations(db);
+    expect(await db.selectFrom("association_revisions").selectAll().execute()).toMatchObject([
+      { ...original, ...revision, restored_from_revision_id: null },
+    ]);
+    expect(await db.selectFrom("change_requests").select("id").execute()).toHaveLength(7);
+    expect(await db.selectFrom("leads").select("id").execute()).toEqual([lead]);
+    const receipts = await db.selectFrom("review_corrections").selectAll().execute();
+    expect(receipts).toHaveLength(3);
+    const collection = { namespace: base.namespace, native_id: base.native_id };
+    expect(receipts).toEqual(
+      expect.arrayContaining([
+        {
+          ...collection,
+          change_request_id: first.id,
+          media_id: media.id,
+          target_external_key: null,
+        },
+        {
+          ...collection,
+          change_request_id: external.id,
+          media_id: null,
+          target_external_key: base.target_external_key,
+        },
+        expect.objectContaining({
+          native_id: "ss5",
+          media_id: media.id,
+          target_external_key: null,
+        }),
+      ]),
+    );
+
+    const receipt = { ...collection, change_request_id: later.id };
+    const insert = (target: { media_id?: string; target_external_key?: string }) =>
+      db
+        .insertInto("review_corrections")
+        .values({ ...receipt, ...target })
+        .execute();
+    await expect(insert({})).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      insert({ media_id: media.id, target_external_key: base.target_external_key }),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(insert({ media_id: media.id })).rejects.toMatchObject({ code: "23505" });
+    await expect(insert({ target_external_key: base.target_external_key })).rejects.toMatchObject({
+      code: "23505",
+    });
+    await expect(insert({ media_id: later.id })).rejects.toMatchObject({ code: "23503" });
+    await expect(
+      db
+        .insertInto("review_corrections")
+        .values({ ...collection, change_request_id: media.id, target_external_key: "unknown" })
+        .execute(),
+    ).rejects.toMatchObject({ code: "23503" });
+
+    const next = { ...revision, revision_number: 2 };
+    await expect(
+      db
+        .insertInto("association_revisions")
+        .values({ ...next, restored_from_revision_id: fallback.id })
+        .execute(),
+    ).rejects.toMatchObject({ code: "23503" });
+    const restored = await db
+      .insertInto("association_revisions")
+      .values({ ...next, restored_from_revision_id: original.id })
+      .returning("restored_from_revision_id")
+      .executeTakeFirstOrThrow();
+    expect(restored.restored_from_revision_id).toBe(original.id);
+    const delisted = await db
+      .insertInto("association_revisions")
+      .values({ ...next, revision_number: 3, status: "delisted" })
+      .returning("restored_from_revision_id")
+      .executeTakeFirstOrThrow();
+    expect(delisted.restored_from_revision_id).toBeNull();
   });
 
   test("createTestDb provisions an already-migrated ephemeral database by default", async () => {

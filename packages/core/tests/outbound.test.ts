@@ -163,6 +163,37 @@ describe("OutboundClient live HTTP routing", () => {
     ]);
   });
 
+  test("egress keeps credentials on same-host redirects and drops them for all hops after a host change", async () => {
+    const redirects = ["/same-host", "https://other.invalid/next", "https://start.invalid/last"];
+    const sent: (string | null)[][] = [];
+    const outbound = createLiveOutboundClient({
+      proxyConfig: { bilibili: { mode: "egress" } },
+      egressFetcher: {
+        async fetch(_input, init) {
+          const headers = new Headers(init?.headers);
+          sent.push([headers.get("authorization"), headers.get("cookie")]);
+          const location = redirects.shift();
+          return location
+            ? new Response(null, { status: 302, headers: { location } })
+            : new Response();
+        },
+      },
+    });
+    await outbound.fetchExternal({
+      kind: "platform",
+      namespace: "bilibili",
+      url: "https://start.invalid/",
+      headers: { Authorization: "test-token", Cookie: "session=test" },
+    });
+
+    expect(sent).toEqual([
+      ["test-token", "session=test"],
+      ["test-token", "session=test"],
+      [null, null],
+      [null, null],
+    ]);
+  });
+
   test("egress namespace without an HK binding fails loudly instead of going direct", async () => {
     const outbound = createLiveOutboundClient({
       fetchImpl: async () => new Response("direct"),

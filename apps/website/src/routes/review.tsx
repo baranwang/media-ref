@@ -559,15 +559,17 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
               看媒体详情
             </Button>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            nativeButton={false}
-            render={<a href={cr.pageUrl} target="_blank" rel="noreferrer" />}
-          >
-            打开播放页
-            <RiArrowRightUpLine />
-          </Button>
+          {cr.pageLink && (
+            <Button
+              variant="outline"
+              size="sm"
+              nativeButton={false}
+              render={<a href={cr.pageLink.href} target="_blank" rel="noreferrer" />}
+            >
+              {cr.pageLink.source === "submission" ? "打开提交时的链接" : "打开条目"}
+              <RiArrowRightUpLine />
+            </Button>
+          )}
         </div>
       </div>
 

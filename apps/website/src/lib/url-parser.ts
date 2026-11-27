@@ -8,6 +8,36 @@ export interface ParsedExternalLink {
   mediaTypeHint?: MediaType;
 }
 
+export function contributionLinkFields(link: ParsedExternalLink) {
+  // Have the adapter verify the page the detail view will link to, not just its slug.
+  const nativeId =
+    link.namespace === "iqiyi" && /^[av]_/.test(link.nativeId) ? link.url : link.nativeId;
+  return { namespace: link.namespace, nativeId, rawNativeId: link.url };
+}
+
+const tencentCid = /^[a-z0-9]{15}$/;
+const tencentMobileQueryPaths = new Set([
+  "/x/m/play",
+  "/x/m/play/",
+  "/x/m/detail",
+  "/x/m/detail/",
+  "/play.html",
+  "/detail.html",
+  "/z/msite/play-short/index.html",
+]);
+const positiveId = /^[1-9]\d*$/;
+const bilibiliId = /^(ss|ep|md)[1-9]\d*$/i;
+const youkuShowId = /^z?([0-9a-f]{20})$/i;
+const bareIdPatterns: Partial<Record<Namespace, RegExp>> = {
+  bangumi: positiveId,
+  bilibili: bilibiliId,
+  douban: positiveId,
+  iqiyi: /^(?:[1-9]\d{5,}|[av]_[a-zA-Z0-9]{4,})$/,
+  mgtv: positiveId,
+  tencent: tencentCid,
+  youku: youkuShowId,
+};
+
 export function buildExternalUrl(
   namespace: Namespace,
   nativeId: string,
@@ -15,24 +45,28 @@ export function buildExternalUrl(
 ): string {
   switch (namespace) {
     case "bilibili": {
-      if (nativeId.startsWith("ss") || nativeId.startsWith("ep")) {
-        return `https://www.bilibili.com/bangumi/play/${nativeId}`;
+      if (/^(ss|ep)/i.test(nativeId)) {
+        return `https://www.bilibili.com/bangumi/play/${nativeId.toLowerCase()}`;
       }
-      if (nativeId.startsWith("md")) {
-        return `https://www.bilibili.com/bangumi/media/${nativeId}`;
+      if (/^md/i.test(nativeId)) {
+        return `https://www.bilibili.com/bangumi/media/${nativeId.toLowerCase()}`;
       }
       return `https://www.bilibili.com/bangumi/play/ss${nativeId}`;
     }
     case "tencent":
       return `https://v.qq.com/x/cover/${nativeId}.html`;
     case "iqiyi": {
+      if (/^[av]_/.test(nativeId)) return `https://www.iqiyi.com/${nativeId}.html`;
       if (!/^\d+$/.test(nativeId)) return `https://www.iqiyi.com/a_${nativeId}.html`;
       // iQIYI page slugs are base36 of (id XOR "upiqgl"); movie/episode tvIds end in 00 and live on v_ pages.
       const slug = (BigInt(nativeId) ^ 0x75706971676cn).toString(36);
       return `https://www.iqiyi.com/${nativeId.endsWith("00") ? "v" : "a"}_${slug}.html`;
     }
-    case "youku":
+    case "youku": {
+      const show = nativeId.match(youkuShowId);
+      if (show) return `https://list.youku.com/show/id_z${show[1]!.toLowerCase()}.html`;
       return `https://v.youku.com/v_show/id_${nativeId}.html`;
+    }
     case "mgtv":
       return `https://www.mgtv.com/h/${nativeId}.html`;
     case "tmdb": {
@@ -65,6 +99,18 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     const ns = canonicalMatch[1]!.toLowerCase();
     const rest = canonicalMatch[2]!.trim();
     if (isNamespace(ns) && rest.length > 0) {
+      if (/^https?:\/\//i.test(rest)) {
+        const link = parseExternalInput(rest);
+        return link?.namespace === ns ? link : null;
+      }
+      const pattern = bareIdPatterns[ns];
+      if (pattern && !pattern.test(rest)) {
+        if (ns === "youku" && /^[A-Za-z0-9=_-]{2,64}$/.test(rest)) {
+          const pageUrl = buildExternalUrl(ns, rest);
+          return { namespace: ns, nativeId: pageUrl, url: pageUrl, isCatalog: false };
+        }
+        return null;
+      }
       const tmdbType =
         ns === "tmdb" && rest.startsWith("movie:")
           ? "movie"
@@ -92,7 +138,7 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
   }
 
   // Bare Bilibili ss / ep / md ID
-  if (/^(ss|ep|md)\d+$/i.test(trimmed)) {
+  if (bilibiliId.test(trimmed)) {
     const id = trimmed.toLowerCase();
     return {
       namespace: "bilibili",
@@ -105,16 +151,17 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
   // URL parsing
   let url: URL;
   try {
-    url = new URL(trimmed.startsWith("http") ? trimmed : `https://${trimmed}`);
+    url = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
   } catch {
     return null;
   }
 
   const host = url.hostname.toLowerCase();
+  const isHost = (domain: string) => host === domain || host.endsWith(`.${domain}`);
   const path = url.pathname;
 
-  if (host.includes("douban.com")) {
-    const m = path.match(/\/subject\/(\d+)/);
+  if (isHost("douban.com")) {
+    const m = path.match(/^\/(?:movie\/)?subject\/([1-9]\d*)\/?$/);
     if (m) {
       return {
         namespace: "douban",
@@ -125,8 +172,10 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     }
   }
 
-  if (host.includes("bilibili.com")) {
-    const m = path.match(/\/bangumi\/(?:play|media)\/((?:ss|ep|md)\d+)/i);
+  if (isHost("bilibili.com")) {
+    const m =
+      path.match(/^\/bangumi\/play\/((?:ss|ep)[1-9]\d*)\/?$/i) ??
+      path.match(/^\/bangumi\/media\/(md[1-9]\d*)\/?$/i);
     if (m) {
       const id = m[1]!.toLowerCase();
       return {
@@ -138,48 +187,64 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     }
   }
 
-  if (host.includes("v.qq.com")) {
+  if (host === "v.qq.com" || host === "m.v.qq.com") {
+    const mobileQuery = host === "m.v.qq.com" && tencentMobileQueryPaths.has(path);
     const m =
-      path.match(/\/x\/cover\/([a-z0-9]+)(?:\/|\.html|$)/i) ??
-      path.match(/\/detail\/[a-z0-9]\/([a-z0-9]+)\.html/i);
-    if (m) {
+      path.match(/^\/x\/cover\/([a-z0-9]{15})(?:\/[a-zA-Z0-9]+)?(?:\.html)?\/?$/) ??
+      path.match(/^\/cover\/(?:[a-z0-9]\/)?([a-z0-9]{15})(?:\/[a-zA-Z0-9]+)?(?:\.html)?\/?$/) ??
+      path.match(/^\/detail\/[a-z0-9]\/([a-z0-9]{15})(?:\.html)?\/?$/);
+    const cid = m?.[1] ?? (mobileQuery ? url.searchParams.get("cid")?.trim() : null);
+    if (cid && tencentCid.test(cid)) {
       return {
         namespace: "tencent",
-        nativeId: m[1]!,
-        url: buildExternalUrl("tencent", m[1]!),
+        nativeId: cid,
+        url: buildExternalUrl("tencent", cid),
         isCatalog: false,
       };
     }
   }
 
-  if (host.includes("iqiyi.com")) {
-    const m = path.match(/\/(a|v)_([a-z0-9]+)\.html/i);
+  if (isHost("iqiyi.com")) {
+    const m = path.match(/^\/([av])_([a-zA-Z0-9]+)\.html$/);
     if (m) {
+      const pageId = `${m[1]}_${m[2]}`;
+      const pageUrl = buildExternalUrl("iqiyi", pageId);
       return {
         namespace: "iqiyi",
-        nativeId: m[2]!,
-        url: `https://www.iqiyi.com/${m[1]!.toLowerCase()}_${m[2]!}.html`,
+        // The adapter only accepts short slugs inside a page URL.
+        nativeId: m[2]!.length < 4 ? pageUrl : pageId,
+        url: pageUrl,
         isCatalog: false,
       };
     }
   }
 
-  if (host.includes("youku.com")) {
-    const m =
-      path.match(/\/v_show\/id_([a-z0-9_=]+)\.html/i) ??
-      path.match(/\/show\/id_([a-z0-9_=]+)\.html/i);
-    if (m) {
+  if (isHost("youku.com")) {
+    const video =
+      path.match(/^\/v_show\/id_([A-Za-z0-9=_-]{2,64})\.html$/) ??
+      (host === "m.youku.com"
+        ? path.match(/^\/(?:video|alipay_video)\/id_([A-Za-z0-9=_-]{2,64})\.html$/)
+        : null);
+    if (video) {
+      const pageUrl = `https://v.youku.com/v_show/id_${video[1]}.html`;
+      return { namespace: "youku", nativeId: pageUrl, url: pageUrl, isCatalog: false };
+    }
+    const show = path.match(/^\/show\/id_z?([0-9a-f]{20})\.html$/i);
+    if (show) {
+      const nativeId = show[1]!.toLowerCase();
       return {
         namespace: "youku",
-        nativeId: m[1]!,
-        url: buildExternalUrl("youku", m[1]!),
+        nativeId,
+        url: buildExternalUrl("youku", nativeId),
         isCatalog: false,
       };
     }
   }
 
-  if (host.includes("mgtv.com")) {
-    const m = path.match(/\/(?:h|b)\/(\d+)/i);
+  if (isHost("mgtv.com")) {
+    const m =
+      path.match(/^\/[hb]\/([1-9]\d*)\.html\/?$/i) ??
+      path.match(/^\/b\/([1-9]\d*)\/[1-9]\d*\.html\/?$/i);
     if (m) {
       return {
         namespace: "mgtv",
@@ -190,7 +255,7 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     }
   }
 
-  if (host.includes("themoviedb.org")) {
+  if (isHost("themoviedb.org")) {
     const m = path.match(/\/(tv|movie)\/(\d+)/i);
     if (m) {
       const mt = m[1]!.toLowerCase() as MediaType;
@@ -205,7 +270,7 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     }
   }
 
-  if (host.includes("imdb.com")) {
+  if (isHost("imdb.com")) {
     const m = path.match(/\/title\/(tt\d+)/i);
     if (m) {
       const id = m[1]!.toLowerCase();
@@ -218,7 +283,7 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     }
   }
 
-  if (host.includes("thetvdb.com")) {
+  if (isHost("thetvdb.com")) {
     const m = path.match(/\/(?:series|movies|dereferrer\/series)\/([a-z0-9-]+)/i);
     if (m) {
       return {
@@ -230,8 +295,8 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     }
   }
 
-  if (host.includes("bgm.tv") || host.includes("bangumi.tv") || host.includes("chii.in")) {
-    const m = path.match(/\/subject\/(\d+)/i);
+  if (isHost("bgm.tv") || isHost("bangumi.tv") || isHost("chii.in")) {
+    const m = path.match(/^\/subject\/([1-9]\d*)\/?$/i);
     if (m) {
       return {
         namespace: "bangumi",
@@ -242,7 +307,7 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
     }
   }
 
-  if (host.includes("trakt.tv")) {
+  if (isHost("trakt.tv")) {
     const m = path.match(/\/(shows|movies)\/([a-z0-9-]+)/i);
     if (m) {
       const mt: MediaType = m[1]!.toLowerCase() === "movies" ? "movie" : "tv";

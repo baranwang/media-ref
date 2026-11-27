@@ -125,6 +125,88 @@ describe("Association revision history, locking, and reviewer external ID overri
     }
   });
 
+  test("ReportInvalidation requires a verified session and shares the UTC daily cap across associations and credentials", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    let now = new Date("2026-11-23T23:59:59.000Z");
+    const outbound = createFakeOutboundClient();
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: db,
+      outbound,
+      config: { baseUrl: TEST_BASE_URL, authSecret: TEST_AUTH_SECRET, now: () => now },
+    });
+    const media = await db
+      .insertInto("media")
+      .values({ type: "tv", title: "Test series" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const [first, second] = await db
+      .insertInto("associations")
+      .values([
+        { media_id: media.id, status: "confirmed", namespace: "bangumi", native_id: "123" },
+        { media_id: media.id, status: "confirmed", namespace: "douban", native_id: "456" },
+      ])
+      .returning("id")
+      .execute();
+    const unverified = await signUpUser(app, outbound, {
+      email: "unverified-reporter@example.com",
+      name: "Unverified",
+      password: "StrongPassword123!",
+      verify: false,
+    });
+    const denied = await expectRpcError(
+      createRpcClients(app, { cookie: unverified.cookie }).association.reportInvalidation({
+        associationId: first!.id,
+      }),
+    );
+    expect(denied).toMatchObject({ status: 403, code: "EMAIL_NOT_VERIFIED" });
+    expect(await db.selectFrom("invalidation_reports").select("id").execute()).toHaveLength(0);
+
+    const user = await signUpUser(app, outbound, {
+      email: "verified-reporter@example.com",
+      name: "Verified",
+      password: "StrongPassword123!",
+    });
+    const key1 = await issueApiKeyRpc(app, user.cookie, { name: "First" });
+    const key2 = await issueApiKeyRpc(app, user.cookie, { name: "Second" });
+    const session = createRpcClients(app, { cookie: user.cookie }).association;
+    const firstKey = createRpcClients(app, { apiKey: key1.key }).association;
+    const secondKey = createRpcClients(app, { apiKey: key2.key }).association;
+    const pending = await firstKey.reportInvalidation({ associationId: first!.id });
+    await db
+      .insertInto("invalidation_reports")
+      .values(
+        Array.from({ length: 18 }, () => ({
+          association_id: second!.id,
+          reporter_type: "user" as const,
+          reporter_user_id: user.userId,
+          created_at: now,
+        })),
+      )
+      .execute();
+
+    const results = await Promise.allSettled([
+      secondKey.reportInvalidation({ associationId: first!.id }),
+      session.reportInvalidation({ associationId: second!.id }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected")!;
+    expect(await expectRpcError(Promise.reject(rejected.reason))).toMatchObject({
+      status: 429,
+      code: "INVALIDATION_LIMIT_REACHED",
+    });
+    expect(await firstKey.reportInvalidation({ associationId: first!.id })).toMatchObject({
+      reportId: pending.reportId,
+      deduplicated: true,
+    });
+    expect(await db.selectFrom("invalidation_reports").select("id").execute()).toHaveLength(20);
+
+    now = new Date("2026-11-24T00:00:00.000Z");
+    expect((await session.reportInvalidation({ associationId: second!.id })).triggered).toBe(true);
+  });
+
   test("returns ordered association revision history via session and read API key, preserving full snapshots across revisions", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

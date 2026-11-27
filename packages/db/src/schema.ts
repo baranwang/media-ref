@@ -209,6 +209,7 @@ export interface AssociationRevisionsTable {
   id: Generated<string>;
   association_id: string;
   revision_number: number;
+  restored_from_revision_id: string | null;
   change_request_id: string | null;
   variant_id: string | null;
   status: AssociationStatusRow;
@@ -282,6 +283,14 @@ export interface ChangeRequestCommentsTable {
   /** Comments an agent reply answers; empty on people's comments. */
   reply_to_ids: ColumnType<string[], string[] | undefined, string[]>;
   created_at: Generated<Date>;
+}
+
+export interface ReviewCorrectionsTable {
+  change_request_id: string;
+  media_id: string | null;
+  target_external_key: string | null;
+  namespace: AssociationNamespaceRow;
+  native_id: string;
 }
 
 export interface LeadsTable {
@@ -405,6 +414,7 @@ export interface Database {
   association_revisions: AssociationRevisionsTable;
   segments: SegmentsTable;
   change_requests: ChangeRequestsTable;
+  review_corrections: ReviewCorrectionsTable;
   leads: LeadsTable;
   change_request_comments: ChangeRequestCommentsTable;
   platform_checks: PlatformChecksTable;

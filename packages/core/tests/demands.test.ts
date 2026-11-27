@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vite-plus/test";
-import { computeDemandTargetsForRead } from "../src/index.ts";
+import { createTestDb } from "@media-ref/db/testing";
+import {
+  computeDemandTargetsForRead,
+  mergeExternalKeyDemandsIntoMedia,
+  scheduleExplorationJobs,
+} from "../src/index.ts";
 import type { QueryMediaByKeyResult } from "../src/read-media.ts";
 
 // Only the fields demand targeting reads.
@@ -50,5 +55,83 @@ describe("catalog-group demand", () => {
         namespaceGroup: "catalog",
       }),
     ).toEqual([]);
+  });
+});
+
+describe("external-key demand merge", () => {
+  test.each(["leased", "invalid_key"] as const)(
+    "opens every season of a %s external-key demand immediately",
+    async (status) => {
+      const handle = await createTestDb();
+      try {
+        const db = handle.writeDb;
+        const now = new Date("2026-11-23T12:00:00Z");
+        const later = new Date("2026-12-23T12:00:00Z");
+        const media = await db
+          .insertInto("media")
+          .values({ type: "tv", title: "Season merge", baseline: "tmdb" })
+          .returning("id")
+          .executeTakeFirstOrThrow();
+        await db
+          .insertInto("demands")
+          .values({
+            external_key: "tmdb:tv:123",
+            namespace_group: "platform",
+            status,
+            lease_expires_at: status === "leased" ? later : null,
+            next_eligible_at: later,
+            demand_count: 3,
+          })
+          .execute();
+        const result = await mergeExternalKeyDemandsIntoMedia(db, {
+          mediaId: media.id,
+          externalKeys: ["tmdb:tv:123"],
+          seasons: [1, 2],
+          mediaType: "tv",
+          now,
+        });
+        expect(result.mergedSourceCount).toBe(1);
+        expect(result.demands).toMatchObject(
+          [1, 2].map((season) => ({
+            season,
+            mediaId: media.id,
+            status: "open",
+            demandCount: 3,
+            nextEligibleAt: now.toISOString(),
+            leaseExpiresAt: null,
+          })),
+        );
+      } finally {
+        await handle.cleanup();
+      }
+    },
+  );
+
+  test("the scheduler recovers a media demand merged before lease normalization", async () => {
+    const handle = await createTestDb();
+    try {
+      const db = handle.writeDb;
+      const media = await db
+        .insertInto("media")
+        .values({ type: "movie", title: "Legacy merge", baseline: "tmdb" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const demand = await db
+        .insertInto("demands")
+        .values({
+          media_id: media.id,
+          namespace_group: "platform",
+          status: "leased",
+          lease_expires_at: null,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const scheduled = await scheduleExplorationJobs(db);
+      expect(scheduled.jobs).toMatchObject([
+        { payload: { demandId: demand.id, demandLeaseGeneration: 1 } },
+      ]);
+    } finally {
+      await handle.cleanup();
+    }
   });
 });

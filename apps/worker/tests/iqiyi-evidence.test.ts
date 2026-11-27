@@ -9,6 +9,12 @@ import {
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
+import { changeRequestFromProto } from "../../website/src/lib/mappers.ts";
+import {
+  buildExternalUrl,
+  contributionLinkFields,
+  parseExternalInput,
+} from "../../website/src/lib/url-parser.ts";
 import { createBackgroundWorker } from "../src/index.ts";
 import {
   createRpcClients,
@@ -375,10 +381,11 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
 
     // 2. Submit desktop v_ share URL -> rewritten to m.iqiyi.com -> canonical albumId stored
     const shareUrl = "https://www.iqiyi.com/v_xkt6z3z798.html?vfrm=pcw_home";
+    const episodeUrl = "https://www.iqiyi.com/v_xkt6z3z798.html";
+    const fields = contributionLinkFields(parseExternalInput(shareUrl)!);
     const tvSubmitBody = await submitRpc.changeRequest.createChangeRequest({
       target: mediaRef({ tmdb: { type: "tv", id: 218574 } }),
-      namespace: "iqiyi",
-      nativeId: shareUrl,
+      ...fields,
       variantDescription: "原声",
       segments: [
         toProtoSegmentInput({
@@ -393,8 +400,24 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     expect(fromProtoChangeRequestStatus(tvSubmitBody.changeRequest!.status)).toBe(
       "pending_evidence",
     );
-    expect(tvSubmitBody.changeRequest!.rawNativeId).toBe(shareUrl);
+    const detailResponse = await submitRpc.changeRequest.getChangeRequest({
+      id: tvSubmitBody.changeRequest!.id,
+    });
+    expect(changeRequestFromProto(detailResponse.changeRequest!).pageLink).toEqual({
+      href: episodeUrl,
+      source: "entry",
+    });
+    expect(fields).toEqual({ namespace: "iqiyi", nativeId: episodeUrl, rawNativeId: episodeUrl });
+    expect(tvSubmitBody.changeRequest!.rawNativeId).toBe(episodeUrl);
     expect(tvSubmitBody.changeRequest!.nativeId).toBe("5328486914190101");
+
+    const episodePage = {
+      namespace: "iqiyi",
+      nativeId: "5328486914190101",
+      kind: "video_page",
+      id: "xkt6z3z798",
+    };
+    expect(tvSubmitBody.changeRequest!.evidence).toMatchObject({ resolvedPage: episodePage });
 
     // Also submit movie share URL -> m.iqiyi.com -> video/baseinfo -> 923452300
     const movieShareUrl = "https://www.iqiyi.com/v_19rrfe142o.html";
@@ -436,6 +459,8 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     for (const crId of [tvSubmitBody.changeRequest!.id, movieSubmitBody.changeRequest!.id]) {
       const crBody = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, crId);
       expect(crBody.status).toBe("approved");
+      if (crId === tvSubmitBody.changeRequest!.id)
+        expect(crBody.evidence).toMatchObject({ resolvedPage: episodePage });
       expect(crBody.reviewerUserId).toBeNull();
       expect(crBody.decisionReason).toBe("evidence_gate_passed");
     }
@@ -450,6 +475,9 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
       nativeId: "5328486914190101",
       status: "confirmed",
     });
+    expect(buildExternalUrl("iqiyi", tvDoc.associations[0]!.nativeId)).toBe(
+      "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+    );
     expect(resolveEpisode(tvDoc, { namespace: "iqiyi", season: 1, episode: 15 })).toMatchObject({
       kind: "mapped",
       nativeId: "5328486914190101",

@@ -100,6 +100,7 @@ export {
 } from "./evidence-gate.ts";
 export {
   claimDueJobs,
+  startLeasedJob,
   completeJobWithFencing,
   createDefaultJobHandlers,
   enqueueJob,
@@ -165,6 +166,7 @@ export {
   type SetAssociationLockInput,
   type SetMediaExternalIdLockInput,
 } from "./conflict-resolution.ts";
+export { enqueuePendingEvidenceChecks } from "./evidence-job.ts";
 export { createEvidenceCheckJobHandler, type EvidenceCheckJobOptions } from "./evidence-job.ts";
 export {
   createReviewAgentJobHandler,

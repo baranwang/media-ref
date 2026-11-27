@@ -202,6 +202,13 @@ export const browseServiceImpl: ServiceImpl<typeof proto.BrowseService> = {
     await authorizePublicRead(ctx);
     const runtime = getRuntime(ctx);
     const limit = clampLimit(req.limit, DEFAULT_SEARCH_LIMIT);
+    if (/^.{201}/su.test(req.query)) {
+      throw createDomainConnectError({
+        status: 400,
+        code: "INVALID_QUERY",
+        message: "query must be at most 200 characters",
+      });
+    }
     const query = req.query.trim();
     if (query.length === 0) {
       return create(proto.SearchResponseSchema, { items: [], matchedAsLink: false });
@@ -210,25 +217,22 @@ export const browseServiceImpl: ServiceImpl<typeof proto.BrowseService> = {
     const linkKeys = resolveLookupKeys(query, runtime.adapterRegistry);
     if (linkKeys.length > 0) {
       const library = await lookupLibrary(runtime, linkKeys);
-      const items: proto.CatalogCard[] = [];
       const seenMedia = new Set<string>();
-      for (const key of linkKeys) {
-        const hit = library.get(key);
-        if (hit) {
-          if (!seenMedia.has(hit.library.mediaId)) {
+      const items = await Promise.all(
+        linkKeys.map(async (key) => {
+          const hit = library.get(key);
+          if (hit) {
+            if (seenMedia.has(hit.library.mediaId)) return null;
             seenMedia.add(hit.library.mediaId);
-            items.push(await cardForDocument(runtime, hit.document));
+            return cardForDocument(runtime, hit.document);
           }
-          continue;
-        }
-        // Not in MediaRef yet: catalog links can still open a detail page; platform links cannot.
-        const detail = await getCatalogDetail(key, browseOptions(runtime));
-        if (detail) {
-          items.push(toProtoCard(detail));
-        }
-      }
+          // Not in MediaRef yet: catalog links can still open a detail page; platform links cannot.
+          const detail = await getCatalogDetail(key, browseOptions(runtime));
+          return detail ? toProtoCard(detail) : null;
+        }),
+      );
       return create(proto.SearchResponseSchema, {
-        items: items.slice(0, limit),
+        items: items.filter((item) => item !== null).slice(0, limit),
         matchedAsLink: true,
       });
     }
@@ -246,15 +250,16 @@ export const browseServiceImpl: ServiceImpl<typeof proto.BrowseService> = {
       runtime,
       rows.map((r) => r.id),
     );
-    const items: proto.CatalogCard[] = [];
+    const cards: Promise<proto.CatalogCard>[] = [];
     const seenMedia = new Set<string>();
     for (const row of rows) {
       const hit = local.get(row.id);
       if (hit && !seenMedia.has(hit.library.mediaId)) {
         seenMedia.add(hit.library.mediaId);
-        items.push(await cardForDocument(runtime, hit.document));
+        cards.push(cardForDocument(runtime, hit.document));
       }
     }
+    const items = await Promise.all(cards);
 
     if (items.length < limit) {
       const remote = await searchCatalogTitles(query, browseOptions(runtime));

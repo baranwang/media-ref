@@ -101,6 +101,30 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
     });
   });
 
+  test("limits sign-in attempts by Cloudflare client IP", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      config: { baseUrl: TEST_BASE_URL, authSecret: TEST_AUTH_SECRET, readIpLimit: 1 },
+    });
+    const signIn = (ip: string) =>
+      app.fetch(
+        new Request(`${TEST_BASE_URL}/api/auth/sign-in/email`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "cf-connecting-ip": ip },
+          body: JSON.stringify({ email: "visitor@example.test", password: "not-an-account" }),
+        }),
+      );
+    expect((await signIn("192.0.2.1")).status).toBe(401);
+    const limited = await signIn("192.0.2.1");
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect((await signIn("192.0.2.2")).status).toBe(401);
+  });
+
   test("signs in with email + password, authenticates subsequent requests, and invalidates session on sign out", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -308,7 +332,7 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
     expect(created.key.startsWith("mref_")).toBe(true);
   });
 
-  test("sets cross-subdomain session cookie Domain and allows trusted subdomain CORS when cookieDomain is configured", async () => {
+  test("shares the session cookie but grants credentialed CORS only to configured origins", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -321,6 +345,7 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
         cookieDomain: "mediaref.org",
+        trustedOrigins: ["https://www.mediaref.org"],
       },
     });
 
@@ -355,14 +380,14 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
       new Request(`${TEST_BASE_URL}/mediaref.v1.AccountService/GetCurrentUser`, {
         method: "OPTIONS",
         headers: {
-          origin: "https://mediaref.org",
+          origin: "https://www.mediaref.org",
           "access-control-request-method": "POST",
         },
       }),
     );
     expect(trustedPreflight.status).toBe(204);
     expect(trustedPreflight.headers.get("access-control-allow-origin")).toBe(
-      "https://mediaref.org",
+      "https://www.mediaref.org",
     );
     expect(trustedPreflight.headers.get("access-control-allow-headers")).toContain(
       "Connect-Protocol-Version",
@@ -372,14 +397,13 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
       new Request(`${TEST_BASE_URL}/mediaref.v1.AccountService/GetCurrentUser`, {
         method: "OPTIONS",
         headers: {
-          origin: "https://evil.example",
+          origin: "https://unlisted.mediaref.org",
           "access-control-request-method": "POST",
         },
       }),
     );
-    expect(untrustedPreflight.headers.get("access-control-allow-origin")).not.toBe(
-      "https://evil.example",
-    );
+    expect(untrustedPreflight.headers.has("access-control-allow-origin")).toBe(false);
+    expect(untrustedPreflight.headers.has("access-control-allow-credentials")).toBe(false);
   });
 
   test("uses uncached dbWrite exclusively for auth operations and never queries dbRead", async () => {

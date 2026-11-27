@@ -10,7 +10,7 @@ Project principles are in [`CONSTITUTION.md`](./CONSTITUTION.md).
 - `proto/mediaref/v1/`: Canonical Protobuf v3 API schemas (single source of truth for all business RPCs, including the structured `MediaRef` `oneof`, generated into `packages/client/src/gen` via Buf).
 - `apps/api` (`@media-ref/api`): ConnectRPC Protobuf Cloudflare Worker (`api.mediaref.org`) built directly on Web Fetch API (`@connectrpc/connect` + Better Auth + Kysely).
 - `apps/worker` (`@media-ref/worker`): Background Cloudflare Worker (Queues & Cron) for evidence gate checks, exploration agent loops, and TMDB daily sync.
-- `apps/website` (`@media-ref/website`): TanStack Start SSR web app (`mediaref.org`, scaffold wired to `@media-ref/ui`).
+- `apps/website` (`@media-ref/website`): TanStack Start SSR website for browsing media, following exploration and change requests, and managing API keys.
 - `packages/client` (`@media-ref/client`): TypeScript SDK (`@connectrpc/connect-web` + `@bufbuild/protobuf`), generated Protobuf descriptors, and pure episode-resolution / segment-validation utilities.
 - `packages/db` (`@media-ref/db`): Kysely database types, PostgreSQL connection factory, TypeScript migrations, and ephemeral test DB helper.
 - `packages/core` (`@media-ref/core`): Shared core services and the outbound call layer (`OutboundClient`).
@@ -29,7 +29,7 @@ bun install
 
 ## Protobuf & ConnectRPC Codegen
 
-All business APIs are defined under [`proto/mediaref/v1/`](./proto/mediaref/v1/) (`MediaService`, `ChangeRequestService`, `AssociationService`, `AccountService`, `ReviewerService`) and served over ConnectRPC (binary Protobuf by default, with Connect JSON and gRPC-Web interoperability). Better Auth (`/api/auth/*`) and health probes (`/health`) remain standard HTTP/JSON.
+All business APIs are defined under [`proto/mediaref/v1/`](./proto/mediaref/v1/) (`MediaService`, `BrowseService`, `ChangeRequestService`, `AssociationService`, `AccountService`, `ReviewerService`) and served over ConnectRPC (binary Protobuf by default, with Connect JSON and gRPC-Web interoperability). Better Auth (`/api/auth/*`) and health probes (`/health`) remain standard HTTP/JSON.
 
 ```bash
 # Lint .proto schemas with Buf
@@ -69,13 +69,13 @@ Or via the workspace task:
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:54329/media_ref_dev vp run db:migrate
 ```
 
-## Running Tests
+## Validate the workspace
 
 Make sure local PostgreSQL 19 is running (`vp run db:up`). Database, core, API Worker, and background Worker tests automatically create and migrate an isolated ephemeral database (`media_ref_test_<hex>`) on `TEST_DATABASE_URL` (defaulting to `postgres://postgres:postgres@127.0.0.1:54329/postgres`) and drop it during cleanup.
 
 ```bash
-# Run tests across all workspace packages
-vp run -r test
+# Check formatting, lint and types, run all tests, then build every workspace
+vp run ready
 
 # Run tests for a single package
 vp run @media-ref/client#test

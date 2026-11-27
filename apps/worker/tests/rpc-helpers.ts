@@ -22,13 +22,7 @@ import {
   type MediaRef,
   type SegmentInput,
 } from "@media-ref/client";
-import {
-  approveChangeRequest,
-  type createFakeOutboundClient,
-  type EmailMessage,
-  type OutboundClient,
-} from "@media-ref/core";
-import type { Db } from "@media-ref/db";
+import type { createFakeOutboundClient, EmailMessage } from "@media-ref/core";
 import { expect } from "vite-plus/test";
 
 export const TEST_BASE_URL = "https://api.mediaref.org";
@@ -239,21 +233,8 @@ export async function getChangeRequestStateRpc(
   };
 }
 
-/**
- * Approves a change request through core's approval, the path the review agent takes: people no
- * longer approve over the API (ADR 0003 amendment 2).
- */
-export function approveInCore(
-  deps: { db: Db; outbound: OutboundClient },
-  input: { id: string; reason?: string; reviewerUserId?: string },
-) {
-  return approveChangeRequest(deps.db, deps.outbound, {
-    changeRequestId: input.id,
-    reviewerUserId: input.reviewerUserId ?? null,
-    reason: input.reason ?? null,
-    tmdbConfig: { accessToken: "test-tmdb-token" },
-  });
-}
+/** Uses the same lock-checked approval transaction as the review agent. */
+export { approveWithReviewChecks as approveInCore } from "../../api/tests/rpc-helpers.ts";
 
 export {
   fromProtoAssociationStatus,

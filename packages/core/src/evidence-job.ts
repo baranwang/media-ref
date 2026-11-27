@@ -28,7 +28,7 @@ import {
   type CatalogEvidence,
   type EvidenceGateStep2Evaluator,
 } from "./evidence-gate.ts";
-import type { JobExecutionOutcome, JobHandler } from "./jobs.ts";
+import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
 import {
   approveChangeRequestInTransaction,
   EVIDENCE_CHECK_JOB_TYPE,
@@ -128,6 +128,59 @@ async function markChangeRequestNeedsReviewInTx(
     });
   }
   return marked;
+}
+
+const MAX_PENDING_EVIDENCE_AGE_MS = 24 * 60 * 60_000;
+
+export async function enqueuePendingEvidenceChecks(db: Db, { now }: { now: Date }): Promise<void> {
+  const cutoff = new Date(now.getTime() - MAX_PENDING_EVIDENCE_AGE_MS);
+  await db.transaction().execute(async (trx) => {
+    const requests = await trx
+      .selectFrom("change_requests")
+      .select(["id", "created_at", "evidence"])
+      .where("status", "=", "pending_evidence")
+      .where((eb) =>
+        eb.or([
+          eb("created_at", "<", cutoff),
+          eb.not(
+            eb.exists(
+              eb
+                .selectFrom("background_jobs")
+                .select("id")
+                .where("status", "in", ["pending", "leased"])
+                .where(
+                  "dedupe_key",
+                  "=",
+                  sql<string>`${EVIDENCE_CHECK_JOB_TYPE} || ':' || change_requests.id::text`,
+                ),
+            ),
+          ),
+        ]),
+      )
+      .orderBy("created_at")
+      .limit(50)
+      .forUpdate()
+      .skipLocked()
+      .execute();
+    for (const request of requests) {
+      if (request.created_at < cutoff) {
+        await markChangeRequestNeedsReviewInTx(trx, {
+          changeRequestId: request.id,
+          evidence: { ...request.evidence, evidenceTimedOutAt: now.toISOString() },
+          conflictReason: "catalog_not_found",
+          decisionReason: "Evidence could not be verified before the deadline",
+          now,
+        });
+      } else {
+        await enqueueJob(trx, {
+          jobType: EVIDENCE_CHECK_JOB_TYPE,
+          payload: { changeRequestId: request.id },
+          dedupeKey: `${EVIDENCE_CHECK_JOB_TYPE}:${request.id}`,
+          runAfter: now,
+        });
+      }
+    }
+  });
 }
 
 async function resolveAuthoritativeCatalogKey(

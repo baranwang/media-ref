@@ -869,7 +869,7 @@ async function prepareTarget(
   // later job for the same demand while an earlier submission is still being checked or reviewed.
   const existingCr = await ctx.db
     .selectFrom("change_requests")
-    .select(["id", "native_id"])
+    .select(["id", "native_id", "status"])
     .where((eb) =>
       eb.or([
         eb("task_id", "=", taskId),
@@ -882,6 +882,16 @@ async function prepareTarget(
     )
     .executeTakeFirst();
   if (existingCr) {
+    if (existingCr.status === "rejected") {
+      return {
+        outcome: {
+          namespace,
+          status: "rejected",
+          reason: "previous_request_rejected",
+          changeRequestId: existingCr.id,
+        },
+      };
+    }
     return {
       outcome: {
         namespace,
@@ -1269,23 +1279,34 @@ async function exploreTmdbExternalId(
       }
       const other = held.find((row) => row.native_id === nativeId);
       if (other) {
-        await trx
-          .insertInto("review_alerts")
-          .values({
-            alert_type: "agent_external_id_conflict",
-            media_id: mediaId,
-            status: "open",
-            details: JSON.stringify({
-              namespace: ns,
-              nativeId,
-              otherMediaId: other.media_id,
-              matchedBy: { imdb: imdbId },
-              jobId: ctx.jobId,
-            }),
-          })
-          .execute();
+        const existing = await trx
+          .selectFrom("review_alerts")
+          .select("id")
+          .where("alert_type", "=", "agent_external_id_conflict")
+          .where("media_id", "=", mediaId)
+          .where("status", "=", "open")
+          .where((eb) => eb(eb.ref("details", "->>").key("namespace"), "=", ns))
+          .where((eb) => eb(eb.ref("details", "->>").key("nativeId"), "=", nativeId))
+          .executeTakeFirst();
+        if (!existing) {
+          await trx
+            .insertInto("review_alerts")
+            .values({
+              alert_type: "agent_external_id_conflict",
+              media_id: mediaId,
+              status: "open",
+              details: JSON.stringify({
+                namespace: ns,
+                nativeId,
+                otherMediaId: other.media_id,
+                matchedBy: { imdb: imdbId },
+                jobId: ctx.jobId,
+              }),
+            })
+            .execute();
+        }
         if (ns === "tmdb") {
-          return false; // Probably the same work twice: a reviewer decides on merging.
+          return false; // Probable duplicate recorded; no automatic media merge today (ADR 0004).
         }
         continue;
       }

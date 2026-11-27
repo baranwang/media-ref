@@ -73,7 +73,6 @@ export function resolveTrustedOrigins(config: AuthConfig): string[] {
   if (cookieDomain) {
     const rootDomain = stripLeadingDot(cookieDomain);
     origins.add(`https://${rootDomain}`);
-    origins.add(`https://*.${rootDomain}`);
   }
 
   for (const origin of config.trustedOrigins ?? []) {
@@ -185,6 +184,7 @@ export function createAuth(deps: AuthDeps) {
       },
     },
     advanced: {
+      ipAddress: { ipAddressHeaders: ["cf-connecting-ip"] },
       database: {
         validateSchema: false,
       },

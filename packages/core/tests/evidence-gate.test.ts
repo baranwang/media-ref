@@ -1060,6 +1060,58 @@ describe("Evidence Gate Step 2", () => {
     ).toBe(true);
   });
 
+  test.each([
+    { episodeEnd: 12, targetEpisodeStart: 1, featureEpisodeCount: 12, conflicts: [] },
+    {
+      episodeEnd: 12,
+      targetEpisodeStart: 2,
+      featureEpisodeCount: 12,
+      conflicts: ["target_episode_start_mismatch"],
+    },
+    {
+      episodeEnd: 25,
+      targetEpisodeStart: 1,
+      featureEpisodeCount: 24,
+      conflicts: ["segment_episode_out_of_range"],
+    },
+    {
+      episodeEnd: 12,
+      targetEpisodeStart: 1,
+      featureEpisodeCount: 13,
+      conflicts: ["episode_count_mismatch", "segment_episode_count_mismatch"],
+    },
+  ])(
+    "checks a mixed submission's linear span 1..$episodeEnd at position $targetEpisodeStart against $featureEpisodeCount episodes",
+    ({ episodeEnd, targetEpisodeStart, featureEpisodeCount, conflicts }) => {
+      const gate = evaluateEvidenceGate({
+        catalog: makeTvCatalog(),
+        collection: makeBilibiliCollection({ featureEpisodeCount }),
+        segments: [
+          {
+            season: 0,
+            episodeStart: 1,
+            episodeEnd: null,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+            nonLinear: true,
+            needsReview: false,
+          },
+          {
+            season: 1,
+            episodeStart: 1,
+            episodeEnd,
+            targetEpisodeStart,
+            baseline: "tmdb",
+            nonLinear: false,
+            needsReview: false,
+          },
+        ],
+      });
+      expect(gate.decision).toBe(conflicts.length ? "needs_review" : "pass");
+      expect(gate.conflicts.map((c) => c.code)).toEqual(conflicts);
+    },
+  );
+
   test("handles whole-media TV associations, Season 0 specials, and missing Step 2 metadata", () => {
     const catalog = makeTvCatalog({
       year: 2020,

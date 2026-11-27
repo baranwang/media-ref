@@ -30,6 +30,10 @@ release. Add a tool name to select part of the graph. For example, run
 
 <!--VITE PLUS END-->
 
+## Workspace commands
+
+Install with `bun install`. Run `node_modules/.bin/vp check` for formatting, lint and types, `vp run -r test` for workspace tests, or `vp run ready` for checks, tests and builds together. The tests require local PostgreSQL (see `README.md`).
+
 ## Project constitution
 
 Read [`CONSTITUTION.md`](./CONSTITUTION.md) before designing anything. In short: no maintainer intervenes at runtime; every flow ends automatically (approved or rejected, never "wait for a human"); outside people may take part, but their input is evidence that goes through the same gates. It overrides ADRs, the glossary, code and prompts.
@@ -46,4 +50,4 @@ Default five canonical labels: `needs-triage`, `needs-info`, `ready-for-agent`, 
 
 ### Domain docs
 
-Multi-context: root `GLOSSARY-MAP.md` points to per-workspace `GLOSSARY.md` files. See `docs/agents/domain.md`.
+All workspaces share the root `GLOSSARY.md`. See `docs/agents/domain.md`.

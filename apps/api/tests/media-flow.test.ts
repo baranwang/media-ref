@@ -7,6 +7,7 @@ import {
   type MediaRef,
 } from "@media-ref/client";
 import {
+  bilibiliAdapter,
   createAdapterRegistry,
   createFakeOutboundClient,
   rejectChangeRequest,
@@ -557,6 +558,95 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     expect(santiDoc.associations).toHaveLength(1);
   });
 
+  test("bounds change request inputs and stores only verified platform links", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const outbound = createFakeOutboundClient();
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      adapterRegistry: createAdapterRegistry([bilibiliAdapter]),
+      config: { baseUrl: TEST_BASE_URL, authSecret: TEST_AUTH_SECRET, tmdb: TMDB },
+    });
+    const { cookie } = await signUpUser(app, outbound, {
+      email: "bounds@example.com",
+      password: "StrongPassword123!",
+      name: "Contributor",
+      verify: true,
+    });
+    const rpc = createRpcClients(app, { cookie }).changeRequest;
+    const segments = Array.from({ length: 201 }, (_, index) =>
+      toProtoSegmentInput({
+        season: 1,
+        episodeStart: index + 1,
+        episodeEnd: index + 1,
+        targetEpisodeStart: index + 1,
+        baseline: "tmdb",
+      }),
+    );
+    const request = {
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "tencent",
+      nativeId: "a".repeat(500),
+      rawNativeId: "b".repeat(500),
+      variantDescription: "版".repeat(512),
+      segments: segments.slice(0, 200),
+    };
+    for (const [change, code] of [
+      [{ nativeId: request.nativeId + " " }, "INVALID_NATIVE_ID"],
+      [{ rawNativeId: request.rawNativeId + " " }, "INVALID_NATIVE_ID"],
+      [{ variantDescription: request.variantDescription + " " }, "INVALID_VARIANT"],
+      [{ segments }, "INVALID_SEGMENTS"],
+      [{ nativeId: "https://example.invalid/collection" }, "INVALID_NATIVE_ID"],
+    ] as const) {
+      expect(
+        await expectRpcError(rpc.createChangeRequest({ ...request, ...change })),
+      ).toMatchObject({ status: 400, code });
+    }
+    const atLimits = await rpc.createChangeRequest(request);
+    expect(atLimits.changeRequest).toMatchObject({
+      nativeId: request.nativeId,
+      rawNativeId: request.nativeId,
+      variantDescription: request.variantDescription,
+    });
+
+    const platform = { ...request, namespace: "bilibili", nativeId: "ss34430", segments: [] };
+    const page = "https://www.bilibili.com/bangumi/play/ss34430";
+    for (const [rawNativeId, stored] of [
+      [page, page],
+      ["https://www.bilibili.com/bangumi/play/ss45574", platform.nativeId],
+      ["https://example.invalid/collection", platform.nativeId],
+    ] as const) {
+      const result = await rpc.createChangeRequest({ ...platform, rawNativeId });
+      expect(result.changeRequest?.rawNativeId).toBe(stored);
+    }
+    expect(outbound.httpRequests).toHaveLength(0);
+  });
+
+  test("accepts a 1 MiB Connect body and rejects one extra byte", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      config: { baseUrl: TEST_BASE_URL, authSecret: TEST_AUTH_SECRET, tmdb: TMDB },
+    });
+    const body = "{}".padEnd(1024 * 1024);
+    const send = (payload: string) =>
+      app.fetch(
+        new Request(`${TEST_BASE_URL}/mediaref.v1.ChangeRequestService/GetChangeRequest`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: payload,
+        }),
+      );
+    expect((await send(body)).status).toBe(401);
+    const oversized = await send(body + " ");
+    expect(await oversized.json()).toMatchObject({ code: "resource_exhausted" });
+  });
+
   test("rejects invalid and overlapping segments immediately at submission time, including shared-collection conflicts", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -758,18 +848,6 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       reviewerUserId: owner.userId,
     });
     expect(fromProtoChangeRequestStatus(rejectRes.changeRequest!.status)).toBe("rejected");
-
-    // Rejected CR cannot be approved afterwards and does not appear in GetMedia
-    expect(
-      (
-        await expectRpcError(
-          approveInCore(
-            { db: testDb.writeDb, outbound, tmdb: TMDB },
-            { id: rejectedCr.changeRequest!.id },
-          ),
-        )
-      ).status,
-    ).toBe(409);
 
     expect(
       (

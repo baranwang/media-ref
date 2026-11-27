@@ -37,6 +37,9 @@ export async function handleWorkerRequest(
   ctx: ExecutionContext,
   internal: boolean,
 ): Promise<Response> {
+  if (!env.AUTH_SECRET?.trim()) {
+    throw new Error("AUTH_SECRET is required");
+  }
   const dbRead = createDb(env.HYPERDRIVE_READ.connectionString, { max: 5 });
   const dbWrite = createDb(env.HYPERDRIVE_WRITE.connectionString, { max: 5 });
   const backgroundTasks: Promise<unknown>[] = [];
@@ -70,7 +73,6 @@ export async function handleWorkerRequest(
     },
     readRateLimitRuntime,
     config: {
-      enableHealthOutboundProbe: env.ENABLE_HEALTH_OUTBOUND_PROBE === "true",
       baseUrl: env.API_BASE_URL,
       authSecret: env.AUTH_SECRET,
       cookieDomain: env.COOKIE_DOMAIN,

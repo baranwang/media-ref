@@ -37,6 +37,8 @@ export interface ToolContext {
   seasons: ReadonlyArray<{ season: number; episodeCount: number; airYear?: number | null }>;
   /** TMDB TV ID when TMDB is the baseline catalog: `get_catalog_season` lists its episodes. */
   tmdbTvId: string | null;
+  /** Include fetch provenance for the review agent’s verdict checks. */
+  reportLiveFetch?: boolean;
 }
 
 /** The query tools; the executor adds `submit_mapping` and `mark_not_found`. */
@@ -301,12 +303,12 @@ async function getCatalogSeason(
     return { error: "UNKNOWN_SEASON" };
   }
   if (!ctx.tmdbTvId) {
-    return known;
+    return ctx.reportLiveFetch ? { ...known, live: false } : known;
   }
   // The episode list is extra context: without it the count and year still answer.
   const all = await ctx.tmdb.fetchSeasonEpisodes(ctx.tmdbTvId, known.season).catch(() => null);
   if (!all) {
-    return known;
+    return ctx.reportLiveFetch ? { ...known, live: false } : known;
   }
   const from = typeof fromEpisode === "number" ? fromEpisode : 1;
   const listed = all.filter((e) => e.episode >= from);
@@ -314,6 +316,7 @@ async function getCatalogSeason(
   const next = listed[MAX_EPISODES_IN_TOOL_RESULT];
   return {
     ...known,
+    ...(ctx.reportLiveFetch ? { live: true } : {}),
     episodes,
     ...(next ? { episodesTruncated: { total: all.length, nextFromEpisode: next.episode } } : {}),
   };
@@ -392,6 +395,7 @@ async function getCollection(
   const total = info.featureEpisodes.length;
   return {
     namespace,
+    ...(ctx.reportLiveFetch ? { live: true } : {}),
     canonicalId: info.canonicalId,
     title: info.title,
     originalTitle: info.originalTitle ?? null,

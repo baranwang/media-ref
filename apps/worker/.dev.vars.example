@@ -1,0 +1,64 @@
+# Cloudflare AI Gateway identifier.
+AI_GATEWAY_ID=
+# Provider for unqualified AI Gateway model IDs.
+AI_PROVIDER=
+# Model used for exploration and review.
+AI_MODEL=
+# Magpie credential for model calls and web tools through HK.
+MAGPIE_GATEWAY_KEY=
+# Token for submitting model usage to tokens.ci.
+TOKENS_API_TOKEN=
+# JSON map of outbound routes by namespace.
+OUTBOUND_PROXY_CONFIG=
+# Maximum number of background jobs claimed per batch.
+JOB_BATCH_SIZE=
+# Background job lease duration in milliseconds.
+JOB_LEASE_DURATION_MS=
+# Maximum demands explored per UTC day.
+EXPLORATION_DAILY_BUDGET=
+# Maximum demands claimed per exploration batch.
+EXPLORATION_BATCH_SIZE=
+# Exploration lease duration in milliseconds.
+EXPLORATION_LEASE_DURATION_MS=
+# Comma-separated retry delays after unsuccessful exploration.
+EXPLORATION_BACKOFF_SECONDS=
+# Maximum steps per exploration task.
+EXPLORATION_MAX_STEPS=
+# Maximum duration of an exploration task in milliseconds.
+EXPLORATION_MAX_DURATION_MS=
+# Maximum model tokens per exploration task.
+EXPLORATION_MAX_TASK_TOKENS=
+# Maximum exploration tokens per UTC day.
+EXPLORATION_DAILY_TOKEN_BUDGET=
+# Maximum model reviews per UTC day.
+REVIEW_AGENT_DAILY_BUDGET=
+# Maximum steps per model review.
+REVIEW_AGENT_MAX_STEPS=
+# Maximum duration of a model review in milliseconds.
+REVIEW_AGENT_MAX_DURATION_MS=
+# Maximum model tokens per review.
+REVIEW_AGENT_MAX_TASK_TOKENS=
+# Bearer token for TMDB requests.
+TMDB_ACCESS_TOKEN=
+# Alternative TMDB credential when no bearer token is set.
+TMDB_API_KEY=
+# Override the TMDB upstream base URL.
+TMDB_API_BASE_URL=
+# Base URL for daily TMDB export files.
+TMDB_EXPORTS_BASE_URL=
+# Set to false to disable daily TMDB export sync.
+ENABLE_DAILY_TMDB_EXPORTS_SYNC=
+# Bearer token for TVDB requests.
+TVDB_BEARER_TOKEN=
+# Override the TVDB upstream base URL.
+TVDB_API_BASE_URL=
+# Override the DOUBAN upstream base URL.
+DOUBAN_API_BASE_URL=
+# Override the BANGUMI upstream base URL.
+BANGUMI_API_BASE_URL=
+# Override the IMDB upstream base URL.
+IMDB_API_BASE_URL=
+# Trakt client ID for catalog requests and OAuth where enabled.
+TRAKT_CLIENT_ID=
+# Override the TRAKT upstream base URL.
+TRAKT_API_BASE_URL=

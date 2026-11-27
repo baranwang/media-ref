@@ -6,14 +6,18 @@ import {
   type AdapterRegistry,
   type BrowseCache,
   type CatalogGatewayConfig,
-  type ExternalTargetKind,
   type OutboundClient,
   type ReputationTier,
   type TmdbGateway,
   type TmdbGatewayConfig,
 } from "@media-ref/core";
 import type { Db } from "@media-ref/db";
-import { createConnectRouter, createContextValues } from "@connectrpc/connect";
+import {
+  ConnectError,
+  createConnectRouter,
+  createContextValues,
+  type Interceptor,
+} from "@connectrpc/connect";
 import {
   universalServerRequestFromFetch,
   universalServerResponseToFetch,
@@ -30,9 +34,10 @@ import {
   type AuthInstance,
 } from "./auth.ts";
 import { changeRequestServiceImpl } from "./change-requests.ts";
-import { kApiRequestRuntime, type ApiRequestRuntime } from "./context.ts";
+import { kApiRequestRuntime, limitRpcByIp, type ApiRequestRuntime } from "./context.ts";
 import { mediaServiceImpl } from "./media.ts";
 import {
+  checkReadRateLimit,
   createReadRateLimitRuntime,
   resolveSubmissionQuotaConfig,
   type RateLimitBinding,
@@ -43,7 +48,6 @@ import { reviewerServiceImpl } from "./reviewer.ts";
 import type { UsageReader, UsageRecorder } from "./usage.ts";
 
 export interface ApiConfig extends AuthConfig {
-  enableHealthOutboundProbe?: boolean;
   now?: () => Date;
   catalog?: CatalogGatewayConfig;
   tmdb?: TmdbGatewayConfig;
@@ -88,12 +92,34 @@ export interface ApiApp {
 
 export const INTERNAL_VISITOR_IP_HEADER = "x-media-ref-visitor-ip";
 
-const VALID_KINDS = new Set<ExternalTargetKind>(["platform", "catalog"]);
-
 const CORS_ALLOW_HEADERS =
   "Content-Type, Authorization, X-API-Key, Connect-Protocol-Version, Connect-Timeout-Ms, X-Grpc-Web, X-User-Agent";
 const CORS_EXPOSE_HEADERS = "Retry-After, Grpc-Status, Grpc-Message, Grpc-Status-Details-Bin";
 const CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
+
+const logUnexpectedRpcErrors: Interceptor = (next) => async (request) => {
+  try {
+    return await next(request);
+  } catch (error) {
+    if (!(error instanceof ConnectError)) {
+      // Log only a single-line diagnostic, not the request, error object, or its cause.
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "Non-Error exception";
+      const diagnostic = message
+        .split(/[\r\n]/, 1)[0]!
+        .replace(/\S+/g, (word) => (word.includes("@") ? "[email]" : word))
+        .slice(0, 512);
+      console.error(
+        `RPC ${request.method.parent.typeName}/${request.method.name} failed: ${diagnostic}`,
+      );
+    }
+    throw error;
+  }
+};
 
 /**
  * Module-level singleton ConnectRPC router shared across all Worker requests.
@@ -103,7 +129,9 @@ const CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 const connectRouter = createConnectRouter({
   // Accept standard Connect binary/JSON, gRPC-Web, and gRPC requests without requiring
   // manual `Connect-Protocol-Version` header for plain HTTP clients/tests.
+  readMaxBytes: 1024 * 1024,
   requireConnectProtocolHeader: false,
+  interceptors: [logUnexpectedRpcErrors, limitRpcByIp],
   jsonOptions: {
     ignoreUnknownFields: false,
   },
@@ -119,15 +147,6 @@ connectRouter.service(proto.BrowseService, browseServiceImpl);
 const connectHandlerMap = new Map<string, UniversalHandler>(
   connectRouter.handlers.map((handler) => [handler.requestPath, handler]),
 );
-
-function isValidHttpUrl(raw: string): boolean {
-  try {
-    const parsed = new URL(raw);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 function appendVaryOrigin(headers: Headers): void {
   const existing = headers.get("vary");
@@ -275,57 +294,28 @@ export function createApiApp(deps: ApiDeps): ApiApp {
     }
 
     if (
-      deps.config.enableHealthOutboundProbe &&
-      pathname === "/health/outbound" &&
-      request.method === "GET"
-    ) {
-      const kindParam = (url.searchParams.get("kind") ?? "platform") as ExternalTargetKind;
-      const namespace = url.searchParams.get("namespace")?.trim();
-      const targetUrl = url.searchParams.get("url")?.trim();
-
-      if (!VALID_KINDS.has(kindParam) || !namespace || !targetUrl || !isValidHttpUrl(targetUrl)) {
-        return applyCorsHeaders(
-          request,
-          Response.json({ ok: false, error: "invalid_probe_parameters" }, { status: 400 }),
-          deps.config,
-        );
-      }
-
-      try {
-        const upstream = await deps.outbound.fetchExternal({
-          kind: kindParam,
-          namespace,
-          url: targetUrl,
-          method: "GET",
-        });
-
-        return applyCorsHeaders(
-          request,
-          Response.json(
-            {
-              ok: true,
-              kind: kindParam,
-              namespace,
-              upstreamStatus: upstream.status,
-              bodyPreview: upstream.body.slice(0, 512),
-            },
-            { status: 200 },
-          ),
-          deps.config,
-        );
-      } catch {
-        return applyCorsHeaders(
-          request,
-          Response.json({ ok: false, error: "upstream_error" }, { status: 502 }),
-          deps.config,
-        );
-      }
-    }
-
-    if (
       (pathname === AUTH_BASE_PATH || pathname.startsWith(`${AUTH_BASE_PATH}/`)) &&
       (request.method === "GET" || request.method === "POST")
     ) {
+      if (request.method === "POST") {
+        const decision = await checkReadRateLimit({
+          runtime: readRateLimit,
+          headers: request.headers,
+        });
+        if (!decision.allowed) {
+          return applyCorsHeaders(
+            request,
+            Response.json(
+              { code: "RATE_LIMITED", message: decision.message },
+              {
+                status: 429,
+                headers: { "Retry-After": String(decision.retryAfterSeconds) },
+              },
+            ),
+            deps.config,
+          );
+        }
+      }
       const authRes = await getAuth().handler(request);
       return applyCorsHeaders(request, authRes, deps.config);
     }

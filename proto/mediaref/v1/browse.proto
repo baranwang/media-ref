@@ -105,7 +105,7 @@ message ListDemandsResponse {
 // What the exploration agent did on one namespace of one job.
 message ExplorationPlatformResult {
   string namespace = 1;
-  // "approved" (in effect), "in_review" (being checked or waiting for a reviewer), "rejected",
+  // "approved" (in effect), "in_review" (being checked or waiting for the review agent), "rejected",
   // "not_found", "retry" (a source was down or time ran out; tried again later), "searching".
   string status = 2;
   // Plain-language reason, at most 200 characters; internal codes are already translated.
@@ -131,7 +131,7 @@ message ExplorationSummary {
   int32 found = 2;
   // Platform pages found that are in effect.
   int32 approved = 3;
-  // Platform pages found that wait for a reviewer.
+  // Platform pages found that await the review agent.
   int32 in_review = 4;
 }
 

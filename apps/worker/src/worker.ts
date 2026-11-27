@@ -5,6 +5,7 @@ import type {
 } from "@cloudflare/workers-types";
 import {
   claimDueJobs,
+  startLeasedJob,
   completeJobWithFencing,
   createEvidenceCheckJobHandler,
   createExplorationAgentExecutor,
@@ -14,6 +15,7 @@ import {
   createSeedEvidenceCheckJobHandler,
   createTmdbDailyExportsJobHandler,
   createTmdbSyncJobHandler,
+  resolveExplorationAgentConfig,
   enqueueTmdbDailyExportsIfDue,
   enqueueTmdbDailySyncIfDue,
   EVIDENCE_CHECK_JOB_TYPE,
@@ -23,6 +25,7 @@ import {
   INVALIDATION_RECHECK_JOB_TYPE,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
+  enqueuePendingEvidenceChecks,
   enqueuePendingReviews,
   enqueueTmdbLookupDemands,
   REVIEW_AGENT_JOB_TYPE,
@@ -140,15 +143,47 @@ function isValidJobQueueMessage(value: unknown): value is JobQueueMessage {
     typeof candidate.leaseGeneration === "number" &&
     Number.isInteger(candidate.leaseGeneration) &&
     candidate.leaseGeneration > 0 &&
+    (candidate.dispatchLeaseExpiresAt === undefined ||
+      (typeof candidate.dispatchLeaseExpiresAt === "string" &&
+        Number.isFinite(Date.parse(candidate.dispatchLeaseExpiresAt)))) &&
     typeof candidate.payload === "object" &&
     candidate.payload !== null &&
     !Array.isArray(candidate.payload)
   );
 }
 
+async function runScheduledStep(event: string, jobType: string, step: () => Promise<unknown>) {
+  try {
+    await step();
+  } catch (error) {
+    logJobError(event, null, jobType, error);
+  }
+}
+
+function logJobError(event: string, jobId: string | null, jobType: string, error: unknown) {
+  // Drivers and upstreams can put request data in exceptions. Only expose diagnostic codes.
+  const code =
+    error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "";
+  const status =
+    error instanceof Error ? /\bHTTP ([1-5]\d\d)\b/i.exec(error.message)?.[1] : undefined;
+  const message = /^(?:[0-9A-Z]{5}|ECONNRESET|ECONNREFUSED|ETIMEDOUT)$/.test(code)
+    ? `Operation failed (${code})`
+    : status
+      ? `Upstream HTTP ${status}`
+      : "Operation failed";
+  console.error({ event, jobId, jobType, error: message });
+}
+
 export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWorker {
   const batchSize = deps.config?.batchSize ?? DEFAULT_JOB_BATCH_SIZE;
   const leaseDurationMs = deps.config?.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
+  const explorationBudget = resolveExplorationAgentConfig(
+    deps.config?.explorationAgent,
+  ).maxDurationMs;
+  // The job is already leased during queue delivery and discovery, before the session clock starts.
+  const leaseDurationMsByType = {
+    [EXPLORATION_JOB_TYPE]: Math.max(leaseDurationMs, explorationBudget + 5 * 60_000),
+  };
   const dispatchFailureRetryDelayMs = deps.config?.dispatchFailureRetryDelayMs ?? 0;
   const defaultRetryDelayMs = deps.config?.defaultRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const handlers: JobHandlerRegistry = {
@@ -209,7 +244,9 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
         (!deps.config?.jobTypes || deps.config.jobTypes.includes(TMDB_SYNC_JOB_TYPE));
 
       if (shouldCheckTmdbSync) {
-        await enqueueTmdbDailySyncIfDue(deps.db, { now });
+        await runScheduledStep("tmdb_sync_schedule_failed", TMDB_SYNC_JOB_TYPE, () =>
+          enqueueTmdbDailySyncIfDue(deps.db, { now }),
+        );
       }
 
       const shouldCheckTmdbDailyExports =
@@ -217,7 +254,9 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
         (!deps.config?.jobTypes || deps.config.jobTypes.includes(TMDB_DAILY_EXPORTS_JOB_TYPE));
 
       if (shouldCheckTmdbDailyExports) {
-        await enqueueTmdbDailyExportsIfDue(deps.db, { now });
+        await runScheduledStep("tmdb_exports_schedule_failed", TMDB_DAILY_EXPORTS_JOB_TYPE, () =>
+          enqueueTmdbDailyExportsIfDue(deps.db, { now }),
+        );
       }
 
       const shouldScheduleExploration =
@@ -226,23 +265,36 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
       if (shouldScheduleExploration) {
         // Media known only from Douban or Bangumi still need their TMDB ID found.
-        await enqueueTmdbLookupDemands(deps.db, { now });
-        await scheduleExplorationJobs(deps.db, {
-          now,
-          config: deps.config?.exploration,
-          adapterRegistry: deps.adapterRegistry,
-        });
+        await runScheduledStep("tmdb_lookup_schedule_failed", EXPLORATION_JOB_TYPE, () =>
+          enqueueTmdbLookupDemands(deps.db, { now }),
+        );
+        await runScheduledStep("exploration_schedule_failed", EXPLORATION_JOB_TYPE, () =>
+          scheduleExplorationJobs(deps.db, {
+            now,
+            config: deps.config?.exploration,
+            adapterRegistry: deps.adapterRegistry,
+          }),
+        );
+      }
+
+      if (!deps.config?.jobTypes || deps.config.jobTypes.includes(EVIDENCE_CHECK_JOB_TYPE)) {
+        await runScheduledStep("evidence_sweep_failed", EVIDENCE_CHECK_JOB_TYPE, () =>
+          enqueuePendingEvidenceChecks(deps.db, { now }),
+        );
       }
 
       // Every needs_review request gets decided: queue reviews for any without an active job.
       if (!deps.config?.jobTypes || deps.config.jobTypes.includes(REVIEW_AGENT_JOB_TYPE)) {
-        await enqueuePendingReviews(deps.db, { now });
+        await runScheduledStep("review_sweep_failed", REVIEW_AGENT_JOB_TYPE, () =>
+          enqueuePendingReviews(deps.db, { now }),
+        );
       }
 
       const claimedJobs = await claimDueJobs(deps.db, {
         now,
         batchSize,
         leaseDurationMs,
+        leaseDurationMsByType,
         jobTypes: deps.config?.jobTypes,
       });
 
@@ -255,18 +307,27 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           jobType: job.jobType,
           leaseGeneration: job.leaseGeneration,
           payload: job.payload,
+          ...(job.jobType === EXPLORATION_JOB_TYPE && job.leaseExpiresAt
+            ? { dispatchLeaseExpiresAt: job.leaseExpiresAt.toISOString() }
+            : {}),
         };
         try {
           await deps.queue.send(message);
           dispatched += 1;
-        } catch {
+        } catch (error) {
+          logJobError("job_dispatch_failed", job.id, job.jobType, error);
           dispatchFailed += 1;
-          await releaseLeaseOnDispatchFailure(deps.db, {
-            jobId: job.id,
-            leaseGeneration: job.leaseGeneration,
-            retryAt: new Date(now.getTime() + dispatchFailureRetryDelayMs),
-            now,
-          });
+          try {
+            await releaseLeaseOnDispatchFailure(deps.db, {
+              jobId: job.id,
+              leaseGeneration: job.leaseGeneration,
+              dispatchLeaseExpiresAt: message.dispatchLeaseExpiresAt,
+              retryAt: new Date(now.getTime() + dispatchFailureRetryDelayMs),
+              now,
+            });
+          } catch (error) {
+            logJobError("dispatch_lease_release_failed", job.id, job.jobType, error);
+          }
         }
       }
 
@@ -300,8 +361,17 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
         let currentJob;
         try {
-          currentJob = await getJobById(deps.db, body.jobId);
-        } catch {
+          currentJob =
+            body.jobType === EXPLORATION_JOB_TYPE
+              ? await startLeasedJob(
+                  deps.db,
+                  body,
+                  resolveNow(deps.now),
+                  leaseDurationMsByType[EXPLORATION_JOB_TYPE],
+                )
+              : await getJobById(deps.db, body.jobId);
+        } catch (error) {
+          logJobError("job_read_failed", body.jobId, body.jobType, error);
           summary.retriedInQueue += 1;
           msg.retry();
           continue;
@@ -309,6 +379,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
         if (
           !currentJob ||
+          currentJob.jobType !== body.jobType ||
           currentJob.status !== "leased" ||
           currentJob.leaseGeneration !== body.leaseGeneration
         ) {
@@ -332,7 +403,8 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
               summary.discarded += 1;
             }
             msg.ack();
-          } catch {
+          } catch (error) {
+            logJobError("unhandled_job_write_failed", body.jobId, body.jobType, error);
             summary.retriedInQueue += 1;
             msg.retry();
           }
@@ -347,7 +419,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
               id: body.jobId,
               jobType: body.jobType,
               leaseGeneration: body.leaseGeneration,
-              payload: body.payload,
+              payload: currentJob.payload,
               leaseExpiresAt: currentJob.leaseExpiresAt,
             },
             now: resolveNow(deps.now),
@@ -419,6 +491,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           }
           msg.ack();
         } catch (error) {
+          logJobError("job_execution_failed", body.jobId, body.jobType, error);
           const errorMessage = error instanceof Error ? error.message : String(error);
           const errorNow = resolveNow(deps.now);
 
@@ -450,7 +523,8 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
               }
             }
             msg.ack();
-          } catch {
+          } catch (error) {
+            logJobError("job_error_write_failed", body.jobId, body.jobType, error);
             summary.retriedInQueue += 1;
             msg.retry();
           }

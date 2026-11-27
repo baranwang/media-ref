@@ -21,11 +21,9 @@
     "@media-ref/ui": "workspace:*",
     "@remixicon/react": "^4.9.0",
     "@tailwindcss/vite": "catalog:",
-    "@tanstack/react-devtools": "0.10.15",
     "@tanstack/react-form": "^1.33.5",
     "@tanstack/react-query": "^5.108.4",
     "@tanstack/react-router": "1.170.46",
-    "@tanstack/react-router-devtools": "1.167.4",
     "@tanstack/react-router-ssr-query": "^1.167.3",
     "@tanstack/react-start": "1.169.7",
     "@tanstack/react-store": "^0.11.4",
@@ -37,20 +35,11 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.26.0",
     "@inlang/paraglide-js": "^2.13.1",
-    "@tanstack/devtools-vite": "0.8.7",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "catalog:",
     "vite": "catalog:",
     "wrangler": "catalog:"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "lightningcss",
-      "sharp",
-      "workerd"
-    ]
   }
 }

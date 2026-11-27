@@ -47,6 +47,7 @@ import {
   reopenDemandAfterRejectionInTx,
 } from "./demands.ts";
 import { enqueueJob } from "./jobs.ts";
+import { MAX_LEAD_VARIANT_DESCRIPTION_LENGTH } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import type { OutboundClient } from "./outbound.ts";
 import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
@@ -630,13 +631,42 @@ export async function createChangeRequest(
   const namespace: AssociationNamespace = input.namespace;
 
   const trimmedNativeId = input.nativeId.trim();
-  if (trimmedNativeId.length === 0) {
-    throw new MediaServiceError("INVALID_NATIVE_ID", 400, "nativeId must be a non-empty string");
+  if (trimmedNativeId.length === 0 || input.nativeId.length > 500) {
+    throw new MediaServiceError(
+      "INVALID_NATIVE_ID",
+      400,
+      "nativeId must be between 1 and 500 characters",
+    );
   }
-  const rawNativeId = (input.rawNativeId ?? input.nativeId).trim() || trimmedNativeId;
+  if (input.rawNativeId && input.rawNativeId.length > 500) {
+    throw new MediaServiceError(
+      "INVALID_NATIVE_ID",
+      400,
+      "rawNativeId must be at most 500 characters",
+    );
+  }
+  if (
+    input.variantDescription &&
+    input.variantDescription.length > MAX_LEAD_VARIANT_DESCRIPTION_LENGTH
+  ) {
+    throw new MediaServiceError(
+      "INVALID_VARIANT",
+      400,
+      `variantDescription must be at most ${MAX_LEAD_VARIANT_DESCRIPTION_LENGTH} characters`,
+    );
+  }
+  const rawSegments = input.segments ?? [];
+  if (!Array.isArray(rawSegments) || rawSegments.length > 200) {
+    throw new MediaServiceError(
+      "INVALID_SEGMENTS",
+      400,
+      "segments must be an array of at most 200 entries",
+    );
+  }
 
   const adapter = options.adapterRegistry?.get(namespace);
   let nativeId = trimmedNativeId;
+  let resolvedPage: JsonObject | undefined;
   if (adapter) {
     const parsedInput = adapter.parseInput(trimmedNativeId);
     if (!parsedInput) {
@@ -658,6 +688,8 @@ export async function createChangeRequest(
       }
       try {
         nativeId = await adapter.canonicalize(trimmedNativeId, options.outbound);
+        // The verified alias is from the primary input, not the separately submitted raw ID.
+        resolvedPage = { namespace, nativeId, kind: parsedInput.kind, id: parsedInput.id };
       } catch (error) {
         if (error instanceof InvalidNativeIdError) {
           throw new MediaServiceError("INVALID_NATIVE_ID", 400, error.message);
@@ -668,7 +700,22 @@ export async function createChangeRequest(
         throw error;
       }
     }
+  } else if (/^https?:\/\//i.test(trimmedNativeId)) {
+    throw new MediaServiceError(
+      "INVALID_NATIVE_ID",
+      400,
+      `Cannot verify a URL for ${namespace} without an adapter`,
+    );
   }
+
+  const submittedRawId = input.rawNativeId?.trim() || trimmedNativeId;
+  // The adapter already verified the native input, including IDs resolved through an upstream lookup.
+  const rawNativeId =
+    adapter &&
+    (submittedRawId === trimmedNativeId ||
+      adapter.parseInput(submittedRawId)?.canonicalId === nativeId)
+      ? submittedRawId
+      : nativeId;
 
   if (input.taskId !== undefined && input.taskId !== null && !isUuid(input.taskId)) {
     throw new MediaServiceError("INVALID_TASK_ID", 400, "taskId must be a valid UUID");
@@ -773,12 +820,10 @@ export async function createChangeRequest(
   const setDefaultVariant = Boolean(input.setDefaultVariant);
 
   if (isPlatformNamespace(namespace)) {
+    const rawDescription = input.variantDescription?.trim() || null;
     const rawVariantId =
       input.variantId?.trim() ||
-      (!input.variantDescription?.trim() && replacesAssociation?.variant_id
-        ? replacesAssociation.variant_id
-        : null);
-    const rawDescription = input.variantDescription?.trim() || null;
+      (!rawDescription && replacesAssociation?.variant_id ? replacesAssociation.variant_id : null);
 
     if (!rawVariantId && !rawDescription) {
       throw new MediaServiceError(
@@ -850,11 +895,6 @@ export async function createChangeRequest(
   }
 
   // Segments validation via @media-ref/client
-  const rawSegments = input.segments ?? [];
-  if (!Array.isArray(rawSegments)) {
-    throw new MediaServiceError("INVALID_SEGMENTS", 400, "segments must be an array");
-  }
-
   if (effectiveBaseline === null && rawSegments.length > 0) {
     throw new MediaServiceError(
       "SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE",
@@ -1057,9 +1097,13 @@ export async function createChangeRequest(
     options.adapterRegistry
       ? TIER1_MANUAL_REVIEW_REASON
       : null);
-  const initialEvidenceJson = replacesAssociation
-    ? JSON.stringify({ replacesAssociationId: replacesAssociation.id })
-    : null;
+  const initialEvidenceJson =
+    replacesAssociation || resolvedPage
+      ? JSON.stringify({
+          ...(replacesAssociation ? { replacesAssociationId: replacesAssociation.id } : {}),
+          ...(resolvedPage ? { resolvedPage } : {}),
+        })
+      : null;
   const effectiveNow = input.now ?? options.now;
 
   const submitterType = input.submitterType ?? "human";
@@ -2054,11 +2098,11 @@ export async function rejectChangeRequest(
 
 /**
  * `rejectChangeRequest` inside the caller's transaction. A review agent correction (ADR 0003 §4)
- * also stores the evidence and reopens the demand without backoff (`corrected`).
+ * also stores the evidence and makes its corrected season explorable without backoff.
  */
 export async function rejectChangeRequestInTx(
   trx: Transaction<Database>,
-  input: RejectChangeRequestInput & { evidence?: JsonObject; corrected?: boolean; now?: Date },
+  input: RejectChangeRequestInput & { evidence?: JsonObject; correctedSeason?: number; now?: Date },
 ): Promise<ChangeRequestRecord> {
   const allowedStatuses = input.allowedStatuses ?? ["needs_review"];
   const reason = input.reason?.trim() || null;
@@ -2082,6 +2126,19 @@ export async function rejectChangeRequestInTx(
   }
 
   const now = input.now ?? new Date();
+  let evidence = input.evidence;
+  if (cr.demand_id && input.correctedSeason !== undefined) {
+    // The correction can precede the exploration commit or the last sibling review.
+    const demand = await trx
+      .selectFrom("demands")
+      .select("lease_generation")
+      .where("id", "=", cr.demand_id)
+      .where("season", "=", input.correctedSeason)
+      .where("status", "in", ["leased", "awaiting_review"])
+      .forUpdate()
+      .executeTakeFirst();
+    if (demand) evidence = { ...evidence, correctedDemandGeneration: demand.lease_generation };
+  }
   const updated = await trx
     .updateTable("change_requests")
     .set({
@@ -2090,7 +2147,7 @@ export async function rejectChangeRequestInTx(
       reviewer_user_id: input.reviewerUserId,
       reviewed_at: now,
       updated_at: now,
-      ...(input.evidence ? { evidence: JSON.stringify(input.evidence) } : {}),
+      ...(evidence ? { evidence: JSON.stringify(evidence) } : {}),
     })
     .where("id", "=", cr.id)
     .returningAll()
@@ -2101,7 +2158,6 @@ export async function rejectChangeRequestInTx(
     await reopenDemandAfterRejectionInTx(trx, {
       demandId: cr.demand_id,
       now,
-      corrected: input.corrected,
     });
   }
 
@@ -2109,9 +2165,9 @@ export async function rejectChangeRequestInTx(
 }
 
 /**
- * Takes back an approval (ADR 0003 amendment 2): the association the request applied is delisted
- * with a revision, and the request becomes rejected. The association must still be the one this
- * request made (not changed by a later request since) and unlocked. Demands are the caller's.
+ * Takes back the current approval by restoring the preceding confirmed change request or delisting
+ * the association. The caller rechecks demand coverage for the seasons in the removed snapshot
+ * (an empty list means the whole media).
  */
 export async function revokeChangeRequestInTx(
   trx: Transaction<Database>,
@@ -2122,7 +2178,7 @@ export async function revokeChangeRequestInTx(
     evidence: JsonObject;
     now: Date;
   },
-): Promise<ChangeRequestRecord> {
+): Promise<{ changeRequest: ChangeRequestRecord; deletedSeasons: number[] }> {
   const cr = await trx
     .selectFrom("change_requests")
     .selectAll()
@@ -2144,16 +2200,75 @@ export async function revokeChangeRequestInTx(
     ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE,
     `${cr.media_id}:${cr.namespace}`,
   );
+  const revisions = trx
+    .selectFrom("association_revisions")
+    .where("association_id", "=", cr.applied_association_id)
+    .select([
+      "id",
+      "revision_number",
+      "change_request_id",
+      "restored_from_revision_id",
+      "status",
+      "variant_id",
+    ]);
+  const current = await revisions.orderBy("revision_number", "desc").limit(1).executeTakeFirst();
+
+  // A restore is owned by the revoked request; its effective approval remains the original row.
+  const approvalFor = (revision: NonNullable<typeof current>) =>
+    trx
+      .selectFrom("association_revisions as origin")
+      .innerJoin("change_requests as owner", "owner.id", "origin.change_request_id")
+      .where("origin.id", "=", revision.restored_from_revision_id ?? revision.id)
+      .where("origin.restored_from_revision_id", "is", null)
+      .where("origin.association_id", "=", cr.applied_association_id)
+      .where("origin.revision_number", "<=", revision.revision_number)
+      .where("origin.status", "=", "confirmed")
+      .where("owner.status", "=", "approved")
+      .whereRef("owner.applied_association_id", "=", "origin.association_id")
+      .whereRef("owner.applied_revision_id", "=", "origin.id");
+  const original =
+    current?.status === "confirmed"
+      ? await approvalFor(current)
+          .where("owner.id", "=", cr.id)
+          .select("origin.revision_number")
+          .executeTakeFirst()
+      : null;
+  const previous =
+    original &&
+    (await revisions
+      .where("revision_number", "=", original.revision_number - 1)
+      .executeTakeFirst());
+  const restore =
+    previous?.status === "confirmed"
+      ? await approvalFor(previous)
+          .where("owner.id", "!=", cr.id)
+          .select(["origin.id", "origin.variant_id", "origin.segments"])
+          .executeTakeFirst()
+      : null;
+  const variantIds = new Set([current?.variant_id, restore?.variant_id].filter((id) => id != null));
+  for (const variantId of [...variantIds].sort()) {
+    await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.VARIANT, variantId);
+  }
+  await acquireAdvisoryLock(
+    trx,
+    ADVISORY_LOCK_CLASSES.COLLECTION,
+    `${cr.namespace}:${cr.native_id}`,
+  );
   const association = await trx
     .selectFrom("associations")
     .select(["id", "variant_id", "status", "locked", "current_revision_id"])
     .where("id", "=", cr.applied_association_id)
+    .where("media_id", "=", cr.media_id)
+    .where("namespace", "=", cr.namespace)
+    .where("native_id", "=", cr.native_id)
     .forUpdate()
     .executeTakeFirst();
   if (
     !association ||
+    !current ||
+    !original ||
     association.status !== "confirmed" ||
-    association.current_revision_id !== cr.applied_revision_id
+    association.current_revision_id !== current.id
   ) {
     throw new MediaServiceError(
       "ASSOCIATION_SUPERSEDED",
@@ -2169,46 +2284,103 @@ export async function revokeChangeRequestInTx(
     );
   }
 
-  const segmentRows = await trx
-    .selectFrom("segments")
-    .select([
-      "season",
-      "episode_start",
-      "episode_end",
-      "target_episode_start",
-      "baseline",
-      "non_linear",
-      "needs_review",
-    ])
-    .where("association_id", "=", association.id)
-    .orderBy("season", "asc")
-    .orderBy("episode_start", "asc")
-    .orderBy("id", "asc")
-    .execute();
-  const snapshot: NormalizedSegment[] = segmentRows.map((seg) => ({
-    season: seg.season,
-    episodeStart: seg.episode_start,
-    episodeEnd: seg.episode_end,
-    targetEpisodeStart: seg.target_episode_start,
-    baseline: seg.baseline,
-    nonLinear: Boolean(seg.non_linear),
-    needsReview: Boolean(seg.needs_review),
-  }));
+  // A confirmed legacy restore with no verifiable owner is not evidence that the association was absent.
+  if (previous?.status === "confirmed" && previous.change_request_id && !restore) {
+    throw new MediaServiceError(
+      "ASSOCIATION_SUPERSEDED",
+      409,
+      "Cannot verify the preceding approval to restore",
+    );
+  }
+
+  const snapshot = await loadSegments(trx, association.id);
+  const restoredSegments = restore ? normalizeSegments(restore.segments) : [];
+  if (restore) {
+    if (isPlatformNamespace(cr.namespace)) {
+      const variant =
+        restore.variant_id &&
+        (await trx
+          .selectFrom("variants")
+          .select("id")
+          .where("id", "=", restore.variant_id)
+          .where("media_id", "=", cr.media_id)
+          .where("platform", "=", cr.namespace)
+          .executeTakeFirst());
+      if (!variant) {
+        throw new MediaServiceError(
+          "INVALID_VARIANT",
+          400,
+          "Previous variant no longer exists for this media and platform",
+        );
+      }
+    }
+    const media = await trx
+      .selectFrom("media")
+      .select("baseline")
+      .where("id", "=", cr.media_id)
+      .executeTakeFirstOrThrow();
+    const siblings = await loadActiveAssociationsWithSegments(trx, {
+      ...(restore.variant_id
+        ? { variantId: restore.variant_id }
+        : { mediaId: cr.media_id, catalogNamespace: cr.namespace }),
+      excludeAssociationId: association.id,
+    });
+    const shared = await loadActiveAssociationsWithSegments(trx, {
+      collection: { namespace: cr.namespace, nativeId: cr.native_id },
+      excludeAssociationId: association.id,
+    });
+    const candidate = {
+      mediaId: cr.media_id,
+      associationId: association.id,
+      segments: restoredSegments,
+    };
+    for (const result of [
+      validateVariantSegments([...siblings, candidate], {
+        baseline: media.baseline,
+        allowHierarchicalScopes: getNamespaceCapabilities(cr.namespace).allowHierarchicalScopes,
+      }),
+      validateSharedCollectionSegments([
+        ...shared.map((a) => ({ ...a, associationId: a.id })),
+        candidate,
+      ]),
+    ]) {
+      if (!result.valid) {
+        const { code, status } = classifyValidationErrorStatus(result.errors, 409);
+        throw new MediaServiceError(code, status, result.errors[0].message, result.errors);
+      }
+    }
+  }
+
   await trx.deleteFrom("segments").where("association_id", "=", association.id).execute();
-  const maxRevRow = await trx
-    .selectFrom("association_revisions")
-    .select(sql<number | null>`max(revision_number)`.as("max_rev"))
-    .where("association_id", "=", association.id)
-    .executeTakeFirst();
+  if (restoredSegments.length > 0) {
+    await trx
+      .insertInto("segments")
+      .values(
+        restoredSegments.map((seg) => ({
+          association_id: association.id,
+          season: seg.season,
+          episode_start: seg.episodeStart,
+          episode_end: seg.episodeEnd,
+          target_episode_start: seg.targetEpisodeStart,
+          baseline: seg.baseline,
+          non_linear: seg.nonLinear,
+          needs_review: seg.needsReview,
+        })),
+      )
+      .execute();
+  }
+  const status = restore ? "confirmed" : "delisted";
+  const variantId = restore ? restore.variant_id : association.variant_id;
   const revision = await trx
     .insertInto("association_revisions")
     .values({
       association_id: association.id,
-      revision_number: (maxRevRow?.max_rev ?? 0) + 1,
+      revision_number: current.revision_number + 1,
       change_request_id: cr.id,
-      variant_id: association.variant_id,
-      status: "delisted",
-      segments: JSON.stringify(snapshot),
+      restored_from_revision_id: restore?.id ?? null,
+      variant_id: variantId,
+      status,
+      segments: JSON.stringify(restore ? restoredSegments : snapshot),
       actor_user_id: input.reviewerUserId,
       reason: input.reason,
       created_at: input.now,
@@ -2218,7 +2390,8 @@ export async function revokeChangeRequestInTx(
   await trx
     .updateTable("associations")
     .set({
-      status: "delisted",
+      status,
+      variant_id: variantId,
       needs_review: false,
       current_revision_id: revision.id,
       updated_at: input.now,
@@ -2239,7 +2412,10 @@ export async function revokeChangeRequestInTx(
     .where("id", "=", cr.id)
     .returningAll()
     .executeTakeFirstOrThrow();
-  return toChangeRequestRecord(updated);
+  return {
+    changeRequest: toChangeRequestRecord(updated),
+    deletedSeasons: [...new Set(snapshot.map((seg) => seg.season))],
+  };
 }
 
 export async function readMediaDocument(
