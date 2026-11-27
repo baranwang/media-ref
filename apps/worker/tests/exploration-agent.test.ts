@@ -463,66 +463,88 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(await testDb.readDb.selectFrom("change_requests").select("id").execute()).toEqual([]);
   });
 
-  test("a collection already mapped to another season of the media is refused for this season", async () => {
-    const replies: unknown[] = [];
-    const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
-      const tools = request.messages.filter((m) => m.role === "tool");
-      if (tools.length === 0) {
-        return {
-          content: null,
-          toolCalls: [
-            {
-              id: "call_s",
-              name: "submit_mapping",
-              arguments: { namespace: "bilibili", canonicalId: "ss45574" },
-            },
-          ],
-          model: "test-model",
-        };
+  test.each([
+    {
+      name: "refused when it takes the positions another season holds",
+      held: { episode_end: null },
+      submitted: undefined,
+      error: "ALREADY_MAPPED_TO_OTHER_SEASON",
+    },
+    {
+      name: "accepted on the positions another season leaves free",
+      held: { episode_end: 10 },
+      submitted: [{ season: 1, episodeStart: 1, episodeEnd: 13, targetEpisodeStart: 11 }],
+      error: undefined,
+    },
+  ])(
+    "a collection already holding another season of the media: $name",
+    async ({ held, submitted, error }) => {
+      const replies: unknown[] = [];
+      const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
+        const tools = request.messages.filter((m) => m.role === "tool");
+        if (tools.length === 0) {
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call_s",
+                name: "submit_mapping",
+                arguments: { namespace: "bilibili", canonicalId: "ss45574", segments: submitted },
+              },
+            ],
+            model: "test-model",
+          };
+        }
+        replies.push(JSON.parse(tools[0]!.content));
+        return markAllNotFound(request);
+      };
+      const { testDb, mediaId, outbound, explore } = await setup(
+        { kan360Rows: [["咒术回战 第二季", "2023", "45574"]] },
+        invokeModel,
+      );
+      await setSeasonOneLength(testDb, mediaId);
+      const variant = await testDb.writeDb
+        .insertInto("variants")
+        .values({ media_id: mediaId, platform: "bilibili", description: "原声", is_default: true })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const assoc = await testDb.writeDb
+        .insertInto("associations")
+        .values({
+          media_id: mediaId,
+          namespace: "bilibili",
+          native_id: "ss45574",
+          status: "confirmed",
+          variant_id: variant.id,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await testDb.writeDb
+        .insertInto("segments")
+        .values({
+          association_id: assoc.id,
+          season: 2,
+          episode_start: 1,
+          ...held,
+          target_episode_start: 1,
+          baseline: "tmdb",
+        })
+        .execute();
+
+      await explore();
+
+      const prompt = outbound.modelRequests[0]!.messages.find((m) => m.role === "user")!.content;
+      expect(prompt).toContain('"alreadyMappedToSeasons"');
+      const requests = await testDb.readDb.selectFrom("change_requests").select("id").execute();
+      if (error) {
+        expect(replies).toMatchObject([{ ok: false, error }]);
+        expect(requests).toEqual([]);
+      } else {
+        expect(replies).toMatchObject([{ ok: true }]);
+        expect(requests).toHaveLength(1);
       }
-      replies.push(JSON.parse(tools[0]!.content));
-      return markAllNotFound(request);
-    };
-    const { testDb, mediaId, outbound, explore } = await setup(
-      { kan360Rows: [["咒术回战 第二季", "2023", "45574"]] },
-      invokeModel,
-    );
-    await setSeasonOneLength(testDb, mediaId);
-    const variant = await testDb.writeDb
-      .insertInto("variants")
-      .values({ media_id: mediaId, platform: "bilibili", description: "原声", is_default: true })
-      .returning("id")
-      .executeTakeFirstOrThrow();
-    const assoc = await testDb.writeDb
-      .insertInto("associations")
-      .values({
-        media_id: mediaId,
-        namespace: "bilibili",
-        native_id: "ss45574",
-        status: "confirmed",
-        variant_id: variant.id,
-      })
-      .returning("id")
-      .executeTakeFirstOrThrow();
-    await testDb.writeDb
-      .insertInto("segments")
-      .values({
-        association_id: assoc.id,
-        season: 2,
-        episode_start: 1,
-        episode_end: null,
-        target_episode_start: 1,
-        baseline: "tmdb",
-      })
-      .execute();
-
-    await explore();
-
-    const prompt = outbound.modelRequests[0]!.messages.find((m) => m.role === "user")!.content;
-    expect(prompt).toContain('"alreadyMappedToSeasons"');
-    expect(replies).toMatchObject([{ ok: false, error: "ALREADY_MAPPED_TO_OTHER_SEASON" }]);
-    expect(await testDb.readDb.selectFrom("change_requests").select("id").execute()).toEqual([]);
-  });
+    },
+  );
 
   test("redelivered job does not submit twice", async () => {
     const { testDb, explore } = await setup({ kan360Rows: [["咒术回战", "2020", "34430"]] });
