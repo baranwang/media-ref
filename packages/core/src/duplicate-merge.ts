@@ -652,7 +652,10 @@ async function recheckConflict(
     {
       ...input,
       extraTitlesByMediaId: new Map([
-        [c.imdb ? c.other : c.mediaId, [evidence.snapshot.title, evidence.snapshot.originalTitle]],
+        [
+          c.namespace === "tmdb" ? c.other : c.mediaId,
+          [evidence.snapshot.title, evidence.snapshot.originalTitle],
+        ],
       ]),
     },
     async (trx, source, target) => {
