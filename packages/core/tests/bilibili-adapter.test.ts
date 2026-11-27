@@ -372,6 +372,31 @@ describe("Bilibili Tier 1 & Tier 2 adapter", () => {
     expect(fallback).toMatchObject({ status: "found", info: { year: 2023 } });
   });
 
+  test("reads the display type, not the channel: a film listed under 番剧 is a movie", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.url.endsWith("season_id=3396")) {
+          return jsonResponse(request.url, {
+            code: 0,
+            message: "success",
+            result: {
+              season_id: 3396,
+              title: "×××HOLiC 仲夏夜之梦",
+              type: 1,
+              show_season_type: 2,
+              publish: { pub_time: "2005-08-20 00:00:01" },
+              episodes: [{ id: 84775, title: "1", badge_type: 0, section_type: 0 }],
+            },
+          });
+        }
+        throw new Error(`Unexpected URL: ${request.url}`);
+      },
+    });
+
+    const result = await bilibiliAdapter.fetchCollection("ss3396", outbound);
+    expect(result).toMatchObject({ status: "found", info: { mediaType: "movie" } });
+  });
+
   test("registry exposes default adapters and tier guards cleanly", () => {
     const defaultRegistry = createDefaultAdapterRegistry();
     const bili = defaultRegistry.get("bilibili");
