@@ -613,6 +613,24 @@ export async function loadActiveAssociationsWithSegments(
   }));
 }
 
+export async function validateSubmissionOnSharedCollection(
+  db: DbExecutor,
+  namespace: AssociationNamespace,
+  nativeId: string,
+  mediaId: string | null,
+  segments: readonly SegmentInput[],
+) {
+  const existing = await loadActiveAssociationsWithSegments(db, {
+    collection: { namespace, nativeId },
+  });
+  return validateSharedCollectionSegments([
+    ...existing
+      .filter((e) => e.mediaId !== mediaId)
+      .map((e) => ({ mediaId: e.mediaId, associationId: e.id, segments: e.segments })),
+    { mediaId: mediaId ?? "__pending_media__", associationId: "candidate", segments },
+  ]);
+}
+
 function classifyValidationErrorStatus(
   errors: SegmentValidationError[],
   conflictStatus: number,
@@ -1692,10 +1710,13 @@ function mergeApprovedSegments(
     return [s.targetEpisodeStart, end ? s.targetEpisodeStart + end - s.episodeStart : Infinity];
   };
   const requestedSeasons = new Set(requested.map((s) => s.season));
-  const claimed = requested.map(positions);
+  const claimed = requested.filter((s) => !s.nonLinear).map(positions);
   const kept = existing.filter((s) => {
     const [start, end] = positions(s);
-    return !requestedSeasons.has(s.season) && claimed.every(([a, b]) => end < a || b < start);
+    return (
+      !requestedSeasons.has(s.season) &&
+      (s.nonLinear || claimed.every(([a, b]) => end < a || b < start))
+    );
   });
   return [...kept, ...requested].sort(
     (a, b) => a.season - b.season || a.episodeStart - b.episodeStart,
