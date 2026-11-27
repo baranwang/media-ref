@@ -468,49 +468,98 @@ export function checkSegmentsFitCollection(
   return null;
 }
 
+/** Platform positions [first, last] a segment covers; last is Infinity when its season's length is unknown. */
+function platformPositions(
+  seg: SegmentInput,
+  seasonEpisodeCount: (season: number) => number | null,
+): [number, number] {
+  const start = seg.episodeStart ?? 1;
+  const target = seg.targetEpisodeStart ?? 1;
+  const end = seg.episodeEnd ?? seasonEpisodeCount(seg.season);
+  return [target, end ? target + end - start : Infinity];
+}
+
+/** An already-mapped season of a collection and the platform positions it holds. */
+interface MappedSeason {
+  season: number;
+  positions: [number, number];
+}
+
 /**
- * Seasons each collection of this media on `namespace` already covers, for collections that do
- * not cover `season`. Whole-media requests (season null) are not checked.
+ * Seasons each collection of this media on `namespace` already holds, for collections that do
+ * not hold `season`. Whole-media requests (season null) are not checked.
  */
 async function loadMappedSeasons(
   db: Db,
-  mediaId: string,
+  media: ExplorationTargetMedia,
   namespace: Namespace,
   season: number | null,
-): Promise<Map<string, number[]>> {
-  const mapped = new Map<string, number[]>();
+): Promise<Map<string, MappedSeason[]>> {
+  const mapped = new Map<string, MappedSeason[]>();
   if (season === null) {
     return mapped;
   }
   const rows = await db
     .selectFrom("associations")
     .innerJoin("segments", "segments.association_id", "associations.id")
-    .select(["associations.native_id", "segments.season"])
-    .where("associations.media_id", "=", mediaId)
+    .select([
+      "associations.native_id",
+      "segments.season",
+      "segments.episode_start",
+      "segments.episode_end",
+      "segments.target_episode_start",
+    ])
+    .where("associations.media_id", "=", media.id)
     .where("associations.namespace", "=", namespace)
     .where("associations.status", "=", "confirmed")
+    .orderBy("segments.season")
+    .orderBy("segments.target_episode_start")
     .execute();
   for (const row of rows) {
-    mapped.set(row.native_id, [...new Set([...(mapped.get(row.native_id) ?? []), row.season])]);
+    const positions = platformPositions(
+      {
+        season: row.season,
+        episodeStart: row.episode_start,
+        episodeEnd: row.episode_end,
+        targetEpisodeStart: row.target_episode_start,
+      } as SegmentInput,
+      (s) => seasonLength(media, s),
+    );
+    mapped.set(row.native_id, [
+      ...(mapped.get(row.native_id) ?? []),
+      { season: row.season, positions },
+    ]);
   }
   for (const [id, seasons] of mapped) {
-    if (seasons.includes(season)) {
+    if (seasons.some((s) => s.season === season)) {
       mapped.delete(id);
-    } else {
-      seasons.sort((a, b) => a - b);
     }
   }
   return mapped;
 }
 
-/** Seasons a submission would drop from the collection's existing association. */
+function seasonLength(media: ExplorationTargetMedia, season: number): number | null {
+  const count = media.snapshot.seasons.find((s) => s.season === season)?.episodeCount;
+  return count && count > 0 ? count : null;
+}
+
+/**
+ * Seasons approving a submission would drop from the collection's existing association: those
+ * it does not restate whose platform positions it claims (see `mergeApprovedSegments`).
+ */
 function lostSeasons(
   target: Pick<OpenTarget, "mappedSeasons">,
+  media: ExplorationTargetMedia,
   canonicalId: string,
   segments: readonly SegmentInput[],
 ): number[] {
-  const kept = new Set(segments.map((s) => s.season));
-  return (target.mappedSeasons.get(canonicalId) ?? []).filter((s) => !kept.has(s));
+  const restated = new Set(segments.map((s) => s.season));
+  const claimed = segments.map((s) => platformPositions(s, (x) => seasonLength(media, x)));
+  const lost = (target.mappedSeasons.get(canonicalId) ?? []).filter(
+    ({ season, positions: [a, b] }) =>
+      !restated.has(season) && claimed.some(([c, d]) => a <= d && c <= b),
+  );
+  return [...new Set(lost.map((s) => s.season))];
 }
 
 function summarizeCandidate(run: JobRun, target: OpenTarget, candidate: FetchedCandidate) {
@@ -555,8 +604,8 @@ function buildAgentSystemPrompt(namespaces: readonly Namespace[]): string {
     "4. Check title, year, media type and episode count against the target. Prefer original audio over dubs or recuts.",
     "5. A collection may hold several seasons, or a season may be split; express that with segments.",
     "6. passesAutomaticCheckWithDefaultMapping is a hint from a deterministic check, not a decision.",
-    "   alreadyMappedToSeasons means the collection is already this media's collection for those seasons:",
-    "   it is not this season's unless it really holds both, and then segments must cover all of them.",
+    "   alreadyMappedToSeasons lists seasons of this media the collection already holds, with their platform positions:",
+    "   it is not this season's unless it really holds both; then map this season onto positions those seasons do not use.",
     "   suggestedMapping comes from a review that rejected an earlier submission of that collection: submit its segments unless the evidence says otherwise.",
     "7. mark_not_found only after you looked: the platform may simply not carry it, which is common.",
     "8. Steps and tokens are limited; stop searching a namespace once the evidence is clear.",
@@ -692,9 +741,9 @@ interface OpenTarget {
   fetched: Map<string, FetchedCandidate>;
   /**
    * Collections this media already has on the namespace for other seasons, by canonical ID. Approving
-   * a mapping replaces an association's segments, so a submission must keep those seasons.
+   * a mapping drops those seasons where it claims their platform positions without restating them.
    */
-  mappedSeasons: Map<string, number[]>;
+  mappedSeasons: Map<string, MappedSeason[]>;
   /** A failing source or fetch: "not found" is then not evidence of absence. */
   discoveryErrored: boolean;
   transient: PlatformTransient | null;
@@ -715,10 +764,7 @@ function createJobRun(
   budget: SessionBudget,
 ): JobRun {
   const segmentMisfit = (info: CollectionInfo, segments: readonly SegmentInput[]) =>
-    checkSegmentsFitCollection(segments, info, (season) => {
-      const count = ctx.media.snapshot.seasons.find((s) => s.season === season)?.episodeCount;
-      return count && count > 0 ? count : null;
-    });
+    checkSegmentsFitCollection(segments, info, (season) => seasonLength(ctx.media, season));
   return {
     ctx,
     budget,
@@ -851,7 +897,7 @@ async function prepareTarget(
     adapter,
     taskId,
     fetched: new Map(),
-    mappedSeasons: await loadMappedSeasons(ctx.db, ctx.media.id, namespace, ctx.season),
+    mappedSeasons: await loadMappedSeasons(ctx.db, ctx.media, namespace, ctx.season),
     discoveryErrored: candidates.sourceErrored,
     transient: null,
   };
@@ -918,7 +964,7 @@ async function prepareTarget(
   const mapping = (c: FetchedCandidate) => c.suggestedSegments ?? run.baseSegments;
   const passing = [...target.fetched.values()].filter(
     (c) =>
-      lostSeasons(target, c.info.canonicalId, mapping(c)).length === 0 &&
+      lostSeasons(target, run.ctx.media, c.info.canonicalId, mapping(c)).length === 0 &&
       run.passesGate(c.info, mapping(c)),
   );
   if (passing.length === 1) {
@@ -983,7 +1029,8 @@ async function runAgentSession(
         });
       }
       return (
-        (!target || lostSeasons(target, info.canonicalId, run.baseSegments).length === 0) &&
+        (!target ||
+          lostSeasons(target, run.ctx.media, info.canonicalId, run.baseSegments).length === 0) &&
         run.passesGate(info, run.baseSegments)
       );
     },
@@ -1090,12 +1137,12 @@ async function runAgentSession(
     if (misfit) {
       return { ok: false, error: "SEGMENTS_OUTSIDE_COLLECTION", message: misfit };
     }
-    const lost = lostSeasons(target, candidate.info.canonicalId, segments);
+    const lost = lostSeasons(target, ctx.media, candidate.info.canonicalId, segments);
     if (lost.length > 0) {
       return {
         ok: false,
         error: "ALREADY_MAPPED_TO_OTHER_SEASON",
-        message: `${candidate.info.canonicalId} is already mapped to season ${lost.join(", ")} of this media. A collection holding only another season is not this season; if it really holds both, submit segments for all of them.`,
+        message: `${candidate.info.canonicalId} already holds season ${lost.join(", ")} of this media on the platform positions these segments use. A collection holding only another season is not this season; if it holds both, put this season on the positions the others do not use, or restate segments for all of them.`,
       };
     }
     const result = await submitMapping(
