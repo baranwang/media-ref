@@ -1060,6 +1060,65 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(checks).toHaveLength(platformCount - 1);
   });
 
+  test.each(["timeout", "503"])(
+    "a %s fetching the catalog during submit_mapping leaves no change request",
+    async (failure) => {
+      const ctx = await setup(
+        { kan360Rows: [["咒术回战 第二季", "2023", "45574"]] },
+        (request) => {
+          if (request.messages.some((m) => m.role === "tool")) return markAllNotFound(request);
+          return {
+            content: null,
+            model: "test-model",
+            toolCalls: [
+              {
+                id: "submit",
+                name: "submit_mapping",
+                arguments: {
+                  namespace: "bilibili",
+                  canonicalId: "ss45574",
+                  segments: [{ season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1 }],
+                },
+              },
+            ],
+          };
+        },
+        { maxDurationMs: 400 },
+      );
+      const fetch = ctx.outbound.fetchExternal.bind(ctx.outbound);
+      let requested = false;
+      let signal: AbortSignal | undefined;
+      let release: (() => void) | undefined;
+      ctx.outbound.fetchExternal = async (request) => {
+        if (new URL(request.url).pathname.endsWith("/tv/95479/season/1")) {
+          requested = true;
+          signal = request.signal;
+          if (failure === "timeout")
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          return jsonResponse(request.url, { episodes: [] }, failure === "503" ? 503 : 200);
+        }
+        return fetch(request);
+      };
+      try {
+        await ctx.explore();
+      } finally {
+        release?.();
+      }
+      expect(requested).toBe(true);
+      if (failure === "timeout") expect(signal?.aborted).toBe(true);
+      expect(await ctx.testDb.readDb.selectFrom("change_requests").select("id").execute()).toEqual(
+        [],
+      );
+      const checks = await ctx.testDb.readDb
+        .selectFrom("platform_checks")
+        .select("platform")
+        .execute();
+      expect(checks.map((c) => c.platform)).not.toContain("bilibili");
+    },
+  );
+
   test("near the end of its budget the session gets only conclusion tools and concludes", async () => {
     const invokeModel = (request: ModelInvocationRequest): ModelInvocationResponse => {
       if (request.tools?.some((t) => t.name === "get_catalog_season")) {
@@ -1256,14 +1315,33 @@ describe("Exploration agent: discover → judge → gate", () => {
       })
       .execute();
 
-    // 47 TMDB episodes (pilot Oct 18, E20 Nov 16, finale E47 Dec 28); Tencent mzc00200znyfa5u has 20 第N期上/下 spanning Oct 25..Dec 28.
+    // An older correction suggested a truncated prefix. The fast path must consult the same evidence as the model.
+    await ensureReviewAgentUser(testDb.writeDb);
+    await testDb.writeDb
+      .insertInto("leads")
+      .values({
+        target_external_key: "tmdb:tv:231620",
+        namespace: "tencent",
+        native_id: "mzc00200znyfa5u",
+        season: 3,
+        segments: JSON.stringify([
+          { season: 3, episodeStart: 1, episodeEnd: 20, targetEpisodeStart: 1 },
+        ]),
+        reporter_user_id: "system:review-agent",
+        reporter_key_id: "system:review-agent",
+        created_at: T0,
+      })
+      .execute();
+
+    // 47 TMDB episodes (pilot Oct 18, E20 Nov 16, finale E47 Dec 28); Tencent has all ten broadcasts.
     const tmdbSeason3 = Array.from({ length: 47 }, (_, i) => {
       const ep = i + 1;
       const day = Math.floor((i * 71) / 46);
       const airDate = new Date(Date.UTC(2025, 9, 18 + day)).toISOString().slice(0, 10);
       return {
         episode_number: ep,
-        name: ep === 1 ? "先导片" : ep % 3 === 0 ? `第${Math.ceil(ep / 3)}期加更` : `第${ep}集`,
+        name:
+          ep === 1 ? "先导片" : ep % 3 === 0 ? "加更版" : `第${Math.ceil(((ep - 1) * 10) / 46)}期`,
         air_date: airDate,
       };
     });
@@ -1467,6 +1545,15 @@ describe("Exploration agent: discover → judge → gate", () => {
     expect(evidenceMsgs).toHaveLength(1);
     await worker.queue(createQueueBatch(evidenceMsgs));
 
+    const firstCr = await testDb.readDb
+      .selectFrom("change_requests")
+      .select("id")
+      .where(
+        "task_id",
+        "=",
+        await deriveExplorationTaskId(exploreMsg.jobId, "tencent", platformCount),
+      )
+      .executeTakeFirstOrThrow();
     const assoc = await testDb.readDb
       .selectFrom("associations")
       .select(["id", "status", "native_id"])
@@ -1497,7 +1584,7 @@ describe("Exploration agent: discover → judge → gate", () => {
       .where("association_id", "=", assoc.id)
       .execute();
     await testDb.writeDb.deleteFrom("associations").where("id", "=", assoc.id).execute();
-    await ensureReviewAgentUser(testDb.writeDb);
+    const t2 = new Date(T0.getTime() + 60_000);
     await testDb.writeDb
       .insertInto("leads")
       .values({
@@ -1516,9 +1603,9 @@ describe("Exploration agent: discover → judge → gate", () => {
         ]),
         reporter_user_id: "system:review-agent",
         reporter_key_id: "system:review-agent",
+        created_at: t2,
       })
       .execute();
-    const t2 = new Date(T0.getTime() + 60_000);
     await testDb.writeDb
       .updateTable("demands")
       .set({ status: "open", next_eligible_at: t2 })
@@ -1550,10 +1637,15 @@ describe("Exploration agent: discover → judge → gate", () => {
     await fastPathWorker.queue(createQueueBatch([exploreMsg2]));
     const fastCr = await testDb.readDb
       .selectFrom("change_requests")
-      .select(["native_id", "segments", "status"])
-      .where("namespace", "=", "tencent")
-      .orderBy("created_at", "desc")
+      .select(["id", "native_id", "segments", "status"])
+      .where(
+        "task_id",
+        "=",
+        await deriveExplorationTaskId(exploreMsg2.jobId, "tencent", platformCount),
+      )
       .executeTakeFirstOrThrow();
+    expect(fastCr.id).not.toBe(firstCr.id);
+    expect(fastCr.status).toBe("pending_evidence");
     expect(fastCr.native_id).toBe("mzc00200znyfa5u");
     expect(fastCr.segments).toEqual([
       expect.objectContaining({

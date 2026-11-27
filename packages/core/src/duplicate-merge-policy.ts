@@ -1,6 +1,7 @@
 import {
   BASELINE_PRIORITY,
   EXTERNAL_ID_NAMESPACES,
+  formatExternalKey,
   getNamespaceCapabilities,
   isCatalogNamespace,
   validateVariantSegments,
@@ -95,6 +96,7 @@ export interface MergeCandidateExternalId {
   namespace: ExternalIdNamespace;
   nativeId: string;
   locked: boolean;
+  status: AssociationStatusRow;
 }
 
 export interface MergeCandidateMediaSnapshot {
@@ -311,8 +313,8 @@ export function areMediaSnapshotsCompatibleForAutoMerge(
 
 /**
  * Verifies whether a fetched catalog target independently describes `snap` (matching `type`,
- * year within ±1, non-conflicting external IDs, and either title/alias overlap or matching
- * authoritative external ID). Used to keep alias enrichment attributable per media.
+ * year within ±1, non-conflicting IDs, and either title/alias overlap or ownership of the fetched
+ * source key). Cross-references can locate candidates but cannot corroborate themselves.
  */
 export function doesCatalogTargetMatchMediaSnapshot(
   snap: Pick<
@@ -321,6 +323,7 @@ export function doesCatalogTargetMatchMediaSnapshot(
   >,
   ownExtraTitles: readonly (string | null | undefined)[],
   catalogTarget: {
+    canonicalKey?: string;
     type: MediaType;
     snapshot: {
       title: string;
@@ -346,7 +349,7 @@ export function doesCatalogTargetMatchMediaSnapshot(
   }
 
   const targetExternalIds = catalogTarget.externalIds ?? {};
-  let hasMatchingExternalId = false;
+  let ownsSourceKey = false;
   for (const ext of snap.externalIds) {
     const catalogVal = targetExternalIds[ext.namespace];
     if (!catalogVal) {
@@ -355,7 +358,8 @@ export function doesCatalogTargetMatchMediaSnapshot(
     if (catalogVal !== ext.nativeId) {
       return false;
     }
-    hasMatchingExternalId = true;
+    if (ext.status === "confirmed" && formatExternalKey(ext) === catalogTarget.canonicalKey)
+      ownsSourceKey = true;
   }
 
   const titleCompat = areMediaSnapshotsCompatibleForAutoMerge(
@@ -373,11 +377,11 @@ export function doesCatalogTargetMatchMediaSnapshot(
     },
   );
 
-  return titleCompat.compatible || hasMatchingExternalId;
+  return titleCompat.compatible || ownsSourceKey;
 }
 
 function hasConfirmedTmdb(snapshot: MergeCandidateMediaSnapshot): boolean {
-  return snapshot.externalIds.some((ext) => ext.namespace === "tmdb");
+  return snapshot.externalIds.some((ext) => ext.namespace === "tmdb" && ext.status === "confirmed");
 }
 
 function getBaselinePriorityScore(baseline: BaselineSource | null): number {
@@ -469,7 +473,7 @@ export async function loadMediaMergeCandidateSnapshotInTx(
     trx
       .selectFrom("associations")
       .where("is_external_id", "=", true)
-      .select(["id", "namespace", "native_id", "locked"])
+      .select(["id", "namespace", "native_id", "locked", "status"])
       .where("media_id", "=", row.id)
       .where("status", "!=", "delisted")
       .$narrowType<{ namespace: ExternalIdNamespace }>()
@@ -537,6 +541,7 @@ export async function loadMediaMergeCandidateSnapshotInTx(
       namespace: ext.namespace,
       nativeId: ext.native_id,
       locked: Boolean(ext.locked),
+      status: ext.status,
     })),
     associations: assocRows.map((assoc) => ({
       id: assoc.id,
@@ -839,6 +844,7 @@ export async function verifyAutoMergeEligibilityInTx(
 export async function findReusableMediaForPrefetchedCatalogInTx(
   trx: DbExecutor,
   input: {
+    canonicalKey?: string;
     type: MediaType;
     snapshot: {
       title: string;
@@ -903,7 +909,7 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
     const rowExtRows = await trx
       .selectFrom("associations")
       .where("is_external_id", "=", true)
-      .select(["namespace", "native_id"])
+      .select(["namespace", "native_id", "status"])
       .where("media_id", "=", row.id)
       .where("status", "!=", "delisted")
       .$narrowType<{ namespace: ExternalIdNamespace }>()
@@ -921,15 +927,11 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
           namespace: ext.namespace,
           nativeId: ext.native_id,
           locked: false,
+          status: ext.status,
         })),
       },
       [],
-      {
-        type: input.type,
-        snapshot: input.snapshot,
-        externalIds: input.externalIds,
-        aliases: input.aliases,
-      },
+      input,
     );
     if (matches) {
       return row;
@@ -937,30 +939,4 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
   }
 
   return null;
-}
-
-export function extractCatalogAndCollectionTitlesFromEvidence(rawEvidence: unknown): {
-  catalogTitles: string[];
-  collectionTitles: string[];
-} {
-  if (!rawEvidence || typeof rawEvidence !== "object" || Array.isArray(rawEvidence)) {
-    return { catalogTitles: [], collectionTitles: [] };
-  }
-  const ev = rawEvidence as Record<string, unknown>;
-  const pickTitles = (obj: unknown): string[] => {
-    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
-      return [];
-    }
-    const rec = obj as Record<string, unknown>;
-    const raw: unknown[] = [
-      rec.title,
-      rec.originalTitle,
-      ...(Array.isArray(rec.aliases) ? rec.aliases : []),
-    ];
-    return raw.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
-  };
-  return {
-    catalogTitles: pickTitles(ev.catalog),
-    collectionTitles: pickTitles(ev.collection),
-  };
 }

@@ -208,8 +208,8 @@ async function fetchExtraAliasesForMerge(
       return null;
     }
     const tmdbItems: Array<{ key: string; mediaIds: string[] }> = [];
-    const tmdbA = snapA.externalIds.find((e) => e.namespace === "tmdb");
-    const tmdbB = snapB.externalIds.find((e) => e.namespace === "tmdb");
+    const tmdbA = snapA.externalIds.find((e) => e.namespace === "tmdb" && e.status === "confirmed");
+    const tmdbB = snapB.externalIds.find((e) => e.namespace === "tmdb" && e.status === "confirmed");
     if (tmdbA) {
       tmdbItems.push({
         key: formatExternalKey({ namespace: "tmdb", nativeId: tmdbA.nativeId }),
@@ -290,7 +290,7 @@ async function fetchExtraAliasesForMerge(
 
   // 2. For shared catalog entries (including seed_unconfirmed), attribute fetched titles to a side
   //    ONLY when that side independently verifies against the fetched entry (type, year, non-conflicting
-  //    external IDs, and either title/alias overlap or matching external ID).
+  //    external IDs, and either title/alias overlap or ownership of the fetched source key).
   const attributeSharedIfMatched = (
     snap: MergeCandidateMediaSnapshot,
     resolvedTarget: Parameters<typeof doesCatalogTargetMatchMediaSnapshot>[2],
@@ -313,12 +313,7 @@ async function fetchExtraAliasesForMerge(
         continue;
       }
       const titles = resolveTitles(resolved.target);
-      const catalogTarget = {
-        type: resolved.target.type,
-        snapshot: resolved.target.snapshot,
-        externalIds: resolved.target.externalIds,
-        aliases: titles,
-      };
+      const catalogTarget = { ...resolved.target, aliases: titles };
       attributeSharedIfMatched(loaded.snapA, catalogTarget, titles);
       attributeSharedIfMatched(loaded.snapB, catalogTarget, titles);
     } catch {

@@ -80,6 +80,7 @@ export interface TmdbGateway {
   fetchSeasonEpisodes(
     tmdbId: string,
     season: number,
+    signal?: AbortSignal,
   ): Promise<Array<{ episode: number; title: string | null; airDate: string | null }> | null>;
 }
 
@@ -369,6 +370,7 @@ export function createTmdbGateway(
   async function fetchTmdbJson(
     url: string,
     label: string,
+    signal?: AbortSignal,
   ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; notFound: true }> {
     let response;
     try {
@@ -379,6 +381,7 @@ export function createTmdbGateway(
         method: "GET",
         headers: buildTmdbHeaders(),
         timeoutMs: config.timeoutMs,
+        ...(signal ? { signal } : {}),
       });
     } catch (error) {
       throw new TmdbGatewayError(
@@ -486,10 +489,11 @@ export function createTmdbGateway(
       return traktHit(type, parsed);
     },
 
-    async fetchSeasonEpisodes(tmdbId, season) {
+    async fetchSeasonEpisodes(tmdbId, season, signal) {
       const fetched = await fetchTmdbJson(
         buildTmdbUrl(`/tv/${encodeURIComponent(tmdbId)}/season/${season}`, { language }),
         `tv:${tmdbId}:season:${season}`,
+        signal,
       );
       if (!fetched.ok) {
         return null;

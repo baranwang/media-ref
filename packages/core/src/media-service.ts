@@ -50,7 +50,6 @@ import {
 import {
   collectionPositionsOverlap,
   doesCatalogTargetMatchMediaSnapshot,
-  extractCatalogAndCollectionTitlesFromEvidence,
   findReusableMediaForPrefetchedCatalogInTx,
   loadMediaMergeCandidateSnapshotInTx,
   parseMediaSeasonsJson,
@@ -606,6 +605,28 @@ export async function loadActiveAssociationsWithSegments(
   }));
 }
 
+export async function validateSubmissionOnSharedCollection(
+  db: DbExecutor,
+  namespace: AssociationNamespace,
+  nativeId: string,
+  mediaId: string | null,
+  segments: readonly SegmentInput[],
+) {
+  const existing = await loadActiveAssociationsWithSegments(db, {
+    collection: { namespace, nativeId },
+  });
+  const otherMediaOnCollection = existing.filter((entry) => entry.mediaId !== mediaId);
+  const check = validateSharedCollectionSegments([
+    ...otherMediaOnCollection.map((e) => ({
+      mediaId: e.mediaId,
+      associationId: e.id,
+      segments: e.segments,
+    })),
+    { mediaId: mediaId ?? "__pending_media__", associationId: "candidate", segments },
+  ]);
+  return check.valid ? check : { ...check, otherMediaOnCollection };
+}
+
 function classifyValidationErrorStatus(
   errors: SegmentValidationError[],
   conflictStatus: number,
@@ -1063,56 +1084,44 @@ export async function createChangeRequest(
   }
 
   // Submit-time shared-collection check across other media
-  const existingOnCollection = await loadActiveAssociationsWithSegments(dbWrite, {
-    collection: { namespace, nativeId },
-  });
-  const otherMediaOnCollection = existingOnCollection.filter(
-    (entry) => !existingMedia || entry.mediaId !== existingMedia.id,
+  const sharedCheck = await validateSubmissionOnSharedCollection(
+    dbWrite,
+    namespace,
+    nativeId,
+    existingMedia?.id ?? null,
+    normalizedSegments,
   );
-  if (otherMediaOnCollection.length > 0) {
-    const sharedCheck = validateSharedCollectionSegments([
-      ...otherMediaOnCollection.map((entry) => ({
-        mediaId: entry.mediaId,
-        associationId: entry.id,
-        segments: entry.segments,
-      })),
-      {
-        mediaId: existingMedia?.id ?? "__pending_media__",
-        associationId: "candidate",
-        segments: normalizedSegments,
-      },
-    ]);
-    if (!sharedCheck.valid) {
-      const canConvergeDuplicate =
-        isCatalogNamespace(namespace) &&
-        (await isPlausibleCatalogDuplicateOverlapForSubmit(dbWrite, {
-          targetMedia: existingMedia
-            ? {
-                id: existingMedia.id,
-                type: existingMedia.type,
-                title: existingMedia.title,
-                originalTitle: existingMedia.original_title,
-                year: existingMedia.year,
-                seasons: parseMediaSeasonsJson(existingMedia.seasons),
-              }
+  if (!sharedCheck.valid) {
+    const canConvergeDuplicate =
+      isCatalogNamespace(namespace) &&
+      !sharedCheck.errors.some((error) => error.code === "SHARED_COLLECTION_NON_LINEAR_SEGMENT") &&
+      (await isPlausibleCatalogDuplicateOverlapForSubmit(dbWrite, {
+        targetMedia: existingMedia
+          ? {
+              id: existingMedia.id,
+              type: existingMedia.type,
+              title: existingMedia.title,
+              originalTitle: existingMedia.original_title,
+              year: existingMedia.year,
+              seasons: parseMediaSeasonsJson(existingMedia.seasons),
+            }
+          : null,
+        targetExternalKey:
+          !existingMedia && target.kind === "external_key"
+            ? { namespace: target.namespace, nativeId: target.nativeId }
             : null,
-          targetExternalKey:
-            !existingMedia && target.kind === "external_key"
-              ? { namespace: target.namespace, nativeId: target.nativeId }
-              : null,
-          overlappingMediaIds: otherMediaOnCollection
-            .filter((entry) => collectionPositionsOverlap(entry.segments, normalizedSegments))
-            .map((entry) => entry.mediaId),
-        }));
-      if (!canConvergeDuplicate) {
-        const classified = classifyValidationErrorStatus(sharedCheck.errors, 400);
-        throw new MediaServiceError(
-          classified.code,
-          classified.status,
-          sharedCheck.errors[0].message,
-          sharedCheck.errors,
-        );
-      }
+        overlappingMediaIds: sharedCheck.otherMediaOnCollection
+          .filter((entry) => collectionPositionsOverlap(entry.segments, normalizedSegments))
+          .map((entry) => entry.mediaId),
+      }));
+    if (!canConvergeDuplicate) {
+      const classified = classifyValidationErrorStatus(sharedCheck.errors, 400);
+      throw new MediaServiceError(
+        classified.code,
+        classified.status,
+        sharedCheck.errors[0].message,
+        sharedCheck.errors,
+      );
     }
   }
 
@@ -1515,6 +1524,7 @@ function canonicalSegmentsKey(segments: readonly NormalizedSegment[]): string {
           s.episodeEnd ?? null,
           s.targetEpisodeStart,
           Boolean(s.nonLinear),
+          Boolean(s.needsReview),
         ] as const,
     )
     .sort(
@@ -1524,7 +1534,8 @@ function canonicalSegmentsKey(segments: readonly NormalizedSegment[]): string {
         a[4] - b[4] ||
         (a[3] ?? Number.POSITIVE_INFINITY) - (b[3] ?? Number.POSITIVE_INFINITY) ||
         a[0].localeCompare(b[0]) ||
-        Number(a[5]) - Number(b[5]),
+        Number(a[5]) - Number(b[5]) ||
+        Number(a[6]) - Number(b[6]),
     );
   return JSON.stringify(entries);
 }
@@ -1685,10 +1696,13 @@ function mergeApprovedSegments(
     return [s.targetEpisodeStart, end ? s.targetEpisodeStart + end - s.episodeStart : Infinity];
   };
   const requestedSeasons = new Set(requested.map((s) => s.season));
-  const claimed = requested.map(positions);
+  const claimed = requested.filter((s) => !s.nonLinear).map(positions);
   const kept = existing.filter((s) => {
     const [start, end] = positions(s);
-    return !requestedSeasons.has(s.season) && claimed.every(([a, b]) => end < a || b < start);
+    return (
+      !requestedSeasons.has(s.season) &&
+      (s.nonLinear || claimed.every(([a, b]) => end < a || b < start))
+    );
   });
   return [...kept, ...requested].sort(
     (a, b) => a.season - b.season || a.episodeStart - b.episodeStart,
@@ -1877,9 +1891,7 @@ export async function approveChangeRequestInTransaction(
 
     if (!resolvedOrCreatedMedia && prefetchedCatalog) {
       const reusable = await findReusableMediaForPrefetchedCatalogInTx(trx, {
-        type: prefetchedCatalog.type,
-        snapshot: prefetchedCatalog.snapshot,
-        externalIds: prefetchedCatalog.externalIds,
+        ...prefetchedCatalog,
         aliases: prefetchedCatalog.evidence.aliases,
       });
       if (reusable) {
@@ -2181,15 +2193,6 @@ export async function approveChangeRequestInTransaction(
       }
     | undefined;
 
-  const { catalogTitles, collectionTitles } = extractCatalogAndCollectionTitlesFromEvidence(
-    input.evidence !== undefined ? input.evidence : cr.evidence,
-  );
-  const prefetchedTitles = prefetchedCatalog
-    ? [prefetchedCatalog.snapshot.title, prefetchedCatalog.snapshot.originalTitle].filter(
-        (t): t is string => typeof t === "string" && t.trim().length > 0,
-      )
-    : [];
-
   for (let pass = 0; pass < 2; pass += 1) {
     existingAssociation = await trx
       .selectFrom("associations")
@@ -2318,18 +2321,33 @@ export async function approveChangeRequestInTransaction(
       let allMerged = candidateOtherIds.length > 0;
 
       const rawEvidence = input.evidence !== undefined ? input.evidence : cr.evidence;
-      const collectionEvidenceRaw =
-        rawEvidence &&
-        typeof rawEvidence === "object" &&
-        !Array.isArray(rawEvidence) &&
-        typeof (rawEvidence as Record<string, unknown>).collection === "object" &&
-        (rawEvidence as Record<string, unknown>).collection !== null
-          ? ((rawEvidence as Record<string, unknown>).collection as Record<string, unknown>)
-          : null;
+      const collectionEvidenceRaw = parseJsonObject(parseJsonObject(rawEvidence)?.collection);
+      const collectionTitles = collectionEvidenceRaw
+        ? [
+            collectionEvidenceRaw.title,
+            collectionEvidenceRaw.originalTitle,
+            ...(Array.isArray(collectionEvidenceRaw.aliases) ? collectionEvidenceRaw.aliases : []),
+          ].filter((title): title is string => typeof title === "string" && title.trim().length > 0)
+        : [];
 
+      const targetSnapshot = prefetchedCatalog
+        ? await loadMediaMergeCandidateSnapshotInTx(trx, mediaId)
+        : null;
+      const targetExtra =
+        prefetchedCatalog &&
+        targetSnapshot &&
+        doesCatalogTargetMatchMediaSnapshot(targetSnapshot, [], {
+          ...prefetchedCatalog,
+          aliases: prefetchedCatalog.evidence.aliases,
+        })
+          ? [
+              prefetchedCatalog.snapshot.title,
+              prefetchedCatalog.snapshot.originalTitle,
+              ...(prefetchedCatalog.evidence.aliases ?? []),
+            ].filter((t): t is string => Boolean(t))
+          : [];
       for (const otherId of candidateOtherIds) {
         const extraTitlesByMediaId = new Map<string, readonly string[]>();
-        const targetExtra = [...prefetchedTitles, ...catalogTitles];
         if (targetExtra.length > 0) {
           extraTitlesByMediaId.set(mediaId, targetExtra);
         }

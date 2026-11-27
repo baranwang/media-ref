@@ -59,7 +59,10 @@ export function formatSegmentEpisodeLabel(
   }
   const coversWholeSeason =
     start === 1 &&
-    (end === null || (wholeSeasonEpisodes !== undefined && end >= wholeSeasonEpisodes));
+    (end === null ||
+      (wholeSeasonEpisodes !== undefined &&
+        wholeSeasonEpisodes > 0 &&
+        end === wholeSeasonEpisodes));
   return coversWholeSeason
     ? "整季收录 · 不按集对应"
     : `${formatEpisodeRange(start, end)}（不按集对应）`;
