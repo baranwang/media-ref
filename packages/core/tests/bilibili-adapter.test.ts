@@ -332,6 +332,46 @@ describe("Bilibili Tier 1 & Tier 2 adapter", () => {
     expect(timedOut.status).toBe("transient_error");
   });
 
+  test("takes the year from the media's premiere date, not the season's listing time", async () => {
+    const season = (seasonId: number, mediaId: number) => ({
+      code: 0,
+      message: "success",
+      result: {
+        season_id: seasonId,
+        media_id: mediaId,
+        title: "死侍2",
+        type: 2,
+        publish: { pub_time: "2023-10-05 18:00:00" },
+        episodes: [{ id: 1, title: "正片", badge_type: 0, section_type: 0 }],
+      },
+    });
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.url.endsWith("season_id=46072"))
+          return jsonResponse(request.url, season(46072, 28339032));
+        if (request.url.endsWith("season_id=46073"))
+          return jsonResponse(request.url, season(46073, 1));
+        if (request.url.endsWith("media?media_id=28339032")) {
+          return jsonResponse(request.url, {
+            code: 0,
+            result: { media_id: 28339032, publish: { pub_date: "2018-05-18" } },
+          });
+        }
+        if (request.url.endsWith("media?media_id=1")) {
+          return { status: 412, headers: {}, body: "risk control", url: request.url };
+        }
+        throw new Error(`Unexpected URL: ${request.url}`);
+      },
+    });
+
+    const premiere = await bilibiliAdapter.fetchCollection("ss46072", outbound);
+    expect(premiere).toMatchObject({ status: "found", info: { year: 2018, mediaType: "movie" } });
+
+    // The media lookup is best effort: when it fails, the season's own year stays.
+    const fallback = await bilibiliAdapter.fetchCollection("ss46073", outbound);
+    expect(fallback).toMatchObject({ status: "found", info: { year: 2023 } });
+  });
+
   test("registry exposes default adapters and tier guards cleanly", () => {
     const defaultRegistry = createDefaultAdapterRegistry();
     const bili = defaultRegistry.get("bilibili");
