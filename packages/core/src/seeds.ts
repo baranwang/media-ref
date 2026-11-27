@@ -1768,6 +1768,57 @@ export async function enqueueSeedEvidenceChecksForMedia(
   return { enqueuedJobIds, alreadyCheckedCount };
 }
 
+/** How long a seed check that gave up on outages waits before it runs again. */
+export const SEED_EVIDENCE_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Puts seed checks that exhausted their retries (a source down, HTTP 5xx) back in the queue a day
+ * later, while their seed is still unchecked. Enqueueing skips a seed with any earlier check, so
+ * without this a seed whose check failed once stays unconfirmed, and the demands that wait on it
+ * stay deferred, for good. Returns how many were requeued.
+ */
+export async function retryFailedSeedEvidenceChecks(
+  db: Db,
+  input: { now: Date; limit?: number },
+): Promise<number> {
+  const before = new Date(input.now.getTime() - SEED_EVIDENCE_RETRY_AFTER_MS);
+  const due = db
+    .selectFrom("background_jobs as j")
+    .select("j.id")
+    .where("j.job_type", "=", SEED_EVIDENCE_CHECK_JOB_TYPE)
+    .where("j.status", "=", "failed")
+    .where("j.updated_at", "<", before)
+    .where((eb) =>
+      eb.exists(
+        eb
+          .selectFrom("associations as a")
+          .select("a.id")
+          .whereRef(sql`a.id::text`, "=", sql`j.payload->>'associationId'`)
+          .where("a.status", "=", "seed_unconfirmed")
+          .where("a.needs_review", "=", false)
+          .where("a.locked", "=", false),
+      ),
+    )
+    .orderBy("j.updated_at")
+    .limit(input.limit ?? 20);
+  const rows = await db
+    .updateTable("background_jobs")
+    .set({
+      status: "pending",
+      attempts: 0,
+      run_after: input.now,
+      error_message: null,
+      lease_expires_at: null,
+      leased_at: null,
+      completed_at: null,
+      updated_at: input.now,
+    })
+    .where("id", "in", due)
+    .returning("id")
+    .execute();
+  return rows.length;
+}
+
 async function resolveAuthoritativeCatalogKeyForMedia(
   db: Db,
   mediaId: string,

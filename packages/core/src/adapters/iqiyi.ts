@@ -857,12 +857,11 @@ async function fetchAlbumFeatureEpisodes(
       });
     }
 
-    // Long albums (e.g. 航海王, total 1181) report hasMore: false on every page, so `total` must win.
+    // iQIYI answers hasMore: false on every page of a long album (航海王: 24 pages), so total wins.
     const hasMore =
-      data.hasMore === true ||
-      (typeof data.total === "number" &&
-        Number.isFinite(data.total) &&
-        totalRawItemsSeen < data.total);
+      typeof data.total === "number" && Number.isFinite(data.total)
+        ? totalRawItemsSeen < data.total
+        : data.hasMore === true;
 
     if (!hasMore || rawList.length === 0) {
       break;

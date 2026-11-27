@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { CollectionInfo } from "../src/adapters/index.ts";
 import { checkSegmentsFitCollection } from "../src/exploration-agent.ts";
-import { seasonCoverageConflict, type SeasonEpisode } from "../src/season-coverage.ts";
+import {
+  lastAiredEpisode,
+  seasonCoverageConflict,
+  type SeasonEpisode,
+} from "../src/season-coverage.ts";
 import type { SegmentInput } from "@media-ref/client";
 
 const collection = (episodes: number): CollectionInfo => ({
@@ -29,6 +33,46 @@ describe("checkSegmentsFitCollection", () => {
       /episode 24/,
     );
     expect(checkSegmentsFitCollection([seg(null)], collection(24), seasonOf24)).toBeNull();
+  });
+
+  test("an open end on a season still airing needs only the episodes aired so far", () => {
+    // 两京十五日: 16 of 26 episodes out on the platform while the season is airing.
+    const aired16 = (season: number) => (season === 1 ? 16 : null);
+    expect(checkSegmentsFitCollection([seg(null)], collection(16), seasonOf24, aired16)).toBeNull();
+    expect(checkSegmentsFitCollection([seg(null)], collection(15), seasonOf24, aired16)).toMatch(
+      /episode 16/,
+    );
+    expect(
+      checkSegmentsFitCollection(
+        [{ ...seg(null), season: 2 }],
+        collection(16),
+        seasonOf24,
+        aired16,
+      ),
+    ).toMatch(/episodeEnd is required/);
+  });
+
+  test("lastAiredEpisode reports a season only while its last episode has not aired", () => {
+    const now = new Date("2026-11-27T12:00:00Z");
+    const ep = (episode: number, airDate: string | null) => ({ episode, title: null, airDate });
+    expect(
+      lastAiredEpisode([ep(1, "2026-11-01"), ep(2, "2026-11-26"), ep(3, "2026-11-27")], now),
+    ).toBe(2);
+    expect(lastAiredEpisode([ep(2, null), ep(1, "2026-11-01")], now)).toBe(1);
+    expect(lastAiredEpisode([ep(1, "2026-11-01"), ep(2, "2026-11-26")], now)).toBeNull();
+    expect(lastAiredEpisode([], now)).toBeNull();
+    // Missing dates alone are no evidence of airing.
+    expect(lastAiredEpisode([ep(1, null), ep(2, null)], now)).toBeNull();
+    expect(lastAiredEpisode([ep(1, "2025-01-01"), ep(2, null)], now)).toBeNull();
+    // An old broadcast with the rest scheduled ahead is still airing (a mid-season break).
+    expect(lastAiredEpisode([ep(1, "2025-01-01"), ep(2, "2027-01-01")], now)).toBe(1);
+    // An undated gap before an aired episode: the collection must still reach E3.
+    expect(
+      lastAiredEpisode(
+        [ep(1, "2026-11-01"), ep(2, null), ep(3, "2026-11-20"), ep(4, "2026-12-01")],
+        now,
+      ),
+    ).toBe(3);
   });
 
   test("an open end with an unknown season length is refused", () => {

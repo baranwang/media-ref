@@ -114,6 +114,15 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
     if (wife) {
       return wife;
     }
+    if (url.includes("/movie/383498")) {
+      return jsonResponse(url, {
+        id: 383498,
+        title: "死侍2",
+        original_title: "Deadpool 2",
+        release_date: "2018-05-10",
+        external_ids: { imdb_id: "tt5463162" },
+      });
+    }
     if (url.includes("/tv/91234/season/1")) {
       return jsonResponse(url, {
         episodes: Array.from({ length: 12 }, (_, i) => ({
@@ -214,6 +223,20 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
       },
     });
   }
+  if (request.namespace === "bilibili" && url.includes("season_id=46072")) {
+    // 死侍2, listed on Bilibili in 2023: without its media's premiere date, the year is 2023.
+    return jsonResponse(url, {
+      code: 0,
+      message: "success",
+      result: {
+        season_id: 46072,
+        title: "死侍2",
+        type: 2,
+        publish: { pub_time: "2023-10-05 18:00:00" },
+        episodes: [{ id: 500000, title: "正片", badge: "付费", badge_type: 0, section_type: 0 }],
+      },
+    });
+  }
   if (request.namespace === "bilibili" && url.includes("season_id=404404")) {
     return jsonResponse(url, { code: -404, message: "啥都木有" });
   }
@@ -307,9 +330,10 @@ async function setup(
   reviewAgent: BackgroundWorkerConfig["reviewAgent"] = {},
   adapterRegistry: AdapterRegistry = createDefaultAdapterRegistry(),
   workerConfig: Partial<BackgroundWorkerConfig> = {},
+  fetchExternal: (request: ExternalHttpRequest) => ExternalHttpResponse = httpStub,
 ) {
   const testDb = await createTestDb();
-  const outbound = createFakeOutboundClient({ fetchExternal: httpStub, invokeModel });
+  const outbound = createFakeOutboundClient({ fetchExternal, invokeModel });
   const emitted: JobQueueMessage[] = [];
   const worker = createBackgroundWorker({
     db: testDb.writeDb,
@@ -450,6 +474,42 @@ describe("review agent (#75)", () => {
     expect(Number(budget.tokens_used)).toBe(2200);
     expect(budget.review_consumed).toBe(1);
     expect(budget.pi_usage).toMatchObject({ "test-model": { input: 2000, output: 200 } });
+  });
+
+  test("死侍2: a movie has no season to correct, so the session approves its year conflict with the collection alone", async () => {
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [["get_collection", { namespace: "bilibili", id: "ss46072" }]]);
+      }
+      return reply(turn, [
+        [
+          "approve",
+          {
+            reasons: [
+              { code: "year_mismatch", reason: "2023 是平台上架年份，正片是 2018 年的电影" },
+            ],
+          },
+        ],
+      ]);
+    };
+    const { submit, drain, changeRequest, outbound } = track(await setup(model));
+    const id = await submit("ss46072", { targetExternalKey: "tmdb:movie:383498", segments: [] });
+
+    await drain();
+
+    const first = outbound.modelRequests[0]!;
+    expect(conflictCodes(first)).toEqual(["year_mismatch"]);
+    const toolNames = first.tools!.map((t) => t.name);
+    expect(toolNames).toEqual(expect.arrayContaining(["approve", "reject"]));
+    expect(toolNames).not.toContain("reject_with_correction");
+    expect(first.messages[0]!.content).toContain("The catalog entry is a movie");
+    const cr = await changeRequest(id);
+    expect(cr.status).toBe("approved");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "approve",
+      fallback: null,
+    });
   });
 
   const approveAfter =
@@ -1307,8 +1367,8 @@ describe("review agent: reject with correction (#76)", () => {
     },
   );
 
-  test("an open-ended correction on a season still airing is handed over up to the last verified episode", async () => {
-    // TMDB season 8 has 10 episodes; the platform has the first 7 so far.
+  test("an open-ended correction on a finished season's shorter collection is handed over up to the last verified episode", async () => {
+    // TMDB season 8 has 10 episodes, all aired; the platform carries only the first 7.
     const airing = createAdapterRegistry([
       {
         ...bilibiliAdapter,
@@ -1353,6 +1413,58 @@ describe("review agent: reject with correction (#76)", () => {
     });
     expect(await leads(ctx)).toEqual([
       expect.objectContaining({ season: 8, segments: bounded.segments }),
+    ]);
+  });
+
+  test("an open-ended correction on a season still airing keeps its open end", async () => {
+    // TMDB season 8 lists 10 episodes, of which 8–10 are scheduled ahead; the platform has the first 7.
+    const unaired: typeof httpStub = (request) => {
+      const response = httpStub(request);
+      if (!/\/tv\/70001\/season\/8/.test(request.url)) return response;
+      const body = JSON.parse(response.body) as { episodes: Array<Record<string, unknown>> };
+      for (const ep of body.episodes)
+        if ((ep.episode_number as number) > 7) ep.air_date = "2026-12-31";
+      return { ...response, body: JSON.stringify(body) };
+    };
+    const airing = createAdapterRegistry([
+      {
+        ...bilibiliAdapter,
+        async fetchCollection(id, outbound) {
+          const result = await bilibiliAdapter.fetchCollection(id, outbound);
+          return result.status === "found"
+            ? {
+                ...result,
+                info: { ...result.info, featureEpisodes: result.info.featureEpisodes.slice(0, 7) },
+              }
+            : result;
+        },
+      },
+    ]);
+    const openEnded = {
+      season: 8,
+      segments: [{ season: 8, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 }],
+    };
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 8 }],
+        ]);
+      }
+      return reply(turn, [["reject_with_correction", { opinion: WIFE_OPINION, ...openEnded }]]);
+    };
+    const ctx = track(await setup(model, {}, airing, {}, unaired));
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    // Exploration accepts an open end on a season still airing once every aired episode is there.
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: { verdict: "reject_with_correction", correction: openEnded, fallback: null },
+    });
+    expect(await leads(ctx)).toEqual([
+      expect.objectContaining({ season: 8, segments: openEnded.segments }),
     ]);
   });
 

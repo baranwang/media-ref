@@ -41,6 +41,7 @@ import {
   type Tier3Adapter,
 } from "./adapters/index.ts";
 import {
+  lastAiredEpisode,
   seasonCoverageConflict,
   seasonCoverageScopes,
   type SeasonEpisode,
@@ -421,7 +422,11 @@ function toDiscoveryInput(
 }
 
 /** Segments used when nobody says otherwise: the requested season mapped 1:1. */
-function defaultSegments(media: ExplorationTargetMedia, season: number | null): SegmentInput[] {
+function defaultSegments(
+  media: ExplorationTargetMedia,
+  season: number | null,
+  airing: AiringSeason | null,
+): SegmentInput[] {
   if (media.type === "movie" || media.baseline === null || season === null) {
     return [];
   }
@@ -430,7 +435,8 @@ function defaultSegments(media: ExplorationTargetMedia, season: number | null): 
     {
       season,
       episodeStart: 1,
-      episodeEnd: snap && snap.episodeCount > 0 ? snap.episodeCount : null,
+      episodeEnd:
+        airing?.season !== season && snap && snap.episodeCount > 0 ? snap.episodeCount : null,
       targetEpisodeStart: 1,
       baseline: media.baseline,
     },
@@ -440,13 +446,13 @@ function defaultSegments(media: ExplorationTargetMedia, season: number | null): 
 function parseModelSegments(
   raw: unknown,
   media: ExplorationTargetMedia,
-  season: number | null,
+  fallback: SegmentInput[],
 ): SegmentInput[] {
   if (media.type === "movie" || media.baseline === null) {
     return [];
   }
   if (!Array.isArray(raw) || raw.length === 0) {
-    return defaultSegments(media, season);
+    return fallback;
   }
   const num = (v: unknown, fallback: number) => (typeof v === "number" ? v : fallback);
   return raw.flatMap((item): SegmentInput[] => {
@@ -470,7 +476,8 @@ function parseModelSegments(
 
 /**
  * Evidence door: every linear segment must land inside the collection's fetched feature episodes
- * (with an open end resolved against its baseline season length). Non-linear segments map the
+ * (with an open end resolved against its baseline season length, or for a season still airing
+ * against the episodes aired so far). Non-linear segments map the
  * season at collection level rather than 1:1 to episode indexes, requiring only a non-empty
  * collection and valid segment bounds. Returns a reason when a segment does not fit.
  */
@@ -478,6 +485,7 @@ export function checkSegmentsFitCollection(
   segments: readonly SegmentInput[],
   info: CollectionInfo,
   seasonEpisodeCount: (season: number) => number | null,
+  lastAired: (season: number) => number | null = () => null,
 ): string | null {
   const available = info.featureEpisodes.length;
   for (const seg of segments) {
@@ -514,7 +522,8 @@ export function checkSegmentsFitCollection(
     }
     let end = rawEnd;
     if (end === null) {
-      end = seasonCount;
+      const aired = lastAired(seg.season);
+      end = aired === null ? seasonCount : Math.max(start, aired);
       if (end === null) {
         return `episodeEnd is required: season ${seg.season} has no known episode count`;
       }
@@ -677,6 +686,7 @@ function buildAgentSystemPrompt(namespaces: readonly Namespace[]): string {
     "   When episode counts differ because the platform and catalog count variety broadcasts/extras differently (e.g. platform has 第1期上..第10期下 = 20 while TMDB includes 先导片/加更 = 47, and the collection spans the whole season),",
     "   NEVER truncate to a shorter linear prefix like 1..20; inspect get_catalog_season + get_collection and submit { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.",
     "   Match a substantive finale subtitle or final broadcast installment before claiming the whole season. Platform publication dates can be delayed. Map only the verified finite range for Part 1, using nonLinear when its episodes are grouped differently.",
+    "   target.airingSeason is a season still airing: a collection holding the episodes aired so far is the whole season, so submit { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 }. NEVER cut it to the aired count.",
     "6. passesAutomaticCheckWithDefaultMapping is a hint from a deterministic check, not a decision.",
     "   alreadyMappedToSeasons lists seasons of this media the collection already holds, with their platform positions:",
     "   it is not this season's unless it really holds both; then map this season onto positions those seasons do not use.",
@@ -689,6 +699,7 @@ function buildAgentSystemPrompt(namespaces: readonly Namespace[]): string {
 function buildAgentUserPrompt(
   media: ExplorationTargetMedia,
   season: number | null,
+  airing: AiringSeason | null,
   targets: ReadonlyArray<{
     namespace: Namespace;
     candidates: ReturnType<typeof summarizeCandidate>[];
@@ -702,6 +713,9 @@ function buildAgentUserPrompt(
       year: media.snapshot.year,
       requestedSeason: season,
       seasons: media.snapshot.seasons,
+      ...(airing
+        ? { airingSeason: { season: airing.season, lastAiredEpisode: airing.aired } }
+        : {}),
       externalIds: Object.fromEntries(media.externalIds.map((e) => [e.namespace, e.nativeId])),
     },
     namespaces: targets,
@@ -834,18 +848,57 @@ interface JobRun {
   passesGate(info: CollectionInfo, segments: readonly SegmentInput[]): boolean;
   segmentMisfit(info: CollectionInfo, segments: readonly SegmentInput[]): string | null;
   baseSegments: SegmentInput[];
+  airing: AiringSeason | null;
+}
+
+/** The media's last season while it is still airing, and the last of its episodes that aired. */
+interface AiringSeason {
+  season: number;
+  aired: number;
+}
+
+async function loadAiringSeason(
+  ctx: ExplorationExecutionContext,
+  catalog: CatalogEvidence,
+  budget: SessionBudget,
+): Promise<(AiringSeason & { episodes: readonly SeasonEpisode[] }) | null> {
+  const tmdbTvId = catalog.namespace === "tmdb" && catalog.canonicalId.match(/^tv:(\d+)$/)?.[1];
+  const season = Math.max(0, ...catalog.seasons.map((s) => s.season));
+  if (!tmdbTvId || season < 1 || (ctx.season !== null && ctx.season !== season)) return null;
+  try {
+    const episodes =
+      catalog.seasonEpisodes?.[season] ??
+      (await raceWithAbortSignal(
+        ctx.tmdbGateway.fetchSeasonEpisodes(tmdbTvId, season, budget.signal),
+        budget.signal,
+        BUDGET_EXCEEDED,
+      )) ??
+      [];
+    const aired = lastAiredEpisode(episodes, ctx.now);
+    return aired === null ? null : { season, aired, episodes };
+  } catch {
+    // An unknown airing state keeps the finished-season rules.
+    return null;
+  }
 }
 
 function createJobRun(
   ctx: ExplorationExecutionContext,
   catalog: CatalogEvidence,
   budget: SessionBudget,
+  airing: (AiringSeason & { episodes: readonly SeasonEpisode[] }) | null,
 ): JobRun {
   const seasonEpisodes: Record<number, readonly SeasonEpisode[]> = { ...catalog.seasonEpisodes };
+  if (airing) seasonEpisodes[airing.season] = airing.episodes;
   const evidence = { ...catalog, seasonEpisodes };
   const tmdbTvId = catalog.canonicalId.match(/^tv:(\d+)$/)?.[1];
   const segmentMisfit = (info: CollectionInfo, segments: readonly SegmentInput[]) =>
-    checkSegmentsFitCollection(segments, info, (season) => seasonLength(ctx.media, season));
+    checkSegmentsFitCollection(
+      segments,
+      info,
+      (season) => seasonLength(ctx.media, season),
+      (season) => (season === airing?.season ? airing.aired : null),
+    );
   return {
     ctx,
     budget,
@@ -874,7 +927,8 @@ function createJobRun(
         collection: info,
         segments: normalizeSegments(segments),
       }).decision === "pass",
-    baseSegments: defaultSegments(ctx.media, ctx.season),
+    baseSegments: defaultSegments(ctx.media, ctx.season, airing),
+    airing: airing && { season: airing.season, aired: airing.aired },
   };
 }
 
@@ -1203,7 +1257,7 @@ async function runAgentSession(
     {
       name: "submit_mapping",
       description:
-        "Conclude a namespace with a fetched collection. For TV, linear segments map baseline episodes episodeStart..episodeEnd of `season` to collection episodes targetEpisodeStart onward. Omit segments to map the requested season 1:1. Set nonLinear: true with { episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 } when a collection holds the full season whose episode granularity differs from the baseline catalog (e.g. variety shows where TMDB counts extras/prologues alongside broadcast parts); never truncate a full season to a shorter linear prefix unless the collection genuinely stops at that episode.",
+        "Conclude a namespace with a fetched collection. For TV, linear segments map baseline episodes episodeStart..episodeEnd of `season` to collection episodes targetEpisodeStart onward. Omit segments to map the requested season 1:1. Set nonLinear: true with { episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 } when a collection holds the full season whose episode granularity differs from the baseline catalog (e.g. variety shows where TMDB counts extras/prologues alongside broadcast parts); never truncate a full season to a shorter linear prefix unless the collection genuinely stops at that episode. A season still airing keeps episodeEnd: null.",
       parameters: {
         type: "object",
         properties: {
@@ -1253,6 +1307,7 @@ async function runAgentSession(
       content: buildAgentUserPrompt(
         ctx.media,
         ctx.season,
+        run.airing,
         targets.map((t) => ({
           namespace: t.namespace,
           candidates: [...t.fetched.values()].map((c) => summarizeCandidate(run, t, c)),
@@ -1292,7 +1347,7 @@ async function runAgentSession(
         message: "Fetch the collection with get_collection before submitting it.",
       };
     }
-    const segments = parseModelSegments(args.segments, ctx.media, ctx.season);
+    const segments = parseModelSegments(args.segments, ctx.media, run.baseSegments);
     const misfit = run.segmentMisfit(candidate.info, segments);
     if (misfit) {
       return { ok: false, error: "SEGMENTS_OUTSIDE_COLLECTION", message: misfit };
@@ -2433,7 +2488,7 @@ export function createExplorationAgentExecutor(
           )
         : null;
 
-      const run = createJobRun(ctx, catalog, budget);
+      const run = createJobRun(ctx, catalog, budget, await loadAiringSeason(ctx, catalog, budget));
       const open: OpenTarget[] = [];
       for (const adapter of targets) {
         const candidates =
