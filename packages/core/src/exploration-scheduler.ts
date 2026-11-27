@@ -42,8 +42,8 @@ import {
 
 export { computeNotFoundBackoffSeconds, DEFAULT_NOT_FOUND_BACKOFF_SECONDS } from "./demands.ts";
 import {
-  areMediaSnapshotsCompatibleForAutoMerge,
-  parseMediaSeasonsJson,
+  doesCatalogTargetMatchMediaSnapshot,
+  loadMediaMergeCandidateSnapshotInTx,
 } from "./duplicate-merge-policy.ts";
 import {
   enqueueJob,
@@ -54,6 +54,7 @@ import {
 } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import {
+  backfillMissingExternalIdsInTx,
   isAssociationNamespace,
   isUuid,
   loadActiveAssociationsWithSegments,
@@ -1584,7 +1585,6 @@ export function createExplorationJobHandler(
 
         // Collect all external keys for demand merging and prefer matching existing media via
         // authoritative external IDs before falling back to unconfirmed seed catalog matches.
-        let matchedByAuthoritativeExternalId = false;
         if (verifiedCatalog?.externalIds) {
           for (const ns of EXTERNAL_ID_NAMESPACES) {
             const val = verifiedCatalog.externalIds[ns];
@@ -1592,7 +1592,6 @@ export function createExplorationJobHandler(
               continue;
             }
             const formatted = formatExternalKey({ namespace: ns, nativeId: val });
-            mergeExternalKeys.add(formatted);
             if (!resolvedMediaId) {
               const candidateId = await findExistingMediaIdByExternalKey(trx, formatted, {
                 includeUnconfirmedCatalog: false,
@@ -1606,7 +1605,6 @@ export function createExplorationJobHandler(
                 if (candidateRow && candidateRow.type === verifiedCatalog.mediaType) {
                   resolvedMediaId = candidateRow.id;
                   reusedExisting = true;
-                  matchedByAuthoritativeExternalId = true;
                 }
               }
             }
@@ -1645,25 +1643,11 @@ export function createExplorationJobHandler(
           mediaSeasons = verifiedCatalog!.snapshot.seasons;
 
           if (verifiedCatalog!.externalIds) {
-            for (const ns of EXTERNAL_ID_NAMESPACES) {
-              const nativeVal = verifiedCatalog!.externalIds[ns];
-              if (!nativeVal) {
-                continue;
-              }
-              await trx
-                .insertInto("associations")
-                .values({
-                  status: "confirmed",
-                  is_external_id: true,
-                  media_id: created.id,
-                  namespace: ns,
-                  native_id: nativeVal,
-                  source: "sync",
-                })
-                .onConflict((oc) => oc.doNothing())
-                .execute();
-              mergeExternalKeys.add(formatExternalKey({ namespace: ns, nativeId: nativeVal }));
-            }
+            const addedKeys = await backfillMissingExternalIdsInTx(trx, {
+              mediaId: created.id,
+              externalIds: verifiedCatalog!.externalIds,
+            });
+            for (const key of addedKeys) mergeExternalKeys.add(key);
           }
 
           // When lazily created from a Douban or Bangumi catalog entry, establish the initial
@@ -1746,6 +1730,29 @@ export function createExplorationJobHandler(
           mediaType = mediaRow.type;
           mediaSeasons = parseSeasonsSnapshotJson(mediaRow.seasons);
 
+          const snapshot = verifiedCatalog
+            ? await loadMediaMergeCandidateSnapshotInTx(trx, resolvedMediaId)
+            : null;
+          const matchesCatalog =
+            verifiedCatalog &&
+            snapshot &&
+            doesCatalogTargetMatchMediaSnapshot(snapshot, [], {
+              type: verifiedCatalog.mediaType,
+              snapshot: verifiedCatalog.snapshot,
+              externalIds: verifiedCatalog.externalIds,
+            });
+          if (matchesCatalog && verifiedCatalog?.externalIds) {
+            const addedKeys = await backfillMissingExternalIdsInTx(trx, {
+              mediaId: resolvedMediaId,
+              externalIds: verifiedCatalog.externalIds,
+            });
+            for (const key of addedKeys) mergeExternalKeys.add(key);
+            for (const ext of snapshot.externalIds) {
+              if (verifiedCatalog.externalIds[ext.namespace] === ext.nativeId)
+                mergeExternalKeys.add(formatExternalKey(ext));
+            }
+          }
+
           // When reusing an existing media for a Douban/Bangumi external key, NEVER confirm an
           // existing `seed_unconfirmed` (or `delisted`) association without running `seed_evidence_check`.
           if (verifiedCatalog && initAssoc) {
@@ -1772,26 +1779,7 @@ export function createExplorationJobHandler(
                 });
               }
             } else if (reusedExisting && mediaRow.type === verifiedCatalog.mediaType) {
-              const snapshotCompat =
-                matchedByAuthoritativeExternalId ||
-                areMediaSnapshotsCompatibleForAutoMerge(
-                  {
-                    type: mediaRow.type,
-                    title: mediaRow.title,
-                    originalTitle: mediaRow.original_title,
-                    year: mediaRow.year,
-                    seasons: parseMediaSeasonsJson(mediaRow.seasons),
-                  },
-                  {
-                    type: verifiedCatalog.mediaType,
-                    title: verifiedCatalog.snapshot.title,
-                    originalTitle: verifiedCatalog.snapshot.originalTitle,
-                    year: verifiedCatalog.snapshot.year,
-                    seasons: [...verifiedCatalog.snapshot.seasons],
-                  },
-                ).compatible;
-
-              if (snapshotCompat) {
+              if (matchesCatalog) {
                 const initSegments: NormalizedSegment[] = [];
                 if (mediaRow.type === "tv" && mediaRow.baseline !== null) {
                   const season1 = verifiedCatalog.snapshot.seasons.find((s) => s.season === 1);

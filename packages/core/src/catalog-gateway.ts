@@ -18,6 +18,8 @@ import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
 import {
   createTmdbGateway,
   DEFAULT_TRAKT_API_BASE_URL,
+  isTraktSyncEnabled,
+  lookupTraktId,
   parseTmdbNativeId,
   type TmdbGateway,
   type TmdbGatewayConfig,
@@ -1015,6 +1017,49 @@ async function fetchTraktTargetSnapshot(
   };
 }
 
+async function enrichTargetWithTraktId(
+  result: ResolveCatalogTargetResult,
+  outbound: OutboundClient,
+  tmdbConfig: TmdbGatewayConfig,
+): Promise<ResolveCatalogTargetResult> {
+  if (
+    result.status !== "found" ||
+    result.target.externalIds.trakt ||
+    !result.target.externalIds.tmdb ||
+    !isTraktSyncEnabled(tmdbConfig)
+  ) {
+    return result;
+  }
+
+  const parsedTmdb = parseTmdbNativeId(result.target.externalIds.tmdb);
+  if (!parsedTmdb) {
+    return result;
+  }
+
+  const traktId = await lookupTraktId(outbound, tmdbConfig, parsedTmdb.type, parsedTmdb.id);
+  if (!traktId) {
+    return result;
+  }
+
+  return {
+    status: "found",
+    target: {
+      ...result.target,
+      externalIds: {
+        ...result.target.externalIds,
+        trakt: traktId,
+      },
+      evidence: {
+        ...result.target.evidence,
+        externalIds: {
+          ...result.target.evidence.externalIds,
+          trakt: traktId,
+        },
+      },
+    },
+  };
+}
+
 export async function resolveCatalogTargetSnapshot(
   externalKey: string,
   outbound: OutboundClient,
@@ -1028,9 +1073,22 @@ export async function resolveCatalogTargetSnapshot(
     };
   }
 
+  const effectiveTmdbConfig: TmdbGatewayConfig = {
+    ...config.tmdb,
+    ...(config.traktClientId !== undefined && config.tmdb?.traktClientId === undefined
+      ? { traktClientId: config.traktClientId }
+      : {}),
+    ...(config.traktApiBaseUrl !== undefined && config.tmdb?.traktApiBaseUrl === undefined
+      ? { traktApiBaseUrl: config.traktApiBaseUrl }
+      : {}),
+    ...(config.timeoutMs !== undefined && config.tmdb?.timeoutMs === undefined
+      ? { timeoutMs: config.timeoutMs }
+      : {}),
+  };
+
   switch (parsed.namespace) {
     case "tmdb": {
-      const gateway = config.tmdbGateway ?? createTmdbGateway(outbound, config.tmdb);
+      const gateway = config.tmdbGateway ?? createTmdbGateway(outbound, effectiveTmdbConfig);
       let fetched: TmdbMediaFetchResult | null;
       try {
         fetched = await gateway.fetchMediaSnapshotAndExternalIds(parsed.tmdbType, parsed.tmdbId);
@@ -1050,10 +1108,18 @@ export async function resolveCatalogTargetSnapshot(
     }
 
     case "tvdb":
-      return fetchTvdbTargetSnapshot(parsed, outbound, config);
+      return enrichTargetWithTraktId(
+        await fetchTvdbTargetSnapshot(parsed, outbound, config),
+        outbound,
+        effectiveTmdbConfig,
+      );
 
     case "imdb":
-      return fetchImdbTargetSnapshot(parsed, outbound, config);
+      return enrichTargetWithTraktId(
+        await fetchImdbTargetSnapshot(parsed, outbound, config),
+        outbound,
+        effectiveTmdbConfig,
+      );
 
     case "bangumi": {
       const fetched = await fetchBangumiCollection(parsed.subjectId, outbound, {

@@ -1464,6 +1464,68 @@ function mergeApprovedSegments(
   );
 }
 
+export async function backfillMissingExternalIdsInTx(
+  trx: Transaction<Database>,
+  input: {
+    mediaId: string;
+    externalIds: Partial<Record<ExternalIdNamespace, string>>;
+    skipNamespace?: ExternalIdNamespace | null;
+    now?: Date;
+  },
+): Promise<string[]> {
+  const candidates = EXTERNAL_ID_NAMESPACES.flatMap((ns) => {
+    if (ns === input.skipNamespace) {
+      return [];
+    }
+    const nativeId = input.externalIds[ns];
+    return nativeId ? [{ namespace: ns, nativeId }] : [];
+  });
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const existingRows = await trx
+    .selectFrom("associations")
+    .select("namespace")
+    .where("is_external_id", "=", true)
+    .where("media_id", "=", input.mediaId)
+    .where(
+      "namespace",
+      "in",
+      candidates.map((entry) => entry.namespace),
+    )
+    .execute();
+  const existingNamespaces = new Set(existingRows.map((row) => row.namespace));
+  const insertedKeys: string[] = [];
+
+  for (const entry of candidates) {
+    if (existingNamespaces.has(entry.namespace)) {
+      continue;
+    }
+    const inserted = await trx
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        is_external_id: true,
+        media_id: input.mediaId,
+        namespace: entry.namespace,
+        native_id: entry.nativeId,
+        source: "sync",
+        ...(input.now ? { created_at: input.now, updated_at: input.now } : {}),
+      })
+      .onConflict((oc) => oc.doNothing())
+      .returning("id")
+      .executeTakeFirst();
+    if (inserted) {
+      insertedKeys.push(
+        formatExternalKey({ namespace: entry.namespace, nativeId: entry.nativeId }),
+      );
+    }
+  }
+
+  return insertedKeys;
+}
+
 export async function approveChangeRequestInTransaction(
   trx: Transaction<Database>,
   input: ApproveChangeRequestInTransactionInput,
@@ -1512,6 +1574,30 @@ export async function approveChangeRequestInTransaction(
     media = await resolveCanonicalMediaById(trx, cr.media_id);
   }
 
+  if (media && prefetchedCatalog) {
+    const snapshot = await loadMediaMergeCandidateSnapshotInTx(trx, media.id);
+    if (
+      snapshot &&
+      doesCatalogTargetMatchMediaSnapshot(snapshot, [], {
+        ...prefetchedCatalog,
+        aliases: prefetchedCatalog.evidence.aliases,
+      })
+    ) {
+      const addedKeys = await backfillMissingExternalIdsInTx(trx, {
+        mediaId: media.id,
+        externalIds: prefetchedCatalog.externalIds,
+      });
+      if (addedKeys.length > 0) {
+        await mergeExternalKeyDemandsIntoMedia(trx, {
+          mediaId: media.id,
+          externalKeys: addedKeys,
+          seasons: media.seasons,
+          mediaType: media.type,
+          now: input.now,
+        });
+      }
+    }
+  }
   if (!media) {
     await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_KEY, target.canonicalKey);
 

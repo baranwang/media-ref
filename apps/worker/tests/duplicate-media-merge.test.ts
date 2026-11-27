@@ -478,6 +478,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
             year: "2026",
             type: "tv",
             episodesCount: 40,
+            imdbId: `tt${id}`,
           });
         }
         if (
@@ -491,6 +492,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
             year: "2026",
             type: "tv",
             episodesCount: 40,
+            imdbId: `tt${id}`,
           });
         }
         if (url.pathname.endsWith("/tv/999222")) {
@@ -541,6 +543,15 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     const explorationMsgs = emitted.filter((m) => m.jobType === EXPLORATION_JOB_TYPE);
     expect(explorationMsgs).toHaveLength(2);
     await worker.queue(createQueueBatch(explorationMsgs, now).batch);
+
+    const copiedIds = await db
+      .selectFrom("associations")
+      .select("native_id")
+      .where("media_id", "in", [wrongMedia.id, uncheckedWrongMedia.id])
+      .where("is_external_id", "=", true)
+      .where("namespace", "=", "imdb")
+      .execute();
+    expect(copiedIds).toEqual([]);
 
     // Neither wrong seed may become confirmed, and `needs_review=true` must NOT be queued again
     emitted.length = 0;
