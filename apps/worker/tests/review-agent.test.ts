@@ -1382,9 +1382,13 @@ describe("review agent: reject with correction (#76)", () => {
     const ctx = track(await setup(correctsTo(8)));
     const { id: mediaId } = await createWifeMedia(ctx);
     const db = ctx.testDb.writeDb;
-    const submit = () =>
-      ctx.submit("ss77777", { targetExternalKey: mediaId, segments: wifeSegments(6) });
-    const ids = [await submit(), await submit()];
+    const submit = (setDefaultVariant: boolean) =>
+      ctx.submit("ss77777", {
+        targetExternalKey: mediaId,
+        setDefaultVariant,
+        segments: wifeSegments(6),
+      });
+    const ids = [await submit(true), await submit(false)];
     await ctx.tick(); // Evidence for both requests is now available to both sessions.
     await db
       .deleteFrom("associations")

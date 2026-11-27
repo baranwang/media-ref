@@ -205,6 +205,7 @@ export interface ChangeRequestItem {
   pageEpisodeCount: number | null;
   variantLabel: string | null;
   segments: ChangeRequestSegmentView[];
+  replacesAssociationId?: string | null;
   conflictReason: string | null;
   decisionReason: string | null;
   /** Null when the evidence gate approved it automatically. */
