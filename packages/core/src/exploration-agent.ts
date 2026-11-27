@@ -37,6 +37,11 @@ import {
   type Tier3Adapter,
 } from "./adapters/index.ts";
 import {
+  extractBroadcastPeriod,
+  hasVarietyExtraMarker,
+  isBroadcastStructured,
+} from "./adapters/variety.ts";
+import {
   discoverCandidates,
   lookupDoubanSubjectByImdb,
   type DiscoveryMediaInput,
@@ -492,6 +497,9 @@ export function checkSegmentsFitCollection(
 
 const MS_PER_DAY = 86_400_000;
 const PARTIAL_SEASON_AIRDATE_GAP_DAYS = 7;
+const SIMULCAST_PREMIERE_SLACK_DAYS = 14;
+const FINALE_PUBLICATION_SLACK_DAYS = 14;
+const MIN_SEASON_SPAN_COVERAGE = 0.75;
 
 function parseAirDateMs(value: string | null | undefined): number | null {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -501,15 +509,220 @@ function parseAirDateMs(value: string | null | undefined): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
+function normalizeEpisodeSubtitle(raw: string | null | undefined): string | null {
+  if (!raw) {
+    return null;
+  }
+  const stripped = raw
+    .trim()
+    .replace(/^第\s*\d+\s*[期集话話回]\s*[上中下]?\s*(?:[（(][^）)]+[)）])?\s*[:：\-\s]*/u, "")
+    .replace(/^(?:ep(?:isode)?|e)\s*\d+\s*[:：\-\s]*/iu, "")
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
+  if (
+    stripped.length < 4 ||
+    /^\d+$/.test(stripped) ||
+    /^(?:part\d*|先导片?|预告|花絮|彩蛋|特辑|番外|大结局|收官|加更版?|纯享版?)$/u.test(stripped)
+  ) {
+    return null;
+  }
+  return stripped;
+}
+
+function fullSeasonHint(season: number, episodeEnd: number, prefix: string): string {
+  return (
+    `${prefix} Never truncate a complete season to a linear prefix like 1..${episodeEnd}; ` +
+    `if the platform splits broadcast parts or omits catalog extras (e.g. variety shows), submit one whole-season segment ` +
+    `{ season: ${season}, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.`
+  );
+}
+
+function checkBroadcastPeriodTruncation(
+  info: CollectionInfo,
+  seg: SegmentInput,
+  seasonEpisodes: ReadonlyArray<{ episode: number; title?: string | null; airDate: string | null }>,
+  broadcastStructured: boolean,
+): { matched: true; message: string | null } | { matched: false } {
+  const collectionPeriods = info.featureEpisodes.flatMap((ep) => {
+    const period =
+      (ep.title ? extractBroadcastPeriod(ep.title) : null) ??
+      (ep.longTitle ? extractBroadcastPeriod(ep.longTitle) : null);
+    return period !== null ? [period] : [];
+  });
+  const maxCollectionPeriod =
+    collectionPeriods.length >= 2 || (broadcastStructured && collectionPeriods.length > 0)
+      ? Math.max(...collectionPeriods)
+      : null;
+
+  const prefixPeriods: number[] = [];
+  const afterPeriods: number[] = [];
+  for (const ep of seasonEpisodes) {
+    if (!ep.title) {
+      continue;
+    }
+    const period = extractBroadcastPeriod(ep.title);
+    if (period === null) {
+      continue;
+    }
+    if (ep.episode <= seg.episodeEnd!) {
+      prefixPeriods.push(period);
+    } else {
+      afterPeriods.push(period);
+    }
+  }
+  if (maxCollectionPeriod === null || prefixPeriods.length === 0) {
+    return { matched: false };
+  }
+  const maxPrefixPeriod = Math.max(...prefixPeriods);
+  // Catalog confirms all collection broadcast periods fall inside 1..episodeEnd (e.g. a genuine Part 1).
+  if (maxCollectionPeriod <= maxPrefixPeriod) {
+    return { matched: true, message: null };
+  }
+  if (afterPeriods.length > 0 && Math.max(...afterPeriods) > maxPrefixPeriod) {
+    const afterPeriod = Math.max(...afterPeriods);
+    return {
+      matched: true,
+      message: fullSeasonHint(
+        seg.season,
+        seg.episodeEnd!,
+        `${info.canonicalId} reaches broadcast period 第${maxCollectionPeriod}期, while baseline episodes 1..${seg.episodeEnd} only reach 第${maxPrefixPeriod}期 and 第${afterPeriod}期 appears later in season ${seg.season}.`,
+      ),
+    };
+  }
+  return { matched: false };
+}
+
+function checkTitleMatchTruncation(
+  info: CollectionInfo,
+  seg: SegmentInput,
+  seasonEpisodes: ReadonlyArray<{ episode: number; title?: string | null; airDate: string | null }>,
+): string | null {
+  const prefixTitles = new Set<string>();
+  const afterTitles = new Map<string, number>();
+  for (const ep of seasonEpisodes) {
+    const normalized = normalizeEpisodeSubtitle(ep.title);
+    if (!normalized) {
+      continue;
+    }
+    if (ep.episode <= seg.episodeEnd!) {
+      prefixTitles.add(normalized);
+    } else if (!afterTitles.has(normalized)) {
+      afterTitles.set(normalized, ep.episode);
+    }
+  }
+  if (afterTitles.size === 0) {
+    return null;
+  }
+  const tailStart = Math.floor(info.featureEpisodes.length / 2);
+  for (const ep of info.featureEpisodes.slice(tailStart)) {
+    for (const rawTitle of [ep.title, ep.longTitle]) {
+      const normalized = normalizeEpisodeSubtitle(rawTitle);
+      if (!normalized || prefixTitles.has(normalized)) {
+        continue;
+      }
+      const matchedCatalogEp = afterTitles.get(normalized);
+      if (matchedCatalogEp !== undefined) {
+        return fullSeasonHint(
+          seg.season,
+          seg.episodeEnd!,
+          `${info.canonicalId} episode ${ep.index} matches season ${seg.season} episode ${matchedCatalogEp} (past baseline episode ${seg.episodeEnd}).`,
+        );
+      }
+    }
+  }
+  return null;
+}
+
+function checkScheduleTruncation(
+  info: CollectionInfo,
+  seg: SegmentInput,
+  seasonCount: number,
+  seasonEpisodes: ReadonlyArray<{ episode: number; title?: string | null; airDate: string | null }>,
+  broadcastStructured: boolean,
+): string | null {
+  // Only infer full-season coverage from schedule dates when episode granularity actually differs
+  // (broadcast-split labels or catalog extras), never on plain linear split seasons.
+  const catalogHasExtras = seasonEpisodes.some(
+    (ep) => ep.title != null && hasVarietyExtraMarker(ep.title),
+  );
+  if (!broadcastStructured && !catalogHasExtras) {
+    return null;
+  }
+
+  const firstEp = seasonEpisodes[0];
+  const cutEp = seasonEpisodes.find((e) => e.episode === seg.episodeEnd);
+  const finalEp = seasonEpisodes.at(-1);
+  if (!firstEp || firstEp.episode !== 1 || !finalEp || finalEp.episode < seasonCount) {
+    return null;
+  }
+  const firstMs = parseAirDateMs(firstEp.airDate);
+  const cutMs = parseAirDateMs(cutEp?.airDate);
+  const finalMs = parseAirDateMs(finalEp.airDate);
+  if (
+    firstMs === null ||
+    cutMs === null ||
+    finalMs === null ||
+    finalMs - cutMs <= PARTIAL_SEASON_AIRDATE_GAP_DAYS * MS_PER_DAY
+  ) {
+    return null;
+  }
+
+  const datedMs = info.featureEpisodes.flatMap((ep) => {
+    const ms = parseAirDateMs(ep.airDate);
+    return ms !== null ? [ms] : [];
+  });
+  if (datedMs.length < Math.min(4, info.featureEpisodes.length) || datedMs.length < 2) {
+    return null;
+  }
+
+  const firstCollectionDate = Math.min(...datedMs);
+  const lastCollectionDate = Math.max(...datedMs);
+  const seasonSpan = finalMs - firstMs;
+  const prefixSpan = cutMs - firstMs;
+  const collectionSpan = lastCollectionDate - firstCollectionDate;
+  if (seasonSpan <= 0) {
+    return null;
+  }
+
+  const rawShift = Math.max(0, firstCollectionDate - firstMs);
+  const delayedShift = rawShift > SIMULCAST_PREMIERE_SLACK_DAYS * MS_PER_DAY ? rawShift : 0;
+  const expectedCut = cutMs + delayedShift;
+  const expectedFinale = finalMs + delayedShift;
+  const finaleUpperBound = expectedFinale + FINALE_PUBLICATION_SLACK_DAYS * MS_PER_DAY;
+  const postCutoffThreshold = expectedCut + PARTIAL_SEASON_AIRDATE_GAP_DAYS * MS_PER_DAY;
+  const postCutoffDates = datedMs.filter(
+    (ms) => ms > postCutoffThreshold && ms <= finaleUpperBound,
+  );
+
+  if (
+    lastCollectionDate >= expectedFinale - PARTIAL_SEASON_AIRDATE_GAP_DAYS * MS_PER_DAY &&
+    lastCollectionDate <= finaleUpperBound &&
+    collectionSpan > prefixSpan + PARTIAL_SEASON_AIRDATE_GAP_DAYS * MS_PER_DAY &&
+    collectionSpan >= seasonSpan * MIN_SEASON_SPAN_COVERAGE &&
+    postCutoffDates.length >= Math.max(2, Math.floor(datedMs.length * 0.2)) &&
+    new Set(postCutoffDates).size >= 2
+  ) {
+    const firstCollectionIso = new Date(firstCollectionDate).toISOString().slice(0, 10);
+    const lastCollectionIso = new Date(lastCollectionDate).toISOString().slice(0, 10);
+    return fullSeasonHint(
+      seg.season,
+      seg.episodeEnd!,
+      `${info.canonicalId}'s broadcast schedule (${firstCollectionIso}..${lastCollectionIso}) spans season ${seg.season}'s full run through its finale (${finalEp.airDate}), while baseline episode ${seg.episodeEnd} aired on ${cutEp!.airDate}.`,
+    );
+  }
+  return null;
+}
+
 /**
- * Catches truncated linear submissions like 1..20 of 47 when air dates show the collection already
- * runs to the season finale while catalog episode `episodeEnd` ended weeks earlier (variety extras).
+ * Catches truncated linear submissions like 1..20 of 47 when actual episode evidence (broadcast
+ * period numbers, distinctive post-cutoff titles, or variety-structured schedule progression)
+ * shows the collection covers through the season finale rather than just a delayed/split prefix.
  */
-function findFullSeasonTruncationMessage(
+export function findFullSeasonTruncationMessage(
   segments: readonly SegmentInput[],
   info: CollectionInfo,
   seasonEpisodeCount: (season: number) => number | null,
-  seasonEpisodes: ReadonlyArray<{ episode: number; airDate: string | null }>,
+  seasonEpisodes: ReadonlyArray<{ episode: number; title?: string | null; airDate: string | null }>,
 ): string | null {
   if (segments.length !== 1) {
     return null;
@@ -519,34 +732,30 @@ function findFullSeasonTruncationMessage(
     return null;
   }
   const seasonCount = seasonEpisodeCount(seg.season);
-  if (seasonCount === null || seg.episodeEnd >= seasonCount) {
-    return null;
-  }
-  const lastCollectionDate = info.featureEpisodes.reduce<number | null>((latest, ep) => {
-    const ms = parseAirDateMs(ep.airDate);
-    return ms !== null && (latest === null || ms > latest) ? ms : latest;
-  }, null);
-  const cutEp = seasonEpisodes.find((e) => e.episode === seg.episodeEnd);
-  const finalEp = seasonEpisodes.at(-1);
-  const cutMs = parseAirDateMs(cutEp?.airDate);
-  const finalMs = parseAirDateMs(finalEp?.airDate);
-  if (lastCollectionDate === null || cutMs === null || finalMs === null) {
-    return null;
-  }
   if (
-    finalMs - cutMs > PARTIAL_SEASON_AIRDATE_GAP_DAYS * MS_PER_DAY &&
-    lastCollectionDate >= finalMs - PARTIAL_SEASON_AIRDATE_GAP_DAYS * MS_PER_DAY
+    seasonCount === null ||
+    seg.episodeEnd >= seasonCount ||
+    info.featureEpisodes.length === 0 ||
+    seasonEpisodes.length === 0
   ) {
-    const lastCollectionIso = new Date(lastCollectionDate).toISOString().slice(0, 10);
-    return (
-      `${info.canonicalId}'s latest episode (${lastCollectionIso}) ` +
-      `already spans through season ${seg.season}'s finale (${finalEp!.airDate}), while baseline episode ${seg.episodeEnd} ` +
-      `aired on ${cutEp!.airDate}. Never truncate a complete season to a linear prefix like 1..${seg.episodeEnd}; ` +
-      `if the platform splits broadcast parts or omits catalog extras (e.g. variety shows), submit one whole-season segment ` +
-      `{ season: ${seg.season}, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.`
-    );
+    return null;
   }
-  return null;
+
+  const broadcastStructured = isBroadcastStructured(info.featureEpisodes);
+  const periodCheck = checkBroadcastPeriodTruncation(
+    info,
+    seg,
+    seasonEpisodes,
+    broadcastStructured,
+  );
+  if (periodCheck.matched) {
+    return periodCheck.message;
+  }
+
+  return (
+    checkTitleMatchTruncation(info, seg, seasonEpisodes) ??
+    checkScheduleTruncation(info, seg, seasonCount, seasonEpisodes, broadcastStructured)
+  );
 }
 
 /** Platform positions [first, last] a segment covers; last is Infinity when its season's length is unknown. */
@@ -1250,7 +1459,7 @@ async function runAgentSession(
       segments[0]!.episodeStart === 1 &&
       segments[0]!.episodeEnd != null &&
       toolCtx.tmdbTvId &&
-      candidate.info.featureEpisodes.some((ep) => Boolean(ep.airDate))
+      candidate.info.featureEpisodes.length > 0
     ) {
       const targetSeason = segments[0]!.season;
       const seasonCount = seasonLength(ctx.media, targetSeason);

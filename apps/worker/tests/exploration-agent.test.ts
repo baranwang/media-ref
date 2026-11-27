@@ -1560,4 +1560,227 @@ describe("Exploration agent: discover → judge → gate", () => {
       }),
     ]);
   });
+
+  test("allows delayed-release linear prefix 1..12 of 24 when publish_date is after TMDB finale", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const media = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "延迟上线分季剧",
+        original_title: "延迟上线分季剧",
+        year: 2024,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 24, airYear: 2024 }]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        is_external_id: true,
+        media_id: media.id,
+        namespace: "tmdb",
+        native_id: "tv:998877",
+      })
+      .execute();
+    await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: media.id,
+        season: 1,
+        namespace_group: "platform",
+        status: "open",
+        next_eligible_at: T0,
+        last_demanded_at: T0,
+      })
+      .execute();
+
+    // TMDB S1 has 24 episodes airing Jan 1 .. Jun 10, 2024; Tencent licensed Part 1 (1..12) on Jul 15, 2024.
+    const tmdbSeason1 = Array.from({ length: 24 }, (_, i) => ({
+      episode_number: i + 1,
+      name: `Episode ${i + 1}`,
+      air_date: new Date(Date.UTC(2024, 0, 1 + i * 7)).toISOString().slice(0, 10),
+    }));
+    const tencentPart1 = Array.from({ length: 12 }, (_, i) => ({
+      vid: `v_part1_${i + 1}`,
+      title: String(i + 1),
+      c_title_output: String(i + 1),
+      play_title: `第${i + 1}集`,
+      is_trailer: "0",
+      publish_date: "2024-07-15",
+    }));
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/998877/season/1")) {
+          return jsonResponse(request.url, { season_number: 1, episodes: tmdbSeason1 });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/998877")) {
+          return jsonResponse(request.url, {
+            id: 998877,
+            name: "延迟上线分季剧",
+            original_name: "延迟上线分季剧",
+            first_air_date: "2024-01-01",
+            seasons: [{ season_number: 1, episode_count: 24, air_date: "2024-01-01" }],
+            external_ids: {},
+          });
+        }
+        if (request.namespace === "trakt") return jsonResponse(request.url, []);
+        if (url.hostname === "api.so.360kan.com") {
+          return jsonResponse(request.url, {
+            code: 0,
+            data: {
+              longData: {
+                rows: [
+                  {
+                    titleTxt: "延迟上线分季剧 第一季",
+                    year: "2024",
+                    playlinks: { qq: "https://v.qq.com/x/cover/mzc00200delayed.html" },
+                  },
+                ],
+              },
+            },
+          });
+        }
+        if (url.hostname === "api.douban.com") {
+          return jsonResponse(request.url, { msg: "not_found", code: 5000 });
+        }
+        if (url.hostname === "search.video.iqiyi.com") {
+          return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
+        }
+        if (url.hostname === "pbaccess.video.qq.com") {
+          const body = JSON.parse(request.body ?? "{}") as { page_params?: { page_id?: string } };
+          if (body.page_params?.page_id === "detail_page_introduction") {
+            return jsonResponse(request.url, {
+              ret: 0,
+              msg: "",
+              data: {
+                module_list_datas: [
+                  {
+                    module_datas: [
+                      {
+                        item_data_lists: {
+                          item_datas: [
+                            {
+                              item_params: {
+                                title: "延迟上线分季剧",
+                                year: "2024",
+                                type: "2",
+                                type_name: "电视剧",
+                              },
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            });
+          }
+          return jsonResponse(request.url, {
+            ret: 0,
+            msg: "",
+            data: {
+              module_list_datas: [
+                {
+                  module_datas: [
+                    {
+                      module_params: {},
+                      item_data_lists: {
+                        item_datas: tencentPart1.map((item_params) => ({ item_params })),
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          });
+        }
+        throw new Error(`Unexpected outbound request: ${request.namespace} ${request.url}`);
+      },
+      invokeModel(request) {
+        const turn = request.messages.filter((m) => m.role === "assistant").length;
+        if (turn === 0) {
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call_part1",
+                name: "submit_mapping",
+                arguments: {
+                  namespace: "tencent",
+                  canonicalId: "mzc00200delayed",
+                  segments: [{ season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1 }],
+                },
+              },
+              ...openNamespaces(request)
+                .filter((ns) => ns !== "tencent")
+                .map((namespace, i) => ({
+                  id: `call_nf_${i}`,
+                  name: "mark_not_found",
+                  arguments: { namespace, reason: "not carried" },
+                })),
+            ],
+            model: "test-model",
+          };
+        }
+        return markAllNotFound(request);
+      },
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        exploration: { dailyBudget: 10 },
+      },
+      now: () => T0,
+    });
+
+    await worker.scheduled(createScheduledController(T0));
+    const exploreMsg = emitted.find((m) => m.jobType === EXPLORATION_JOB_TYPE)!;
+    emitted.length = 0;
+    await worker.queue(createQueueBatch([exploreMsg]));
+
+    await worker.scheduled(createScheduledController(T0));
+    const evidenceMsgs = emitted.filter((m) => m.jobType === EVIDENCE_CHECK_JOB_TYPE);
+    expect(evidenceMsgs).toHaveLength(1);
+    await worker.queue(createQueueBatch(evidenceMsgs));
+
+    const assoc = await testDb.readDb
+      .selectFrom("associations")
+      .select(["id", "status", "native_id"])
+      .where("media_id", "=", media.id)
+      .where("namespace", "=", "tencent")
+      .executeTakeFirstOrThrow();
+    expect(assoc.status).toBe("confirmed");
+    expect(assoc.native_id).toBe("mzc00200delayed");
+    const segs = await testDb.readDb
+      .selectFrom("segments")
+      .select(["season", "episode_start", "episode_end", "target_episode_start", "non_linear"])
+      .where("association_id", "=", assoc.id)
+      .execute();
+    expect(segs).toEqual([
+      {
+        season: 1,
+        episode_start: 1,
+        episode_end: 12,
+        target_episode_start: 1,
+        non_linear: false,
+      },
+    ]);
+  });
 });
