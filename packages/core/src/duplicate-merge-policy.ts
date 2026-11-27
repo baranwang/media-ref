@@ -153,6 +153,28 @@ export function parseMediaSeasonsJson(raw: unknown): SeasonSnapshot[] {
   return seasons;
 }
 
+export function collectionPositionsOverlap(
+  a: readonly NormalizedSegment[],
+  b: readonly NormalizedSegment[],
+): boolean {
+  if (a.length === 0 || b.length === 0) return true; // Whole collection.
+  // An open end proves its start, but non-linear or flagged segments prove no episode positions.
+  const end = (s: NormalizedSegment) =>
+    s.targetEpisodeStart + (s.episodeEnd ?? s.episodeStart) - s.episodeStart;
+  return a.some(
+    (left) =>
+      !left.nonLinear &&
+      !left.needsReview &&
+      b.some(
+        (right) =>
+          !right.nonLinear &&
+          !right.needsReview &&
+          left.targetEpisodeStart <= end(right) &&
+          right.targetEpisodeStart <= end(left),
+      ),
+  );
+}
+
 function collectExpandedNormalizedTitles(
   titles: readonly (string | null | undefined)[],
 ): Set<string> {
@@ -599,18 +621,72 @@ export async function verifyAutoMergeEligibilityInTx(
     };
   }
 
-  // Check exclusive catalog associations (`douban`, `bangumi`): different collection IDs cannot overlap
-  // in the same season/episodes, while identical collection IDs count as corroborating shared collections.
-  const sharedCollections: Array<{ namespace: AssociationNamespaceRow; nativeId: string }> = [];
-  const seenSharedKeys = new Set<string>();
-  const targetAssocKeys = new Set(target.associations.map((a) => `${a.namespace}:${a.nativeId}`));
+  if (source.type === "tv" && source.baseline !== null && source.baseline === target.baseline) {
+    const conflict = source.seasons.find(
+      (s) =>
+        s.episodeCount > 0 &&
+        target.seasons.some(
+          (t) => t.season === s.season && t.episodeCount > 0 && t.episodeCount !== s.episodeCount,
+        ),
+    );
+    if (conflict)
+      return {
+        eligible: false,
+        blockReason: "season_episode_count_mismatch",
+        details: { season: conflict.season, baseline: source.baseline },
+      };
+  }
 
-  for (const sa of source.associations) {
-    const key = `${sa.namespace}:${sa.nativeId}`;
-    if (targetAssocKeys.has(key) && !seenSharedKeys.has(key)) {
-      seenSharedKeys.add(key);
-      sharedCollections.push({ namespace: sa.namespace, nativeId: sa.nativeId });
+  const locked = await trx
+    .selectFrom("associations")
+    .select("id")
+    .where("media_id", "in", [source.id, target.id])
+    .where("locked", "=", true)
+    .executeTakeFirst();
+  if (locked)
+    return {
+      eligible: false,
+      blockReason: "locked_association",
+      details: { associationId: locked.id },
+    };
+
+  const sharedCollections: Array<{ namespace: AssociationNamespaceRow; nativeId: string }> = [];
+  const targetAssocByKey = new Map(
+    target.associations.map((a) => [`${a.namespace}:${a.nativeId}`, a]),
+  );
+  for (const incoming of source.associations) {
+    const existing = targetAssocByKey.get(`${incoming.namespace}:${incoming.nativeId}`);
+    if (!existing) continue;
+    if (!collectionPositionsOverlap(incoming.segments, existing.segments)) {
+      return {
+        eligible: false,
+        blockReason: "disjoint_collection_positions",
+        details: { namespace: incoming.namespace, nativeId: incoming.nativeId },
+      };
     }
+    if (
+      incoming.status === "confirmed" &&
+      existing.status === "confirmed" &&
+      ((incoming.segments.length === 0) !== (existing.segments.length === 0) ||
+        incoming.segments.some(
+          (s) =>
+            !existing.segments.some(
+              (t) =>
+                s.season === t.season &&
+                s.episodeStart === t.episodeStart &&
+                s.episodeEnd === t.episodeEnd &&
+                s.targetEpisodeStart === t.targetEpisodeStart &&
+                s.nonLinear === t.nonLinear,
+            ),
+        ))
+    ) {
+      return {
+        eligible: false,
+        blockReason: "conflicting_confirmed_segments",
+        details: { namespace: incoming.namespace, nativeId: incoming.nativeId },
+      };
+    }
+    sharedCollections.push({ namespace: incoming.namespace, nativeId: incoming.nativeId });
   }
 
   const catalogNamespaces = new Set(
@@ -694,9 +770,7 @@ export async function verifyAutoMergeEligibilityInTx(
 
 /**
  * Finds an existing active canonical media matching a newly prefetched catalog target
- * by its external IDs (`tmdb`, `imdb`, `tvdb`, `trakt`) or initial catalog association
- * (`douban`, `bangumi` confirmed or `seed_unconfirmed`), checking coarse type + snapshot
- * compatibility to avoid false merges.
+ * by confirmed whole-media external IDs, never by an unverified catalog seed.
  */
 export async function findReusableMediaForPrefetchedCatalogInTx(
   trx: DbExecutor,
@@ -710,7 +784,6 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
     };
     externalIds: Partial<Record<ExternalIdNamespace, string>>;
     aliases?: readonly (string | null | undefined)[];
-    initialAssociation?: { namespace: AssociationNamespaceRow; nativeId: string } | null;
   },
 ): Promise<{
   id: string;
@@ -722,8 +795,7 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
   seasons: SeasonSnapshotRow[];
   merged_into_media_id: string | null;
 } | null> {
-  const candidates: Array<{ mediaId: string; strongKey: boolean }> = [];
-  const seen = new Set<string>();
+  const candidates = new Set<string>();
 
   for (const extNs of EXTERNAL_ID_NAMESPACES) {
     const extNativeId = input.externalIds[extNs];
@@ -736,37 +808,11 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
       .select("media_id")
       .where("namespace", "=", extNs)
       .where("native_id", "=", extNativeId)
-      .where("status", "!=", "delisted")
+      .where("status", "=", "confirmed")
       .executeTakeFirst();
     if (ext) {
       const canonical = await resolveCanonicalMediaIdInTx(trx, ext.media_id);
-      if (canonical && !seen.has(canonical)) {
-        seen.add(canonical);
-        candidates.push({ mediaId: canonical, strongKey: extNs === "tmdb" });
-      }
-    }
-  }
-
-  if (input.initialAssociation) {
-    const assocs = await trx
-      .selectFrom("associations")
-      .where("is_external_id", "=", false)
-      .select(["media_id", "status"])
-      .where("namespace", "=", input.initialAssociation.namespace)
-      .where("native_id", "=", input.initialAssociation.nativeId)
-      .where("status", "in", ["confirmed", "seed_unconfirmed"])
-      .orderBy("created_at", "asc")
-      .orderBy("id", "asc")
-      .execute();
-    for (const assoc of [
-      ...assocs.filter((a) => a.status === "confirmed"),
-      ...assocs.filter((a) => a.status !== "confirmed"),
-    ]) {
-      const canonical = await resolveCanonicalMediaIdInTx(trx, assoc.media_id);
-      if (canonical && !seen.has(canonical)) {
-        seen.add(canonical);
-        candidates.push({ mediaId: canonical, strongKey: false });
-      }
+      if (canonical) candidates.add(canonical);
     }
   }
 
@@ -783,15 +829,11 @@ export async function findReusableMediaForPrefetchedCatalogInTx(
         "seasons",
         "merged_into_media_id",
       ])
-      .where("id", "=", candidate.mediaId)
+      .where("id", "=", candidate)
       .forUpdate()
       .executeTakeFirst();
     if (!row || row.merged_into_media_id !== null || row.type !== input.type) {
       continue;
-    }
-
-    if (candidate.strongKey) {
-      return row;
     }
 
     const rowExtRows = await trx
