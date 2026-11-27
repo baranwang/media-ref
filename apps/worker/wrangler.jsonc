@@ -2,6 +2,12 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "media-ref-worker",
   "main": "src/index.ts",
+  // Queue and cron only. workers.dev is public by default, and certificate-log
+  // scrapers request that URL. The runtime then throws
+  // "Handler does not export a fetch() function." Version URLs stay enabled
+  // after workers.dev is turned off unless preview_urls is set explicitly.
+  "workers_dev": false,
+  "preview_urls": false,
   "compatibility_date": "2026-11-24",
   "compatibility_flags": ["nodejs_compat"],
   "upload_source_maps": true,
