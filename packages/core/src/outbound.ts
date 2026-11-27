@@ -1,16 +1,12 @@
-import {
-  type AssistantMessage,
-  type Context,
-  type Message,
-  type Model,
-  type Tool,
-} from "@earendil-works/pi-ai";
+import type { AssistantMessage, JsonObject, Message, Model } from "@earendil-works/pi-ai";
 import {
   CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL,
   createAiBindingFetch,
   type AiBinding,
 } from "@earendil-works/pi-ai/api/cloudflare-ai-binding";
 import { streamSimple as streamOpenAiCompletions } from "@earendil-works/pi-ai/api/openai-completions";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+
 export type ExternalTargetKind = "platform" | "catalog" | "oauth";
 
 export type ExternalHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
@@ -104,7 +100,7 @@ export interface ModelToolDefinition {
 export interface ModelToolCall {
   id: string;
   name: string;
-  arguments: Record<string, unknown>;
+  arguments: JsonObject;
 }
 
 export interface ModelInvocationRequest {
@@ -288,7 +284,7 @@ const ZERO_USAGE = {
 };
 
 /** Our model-agnostic transcript as a pi context. */
-function toPiContext(request: ModelInvocationRequest, model: Model<"openai-completions">): Context {
+function toPiContext(request: ModelInvocationRequest, model: Model<"openai-completions">) {
   const now = Date.now();
   const system: string[] = [];
   const messages: Message[] = [];
@@ -325,20 +321,11 @@ function toPiContext(request: ModelInvocationRequest, model: Model<"openai-compl
       });
     }
   }
-  return {
+  return normalizeContext({
     ...(system.length > 0 ? { systemPrompt: system.join("\n\n") } : {}),
     messages,
-    ...(request.tools?.length
-      ? {
-          // Our tool parameters are plain JSON Schema, which is what TypeBox schemas are at runtime.
-          tools: request.tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            parameters: t.parameters as unknown as Tool["parameters"],
-          })),
-        }
-      : {}),
-  };
+    ...(request.tools?.length ? { tools: request.tools } : {}),
+  });
 }
 
 const FINISH_REASONS: Partial<Record<AssistantMessage["stopReason"], ModelFinishReason>> = {
