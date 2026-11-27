@@ -485,6 +485,11 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
     otherPendingCount,
   } = buildReviewCoveragePreview(cr, media);
   const seasonLabel = isMovie ? "整部" : `第 ${season} 季`;
+  const baselineCount = media?.seasons.find((s) => s.season === season)?.episodeCount ?? 0;
+  const showCoverage =
+    isMovie ||
+    baselineCount > 0 ||
+    ![...existingSegments, ...afterSegments].some((s) => s.nonLinear);
 
   const passedCount = cr.checks.filter((c) => c.status === "passed").length;
   const failedCount = cr.checks.filter((c) => c.status === "failed").length;
@@ -523,7 +528,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
                 {NAMESPACE_LABELS[cr.namespace]}
                 {variantLabel ? ` · ${variantLabel}` : ""}
                 {primary &&
-                  ` · 补充${formatSegmentEpisodeLabel(primary.start, primary.end, primary.nonLinear)}`}
+                  ` · 补充${formatSegmentEpisodeLabel(primary.start, primary.end, primary.nonLinear, baselineCount)}`}
               </span>
             </div>
             {tag && (
@@ -569,40 +574,48 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
             <p className="text-sm text-muted-foreground">
               {isMovie
                 ? `电影整部映射。横条是${platformLabel}收录情况`
-                : `第 ${season} 季，以 TMDB 的 ${totalSeasonEpisodes} 集为准。横条是${platformLabel}收录的集数`}
+                : baselineCount > 0
+                  ? `第 ${season} 季共 ${baselineCount} 集。横条表示${platformLabel}的收录范围。`
+                  : `第 ${season} 季的基准集数暂缺。`}
             </p>
           </div>
-          <CoverageLegend labels={["已确认", "本次提交", "未收录"]} />
+          {showCoverage && <CoverageLegend labels={["已确认", "本次提交", "未收录"]} />}
         </div>
 
         <Card>
           <CardContent className="flex flex-col gap-3 pt-4">
-            <div className="flex items-center gap-3">
-              <div className="w-18 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <CoverageRuler total={totalSeasonEpisodes} />
-              </div>
-            </div>
+            {showCoverage && (
+              <>
+                <div className="flex items-center gap-3">
+                  <div className="w-18 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <CoverageRuler total={totalSeasonEpisodes} />
+                  </div>
+                </div>
 
-            <div className="flex items-center gap-3">
-              <div className="w-18 shrink-0 text-xs">
-                <div className="font-medium text-foreground">现在</div>
-                <div className="text-2xs text-muted-foreground">{spanLabel(existingSegments)}</div>
-              </div>
-              <div className="min-w-0 flex-1">
-                <CoverageTrack total={totalSeasonEpisodes} segments={existingSegments} />
-              </div>
-            </div>
+                <div className="flex items-center gap-3">
+                  <div className="w-18 shrink-0 text-xs">
+                    <div className="font-medium text-foreground">现在</div>
+                    <div className="text-2xs text-muted-foreground">
+                      {spanLabel(existingSegments)}
+                    </div>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <CoverageTrack total={totalSeasonEpisodes} segments={existingSegments} />
+                  </div>
+                </div>
 
-            <div className="flex items-center gap-3">
-              <div className="w-18 shrink-0 text-xs">
-                <div className="font-medium text-foreground">通过后</div>
-                <div className="text-2xs text-muted-foreground">{spanLabel(afterSegments)}</div>
-              </div>
-              <div className="min-w-0 flex-1">
-                <CoverageTrack total={totalSeasonEpisodes} segments={afterSegments} />
-              </div>
-            </div>
+                <div className="flex items-center gap-3">
+                  <div className="w-18 shrink-0 text-xs">
+                    <div className="font-medium text-foreground">通过后</div>
+                    <div className="text-2xs text-muted-foreground">{spanLabel(afterSegments)}</div>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <CoverageTrack total={totalSeasonEpisodes} segments={afterSegments} />
+                  </div>
+                </div>
+              </>
+            )}
 
             {otherPendingCount > 0 && (
               <div className="flex items-center gap-3">

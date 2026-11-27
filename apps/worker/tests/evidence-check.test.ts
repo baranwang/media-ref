@@ -1223,6 +1223,15 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
             external_ids: { imdb_id: "tt20020001" },
           });
         }
+        if (request.url.includes("/tv/200300/season/1")) {
+          return jsonResponse(request.url, {
+            episodes: Array.from({ length: 12 }, (_, i) => ({
+              episode_number: i + 1,
+              name: i === 11 ? "雪地收官狂欢夜" : `第${i + 1}集`,
+              air_date: "2023-03-01",
+            })),
+          });
+        }
         if (request.url.includes("/tv/200300")) {
           return jsonResponse(request.url, {
             id: 200300,
@@ -1383,17 +1392,20 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
             },
           });
         }
-        if (request.url.includes("season_id=80300")) {
+        if (request.url.includes("season_id=80300") || request.url.includes("season_id=80302")) {
+          const complete = request.url.includes("season_id=80300");
           // Non-linear variety show: 30 feature eps vs TMDB 12 eps, year 2023 matches S1
           return jsonResponse(request.url, {
             code: 0,
             message: "success",
             result: {
-              season_id: 80300,
+              season_id: complete ? 80300 : 80302,
               title: "推理综艺",
               type: 7,
               publish: { pub_time: "2023-03-01 12:00:00" },
-              episodes: makeBilibiliEpisodes(30, true),
+              episodes: makeBilibiliEpisodes(30, true).map((ep) =>
+                complete && ep.title === "30" ? { ...ep, long_title: "雪地收官狂欢夜" } : ep,
+              ),
             },
           });
         }
@@ -1931,7 +1943,7 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
     expect(mediaBody.document.associations[0]?.nativeId).toBe("ss28281");
   });
 
-  test("checks only season premiere year for nonLinear segments (skips episode count mismatch)", async () => {
+  test("approves a nonLinear season only with its year and a verified final broadcast", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -1951,7 +1963,7 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
     const user = await setupVerifiedUserAndKeys(app, outbound, "step2-nonlinear@example.com");
     const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
 
-    // 30 feature eps vs TMDB 12 eps, matching S1 year 2023 + nonLinear: true -> auto-approves!
+    // The collection has 30 entries and the catalog has 12; the last broadcast is identifiable.
     const okRes = await submitRpc.changeRequest.createChangeRequest({
       target: mediaRef("tmdb:tv:200300"),
       namespace: "bilibili",
@@ -1969,6 +1981,22 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       ],
     });
     const okCr = okRes.changeRequest!;
+    const partial = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:200300"),
+      namespace: "bilibili",
+      nativeId: "ss80302",
+      variantDescription: "前半季",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: null,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+          nonLinear: true,
+        }),
+      ],
+    });
 
     // Wrong year (2024 collection submitted for S1 2023) with nonLinear: true -> needs_review!
     const badYearRes = await submitRpc.changeRequest.createChangeRequest({
@@ -2006,7 +2034,10 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
       now: () => t0,
     });
 
-    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(2);
+    expect(await drainEvidenceJobs(worker, emitted, t0)).toBe(3);
+    expect(
+      await getChangeRequestStateRpc(app, { apiKey: user.readKey }, partial.changeRequest!.id),
+    ).toMatchObject({ status: "needs_review", conflictReason: "season_finale_unverified" });
 
     const okState = await getChangeRequestStateRpc(app, { apiKey: user.readKey }, okCr.id);
     expect(okState.status).toBe("approved");

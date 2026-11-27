@@ -779,6 +779,55 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
     expect(result.info.featureEpisodes[19]?.title).toBe("第10期下");
   });
 
+  test("keeps module and tab order through independent cursors, including empty intermediate pages", async () => {
+    const module = (numbers: number[], params: Record<string, unknown> = {}) => ({
+      module_params: params,
+      item_data_lists: {
+        item_datas: numbers.map((n) => ({
+          item_params: { vid: `v${n}`, title: String(n), is_trailer: "0" },
+        })),
+      },
+    });
+    const next = (cursor: string) => ({ has_next: true, next_page_context: cursor });
+    const tabs = [
+      { selected: false, page_context: "first" },
+      { selected: true, page_context: "second" },
+    ];
+    const pages: Record<string, ReturnType<typeof module>[]> = {
+      "": [module([3], { tabs, ...next("second_more") }), module([5], next("last_more"))],
+      first: [module([1], { tabs, ...next("empty") })],
+      empty: [module([], next("first_more"))],
+      first_more: [module([2], next("empty"))],
+      second_more: [module([4])],
+      last_more: [module([6])],
+    };
+    const seen: string[] = [];
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const { page_params: params } = JSON.parse(request.body!);
+        if (params.page_id === "detail_page_introduction")
+          return jsonResponse(request.url, makeIntroPayload({ title: "剧集", type: "2" }));
+        seen.push(params.page_context);
+        return jsonResponse(request.url, {
+          ret: 0,
+          data: { module_list_datas: [{ module_datas: pages[params.page_context] }] },
+        });
+      },
+    });
+    const result = await tencentAdapter.fetchCollection("mzc002007knmh3g", outbound);
+    expect(result.status).toBe("found");
+    if (result.status === "found")
+      expect(result.info.featureEpisodes.map((e) => e.title)).toEqual([
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+      ]);
+    expect(seen).toEqual(["", "first", "empty", "first_more", "second_more", "last_more"]);
+  });
+
   test("preserves tab order when a non-first tab is initially selected", async () => {
     const makeEps = (from: number, to: number) =>
       Array.from({ length: to - from + 1 }, (_, i) => ({

@@ -466,6 +466,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
         episodeStart: number;
         episodeEnd: number;
         targetEpisodeStart: number;
+        nonLinear?: boolean;
       }>,
     ) => {
       const created = await createRpcClients(app, {
@@ -507,6 +508,12 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       nativeId: "ss34430",
       targetEpisode: 15,
     });
+
+    // A non-linear season has no platform positions to take from the other season.
+    await land([
+      { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, nonLinear: true },
+    ]);
+    expect(await resolve(2, 3)).toMatchObject({ kind: "mapped", targetEpisode: 15 });
 
     // A request that claims positions 1–24 for season 1 supersedes season 2 on those positions.
     await land([{ season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1 }]);

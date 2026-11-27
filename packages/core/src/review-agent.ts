@@ -73,10 +73,12 @@ import {
   isUuid,
   MediaServiceError,
   rejectChangeRequestInTx,
+  validateSubmissionOnSharedCollection,
   revokeChangeRequestInTx,
   type ChangeRequestRecord,
 } from "./media-service.ts";
 import type { ModelToolCall, ModelToolDefinition } from "./outbound.ts";
+import { seasonCoverageConflict, type SeasonEpisode } from "./season-coverage.ts";
 import { createTmdbGateway, type TmdbGateway, type TmdbGatewayConfig } from "./tmdb.ts";
 import { formatUtcDate } from "./tmdb-sync.ts";
 import { reportPiUsage } from "./tokens-report.ts";
@@ -495,6 +497,7 @@ function buildSystemPrompt(mode: ReviewMode, conclusions: string, hasComments: b
     "3. A platform episode number is the position in the collection's feature episode list, counted from 1, not the number in the episode title.",
     "4. Extras (chapters, recaps, specials) mixed into the platform's list shift every later position. Check that each segment's episodes land on the right positions.",
     "   Example: 灵笼 season 1 on Bilibili has 16 entries: 001–006, 中章, 007–012, 终章上, 终章下, 特别篇. TMDB season 1 has 12 episodes; 中章, 终章 and 特别篇 are in TMDB season 0. Mapping the whole season from position 1 puts TMDB 7–12 on positions 7–12, one off. The right segments are episodes 1–6 at positions 1–6 and 7–12 at positions 8–13. Extras at the end of the list need no split.",
+    "   Platform publication dates and intermediate installments do not verify a whole season. Check the final broadcast installment or its distinctive subtitle; use a finite range for a partial collection.",
     "   For variety shows or collections covering a complete season whose episode count diverges from TMDB because broadcast parts (第N期上/下) and extras/prologues are grouped differently (e.g. 20 broadcast parts covering the whole run while TMDB lists 47 with extras), do NOT truncate episodeEnd to a shorter linear prefix like 1..20; approve or correct with { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.",
     "5. Long lists come in windows of 80. When a result has episodesTruncated, fetch the rest with get_collection fromPosition and get_catalog_season fromEpisode before judging positions you have not seen; request all the windows you need in one turn.",
     mode === "approved"
@@ -1005,8 +1008,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
     // re-checked against them (§4).
     const collected = new Map<string, CollectionInfo>();
     const fetchedCollections = new Map<string, { info: CollectionInfo; step: number }>();
-    const fetchedSeasons = new Map<number, number>();
-    const episodeAirYears: Record<number, Record<number, number | null>> = {};
+    const seasonWindows: Array<{ season: number; step: number; episodes: SeasonEpisode[] }> = [];
     const queries: Array<{ tool: string; arguments: Record<string, unknown> }> = [];
     let conclusion: ReviewConclusion | null = null;
     let conclusionStep = 0;
@@ -1105,17 +1107,11 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
             }
           }
           if (call.name === "get_catalog_season" && typeof args.season === "number") {
-            if (!fetchedSeasons.has(args.season)) {
-              fetchedSeasons.set(args.season, step);
-            }
-            const episodes = result.episodes as Array<{ episode: number; airDate: string | null }>;
-            // A long season comes in windows (fromEpisode): keep the episodes of every call.
-            episodeAirYears[args.season] = {
-              ...episodeAirYears[args.season],
-              ...Object.fromEntries(
-                episodes.map((e) => [e.episode, e.airDate ? Number(e.airDate.slice(0, 4)) : null]),
-              ),
-            };
+            seasonWindows.push({
+              season: args.season,
+              step,
+              episodes: result.episodes as SeasonEpisode[],
+            });
           }
         },
         wrapUpMessage: () =>
@@ -1150,15 +1146,20 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       };
     }
     // Only what the model saw before the turn it concluded in counts.
+    const seasonEpisodes: Record<number, SeasonEpisode[]> = {};
+    for (const { season, step, episodes } of seasonWindows) {
+      if (step >= conclusionStep) continue;
+      const byEpisode = new Map((seasonEpisodes[season] ?? []).map((e) => [e.episode, e]));
+      for (const episode of episodes) byEpisode.set(episode.episode, episode);
+      seasonEpisodes[season] = [...byEpisode.values()];
+    }
     const fetched: SessionFetches = {
       fetchedCollections: new Map(
         [...fetchedCollections]
           .filter(([, f]) => f.step < conclusionStep)
           .map(([key, f]) => [key, f.info]),
       ),
-      fetchedSeasons: new Set(
-        [...fetchedSeasons].filter(([, step]) => step < conclusionStep).map(([season]) => season),
-      ),
+      seasonEpisodes,
     };
     let correction = concluded?.correction ?? null;
     const record = (verdict: ReviewVerdict, fallback: string | null, extra: JsonObject = {}) =>
@@ -1189,7 +1190,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         verdict = fallback === null ? "revoke" : "keep";
       }
       if (concluded?.verdict === "revoke_with_correction" && revokeBlocker === null) {
-        fallback = correctionBlocker(cr, correction, fetched, episodeAirYears, {
+        fallback = await correctionBlocker(ctx.db, mediaId, cr, correction, fetched, {
           submittedCodes: conflictCodes,
           reasons: concluded.reasons,
         });
@@ -1262,7 +1263,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       fallback = approvalBlocker(cr, conflictCodes, concluded.reasons, fetched);
     }
     if (concluded?.verdict === "reject_with_correction") {
-      fallback = correctionBlocker(cr, correction, fetched, episodeAirYears, {
+      fallback = await correctionBlocker(ctx.db, mediaId, cr, correction, fetched, {
         submittedCodes: conflictCodes,
         reasons: concluded.reasons,
       });
@@ -1495,7 +1496,7 @@ async function rejectPlainlyInTx(
 
 interface SessionFetches {
   fetchedCollections: ReadonlyMap<string, CollectionInfo>;
-  fetchedSeasons: ReadonlySet<number>;
+  seasonEpisodes: Record<number, SeasonEpisode[]>;
 }
 
 /** Whether the session fetched the collection and every season of these segments. */
@@ -1508,7 +1509,7 @@ function fetchBlocker(
     return "collection_not_fetched";
   }
   const seasons = [...new Set(segments.map((s) => s.season))];
-  const unfetched = seasons.filter((s) => !fetched.fetchedSeasons.has(s));
+  const unfetched = seasons.filter((s) => !fetched.seasonEpisodes[s]?.length);
   return unfetched.length > 0 ? `season_not_fetched: ${unfetched.join(", ")}` : null;
 }
 
@@ -1532,8 +1533,15 @@ function approvalBlocker(
     return `no_reason_for: ${unexplained.join(", ")}`;
   }
   const collection = fetched.fetchedCollections.get(`${cr.namespace}:${cr.nativeId}`)!;
-  const catalog = cr.evidence?.catalog as { seasons?: CatalogEvidence["seasons"] } | undefined;
-  return positionMisfit(cr.segments, collection, catalog?.seasons ?? []);
+  const catalog = cr.evidence?.catalog as unknown as CatalogEvidence | undefined;
+  const coverage =
+    catalog &&
+    seasonCoverageConflict(
+      { ...catalog, seasonEpisodes: fetched.seasonEpisodes },
+      collection,
+      cr.segments,
+    );
+  return coverage?.code ?? positionMisfit(cr.segments, collection, catalog?.seasons ?? []);
 }
 
 /**
@@ -1569,13 +1577,14 @@ function boundToCollection(
  * Why code does not follow the model's correction (ADR 0003 §4), or null when it does: Evidence
  * Gate step 2 must pass on it, with the catalog and the collection this session fetched.
  */
-function correctionBlocker(
+async function correctionBlocker(
+  db: Db,
+  mediaId: string | null,
   cr: ChangeRequestRecord,
   correction: ReviewCorrection | null,
   fetched: SessionFetches,
-  episodeAirYears: CatalogEvidence["episodeAirYears"],
   explained: { submittedCodes: readonly string[]; reasons: readonly ReviewReason[] },
-): string | null {
+): Promise<string | null> {
   if (!correction) {
     return "invalid_correction";
   }
@@ -1590,7 +1599,10 @@ function correctionBlocker(
   }
   const evidence = cr.evidence ?? {};
   const baseline = cr.segments[0]?.baseline ?? "tmdb";
-  const catalog = { ...(evidence.catalog as unknown as CatalogEvidence), episodeAirYears };
+  const catalog = {
+    ...(evidence.catalog as unknown as CatalogEvidence),
+    seasonEpisodes: fetched.seasonEpisodes,
+  };
   const collection = fetched.fetchedCollections.get(`${cr.namespace}:${cr.nativeId}`)!;
   const segments = correction.segments.map((s): NormalizedSegment => ({
     season: s.season,
@@ -1638,7 +1650,15 @@ function correctionBlocker(
   if (blocking.length > 0) {
     return `correction_failed_step2: ${[...new Set(blocking.map((c) => c.code))].join(", ")}`;
   }
-  return misfit ? `correction_failed_step2: ${misfit}` : null;
+  if (misfit) return `correction_failed_step2: ${misfit}`;
+  const shared = await validateSubmissionOnSharedCollection(
+    db,
+    cr.namespace,
+    cr.nativeId,
+    mediaId,
+    boundToCollection(cr, correction, fetched).segments.map((s) => ({ ...s, baseline })),
+  );
+  return shared.valid ? null : `correction_invalid_segments: ${shared.errors[0].code}`;
 }
 
 /**

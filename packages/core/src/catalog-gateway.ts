@@ -530,6 +530,17 @@ function buildCatalogTargetFromAssociationAdapter(
       ...(info.aliases && info.aliases.length > 0 ? { aliases: info.aliases } : {}),
       year: info.year,
       seasons,
+      ...(type === "tv" && info.featureEpisodes.some((e) => e.title || e.longTitle)
+        ? {
+            seasonEpisodes: {
+              1: info.featureEpisodes.map((e) => ({
+                episode: e.index,
+                title: e.longTitle || e.title || null,
+                airDate: e.airDate ?? null,
+              })),
+            },
+          }
+        : {}),
       episodeCount: info.featureEpisodeCount,
       externalIds: evidenceExternalIds,
     },

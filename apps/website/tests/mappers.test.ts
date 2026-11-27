@@ -702,6 +702,8 @@ test("propagates nonLinear on whole-season variety associations and change reque
   });
   expect(formatSegmentEpisodeLabel(1, 47, true, 47)).toBe("整季收录 · 不按集对应");
   expect(formatSegmentEpisodeLabel(1, null, true)).toBe("整季收录 · 不按集对应");
+  expect(formatSegmentEpisodeLabel(1, 20, true, 0)).toBe("第 1–20 集（不按集对应）");
+  expect(formatSegmentEpisodeLabel(1, 20, true, 12)).toBe("第 1–20 集（不按集对应）");
   expect(formatSegmentEpisodeLabel(1, 20, true, 47)).toBe("第 1–20 集（不按集对应）");
   expect(formatSegmentEpisodeLabel(1, 20, false, 47)).toBe("第 1–20 集");
 });
