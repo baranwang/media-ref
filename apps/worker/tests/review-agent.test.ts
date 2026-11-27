@@ -799,7 +799,7 @@ const correctionFor = (season: number) => ({
 
 /** Fetches the collection and the corrected season, then rejects with that correction. */
 const correctsTo =
-  (season: number): ScriptedModel =>
+  (season: number, reasons: Array<{ code: string; reason: string }> = []): ScriptedModel =>
   (request) => {
     const turn = turnOf(request);
     if (turn === 0) {
@@ -810,7 +810,7 @@ const correctsTo =
     }
     if (turn === 1) {
       return reply(turn, [
-        ["reject_with_correction", { opinion: WIFE_OPINION, ...correctionFor(season) }],
+        ["reject_with_correction", { opinion: WIFE_OPINION, ...correctionFor(season), reasons }],
       ]);
     }
     return reply(turn, [["reject", { opinion: WIFE_OPINION }]]);
@@ -947,6 +947,84 @@ describe("review agent: reject with correction (#76)", () => {
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
       verdict: "reject",
       fallback: "correction_failed_step1: title_mismatch",
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
+  /** Bilibili, with the collection's title or year changed as the platform shows it. */
+  const relabelled = (info: { title?: string; year?: number }) =>
+    createAdapterRegistry([
+      {
+        ...bilibiliAdapter,
+        async fetchCollection(id, outbound) {
+          const result = await bilibiliAdapter.fetchCollection(id, outbound);
+          return result.status === "found"
+            ? { ...result, info: { ...result.info, ...info } }
+            : result;
+        },
+      },
+    ]);
+
+  test.each([
+    {
+      name: "a platform upload year that matches no season (降世神通)",
+      info: { year: 2031, title: "妻子的浪漫旅行" },
+      code: "year_mismatch",
+      reason: "2031 是平台上架年份，不是播出年份",
+    },
+    {
+      name: "a platform title suffix (斗破苍穹年番)",
+      info: { title: "妻子的浪漫旅行 特别版" },
+      code: "title_mismatch",
+      reason: "「特别版」是平台给这一季起的名字，同一部作品",
+    },
+  ])(
+    "a correction keeps a conflict the submission already had when it explains it: $name",
+    async ({ info, code, reason }) => {
+      const ctx = track(await setup(correctsTo(8, [{ code, reason }]), {}, relabelled(info)));
+      const id = await submitAsHuman(ctx);
+
+      await ctx.drain();
+
+      const cr = await ctx.changeRequest(id);
+      expect(cr.status).toBe("rejected");
+      expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+        verdict: "reject_with_correction",
+        correction: correctionFor(8),
+        fallback: null,
+      });
+      expect(await leads(ctx)).toEqual([expect.objectContaining({ season: 8 })]);
+    },
+  );
+
+  test("without a reason for it, the submission's own title or year conflict still blocks the correction", async () => {
+    const ctx = track(
+      await setup(correctsTo(8), {}, relabelled({ year: 2031, title: "妻子的浪漫旅行" })),
+    );
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: { verdict: "reject", fallback: "correction_failed_step1: year_mismatch" },
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
+  test("a season's year still decides a correction when the collection's year matches a season: explaining it does not help", async () => {
+    // The collection is from 2026, season 8's year; season 7 aired in 2024.
+    const ctx = track(
+      await setup(correctsTo(7, [{ code: "segment_year_mismatch", reason: "年份不重要" }])),
+    );
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: {
+        verdict: "reject",
+        fallback: expect.stringMatching(/^correction_failed_step2: .*segment_year_mismatch/),
+      },
     });
     expect(await leads(ctx)).toEqual([]);
   });
