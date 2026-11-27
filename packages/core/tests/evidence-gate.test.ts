@@ -868,6 +868,51 @@ describe("Evidence Gate Step 2", () => {
     ).toBe(true);
   });
 
+  test("checks each season's linear prefix against its own platform positions", () => {
+    const broadcasts = Array.from({ length: 20 }, (_, i) => `第${i + 1}期`);
+    const episodes = (titles: string[]) =>
+      titles.map((title, i) => ({ episode: i + 1, title, airDate: null }));
+    const catalog = makeTvCatalog({
+      seasons: [
+        { season: 1, episodeCount: 13, airYear: 2020 },
+        { season: 2, episodeCount: 47, airYear: 2021 },
+      ],
+      seasonEpisodes: {
+        1: episodes(broadcasts.slice(0, 13)),
+        2: episodes([...broadcasts.slice(0, 19), ...Array<string>(27).fill("特辑"), "第20期"]),
+      },
+    });
+    const first = {
+      season: 1,
+      episodeStart: 1,
+      episodeEnd: 12,
+      targetEpisodeStart: 1,
+      baseline: "tmdb" as const,
+      nonLinear: false,
+      needsReview: false,
+    };
+    const check = (titles: string[]) =>
+      evaluateEvidenceGate({
+        catalog,
+        collection: makeBilibiliCollection({
+          featureEpisodeCount: titles.length,
+          featureEpisodes: titles.map((title, i) => ({ index: i + 1, title })),
+        }),
+        segments: [first, { ...first, season: 2, episodeEnd: 20, targetEpisodeStart: 13 }],
+      });
+
+    expect(check([...broadcasts.slice(0, 12), ...broadcasts]).conflicts).toMatchObject([
+      {
+        code: "partial_segment_spans_full_season",
+        message: expect.stringContaining("season 2 episode 47"),
+      },
+    ]);
+    // S1's finale is only in S2's window, and S2's finale is only in S1's window.
+    expect(
+      check([...broadcasts.slice(0, 11), "第20期", ...broadcasts.slice(0, 19), "20"]).decision,
+    ).toBe("pass");
+  });
+
   test("handles open-ended ongoing seasons (episodeEnd: null) in both Step 1 and Step 2", () => {
     const ongoingCatalog = makeTvCatalog({
       year: 2026,
@@ -1123,7 +1168,8 @@ describe("Evidence Gate Step 2", () => {
       episodeEnd: 12,
       targetEpisodeStart: 2,
       featureEpisodeCount: 12,
-      conflicts: ["target_episode_start_mismatch"],
+      // The S0 finale at position 12 falls inside S1's window.
+      conflicts: ["season_finale_unverified", "target_episode_start_mismatch"],
     },
     {
       episodeEnd: 25,

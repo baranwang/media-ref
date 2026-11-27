@@ -371,6 +371,31 @@ describe("season coverage", () => {
     ).toBe("season_finale_unverified");
   });
 
+  test("a split prefix at an offset only uses the platform positions it claims", () => {
+    const first = { ...seg(2, 1)[0]!, targetEpisodeStart: 2 };
+    const second = { ...first, episodeStart: 2, episodeEnd: 2, targetEpisodeStart: 3 };
+    const episodes = ["第1期上", "第1期下", "第2期"].map((title, i) => ({
+      episode: i + 1,
+      title,
+      airDate: null,
+    }));
+    const check = (position3: string) =>
+      coverage(
+        [second, first],
+        {
+          ...collection(4),
+          featureEpisodes: ["第2期", "第1期", position3, "第2期"].map((title, i) => ({
+            index: i + 1,
+            title,
+          })),
+        },
+        () => 3,
+        episodes,
+      );
+    expect(check("3")).toBeNull();
+    expect(check("第2期")?.code).toBe("partial_segment_spans_full_season");
+  });
+
   test("a split final installment requires its last part", () => {
     const episodes = ["第1期", "第2期下（一）", "第2期下（二）"].map((title, i) => ({
       episode: i + 1,
@@ -383,6 +408,21 @@ describe("season coverage", () => {
     };
     const whole = [{ ...seg(1, 2)[0]!, nonLinear: true, episodeEnd: null }];
     expect(coverage(whole, info, () => 3, episodes)?.code).toBe("season_finale_unverified");
+    const combined = {
+      ...info,
+      featureEpisodes: [info.featureEpisodes[0]!, { index: 2, title: "第2期下" }],
+    };
+    expect(coverage(whole, combined, () => 3, episodes)).toBeNull();
+    expect(coverage(seg(1, 2), combined, () => 3, episodes)?.code).toBe(
+      "partial_segment_spans_full_season",
+    );
+    // The same combined label already in the catalog prefix cannot prove a later subpart.
+    const withCombinedInPrefix = [
+      episodes[0]!,
+      { ...episodes[1]!, title: "第2期下" },
+      episodes[2]!,
+    ];
+    expect(coverage(seg(1, 2), combined, () => 3, withCombinedInPrefix)).toBeNull();
     expect(
       coverage(
         whole,
