@@ -15,12 +15,12 @@ import type { ExternalHttpRequest, ExternalHttpResponse, OutboundClient } from "
 
 /**
  * Discovery sources for the exploration agent (ADR 0002, "discover" step). Deterministic, no model:
- * given one media, ask 360kan's index, Douban's "where to watch" and iQIYI search for play links,
- * canonicalize every link through the platform adapters, and return a closed candidate set keyed by
- * (namespace, canonicalId). A failing source never hides the others: each gets its own report.
+ * given one media, ask 360kan's index, Douban's "where to watch" and iQIYI / Youku search for play
+ * links, canonicalize every link through the platform adapters, and return a closed candidate set
+ * keyed by (namespace, canonicalId). A failing source never hides the others: each gets its own report.
  */
 
-export type DiscoverySourceId = "360kan" | "douban" | "iqiyi_search";
+export type DiscoverySourceId = "360kan" | "douban" | "iqiyi_search" | "youku_search";
 
 export interface DiscoveryMediaInput {
   title: string;
@@ -125,7 +125,7 @@ interface RawLink {
 interface SourceOutcome {
   report: DiscoverySourceReport;
   links: RawLink[];
-  /** Entries a source already returned as canonical IDs (iQIYI search). */
+  /** Entries a source already returned as canonical IDs (platform search). */
   ids?: Array<{ namespace: PlatformNamespace; id: string; candidate: DiscoveryCandidateSource }>;
 }
 
@@ -143,7 +143,8 @@ export async function discoverCandidates(
   const outcomes = await Promise.all([
     guard("360kan", () => fetch360kan(media, outbound)),
     guard("douban", () => fetchDoubanVendors(media, outbound)),
-    guard("iqiyi_search", () => fetchIqiyiSearch(media, outbound)),
+    guard("iqiyi_search", () => fetchPlatformSearch("iqiyi_search", iqiyiAdapter, media, outbound)),
+    guard("youku_search", () => fetchPlatformSearch("youku_search", youkuAdapter, media, outbound)),
   ]);
 
   const candidates = new Map<string, DiscoveryCandidate>();
@@ -436,12 +437,12 @@ export async function lookupDoubanSubjectByImdb(
   throw new Error("unexpected_imdb_lookup_payload");
 }
 
-async function fetchIqiyiSearch(
+async function fetchPlatformSearch(
+  source: DiscoverySourceId,
+  adapter: Tier3Adapter<PlatformNamespace>,
   media: DiscoveryMediaInput,
   outbound: OutboundClient,
 ): Promise<SourceOutcome> {
-  const source = "iqiyi_search";
-  const adapter: Tier3Adapter<"iqiyi"> = iqiyiAdapter;
   const result = await adapter.search(
     {
       title: media.title,
@@ -459,7 +460,7 @@ async function fetchIqiyiSearch(
     report: { source, status: "ok", links: result.candidates.length },
     links: [],
     ids: result.candidates.map((c) => ({
-      namespace: "iqiyi" as const,
+      namespace: adapter.namespace,
       id: c.canonicalId,
       candidate: { source, title: c.title, year: c.year ?? null, rawUrl: c.url ?? null },
     })),

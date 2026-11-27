@@ -502,6 +502,7 @@ describe("Bilibili Tier 1 & Tier 2 adapter", () => {
       "bilibili",
       "tencent",
       "iqiyi",
+      "youku",
     ]);
 
     const tier1Stub = createTier1Adapter({
