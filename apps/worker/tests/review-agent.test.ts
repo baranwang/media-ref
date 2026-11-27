@@ -1058,7 +1058,7 @@ describe("review agent: reject with correction (#76)", () => {
     },
   );
 
-  test("an open-ended correction runs to the collection's end: a season still airing on the platform", async () => {
+  test("an open-ended correction on a season still airing is handed over up to the last verified episode", async () => {
     // TMDB season 8 has 10 episodes; the platform has the first 7 so far.
     const airing = createAdapterRegistry([
       {
@@ -1093,9 +1093,18 @@ describe("review agent: reject with correction (#76)", () => {
 
     await ctx.drain();
 
+    // Positions 1–7 are what the session saw: exploration resubmits exactly that, and its own
+    // segment check (which reads an open end as the whole 10-episode season) accepts it.
+    const bounded = {
+      season: 8,
+      segments: [{ season: 8, episodeStart: 1, episodeEnd: 7, targetEpisodeStart: 1 }],
+    };
     expect((await ctx.changeRequest(id)).evidence).toMatchObject({
-      reviewAgent: { verdict: "reject_with_correction", correction: openEnded, fallback: null },
+      reviewAgent: { verdict: "reject_with_correction", correction: bounded, fallback: null },
     });
+    expect(await leads(ctx)).toEqual([
+      expect.objectContaining({ season: 8, segments: bounded.segments }),
+    ]);
   });
 
   test("without a reason for it, the submission's own title or year conflict still blocks the correction", async () => {

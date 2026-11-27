@@ -4,6 +4,7 @@ import {
   createChangeRequest,
   createDefaultAdapterRegistry,
   createLiveOutboundClient,
+  MediaServiceError,
   type JobQueueMessage,
 } from "@media-ref/core";
 import { createTestDb } from "@media-ref/db/testing";
@@ -165,6 +166,14 @@ async function runCase(c: EvalCase): Promise<EvalResult> {
       );
       crId = cr.id;
     } catch (error) {
+      // Only a validation refusal counts as a rejection; an outage or a bug fails the case.
+      if (
+        !(error instanceof MediaServiceError) ||
+        error.status >= 500 ||
+        error.code === "PLATFORM_UPSTREAM_ERROR"
+      ) {
+        throw error;
+      }
       // Refused at submission: nothing goes live, which counts as a rejection.
       return {
         id: c.id,

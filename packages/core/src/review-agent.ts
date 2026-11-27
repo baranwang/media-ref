@@ -1001,7 +1001,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         [...fetchedSeasons].filter(([, step]) => step < conclusionStep).map(([season]) => season),
       ),
     };
-    const correction = concluded?.correction ?? null;
+    let correction = concluded?.correction ?? null;
     const record = (verdict: ReviewVerdict, fallback: string | null, extra: JsonObject = {}) =>
       ({
         verdict,
@@ -1035,6 +1035,9 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           reasons: concluded.reasons,
         });
         verdict = fallback === null ? "revoke_with_correction" : "revoke";
+        if (fallback === null) {
+          correction = boundToCollection(cr, correction!, fetched);
+        }
       }
       const reviewAgent = record(
         verdict,
@@ -1095,6 +1098,9 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         submittedCodes: conflictCodes,
         reasons: concluded.reasons,
       });
+      if (fallback === null) {
+        correction = boundToCollection(cr, correction!, fetched);
+      }
     }
 
     let prefetchedCatalog: CatalogTargetSnapshot | null = null;
@@ -1350,6 +1356,32 @@ function approvalBlocker(
     return `no_reason_for: ${unexplained.join(", ")}`;
   }
   return null;
+}
+
+/**
+ * A checked correction as exploration will resubmit it: an open end on a collection shorter than
+ * the season (still airing) stops at the last position the session saw, so exploration's own
+ * segment check, which reads an open end as the whole season, accepts it unchanged.
+ */
+function boundToCollection(
+  cr: ChangeRequestRecord,
+  correction: ReviewCorrection,
+  fetched: SessionFetches,
+): ReviewCorrection {
+  const available =
+    fetched.fetchedCollections.get(`${cr.namespace}:${cr.nativeId}`)?.featureEpisodes.length ?? 0;
+  const seasons = ((cr.evidence?.catalog as { seasons?: CatalogEvidence["seasons"] } | undefined)
+    ?.seasons ?? []) as CatalogEvidence["seasons"];
+  return {
+    ...correction,
+    segments: correction.segments.map((s) => {
+      const lastSeen = s.episodeStart + available - s.targetEpisodeStart;
+      const count = seasons.find((x) => x.season === s.season)?.episodeCount ?? null;
+      return s.episodeEnd === null && count !== null && lastSeen < count
+        ? { ...s, episodeEnd: lastSeen }
+        : s;
+    }),
+  };
 }
 
 /**
