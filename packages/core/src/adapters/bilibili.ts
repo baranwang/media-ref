@@ -34,6 +34,7 @@ const BILIBILI_API_HEADERS: Record<string, string> = {
 };
 
 const BILIBILI_SEASON_API = "https://api.bilibili.com/pgc/view/web/season";
+const BILIBILI_SECTION_API = "https://api.bilibili.com/pgc/web/season/section";
 const BILIBILI_MEDIA_API = "https://api.bilibili.com/pgc/review/user";
 const BILIBILI_MEDIA_DETAIL_API = "https://api.bilibili.com/pgc/view/web/media";
 const BILIBILI_SEARCH_API = "https://api.bilibili.com/x/web-interface/search/type";
@@ -480,6 +481,36 @@ async function fetchPremiereYear(
   }
 }
 
+/**
+ * The season's main episodes from the section API (`main_section.episodes`), or null.
+ * It answers for 港澳台-only seasons that the season API hides (-404 from other regions) or
+ * returns without episodes. Best effort: any failure is null.
+ */
+async function fetchSectionEpisodes(
+  seasonId: string,
+  outbound: OutboundClient,
+): Promise<FeatureEpisode[] | null> {
+  try {
+    const response = await outbound.fetchExternal({
+      kind: "platform",
+      namespace: "bilibili",
+      url: `${BILIBILI_SECTION_API}?season_id=${encodeURIComponent(seasonId)}`,
+      method: "GET",
+      headers: BILIBILI_API_HEADERS,
+    });
+    const envelope = parseBilibiliJsonEnvelope(response);
+    if (!envelope.ok || envelope.code !== 0) {
+      return null;
+    }
+    const mainSection = (envelope.result as { main_section?: { episodes?: unknown } } | null)
+      ?.main_section;
+    const episodes = extractFeatureEpisodes(mainSection?.episodes);
+    return episodes !== null && episodes.length > 0 ? episodes : null;
+  } catch {
+    return null;
+  }
+}
+
 export const bilibiliAdapter: Tier3Adapter<"bilibili"> = {
   namespace: "bilibili",
   tier: 3,
@@ -545,6 +576,11 @@ export const bilibiliAdapter: Tier3Adapter<"bilibili"> = {
     }
 
     if (isBilibiliNotFoundCode(envelope.code)) {
+      // A 港澳台-only season is -404 here from other regions, yet still lists its episodes in the
+      // section API: it exists, but its metadata cannot be read from this region.
+      if ((await fetchSectionEpisodes(seasonId, outbound)) !== null) {
+        return { status: "transient_error", reason: "bilibili_season_region_restricted" };
+      }
       return {
         status: "not_found",
         reason: envelope.message ?? `bilibili_code_${envelope.code}`,
@@ -585,7 +621,12 @@ export const bilibiliAdapter: Tier3Adapter<"bilibili"> = {
 
     // `type` is the channel (番剧 also lists theatrical films); `show_season_type` is the display type.
     const mediaType = mapBilibiliMediaType(result.show_season_type ?? result.type);
-    const extracted = extractFeatureEpisodes(result.episodes);
+    const listed = extractFeatureEpisodes(result.episodes);
+    // An empty list means "not shown here", not "zero episodes": ask the section API, else unknown.
+    const extracted =
+      listed !== null && listed.length > 0
+        ? listed
+        : await fetchSectionEpisodes(seasonId, outbound);
     const featureEpisodes = extracted !== null ? selectBroadcastEpisodes(extracted) : null;
     const aliases = collectAliases(result, title);
     const originalTitle = nonEmptyString(result.jp_title);
