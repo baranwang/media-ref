@@ -19,6 +19,8 @@ export interface CoverageSegment {
   end: number;
   targetStart?: number;
   nonLinear?: boolean;
+  /** An authority catalog ID is independent of change requests. */
+  isExternalId?: boolean;
   status: "confirmed" | "pending" | "muted";
   changeRequestId?: string;
   /** Association that backs this bar (for version history). */

@@ -188,6 +188,8 @@ export async function runSeedCli(argv: readonly string[]): Promise<SeedImportSum
     accessToken: parsed.tmdbAccessToken ?? process.env.TMDB_ACCESS_TOKEN,
     apiKey: parsed.tmdbApiKey ?? process.env.TMDB_API_KEY,
     apiBaseUrl: parsed.tmdbApiBaseUrl ?? process.env.TMDB_API_BASE_URL,
+    traktClientId: process.env.TRAKT_CLIENT_ID,
+    traktApiBaseUrl: process.env.TRAKT_API_BASE_URL,
   };
 
   const db = createDb(databaseUrl);
