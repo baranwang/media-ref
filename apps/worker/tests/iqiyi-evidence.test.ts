@@ -403,7 +403,10 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
     const detailResponse = await submitRpc.changeRequest.getChangeRequest({
       id: tvSubmitBody.changeRequest!.id,
     });
-    expect(changeRequestFromProto(detailResponse.changeRequest!).pageUrl).toBe(episodeUrl);
+    expect(changeRequestFromProto(detailResponse.changeRequest!).pageLink).toEqual({
+      href: episodeUrl,
+      source: "entry",
+    });
     expect(fields).toEqual({ namespace: "iqiyi", nativeId: episodeUrl, rawNativeId: episodeUrl });
     expect(tvSubmitBody.changeRequest!.rawNativeId).toBe(episodeUrl);
     expect(tvSubmitBody.changeRequest!.nativeId).toBe("5328486914190101");
