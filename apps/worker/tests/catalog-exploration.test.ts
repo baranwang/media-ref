@@ -4,6 +4,7 @@ import {
   EVIDENCE_CHECK_JOB_TYPE,
   EXPLORATION_JOB_TYPE,
   listDemands,
+  type ExplorationAgentConfig,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type FakeOutboundHandlers,
@@ -120,6 +121,7 @@ describe("catalog-group exploration", () => {
     tmdbSearchEmpty?: boolean;
     extraHttpStub?: (request: ExternalHttpRequest) => ExternalHttpResponse | null;
     invokeModel?: FakeOutboundHandlers["invokeModel"];
+    explorationAgent?: ExplorationAgentConfig;
   }) {
     const testDb = await createTestDb();
     handles.push(testDb);
@@ -212,7 +214,11 @@ describe("catalog-group exploration", () => {
           emitted.push(message);
         },
       },
-      config: { enableDailyTmdbSync: false, exploration: { dailyBudget: 10 } },
+      config: {
+        enableDailyTmdbSync: false,
+        exploration: { dailyBudget: 10 },
+        ...(media.explorationAgent ? { explorationAgent: media.explorationAgent } : {}),
+      },
       now: () => now,
     });
     const runJobs = async (at = T0) => {
@@ -509,6 +515,102 @@ describe("catalog-group exploration", () => {
 
     expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
     expect(await externalIds(testDb, mediaId)).toEqual([]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("not_found");
+  });
+
+  test("single shared title with trailing qualifier does not count as two independent signals", async () => {
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "bangumi",
+      type: "movie",
+      title: "Example (2026)",
+      originalTitle: null,
+      year: 2026,
+      externalIds: [],
+      bangumiAssociation: "12346",
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/12346")) {
+          return json(request.url, {
+            id: 12346,
+            type: 2,
+            name: "Example (2026)",
+            date: "2026-03-01",
+            infobox: [{ key: "别名", value: "Example" }],
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/search/movie")) {
+          return json(request.url, {
+            results: [
+              {
+                id: 90002,
+                title: "Example (2026)",
+                original_title: "Example (2026)",
+                release_date: "2026-03-01",
+              },
+            ],
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/movie/90002")) {
+          return json(request.url, {
+            id: 90002,
+            title: "Example (2026)",
+            original_title: "Example (2026)",
+            release_date: "2026-03-01",
+            external_ids: {},
+          });
+        }
+        return null;
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(await externalIds(testDb, mediaId)).toEqual([]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("not_found");
+  });
+
+  test("TMDB fallback session keeps search tools available even when explorationAgent maxDurationMs exceeds 6 minutes", async () => {
+    let seenToolNames: string[] = [];
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "bangumi",
+      type: "tv",
+      title: "冷门译名",
+      originalTitle: null,
+      year: 2026,
+      seasons: [{ season: 1, episodeCount: 12, airYear: 2026 }],
+      externalIds: [],
+      bangumiAssociation: "499997",
+      explorationAgent: { maxDurationMs: 10 * 60_000 },
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/499997")) {
+          return json(request.url, { id: 499997, type: 2, name: "冷门译名", eps: 12 });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/search/tv")) {
+          return json(request.url, { results: [] });
+        }
+        return null;
+      },
+      invokeModel(request: ModelInvocationRequest): ModelInvocationResponse {
+        if (seenToolNames.length === 0) {
+          seenToolNames = (request.tools ?? []).map((t) => t.name);
+        }
+        return {
+          content: null,
+          toolCalls: [{ id: "c1", name: "mark_not_found", arguments: { reason: "not on tmdb" } }],
+          model: "test-model",
+        };
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(seenToolNames).toEqual(
+      expect.arrayContaining([
+        "search_catalog",
+        "get_catalog_entry",
+        "submit_tmdb_id",
+        "mark_not_found",
+      ]),
+    );
     expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("not_found");
   });
 

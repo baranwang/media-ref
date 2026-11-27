@@ -1482,6 +1482,57 @@ async function loadTmdbLookupSourceContext(
   };
 }
 
+function groupNormalizedTitles(
+  rawTitles: readonly (string | null | undefined)[],
+  year: number | null,
+): Map<string, Set<string>> {
+  const groups = new Map<string, Set<string>>();
+  for (const raw of rawTitles) {
+    if (!raw || raw.trim().length === 0) {
+      continue;
+    }
+    const forms = collectNormalizedTitleCandidates(raw, null, undefined, year);
+    if (forms.size === 0) {
+      continue;
+    }
+    const stripped = normalizeTitleForComparison(stripTrailingQualifiers(raw, year));
+    const full = normalizeTitleForComparison(raw);
+    const key = stripped.length >= 2 ? stripped : full;
+    if (!key) {
+      continue;
+    }
+    const existing = groups.get(key);
+    if (existing) {
+      for (const form of forms) {
+        existing.add(form);
+      }
+    } else {
+      groups.set(key, forms);
+    }
+  }
+  return groups;
+}
+
+function countMatchedIndependentTitles(
+  targetGroups: ReadonlyMap<string, ReadonlySet<string>>,
+  candidateGroups: ReadonlyMap<string, ReadonlySet<string>>,
+): number {
+  const matchedTarget = new Set<string>();
+  const matchedCandidate = new Set<string>();
+  for (const [targetKey, targetForms] of targetGroups) {
+    for (const [candidateKey, candidateForms] of candidateGroups) {
+      for (const form of targetForms) {
+        if (candidateForms.has(form)) {
+          matchedTarget.add(targetKey);
+          matchedCandidate.add(candidateKey);
+          break;
+        }
+      }
+    }
+  }
+  return Math.min(matchedTarget.size, matchedCandidate.size);
+}
+
 function evaluateTmdbIdentityMatch(
   media: ExplorationTargetMedia,
   source: TmdbLookupSourceContext,
@@ -1570,20 +1621,15 @@ function evaluateTmdbIdentityMatch(
   }
   const exactYear = yearGap === 0;
 
-  const targetTitles = collectNormalizedTitleCandidates(
-    media.snapshot.title,
-    media.snapshot.originalTitle,
-    source.aliases,
+  const targetTitles = groupNormalizedTitles(
+    [media.snapshot.title, media.snapshot.originalTitle, ...source.aliases],
     source.year,
   );
-  const candidateTitles = collectNormalizedTitleCandidates(
-    candidate.title,
-    candidate.originalTitle,
-    candidate.aliases,
+  const candidateTitles = groupNormalizedTitles(
+    [candidate.title, candidate.originalTitle, ...candidate.aliases],
     candidate.year,
   );
-  const matchedTitles = [...targetTitles].filter((t) => candidateTitles.has(t));
-  const matchedTitleCount = matchedTitles.length;
+  const matchedTitleCount = countMatchedIndependentTitles(targetTitles, candidateTitles);
 
   const directorHits = intersectNormalizedNames(source.directors, candidate.directorsAndCreators);
   const studioHits = intersectNormalizedNames(source.studios, candidate.productionCompanies);
@@ -1899,17 +1945,15 @@ async function runTmdbAgentFallback(
     return { ok: true };
   };
 
-  const budget = createSessionBudget(
-    ctx.outbound,
-    clockMs() + Math.min(config.maxDurationMs, 90_000),
-    clockMs,
-  );
+  const maxDurationMs = Math.min(config.maxDurationMs, 90_000);
+  const budget = createSessionBudget(ctx.outbound, clockMs() + maxDurationMs, clockMs);
   const usage: SessionUsage = { tokens: 0, byModel: new Map() };
   try {
     const stop = await runToolSession({
       budget,
       config: {
         ...config,
+        maxDurationMs,
         maxSteps: Math.min(config.maxSteps, 12),
       },
       usage,
