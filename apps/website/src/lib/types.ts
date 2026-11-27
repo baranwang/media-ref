@@ -21,8 +21,6 @@ export interface CoverageSegment {
   nonLinear?: boolean;
   status: "confirmed" | "pending" | "muted";
   changeRequestId?: string;
-  /** An authority catalog's whole-media ID is maintained independently of change requests. */
-  isExternalId?: boolean;
   /** Association that backs this bar (for version history). */
   associationId?: string;
 }

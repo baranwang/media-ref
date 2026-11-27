@@ -253,6 +253,7 @@ export type CatalogVerificationResult =
   | {
       status: "found";
       canonicalKey?: string;
+      aliases?: readonly string[];
       mediaType: MediaType;
       baseline: BaselineSource | null;
       snapshot: MediaSnapshot;
@@ -1169,6 +1170,7 @@ export async function verifyExternalKeyInCatalog(
   return {
     status: "found",
     canonicalKey: target.canonicalKey,
+    aliases: target.evidence.aliases,
     mediaType: target.type,
     baseline: target.baseline,
     snapshot: target.snapshot,
@@ -1583,6 +1585,8 @@ export function createExplorationJobHandler(
         if (!resolvedMediaId && !verifiedCatalog) return { kind: "stale" as const };
         if (!resolvedMediaId && verifiedCatalog) {
           const reusable = await findReusableMediaForPrefetchedCatalogInTx(trx, {
+            canonicalKey: verifiedCatalog.canonicalKey ?? externalKey,
+            aliases: verifiedCatalog.aliases,
             type: verifiedCatalog.mediaType,
             snapshot: verifiedCatalog.snapshot,
             externalIds: verifiedCatalog.externalIds ?? {},

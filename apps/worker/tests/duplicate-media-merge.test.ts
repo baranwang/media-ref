@@ -4,6 +4,7 @@ import {
   approveChangeRequest,
   bilibiliAdapter,
   convergeDuplicateMedia,
+  findSharedCatalogDuplicateMediaIdsInTx,
   createAdapterRegistry,
   createChangeRequest,
   createFakeOutboundClient,
@@ -871,9 +872,11 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
     },
   );
 
-  test.each([true, false])(
-    "a Trakt approval uses the two owners' stored titles before merging demands (same title: %s)",
-    async (sameTitle) => {
+  test.each(["compatible owners", "distinct owners", "one wrong cross-reference"])(
+    "Trakt approval verifies stored identity before merging demands with %s",
+    async (scenario) => {
+      const sameTitle = scenario === "compatible owners";
+      const onlyWrongReference = scenario === "one wrong cross-reference";
       const handle = await createTestDb();
       handles.push(handle);
       const db = handle.writeDb;
@@ -899,7 +902,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
           {
             media_id: imdb.id,
             namespace: "imdb",
-            native_id: "tt0000002",
+            native_id: onlyWrongReference ? "tt0000003" : "tt0000002",
             is_external_id: true,
             status: "confirmed",
           },
@@ -946,6 +949,14 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
         expect((await approval).mediaId).toBe(tmdb.id);
         expect(await listDemands(db, { mediaId: tmdb.id })).toMatchObject([{ demandCount: 6 }]);
         for (const key of keys) expect(await listDemands(db, { externalKey: key })).toEqual([]);
+      } else if (onlyWrongReference) {
+        const { mediaId } = await approval;
+        expect([tmdb.id, imdb.id]).not.toContain(mediaId);
+        expect(await listDemands(db, { mediaId })).toMatchObject([{ demandCount: 3 }]);
+        expect(await listDemands(db, { externalKey: "imdb:tt0000002" })).toMatchObject([
+          { mediaId: null, demandCount: 3 },
+        ]);
+        expect((await queryMediaByKey(db, "imdb:tt0000002")).kind).toBe("not_found");
       } else {
         await expect(approval).rejects.toMatchObject({ code: "INVALID_SEGMENTS", status: 409 });
         expect((await queryMediaByKey(db, keys[0]!)).kind).toBe("not_found");
@@ -1866,7 +1877,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
         native_id: "35235320",
         is_external_id: false,
         status: "confirmed",
-        needs_review: false,
+        needs_review: true,
         locked: false,
       })
       .returningAll()
@@ -1962,6 +1973,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       .where("native_id", "=", "35235320")
       .executeTakeFirstOrThrow();
     expect(mergedDouban.status).toBe("confirmed");
+    expect(mergedDouban.needs_review).toBe(true);
 
     const mergedSegs = await db
       .selectFrom("segments")
@@ -3436,6 +3448,11 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
         return { status: 404, headers: {}, url: request.url, body: "" };
       },
     });
+    const immediate = await db
+      .transaction()
+      .execute((trx) => findSharedCatalogDuplicateMediaIdsInTx(trx, compatA.id));
+    expect(immediate).toHaveLength(1);
+
     let totalMerged = 0;
     for (let step = 0; step < 12; step += 1) {
       const batchTime = new Date(now.getTime() + step * 5 * 60_000);

@@ -173,66 +173,37 @@ function attemptAutoMerge(db: Db, input: VerifyAndAutoMergeDuplicateInput, guard
     });
 }
 
-/** Finds all active unmerged media sharing any active catalog (`douban` / `bangumi`) collection with `mediaId`. */
+/** Probe one shared catalog pair on the request path; cron's keyset cursor covers the rest. */
 export async function findSharedCatalogDuplicateMediaIdsInTx(
   trx: Transaction<Database>,
   mediaId: string,
 ): Promise<Array<{ otherMediaId: string; namespace: AssociationNamespaceRow; nativeId: string }>> {
   const canonicalId = await resolveCanonicalMediaIdInTx(trx, mediaId);
-  if (!canonicalId) {
-    return [];
-  }
-
-  const ownCatalogRows = await trx
-    .selectFrom("associations")
-    .where("is_external_id", "=", false)
-    .select(["namespace", "native_id"])
-    .where("media_id", "=", canonicalId)
-    .where("namespace", "in", ["douban", "bangumi"])
-    .where("status", "in", ["confirmed", "seed_unconfirmed"])
-    .where("needs_review", "=", false)
+  if (!canonicalId) return [];
+  return trx
+    .selectFrom("associations as own")
+    .innerJoin("associations as peer", (join) =>
+      join
+        .onRef("peer.namespace", "=", "own.namespace")
+        .onRef("peer.native_id", "=", "own.native_id"),
+    )
+    .innerJoin("media as m", "m.id", "peer.media_id")
+    .select(["m.id as otherMediaId", "own.namespace as namespace", "own.native_id as nativeId"])
+    .where("own.media_id", "=", canonicalId)
+    .where("m.id", "!=", canonicalId)
+    .where("m.merged_into_media_id", "is", null)
+    .where("own.namespace", "in", ["douban", "bangumi"])
+    .where("own.is_external_id", "=", false)
+    .where("peer.is_external_id", "=", false)
+    .where("own.status", "in", ["confirmed", "seed_unconfirmed"])
+    .where("own.needs_review", "=", false)
+    .where("peer.status", "in", ["confirmed", "seed_unconfirmed"])
+    .where("peer.needs_review", "=", false)
+    .orderBy("m.created_at")
+    .orderBy("m.id")
+    .orderBy("own.id")
+    .limit(1)
     .execute();
-
-  if (ownCatalogRows.length === 0) {
-    return [];
-  }
-
-  const results: Array<{
-    otherMediaId: string;
-    namespace: AssociationNamespaceRow;
-    nativeId: string;
-  }> = [];
-  const seenMedia = new Set<string>([canonicalId]);
-
-  for (const row of ownCatalogRows) {
-    const sharedRows = await trx
-      .selectFrom("associations as a")
-      .innerJoin("media as m", "m.id", "a.media_id")
-      .where("a.is_external_id", "=", false)
-      .where("a.namespace", "=", row.namespace)
-      .where("a.native_id", "=", row.native_id)
-      .where("a.status", "in", ["confirmed", "seed_unconfirmed"])
-      .where("a.needs_review", "=", false)
-      .where("m.merged_into_media_id", "is", null)
-      .where("m.id", "!=", canonicalId)
-      .select("m.id as media_id")
-      .orderBy("m.created_at", "asc")
-      .orderBy("m.id", "asc")
-      .execute();
-
-    for (const shared of sharedRows) {
-      if (!seenMedia.has(shared.media_id)) {
-        seenMedia.add(shared.media_id);
-        results.push({
-          otherMediaId: shared.media_id,
-          namespace: row.namespace,
-          nativeId: row.native_id,
-        });
-      }
-    }
-  }
-
-  return results;
 }
 
 async function fetchExtraAliasesForMerge(
@@ -256,8 +227,8 @@ async function fetchExtraAliasesForMerge(
       return null;
     }
     const tmdbItems: Array<{ key: string; mediaIds: string[] }> = [];
-    const tmdbA = snapA.externalIds.find((e) => e.namespace === "tmdb");
-    const tmdbB = snapB.externalIds.find((e) => e.namespace === "tmdb");
+    const tmdbA = snapA.externalIds.find((e) => e.namespace === "tmdb" && e.status === "confirmed");
+    const tmdbB = snapB.externalIds.find((e) => e.namespace === "tmdb" && e.status === "confirmed");
     if (tmdbA) {
       tmdbItems.push({
         key: formatExternalKey({ namespace: "tmdb", nativeId: tmdbA.nativeId }),
@@ -339,7 +310,7 @@ async function fetchExtraAliasesForMerge(
 
   // 2. For shared catalog entries (including seed_unconfirmed), attribute fetched titles to a side
   //    ONLY when that side independently verifies against the fetched entry (type, year, non-conflicting
-  //    external IDs, and either title/alias overlap or matching external ID).
+  //    external IDs, and either title/alias overlap or ownership of the fetched source key).
   const attributeSharedIfMatched = (
     snap: MergeCandidateMediaSnapshot,
     resolvedTarget: Parameters<typeof doesCatalogTargetMatchMediaSnapshot>[2],
@@ -358,12 +329,7 @@ async function fetchExtraAliasesForMerge(
         continue;
       }
       const titles = resolveTitles(resolved.target);
-      const catalogTarget = {
-        type: resolved.target.type,
-        snapshot: resolved.target.snapshot,
-        externalIds: resolved.target.externalIds,
-        aliases: titles,
-      };
+      const catalogTarget = { ...resolved.target, aliases: titles };
       attributeSharedIfMatched(loaded.snapA, catalogTarget, titles);
       attributeSharedIfMatched(loaded.snapB, catalogTarget, titles);
     } catch {
