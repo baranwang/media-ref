@@ -206,6 +206,17 @@ function createWorkerOutboundClient(env: BackgroundWorkerEnv) {
 }
 
 const worker = {
+  // HTTP is not a job entrypoint. A request that still reaches the script (a
+  // Version URL, a stray route) must get a response; otherwise the runtime throws
+  // "Handler does not export a fetch() function." Do not open the database or read env.
+  async fetch(
+    _request: Request,
+    _env: BackgroundWorkerEnv,
+    _ctx: ExecutionContext,
+  ): Promise<Response> {
+    return new Response(null, { status: 404 });
+  },
+
   async scheduled(
     controller: ScheduledController,
     env: BackgroundWorkerEnv,
