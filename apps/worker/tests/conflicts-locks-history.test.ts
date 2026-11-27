@@ -1463,12 +1463,6 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     });
 
     const user = await setupUser(app, outbound, "idem-user@example.com");
-    const reviewer = await setupUser(app, outbound, "idem-rev@example.com");
-    await testDb.writeDb
-      .updateTable("user")
-      .set({ role: "reviewer" })
-      .where("id", "=", reviewer.userId)
-      .execute();
 
     const emitted: JobQueueMessage[] = [];
     const worker = createBackgroundWorker({
@@ -1483,18 +1477,8 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       now: () => t0,
     });
 
-    await seedConfirmedAssociation(app, worker, emitted, {
-      submitKey: user.submitKey,
-      reviewerCookie: reviewer.cookie,
-      nativeId: "ss34430",
-      segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
-      ],
-      now: t0,
-    });
-
     const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
-    const dupRes = await submitRpc.changeRequest.createChangeRequest({
+    const mapping = {
       target: mediaRef("tmdb:tv:95479"),
       namespace: "bilibili",
       nativeId: "ss34430",
@@ -1508,9 +1492,24 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
           baseline: "tmdb",
         }),
       ],
+    };
+    // Both requests precede confirmation. Only the first asks to change the default variant.
+    const first = await submitRpc.changeRequest.createChangeRequest({
+      ...mapping,
+      setDefaultVariant: true,
     });
     await worker.scheduled(createScheduledController(t0));
-    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+    const firstBatch = emitted.splice(0);
+    const dupRes = await submitRpc.changeRequest.createChangeRequest(mapping);
+    await worker.queue(createQueueBatch(firstBatch, t0).batch);
+    const firstState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      first.changeRequest!.id,
+    );
+    expect(firstState.status).toBe("approved");
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0), t0).batch);
 
     const dupState = await getChangeRequestStateRpc(
       app,
@@ -1519,6 +1518,11 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     );
     expect(dupState.status).toBe("approved");
     expect(dupState.conflictReason).toBeNull();
+    expect(dupState.evidence?.conflict).toMatchObject({
+      newPassed: true,
+      oldPassed: true,
+      outcome: "auto_replace",
+    });
   });
 
   test("changing nonLinear flag on the same unlocked confirmed collection goes through conflict review instead of auto-approving", async () => {

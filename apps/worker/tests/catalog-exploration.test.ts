@@ -1,5 +1,8 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import {
+  createExplorationAgentExecutor,
+  createDefaultAdapterRegistry,
+  createTmdbGateway,
   createFakeOutboundClient,
   EVIDENCE_CHECK_JOB_TYPE,
   EXPLORATION_JOB_TYPE,
@@ -276,6 +279,63 @@ describe("catalog-group exploration", () => {
       .where("is_external_id", "=", true)
       .orderBy("namespace")
       .execute();
+
+  test("a redirect to a media without TMDB does not report a Douban key as a TMDB result", async () => {
+    const { testDb, mediaId, outbound } = await setup({
+      baseline: "douban",
+      externalIds: [],
+      doubanAssociation: "1292000",
+    });
+    const db = testDb.writeDb;
+    const snapshot = {
+      type: "movie" as const,
+      title: "搏击俱乐部",
+      originalTitle: "Fight Club",
+      year: 1999,
+      seasons: [],
+    };
+    const target = await db
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "douban",
+        title: snapshot.title,
+        original_title: snapshot.originalTitle,
+        year: 1999,
+        seasons: "[]",
+        created_at: new Date(0),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("associations")
+      .values({
+        media_id: target.id,
+        namespace: "douban",
+        native_id: "1292000",
+        status: "confirmed",
+      })
+      .execute();
+    const { platformOutcomes } = await createExplorationAgentExecutor()({
+      db,
+      outbound,
+      adapterRegistry: createDefaultAdapterRegistry(),
+      tmdbGateway: createTmdbGateway(outbound),
+      jobId: crypto.randomUUID(),
+      jobLeaseGeneration: 1,
+      demandId: crypto.randomUUID(),
+      demandLeaseGeneration: 1,
+      media: { id: mediaId, type: "movie", baseline: "douban", snapshot, externalIds: [] },
+      season: null,
+      namespaceGroup: "catalog",
+      targetNamespaces: ["tmdb"],
+      now: T0,
+    });
+    expect(platformOutcomes).toMatchObject([
+      { namespace: "tmdb", status: "transient_error", reason: "merged_target_missing_tmdb" },
+    ]);
+    expect(await externalIds(testDb, target.id)).toEqual([]);
+  });
 
   test("a Douban-only media gets its TMDB ID from the IMDb chain, and the demand is fulfilled", async () => {
     const { testDb, mediaId, runJobs } = await setup({

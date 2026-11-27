@@ -2455,10 +2455,10 @@ async function exploreTmdbExternalId(
         .executeTakeFirst();
       return {
         namespace,
-        status: "submitted",
-        nativeId: targetTmdb?.native_id ?? `${candidate.namespace}:${candidate.nativeId}`,
-        directWrite: true,
         mergedIntoMediaId: mergeAttempt.targetMediaId,
+        ...(targetTmdb
+          ? { status: "submitted", nativeId: targetTmdb.native_id, directWrite: true }
+          : { status: "transient_error", reason: "merged_target_missing_tmdb" }),
       };
     }
   }
