@@ -438,6 +438,42 @@ describe("Background Worker pipeline", () => {
     expect(emitted).toEqual([expect.objectContaining({ jobId: ordinary.id, leaseGeneration: 2 })]);
   });
 
+  test("a tmdb_sync lease outlasts the 15-minute invocation wall clock (#153)", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const t0 = new Date("2026-11-26T00:00:00Z");
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { jobTypes: ["tmdb_sync", "echo"], enableDailyTmdbSync: false },
+    });
+    const { job: sync } = await enqueueJob(testDb.writeDb, { jobType: "tmdb_sync", runAfter: t0 });
+    const { job: ordinary } = await enqueueJob(testDb.writeDb, { jobType: "echo", runAfter: t0 });
+    await worker.scheduled(createScheduledController(t0));
+    expect(emitted).toHaveLength(2);
+    expect((await getJobById(testDb.readDb, sync.id))?.leaseExpiresAt).toEqual(
+      new Date(t0.getTime() + 20 * 60_000),
+    );
+
+    // A sync still running after the ordinary 5-minute lease is not claimed a second time.
+    emitted.length = 0;
+    await worker.scheduled(createScheduledController(new Date(t0.getTime() + 16 * 60_000)));
+    expect(emitted).toEqual([expect.objectContaining({ jobId: ordinary.id, leaseGeneration: 2 })]);
+
+    // Once the invocation that held it must have ended, the sync is claimed again.
+    emitted.length = 0;
+    await worker.scheduled(createScheduledController(new Date(t0.getTime() + 21 * 60_000)));
+    expect(emitted).toEqual(
+      expect.arrayContaining([expect.objectContaining({ jobId: sync.id, leaseGeneration: 2 })]),
+    );
+  });
+
   test("late exploration delivery keeps its generation through the original deadline", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

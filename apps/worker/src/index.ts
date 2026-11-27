@@ -29,6 +29,7 @@ import {
 import { createDb } from "@media-ref/db";
 import {
   createBackgroundWorker,
+  DEFAULT_CATALOG_TIMEOUT_MS,
   DEFAULT_JOB_BATCH_SIZE,
   DEFAULT_LEASE_DURATION_MS,
   type BackgroundWorkerConfig,
@@ -36,6 +37,7 @@ import {
 
 export {
   createBackgroundWorker,
+  DEFAULT_CATALOG_TIMEOUT_MS,
   DEFAULT_JOB_BATCH_SIZE,
   DEFAULT_LEASE_DURATION_MS,
   DEFAULT_RETRY_DELAY_MS,
@@ -128,6 +130,8 @@ export function parseWorkerConfig(env: BackgroundWorkerEnv): BackgroundWorkerCon
     apiBaseUrl: env.TMDB_API_BASE_URL,
     traktClientId: env.TRAKT_CLIENT_ID,
     traktApiBaseUrl: env.TRAKT_API_BASE_URL,
+    // The catalog gateway falls back to this, so it bounds every catalog request too.
+    timeoutMs: DEFAULT_CATALOG_TIMEOUT_MS,
   };
   return {
     batchSize: parsePositiveInt(env.JOB_BATCH_SIZE, DEFAULT_JOB_BATCH_SIZE),
