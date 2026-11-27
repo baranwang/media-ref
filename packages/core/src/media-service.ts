@@ -1170,15 +1170,14 @@ export async function createChangeRequest(
       }
     }
 
-    const dedupeLockScope = existingMedia?.id ?? canonicalTargetKey;
+    // The target can gain a media ID while a submission waits for this collection.
     await acquireAdvisoryLock(
       trx,
       ADVISORY_LOCK_CLASSES.CHANGE_REQUEST_DEDUPE,
-      `${dedupeLockScope}:${namespace}:${nativeId}`,
+      `${namespace}:${nativeId}`,
     );
 
-    const mediaInTx =
-      existingMedia ?? (await resolveExistingMediaByTarget(trx, target))?.media ?? null;
+    const mediaInTx = (await resolveExistingMediaByTarget(trx, target))?.media ?? null;
     let resolvedVariantIdInTx = resolvedVariantId;
     if (
       !resolvedVariantIdInTx &&
@@ -1593,24 +1592,6 @@ async function assertNotNoOpSubmission(
   }
 }
 
-async function loadCandidateTargetKeysForMedia(
-  db: DbExecutor,
-  mediaId: string,
-  canonicalTargetKey: string,
-): Promise<string[]> {
-  const extRows = await db
-    .selectFrom("associations")
-    .where("is_external_id", "=", true)
-    .select(["namespace", "native_id"])
-    .where("media_id", "=", mediaId)
-    .execute();
-  const keys = new Set<string>([canonicalTargetKey]);
-  for (const row of extRows) {
-    keys.add(`${row.namespace}:${row.native_id}`);
-  }
-  return [...keys];
-}
-
 async function assertNoDuplicateInFlightChangeRequest(
   db: DbExecutor,
   input: {
@@ -1625,14 +1606,12 @@ async function assertNoDuplicateInFlightChangeRequest(
     normalizedSegments: readonly NormalizedSegment[];
   },
 ): Promise<void> {
-  const candidateKeys = input.existingMedia
-    ? await loadCandidateTargetKeysForMedia(db, input.existingMedia.id, input.canonicalTargetKey)
-    : [input.canonicalTargetKey];
-
   const pendingRows = await db
     .selectFrom("change_requests")
     .select([
       "id",
+      "media_id",
+      "target_external_key",
       "variant_id",
       "variant_description",
       "set_default_variant",
@@ -1644,10 +1623,7 @@ async function assertNoDuplicateInFlightChangeRequest(
     .where("native_id", "=", input.nativeId)
     .where((eb) =>
       input.existingMedia
-        ? eb.or([
-            eb("media_id", "=", input.existingMedia.id),
-            eb.and([eb("media_id", "is", null), eb("target_external_key", "in", candidateKeys)]),
-          ])
+        ? eb.or([eb("media_id", "=", input.existingMedia.id), eb("media_id", "is", null)])
         : eb.and([
             eb("media_id", "is", null),
             eb("target_external_key", "=", input.canonicalTargetKey),
@@ -1679,13 +1655,17 @@ async function assertNoDuplicateInFlightChangeRequest(
       continue;
     }
     const rowKey = canonicalSegmentsKey(parseStoredNormalizedSegments(row.segments));
-    if (rowKey === requestedKey) {
-      throw new MediaServiceError(
-        "DUPLICATE_CHANGE_REQUEST",
-        409,
-        `An identical pending change request (${row.id}) is already in progress`,
-      );
+    if (rowKey !== requestedKey) continue;
+    if (!row.media_id && row.target_external_key !== input.canonicalTargetKey) {
+      const target = parseTargetKey(row.target_external_key);
+      const resolved = target && (await resolveExistingMediaByTarget(db, target));
+      if (!resolved || resolved.media.id !== input.existingMedia?.id) continue;
     }
+    throw new MediaServiceError(
+      "DUPLICATE_CHANGE_REQUEST",
+      409,
+      `An identical pending change request (${row.id}) is already in progress`,
+    );
   }
 }
 
