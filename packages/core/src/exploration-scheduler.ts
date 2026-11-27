@@ -239,6 +239,7 @@ export type ExplorationExecutor = (
 export type CatalogVerificationResult =
   | {
       status: "found";
+      canonicalKey?: string;
       mediaType: MediaType;
       baseline: BaselineSource | null;
       snapshot: MediaSnapshot;
@@ -1154,6 +1155,7 @@ export async function verifyExternalKeyInCatalog(
   const target = resolved.target;
   return {
     status: "found",
+    canonicalKey: target.canonicalKey,
     mediaType: target.type,
     baseline: target.baseline,
     snapshot: target.snapshot,
@@ -1197,6 +1199,8 @@ async function findExistingMediaIdByExternalKey(
       .select("media_id")
       .where("namespace", "=", parsed.namespace)
       .where("native_id", "=", parsed.nativeId)
+      .where("status", "=", "confirmed")
+      .$if(db.isTransaction, (qb) => qb.forShare())
       .executeTakeFirst();
     if (ext) {
       return resolveCanonicalMediaId(db, ext.media_id);
@@ -1213,6 +1217,7 @@ async function findExistingMediaIdByExternalKey(
       .where("status", "=", "confirmed")
       .orderBy("created_at", "asc")
       .orderBy("id", "asc")
+      .$if(db.isTransaction, (qb) => qb.forShare())
       .executeTakeFirst();
     return assoc ? resolveCanonicalMediaId(db, assoc.media_id) : null;
   }
@@ -1444,7 +1449,7 @@ export function createExplorationJobHandler(
         };
       }
 
-      let existingMediaId = await findExistingMediaIdByExternalKey(ctx.db, externalKey);
+      const existingMediaId = await findExistingMediaIdByExternalKey(ctx.db, externalKey);
       let verifiedCatalog: Extract<CatalogVerificationResult, { status: "found" }> | null = null;
 
       if (!existingMediaId) {
@@ -1524,29 +1529,26 @@ export function createExplorationJobHandler(
 
         await acquireAdvisoryLock(trx, ADVISORY_LOCK_CLASSES.MEDIA_KEY, externalKey);
 
-        let resolvedMediaId =
-          existingMediaId ?? (await findExistingMediaIdByExternalKey(trx, externalKey));
+        const mediaForDemandKey = await findExistingMediaIdByExternalKey(trx, externalKey);
+        let resolvedMediaId = mediaForDemandKey;
         let mediaType: MediaType | undefined;
         let mediaSeasons: readonly SeasonSnapshot[] | undefined;
-        const mergeExternalKeys = new Set<string>([externalKey]);
+        const mergeExternalKeys = new Set<string>();
 
         if (!resolvedMediaId) {
           if (!verifiedCatalog) {
             return { kind: "stale" as const };
           }
 
-          // Also check if any synced external ID already resolves to an existing media
-          if (verifiedCatalog.externalIds) {
-            for (const ns of EXTERNAL_ID_NAMESPACES) {
-              const val = verifiedCatalog.externalIds[ns];
-              if (!val) {
-                continue;
-              }
-              const formatted = formatExternalKey({ namespace: ns, nativeId: val });
-              mergeExternalKeys.add(formatted);
-              if (!resolvedMediaId) {
-                resolvedMediaId = await findExistingMediaIdByExternalKey(trx, formatted);
-              }
+          await sql`savepoint resolve_catalog_identity`.execute(trx);
+          for (const namespace of EXTERNAL_ID_NAMESPACES) {
+            const nativeId = verifiedCatalog.externalIds?.[namespace];
+            if (nativeId) {
+              resolvedMediaId = await findExistingMediaIdByExternalKey(
+                trx,
+                formatExternalKey({ namespace, nativeId }),
+              );
+              if (resolvedMediaId) break;
             }
           }
         }
@@ -1568,19 +1570,6 @@ export function createExplorationJobHandler(
           resolvedMediaId = created.id;
           mediaType = created.type;
           mediaSeasons = verifiedCatalog!.snapshot.seasons;
-
-          if (verifiedCatalog!.externalIds) {
-            await backfillMissingExternalIdsInTx(trx, {
-              mediaId: created.id,
-              externalIds: verifiedCatalog!.externalIds,
-            });
-            for (const ns of EXTERNAL_ID_NAMESPACES) {
-              const nativeVal = verifiedCatalog!.externalIds[ns];
-              if (nativeVal) {
-                mergeExternalKeys.add(formatExternalKey({ namespace: ns, nativeId: nativeVal }));
-              }
-            }
-          }
 
           // When lazily created from a Douban or Bangumi catalog entry, establish the initial
           // confirmed catalog association immediately so GET /v1/media/douban:<id> or bangumi:<id> resolves it.
@@ -1674,16 +1663,38 @@ export function createExplorationJobHandler(
             .executeTakeFirstOrThrow();
           mediaType = mediaRow.type;
           mediaSeasons = parseSeasonsSnapshotJson(mediaRow.seasons);
-          if (verifiedCatalog?.externalIds) {
-            const addedKeys = await backfillMissingExternalIdsInTx(trx, {
-              mediaId: resolvedMediaId,
-              externalIds: verifiedCatalog.externalIds,
-            });
-            for (const key of addedKeys) {
-              mergeExternalKeys.add(key);
-            }
-          }
         }
+
+        if (verifiedCatalog?.externalIds) {
+          const { ownedKeys } = await backfillMissingExternalIdsInTx(trx, {
+            mediaId: resolvedMediaId,
+            externalIds: verifiedCatalog.externalIds,
+          });
+          for (const key of ownedKeys) mergeExternalKeys.add(key);
+        }
+
+        // A verified alias (e.g. tvdb:series:123) can merge once its canonical key is owned.
+        if (
+          !mediaForDemandKey &&
+          !mergeExternalKeys.has(verifiedCatalog?.canonicalKey ?? externalKey)
+        ) {
+          // Discard any speculative media and IDs while retaining the job and demand locks.
+          await sql`rollback to savepoint resolve_catalog_identity`.execute(trx);
+          const retryMs =
+            config.transientRetryDelayMs ?? DEFAULT_EXPLORATION_TRANSIENT_RETRY_DELAY_MS;
+          await trx
+            .updateTable("demands")
+            .set({
+              status: "open",
+              next_eligible_at: new Date(ctx.now.getTime() + retryMs),
+              lease_expires_at: null,
+              updated_at: ctx.now,
+            })
+            .where("id", "=", lockedDemand.id)
+            .execute();
+          return { kind: "unresolved_key" as const };
+        }
+        mergeExternalKeys.add(externalKey);
 
         const regularSeasons = extractRegularTvSeasons(mediaSeasons ?? []);
         let targetSeason: number | null;
@@ -1786,6 +1797,18 @@ export function createExplorationJobHandler(
             demandId: activeDemandId,
             skipped: true,
             reason: "stale_lease_before_media_create",
+          },
+        };
+      }
+
+      if (mergeTxResult.kind === "unresolved_key") {
+        return {
+          status: "completed",
+          result: {
+            demandId: activeDemandId,
+            externalKey,
+            skipped: true,
+            reason: "unresolved_catalog_identity",
           },
         };
       }
