@@ -28,11 +28,13 @@ function makeMgtvEpisodeItem(
     t3?: string;
     ts?: string;
     time?: string;
+    srcClipId?: string;
   },
 ) {
   return {
     video_id: String(videoId),
     clip_id: collectionId,
+    src_clip_id: options.srcClipId ?? collectionId,
     t1: options.t1,
     t2: options.t2 ?? "",
     t3: options.t3 ?? `第${options.t1}集`,
@@ -485,6 +487,72 @@ describe("Mango TV (mgtv) Tier 1 & Tier 2 adapter", () => {
       const result = await mgtvAdapter.fetchCollection(cid, outbound);
       expect(result.status).toBe("transient_error");
     }
+  });
+
+  test("drops clips another collection lends to the episode list (src_clip_id differs)", async () => {
+    // Shaped on 大侦探 第十一季 (815824): side collections' "第N期：…" clips, also isIntact "1", made
+    // the list look broadcast-structured, so only those clips survived and the 案 episodes were lost.
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/episode/list") {
+          return jsonResponse(request.url, {
+            code: 200,
+            msg: "",
+            data: {
+              total: 4,
+              count: 4,
+              total_page: 1,
+              info: { title: "大侦探 第十一季", type: "综艺" },
+              list: [
+                makeMgtvEpisodeItem("815824", 990001, {
+                  isIntact: "1",
+                  t1: "1",
+                  t2: "第1期：幕后全记录第1场",
+                  srcClipId: "832612",
+                }),
+                makeMgtvEpisodeItem("815824", 990002, {
+                  isIntact: "1",
+                  t1: "5",
+                  t2: "01案：宝贝计划Ⅰ（上）",
+                }),
+                makeMgtvEpisodeItem("815824", 990003, {
+                  isIntact: "1",
+                  t1: "2",
+                  t2: "第2期: 台下Reaction第1场",
+                  srcClipId: "832612",
+                }),
+                makeMgtvEpisodeItem("815824", 990004, {
+                  isIntact: "1",
+                  t1: "6",
+                  t2: "01案：宝贝计划Ⅰ（下）",
+                }),
+              ],
+            },
+          });
+        }
+        if (url.pathname === "/video/info" && url.searchParams.get("vid") === "990002") {
+          return jsonResponse(request.url, {
+            code: 200,
+            msg: "",
+            data: {
+              info: {
+                clipName: "大侦探 第十一季",
+                fstlvlType: "综艺",
+                detail: { releaseTime: "2026-01-23" },
+              },
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+
+    const result = await mgtvAdapter.fetchCollection("815824", outbound);
+    expect(result).toMatchObject({ status: "found", info: { featureEpisodeCount: 2 } });
+    expect(
+      result.status === "found" && result.info.featureEpisodes.map((ep) => ep.nativeEpisodeId),
+    ).toEqual(["990002", "990004"]);
   });
 
   test("returns null year or null featureEpisodeCount (falling back to first list item vid) when metadata cannot be extracted", async () => {
