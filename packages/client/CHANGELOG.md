@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/baranwang/media-ref/compare/client-v1.1.0...client-v1.1.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **core:** a season needs every platform its confirmed Douban subject lists ([#130](https://github.com/baranwang/media-ref/issues/130)) ([#138](https://github.com/baranwang/media-ref/issues/138)) ([3f864b5](https://github.com/baranwang/media-ref/commit/3f864b577c2972a3cd445358fdf344a54c03d945))
+
 ## [1.1.0](https://github.com/baranwang/media-ref/compare/client-v1.0.0...client-v1.1.0) (2026-11-27)
 
 
