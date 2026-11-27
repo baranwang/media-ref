@@ -3,14 +3,17 @@ import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
 import { isBroadcastLabel, selectBroadcastEpisodes } from "./variety.ts";
 import {
   InvalidNativeIdError,
+  type AdapterSearchCandidate,
+  type AdapterSearchQuery,
+  type AdapterSearchResult,
   type CollectionEvidenceResult,
   type FeatureEpisode,
   type ParsedNativeIdInput,
-  type Tier2Adapter,
+  type Tier3Adapter,
 } from "./types.ts";
 
 /**
- * Tencent Video (`tencent`, `v.qq.com`) Platform Adapter — Tier 1 & Tier 2.
+ * Tencent Video (`tencent`, `v.qq.com`) Platform Adapter — Tier 1, 2 & 3.
  *
  * ## Canonical ID (`canonicalId`)
  * - 15-character lowercase alphanumeric Cover ID (`cid`), matching `/^[a-z0-9]{15}$/`
@@ -34,15 +37,18 @@ import {
  * - Feature episode list: `page_id: "vsite_episode_list"`, paginated across `module_params.tabs[].page_context`.
  *   Strictly filters feature episodes (`is_trailer === "0"` and numeric `title`/`c_title_output` for series,
  *   excluding trailers and bonus `彩蛋` clips).
- * ## Tier 3 Search Status (Intentionally Stays Tier 2 — Ticket #30)
- * Empirically verified unauthenticated search blocks (no auth/CAPTCHA bypassing):
- * - `pbaccess` `MultiTerminalSearch/HttpSearch` & `SmartboxCgi/GetSmartbox` return HTTP 200
- *   `{"ret":10401,"msg":"unknow error."}` without signed/authenticated client context.
- * - `https://v.qq.com/x/search/?q=...` returns a ~2.8 KB client-only SPA shell with no SSR results.
- * - Legacy `union.video.qq.com/fcgi-bin/data` returns `{"errorno":-111013,"errormsg":"禁止外部访问接口"}`
- *   (partner auth required), and `s.video.qq.com` times out on TLS handshake.
- * - Therefore `tencentAdapter` intentionally remains `tier: 2` (no `search` method) and is excluded
- *   from automated exploration job target lists.
+ * ## Tier 3 Search (`search`)
+ * - Endpoint: `POST https://pbaccess.video.qq.com/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2`
+ *   with body `{version:"25071701", clientType:1, query, pagenum, pagesize:30, isPrefetch:true,
+ *   extraInfo:{multi_terminal_pc:"1"}}` and only the JSON/Origin/Referer headers: no cookies or
+ *   signed client headers. Verified 2026-11-28 from a residential IP and from a Cloudflare Workers
+ *   egress (`wrangler dev --remote`). The older `HttpSearch` / `SmartboxCgi/GetSmartbox` RPCs still
+ *   answer `{"ret":10401}` without a signed client context.
+ * - Reads `data.normalList.itemList[]`, then `data.areaBoxList[].itemList[]` (相关影视 recommendations)
+ *   keeping only items whose title contains the keyword. Each item's cid is `doc.id`.
+ * - Keeps only covers: a 15-character cid, `videoInfo.year > 0`, a `qq` entry in `playSites`,
+ *   `typeName` in 电视剧 / 动漫 / 电影 / 纪录片 / 综艺, and no `纯享` clip title. `<em>` highlight
+ *   tags are stripped from titles; `subjectDoc.videoNum` is the episode count.
  */
 
 const TENCENT_ALLOWED_HOSTS = new Set(["v.qq.com", "m.v.qq.com"]);
@@ -73,6 +79,11 @@ const TENCENT_RPC_HEADERS: Record<string, string> = {
   referer: "https://v.qq.com/",
   origin: "https://v.qq.com",
 };
+
+const TENCENT_SEARCH_URL =
+  "https://pbaccess.video.qq.com/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2";
+const TENCENT_SEARCH_PAGE_SIZE = 30;
+const TENCENT_SEARCH_TYPE_NAMES = new Set(["电视剧", "动漫", "电影", "纪录片", "综艺"]);
 
 const NUMERIC_EPISODE_LABEL_PATTERN = /^0*[1-9]\d*$/;
 const BONUS_OR_TRAILER_LABEL_PATTERN =
@@ -517,9 +528,46 @@ export function parseTencentInput(raw: string): ParsedNativeIdInput | null {
   return null;
 }
 
-export const tencentAdapter: Tier2Adapter<"tencent"> = {
+/** A search item as a candidate, or null when it is not a Tencent-hosted feature cover. */
+function toSearchCandidate(
+  rawItem: unknown,
+  keyword: string | null,
+): AdapterSearchCandidate | null {
+  const item = asRecord(rawItem);
+  const info = asRecord(item?.videoInfo);
+  const cid = nonEmptyString(asRecord(item?.doc)?.id);
+  if (!info || !cid || !CANONICAL_CID_PATTERN.test(cid)) {
+    return null;
+  }
+  const title = nonEmptyString(nonEmptyString(info.title)?.replace(/<\/?em>/g, ""));
+  const year = parseFourDigitYear(info.year);
+  const typeName = nonEmptyString(info.typeName);
+  const sites = Array.isArray(info.playSites) ? info.playSites : [];
+  if (
+    !title ||
+    year === null ||
+    !typeName ||
+    !TENCENT_SEARCH_TYPE_NAMES.has(typeName) ||
+    !sites.some((site) => asRecord(site)?.enName === "qq") ||
+    title.includes("纯享") ||
+    (keyword !== null && !title.includes(keyword))
+  ) {
+    return null;
+  }
+  const videoNum = asRecord(info.subjectDoc)?.videoNum;
+  return {
+    canonicalId: cid,
+    title,
+    year,
+    mediaType: mapTencentMediaType(typeName),
+    episodeCount: typeof videoNum === "number" && videoNum > 0 ? videoNum : null,
+    url: `https://v.qq.com/x/cover/${cid}.html`,
+  };
+}
+
+export const tencentAdapter: Tier3Adapter<"tencent"> = {
   namespace: "tencent",
-  tier: 2,
+  tier: 3,
 
   parseInput: parseTencentInput,
 
@@ -677,5 +725,89 @@ export const tencentAdapter: Tier2Adapter<"tencent"> = {
         featureEpisodes: broadcast,
       },
     };
+  },
+
+  async search(query: AdapterSearchQuery, outbound: OutboundClient): Promise<AdapterSearchResult> {
+    const keyword = query.title.trim();
+    if (keyword.length === 0) {
+      return { status: "ok", candidates: [] };
+    }
+    const page =
+      query.page !== undefined && Number.isInteger(query.page) && query.page > 0 ? query.page : 1;
+
+    let response: ExternalHttpResponse;
+    try {
+      response = await outbound.fetchExternal({
+        kind: "platform",
+        namespace: "tencent",
+        url: TENCENT_SEARCH_URL,
+        method: "POST",
+        headers: TENCENT_RPC_HEADERS,
+        body: JSON.stringify({
+          version: "25071701",
+          clientType: 1,
+          query: keyword,
+          pagenum: page - 1,
+          pagesize: TENCENT_SEARCH_PAGE_SIZE,
+          isPrefetch: true,
+          extraInfo: { multi_terminal_pc: "1" },
+        }),
+      });
+    } catch (error) {
+      return {
+        status: "transient_error",
+        reason: error instanceof Error ? error.message : "tencent_search_request_failed",
+      };
+    }
+    if (response.status < 200 || response.status >= 300) {
+      return { status: "transient_error", reason: `http_${response.status}` };
+    }
+
+    let root: Record<string, unknown> | null;
+    try {
+      root = asRecord(JSON.parse(response.body));
+    } catch {
+      return { status: "transient_error", reason: "invalid_json" };
+    }
+    if (!root || typeof root.ret !== "number") {
+      return { status: "transient_error", reason: "missing_ret" };
+    }
+    if (root.ret !== 0) {
+      return { status: "transient_error", reason: `tencent_rpc_ret_${root.ret}` };
+    }
+    const data = asRecord(root.data);
+    if (data && typeof data.errcode === "number" && data.errcode !== 0) {
+      return { status: "transient_error", reason: `tencent_search_errcode_${data.errcode}` };
+    }
+
+    const normalItems = asRecord(data?.normalList)?.itemList;
+    const boxes = Array.isArray(data?.areaBoxList) ? data.areaBoxList : [];
+    const ranked = [
+      ...(Array.isArray(normalItems) ? normalItems : []).map((item) => ({ item, keyword: null })),
+      // Related-film boxes recommend unrelated titles too; keep only those naming the keyword.
+      ...boxes.flatMap((box) => {
+        const items = asRecord(box)?.itemList;
+        return (Array.isArray(items) ? items : []).map((item) => ({ item, keyword }));
+      }),
+    ];
+
+    const limit =
+      query.limit !== undefined && Number.isInteger(query.limit) && query.limit > 0
+        ? query.limit
+        : null;
+    const seen = new Set<string>();
+    const candidates: AdapterSearchCandidate[] = [];
+    for (const { item, keyword: mustContain } of ranked) {
+      const candidate = toSearchCandidate(item, mustContain);
+      if (!candidate || seen.has(candidate.canonicalId)) {
+        continue;
+      }
+      seen.add(candidate.canonicalId);
+      candidates.push(candidate);
+      if (limit !== null && candidates.length >= limit) {
+        break;
+      }
+    }
+    return { status: "ok", candidates };
   },
 };
