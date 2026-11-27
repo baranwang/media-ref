@@ -15,6 +15,7 @@ import {
   mediaRef,
   signUpUser,
   TEST_BASE_URL,
+  approveInCore,
 } from "./rpc-helpers.ts";
 
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-connect-protocol-e2e-tests-0123456789";
@@ -113,9 +114,12 @@ describe("ConnectRPC Protobuf end-to-end protocol compatibility", () => {
         }),
       ],
     });
-    const approved = await ownerRpc.reviewer.approveChangeRequest({
-      id: createdCr.changeRequest!.id,
-    });
+    const approved = await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        id: createdCr.changeRequest!.id,
+      },
+    );
 
     // Reject empty SegmentInput oneof (neither wholeSeason nor explicit set)
     const emptyOneofErr = await expectRpcError(

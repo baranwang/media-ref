@@ -272,6 +272,18 @@ export interface ChangeRequestsTable {
   updated_at: Generated<Date>;
 }
 
+/** A comment on a change request, or the review agent's reply (ADR 0003 amendment 2). */
+export interface ChangeRequestCommentsTable {
+  id: Generated<string>;
+  change_request_id: string;
+  /** `system:review-agent` on the agent's replies. */
+  author_user_id: string;
+  content: string;
+  /** Comments an agent reply answers; empty on people's comments. */
+  reply_to_ids: ColumnType<string[], string[] | undefined, string[]>;
+  created_at: Generated<Date>;
+}
+
 export interface LeadsTable {
   id: Generated<string>;
   target_external_key: string;
@@ -394,6 +406,7 @@ export interface Database {
   segments: SegmentsTable;
   change_requests: ChangeRequestsTable;
   leads: LeadsTable;
+  change_request_comments: ChangeRequestCommentsTable;
   platform_checks: PlatformChecksTable;
   sync_state: SyncStateTable;
   review_alerts: ReviewAlertsTable;

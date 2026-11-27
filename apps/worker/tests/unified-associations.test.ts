@@ -10,6 +10,7 @@ import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
 import {
+  approveInCore,
   createRpcClients,
   expectRpcError,
   fromProtoChangeRequestStatus,
@@ -150,7 +151,8 @@ async function setup(testDb: TestDbHandle) {
     app,
     readKey,
     submitRpc: createRpcClients(app, { apiKey: submitKey }),
-    reviewerRpc: createRpcClients(app, { cookie: reviewer.cookie }),
+    approve: (input: { id: string; reason?: string }) =>
+      approveInCore({ db: testDb.writeDb, outbound }, input),
     async drainEvidence() {
       await worker.scheduled({ scheduledTime: t0.getTime(), cron: "* * * * *", noRetry() {} });
       const evidence = emitted.filter((m) => m.jobType === "evidence_check");
@@ -202,7 +204,7 @@ describe("Unified association model (ADR 0001)", () => {
     for (const id of crIds) {
       const cr = await getChangeRequestStateRpc(ctx.app, { apiKey: ctx.readKey }, id);
       if (cr.status === "needs_review") {
-        await ctx.reviewerRpc.reviewer.approveChangeRequest({ id, reason: "split season" });
+        await ctx.approve({ id, reason: "split season" });
       }
       expect((await getChangeRequestStateRpc(ctx.app, { apiKey: ctx.readKey }, id)).status).toBe(
         "approved",
@@ -282,7 +284,7 @@ describe("Unified association model (ADR 0001)", () => {
       const cr = res.changeRequest!;
       // No evidence adapter for IMDb entries: they go straight to a reviewer.
       expect(fromProtoChangeRequestStatus(cr.status)).toBe("needs_review");
-      await ctx.reviewerRpc.reviewer.approveChangeRequest({ id: cr.id, reason: "imdb entry" });
+      await ctx.approve({ id: cr.id, reason: "imdb entry" });
     }
 
     const byEpisode = await getMediaDocumentRpc(ctx.app, ctx.readKey, "imdb:tt13624322");

@@ -16,6 +16,7 @@ import {
   mediaRef,
   signUpUser,
   TEST_BASE_URL,
+  approveInCore,
 } from "./rpc-helpers.ts";
 
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-rate-limit-integration-tests-0123456789";
@@ -94,7 +95,7 @@ async function seedConfirmedMedia(
     ],
   });
 
-  await ownerRpc.reviewer.approveChangeRequest({ id: created.changeRequest!.id });
+  await approveInCore({ db: testDb.writeDb, outbound }, { id: created.changeRequest!.id });
 }
 
 describe("API Worker rate limiting & submission quotas (#19)", () => {

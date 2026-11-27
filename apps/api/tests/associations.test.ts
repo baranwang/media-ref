@@ -20,6 +20,7 @@ import {
   mediaRef,
   signUpUser,
   TEST_BASE_URL,
+  approveInCore,
 } from "./rpc-helpers.ts";
 
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-associations-locks-history-0123456789";
@@ -170,7 +171,6 @@ describe("Association revision history, locking, and reviewer external ID overri
 
     const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
     const readRpc = createRpcClients(app, { apiKey: readKey.key });
-    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
 
     // Submit & approve revision 1
     const cr1 = await submitRpc.changeRequest.createChangeRequest({
@@ -189,10 +189,14 @@ describe("Association revision history, locking, and reviewer external ID overri
       ],
     });
 
-    const approve1 = await reviewerRpc.reviewer.approveChangeRequest({
-      id: cr1.changeRequest!.id,
-      reason: "Initial confirmation",
-    });
+    const approve1 = await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        reviewerUserId: reviewer.userId,
+        id: cr1.changeRequest!.id,
+        reason: "Initial confirmation",
+      },
+    );
 
     // Submit & approve revision 2 on the same association (extended to E1-24)
     const cr2 = await submitRpc.changeRequest.createChangeRequest({
@@ -211,10 +215,14 @@ describe("Association revision history, locking, and reviewer external ID overri
       ],
     });
 
-    const approve2 = await reviewerRpc.reviewer.approveChangeRequest({
-      id: cr2.changeRequest!.id,
-      reason: "Updated full season range",
-    });
+    const approve2 = await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        reviewerUserId: reviewer.userId,
+        id: cr2.changeRequest!.id,
+        reason: "Updated full season range",
+      },
+    );
     expect(approve2.associationId).toBe(approve1.associationId);
 
     // Unauthenticated request -> 401
@@ -361,7 +369,10 @@ describe("Association revision history, locking, and reviewer external ID overri
         }),
       ],
     });
-    const approved = await reviewerRpc.reviewer.approveChangeRequest({ id: cr.changeRequest!.id });
+    const approved = await approveInCore(
+      { db: testDb.writeDb, outbound },
+      { id: cr.changeRequest!.id },
+    );
 
     // Non-reviewer gets 403
     expect(
@@ -462,7 +473,7 @@ describe("Association revision history, locking, and reviewer external ID overri
         variantDescription: "原声",
         segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
       });
-      return reviewerRpc.reviewer.approveChangeRequest({ id: cr.changeRequest!.id });
+      return approveInCore({ db: testDb.writeDb, outbound }, { id: cr.changeRequest!.id });
     };
 
     const mediaA = await createMedia("tmdb:tv:95479", "ss34430");

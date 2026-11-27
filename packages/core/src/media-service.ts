@@ -76,6 +76,7 @@ export type MediaServiceErrorCode =
   | "ASSOCIATION_NOT_FOUND"
   | "INVALID_REPLACES_ASSOCIATION"
   | "ASSOCIATION_LOCKED"
+  | "ASSOCIATION_SUPERSEDED"
   | "CHANGE_REQUEST_NOT_FOUND"
   | "INVALID_CHANGE_REQUEST_STATE"
   | "TMDB_MEDIA_NOT_FOUND"
@@ -2095,7 +2096,8 @@ export async function rejectChangeRequestInTx(
     .returningAll()
     .executeTakeFirstOrThrow();
 
-  if (cr.demand_id) {
+  // Rejecting a request that was already rejected keeps it so; its demand had its round then.
+  if (cr.demand_id && cr.status !== "rejected") {
     await reopenDemandAfterRejectionInTx(trx, {
       demandId: cr.demand_id,
       now,
@@ -2103,6 +2105,140 @@ export async function rejectChangeRequestInTx(
     });
   }
 
+  return toChangeRequestRecord(updated);
+}
+
+/**
+ * Takes back an approval (ADR 0003 amendment 2): the association the request applied is delisted
+ * with a revision, and the request becomes rejected. The association must still be the one this
+ * request made (not changed by a later request since) and unlocked. Demands are the caller's.
+ */
+export async function revokeChangeRequestInTx(
+  trx: Transaction<Database>,
+  input: {
+    changeRequestId: string;
+    reviewerUserId: string;
+    reason: string;
+    evidence: JsonObject;
+    now: Date;
+  },
+): Promise<ChangeRequestRecord> {
+  const cr = await trx
+    .selectFrom("change_requests")
+    .selectAll()
+    .where("id", "=", input.changeRequestId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (!cr) {
+    throw new MediaServiceError("CHANGE_REQUEST_NOT_FOUND", 404, "Change request not found");
+  }
+  if (cr.status !== "approved" || !cr.applied_association_id || !cr.media_id) {
+    throw new MediaServiceError(
+      "INVALID_CHANGE_REQUEST_STATE",
+      409,
+      `Change request is in status "${cr.status}" and cannot be revoked`,
+    );
+  }
+  await acquireAdvisoryLock(
+    trx,
+    ADVISORY_LOCK_CLASSES.MEDIA_NAMESPACE,
+    `${cr.media_id}:${cr.namespace}`,
+  );
+  const association = await trx
+    .selectFrom("associations")
+    .select(["id", "variant_id", "status", "locked", "current_revision_id"])
+    .where("id", "=", cr.applied_association_id)
+    .forUpdate()
+    .executeTakeFirst();
+  if (
+    !association ||
+    association.status !== "confirmed" ||
+    association.current_revision_id !== cr.applied_revision_id
+  ) {
+    throw new MediaServiceError(
+      "ASSOCIATION_SUPERSEDED",
+      409,
+      "The association is no longer the one this change request applied",
+    );
+  }
+  if (association.locked) {
+    throw new MediaServiceError(
+      "ASSOCIATION_LOCKED",
+      409,
+      `Association ${association.id} is locked and cannot be automatically modified`,
+    );
+  }
+
+  const segmentRows = await trx
+    .selectFrom("segments")
+    .select([
+      "season",
+      "episode_start",
+      "episode_end",
+      "target_episode_start",
+      "baseline",
+      "non_linear",
+      "needs_review",
+    ])
+    .where("association_id", "=", association.id)
+    .orderBy("season", "asc")
+    .orderBy("episode_start", "asc")
+    .orderBy("id", "asc")
+    .execute();
+  const snapshot: NormalizedSegment[] = segmentRows.map((seg) => ({
+    season: seg.season,
+    episodeStart: seg.episode_start,
+    episodeEnd: seg.episode_end,
+    targetEpisodeStart: seg.target_episode_start,
+    baseline: seg.baseline,
+    nonLinear: Boolean(seg.non_linear),
+    needsReview: Boolean(seg.needs_review),
+  }));
+  await trx.deleteFrom("segments").where("association_id", "=", association.id).execute();
+  const maxRevRow = await trx
+    .selectFrom("association_revisions")
+    .select(sql<number | null>`max(revision_number)`.as("max_rev"))
+    .where("association_id", "=", association.id)
+    .executeTakeFirst();
+  const revision = await trx
+    .insertInto("association_revisions")
+    .values({
+      association_id: association.id,
+      revision_number: (maxRevRow?.max_rev ?? 0) + 1,
+      change_request_id: cr.id,
+      variant_id: association.variant_id,
+      status: "delisted",
+      segments: JSON.stringify(snapshot),
+      actor_user_id: input.reviewerUserId,
+      reason: input.reason,
+      created_at: input.now,
+    })
+    .returning("id")
+    .executeTakeFirstOrThrow();
+  await trx
+    .updateTable("associations")
+    .set({
+      status: "delisted",
+      needs_review: false,
+      current_revision_id: revision.id,
+      updated_at: input.now,
+    })
+    .where("id", "=", association.id)
+    .execute();
+
+  const updated = await trx
+    .updateTable("change_requests")
+    .set({
+      status: "rejected",
+      decision_reason: input.reason,
+      reviewer_user_id: input.reviewerUserId,
+      reviewed_at: input.now,
+      updated_at: input.now,
+      evidence: JSON.stringify(input.evidence),
+    })
+    .where("id", "=", cr.id)
+    .returningAll()
+    .executeTakeFirstOrThrow();
   return toChangeRequestRecord(updated);
 }
 

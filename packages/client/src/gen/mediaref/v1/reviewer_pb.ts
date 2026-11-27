@@ -919,6 +919,9 @@ export const ReviewerService: GenService<{
     output: typeof ListChangeRequestsResponseSchema;
   };
   /**
+   * People no longer decide change requests (ADR 0003 amendment 2): both answer FailedPrecondition
+   * DECIDED_BY_REVIEW_AGENT. Comment with ChangeRequestService.CreateChangeRequestComment instead.
+   *
    * @generated from rpc mediaref.v1.ReviewerService.ApproveChangeRequest
    */
   approveChangeRequest: {

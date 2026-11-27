@@ -15,6 +15,7 @@ import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
 import {
+  approveInCore,
   createRpcClients,
   expectRpcError,
   fromProtoAssociationStatus,
@@ -222,7 +223,8 @@ async function seedConfirmedAssociation(
       baseline: "tmdb";
     }>;
     now: Date;
-    approveManually?: boolean;
+    /** Approve through core after the evidence check, as the review agent would. */
+    approveManually?: Parameters<typeof approveInCore>[0];
   },
 ): Promise<{ mediaId: string; associationId: string; changeRequestId: string }> {
   const crRes = await createRpcClients(app, {
@@ -242,9 +244,7 @@ async function seedConfirmedAssociation(
   await worker.queue(createQueueBatch(messages, opts.now).batch);
 
   if (opts.approveManually) {
-    const approved = await createRpcClients(app, {
-      cookie: opts.reviewerCookie,
-    }).reviewer.approveChangeRequest({
+    const approved = await approveInCore(opts.approveManually, {
       id: crId,
       reason: "Seeded by reviewer",
     });
@@ -331,7 +331,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
         { season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1, baseline: "tmdb" },
       ],
       now: t0,
-      approveManually: true,
+      approveManually: { db: testDb.writeDb, outbound },
     });
 
     // Submit updated CR for the SAME ss34430 covering full E1-24 (passes Step 1 & Step 2)
@@ -567,7 +567,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
         { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
       ],
       now: t0,
-      approveManually: true,
+      approveManually: { db: testDb.writeDb, outbound },
     });
 
     const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
@@ -709,7 +709,6 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     });
 
     const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
-    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
 
     const submitChallenge = async (nativeId: string, replacesAssociationId: string) => {
       const res = await submitRpc.changeRequest.createChangeRequest({
@@ -771,9 +770,12 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     });
     await worker.scheduled(createScheduledController(t0));
     await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
-    const failingApproved = await reviewerRpc.reviewer.approveChangeRequest({
-      id: failingAssocRes.changeRequest!.id,
-    });
+    const failingApproved = await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        id: failingAssocRes.changeRequest!.id,
+      },
+    );
 
     const bothFailRes = await submitRpc.changeRequest.createChangeRequest({
       target: mediaRef("tmdb:tv:95479"),
@@ -879,7 +881,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
         { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
       ],
       now,
-      approveManually: true,
+      approveManually: { db: testDb.writeDb, outbound },
     });
 
     // Now make the old record return transient 503 during conflict re-check
@@ -999,7 +1001,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
         { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
       ],
       now: t0,
-      approveManually: true,
+      approveManually: { db: testDb.writeDb, outbound },
     });
 
     const lockRes = await reviewerRpc.reviewer.setAssociationLock({
@@ -1060,11 +1062,15 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       challengeCr.id,
     );
 
-    // Human reviewer CAN explicitly approve the replacement after reviewing the alert
-    await reviewerRpc.reviewer.approveChangeRequest({
-      id: challengeCr.id,
-      reason: "Verified ss34430 supersedes locked ss77777",
-    });
+    // The replacement can still be approved through core (no lock check), as before
+    await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        reviewerUserId: reviewer.userId,
+        id: challengeCr.id,
+        reason: "Verified ss34430 supersedes locked ss77777",
+      },
+    );
 
     const mediaAfterManualApprove = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
     expect(mediaAfterManualApprove.document.associations).toHaveLength(1);
@@ -1194,7 +1200,6 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     });
 
     const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
-    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
 
     // Seed an original default variant first
     await seedConfirmedAssociation(app, worker, emitted, {
@@ -1226,9 +1231,12 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     });
     await worker.scheduled(createScheduledController(t0));
     await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
-    const dubApproved = await reviewerRpc.reviewer.approveChangeRequest({
-      id: dubCrRes.changeRequest!.id,
-    });
+    const dubApproved = await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        id: dubCrRes.changeRequest!.id,
+      },
+    );
 
     const mediaBefore = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
     const dubVariant = mediaBefore.document.variants.find((v) => v.label === "中配");
@@ -1401,10 +1409,13 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     expect(crAfterCheck.evidence?.adapterTier).toBe(1);
 
     // Reviewer approves -> MUST replace (delist) existing.associationId using preserved replacesAssociationId!
-    await createRpcClients(app, { cookie: reviewer.cookie }).reviewer.approveChangeRequest({
-      id: replaceCr.id,
-      reason: "Verified replacement after Tier 1 review",
-    });
+    await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        id: replaceCr.id,
+        reason: "Verified replacement after Tier 1 review",
+      },
+    );
 
     const mediaAfter = await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479");
     expect(mediaAfter.document.associations).toHaveLength(1);

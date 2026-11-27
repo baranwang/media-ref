@@ -7,10 +7,10 @@ Cloudflare Worker (`api.mediaref.org`) serving ConnectRPC Protobuf services (`@c
 All business endpoints are defined in [`proto/mediaref/v1/`](../../proto/mediaref/v1/) and dispatched through a module-level singleton `createConnectRouter` with per-request `ContextValues`:
 
 - `mediaref.v1.MediaService`: `GetMedia` (`NO_SIDE_EFFECTS` / HTTP GET capable, structured `MediaRef` `oneof`: `media_id` / `tmdb` / `imdb` / `tvdb` / `trakt` / `douban` / `bangumi` / `platform`), `BatchGetMedia` (`repeated MediaRef refs`)
-- `mediaref.v1.ChangeRequestService`: `CreateChangeRequest` (`MediaRef target`), `GetChangeRequest`
+- `mediaref.v1.ChangeRequestService`: `CreateChangeRequest` (`MediaRef target`), `GetChangeRequest`, `CreateChangeRequestComment` (signed-in session only, not an API key; 20 a day), `ListChangeRequestComments`
 - `mediaref.v1.AssociationService`: `ReportInvalidation`, `ListAssociationRevisions`
 - `mediaref.v1.AccountService`: `GetCurrentUser`, `GetCurrentApiKey`, `CreateApiKey`, `ListApiKeys`, `DeleteApiKey`
-- `mediaref.v1.ReviewerService`: `ListChangeRequests`, `ApproveChangeRequest`, `RejectChangeRequest`, `SetAssociationLock`, `OverrideMediaExternalId`, `SetMediaExternalIdLock`, `MergeMedia`, `SwitchMediaBaseline`, `ListReviewAlerts`, `ResolveReviewAlert`, `ListNeedsReviewSegments`, `SetUserRole`
+- `mediaref.v1.ReviewerService`: `ListChangeRequests`, `ApproveChangeRequest` / `RejectChangeRequest` (no longer decide anything: they answer `FailedPrecondition` `DECIDED_BY_REVIEW_AGENT`, people comment instead, ADR 0003 amendment 2), `SetAssociationLock`, `OverrideMediaExternalId`, `SetMediaExternalIdLock`, `MergeMedia`, `SwitchMediaBaseline`, `ListReviewAlerts`, `ResolveReviewAlert`, `ListNeedsReviewSegments`, `SetUserRole`
 
 Supported wire protocols on every RPC path (`/mediaref.v1.<Service>/<Method>`):
 

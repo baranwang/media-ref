@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
 export const file_mediaref_v1_change_request: GenFile =
   /*@__PURE__*/
   fileDesc(
-    "CiBtZWRpYXJlZi92MS9jaGFuZ2VfcmVxdWVzdC5wcm90bxILbWVkaWFyZWYudjEipwMKGkNyZWF0ZUNoYW5nZVJlcXVlc3RSZXF1ZXN0EiUKBnRhcmdldBgBIAEoCzIVLm1lZGlhcmVmLnYxLk1lZGlhUmVmEhEKCW5hbWVzcGFjZRgCIAEoCRIRCgluYXRpdmVfaWQYAyABKAkSGgoNcmF3X25hdGl2ZV9pZBgEIAEoCUgAiAEBEhcKCnZhcmlhbnRfaWQYBSABKAlIAYgBARIgChN2YXJpYW50X2Rlc2NyaXB0aW9uGAYgASgJSAKIAQESGwoTc2V0X2RlZmF1bHRfdmFyaWFudBgHIAEoCBIUCgd0YXNrX2lkGAggASgJSAOIAQESJAoXcmVwbGFjZXNfYXNzb2NpYXRpb25faWQYCSABKAlIBIgBARIrCghzZWdtZW50cxgKIAMoCzIZLm1lZGlhcmVmLnYxLlNlZ21lbnRJbnB1dEIQCg5fcmF3X25hdGl2ZV9pZEINCgtfdmFyaWFudF9pZEIWChRfdmFyaWFudF9kZXNjcmlwdGlvbkIKCghfdGFza19pZEIaChhfcmVwbGFjZXNfYXNzb2NpYXRpb25faWQiUQobQ3JlYXRlQ2hhbmdlUmVxdWVzdFJlc3BvbnNlEjIKDmNoYW5nZV9yZXF1ZXN0GAEgASgLMhoubWVkaWFyZWYudjEuQ2hhbmdlUmVxdWVzdCIlChdHZXRDaGFuZ2VSZXF1ZXN0UmVxdWVzdBIKCgJpZBgBIAEoCSJOChhHZXRDaGFuZ2VSZXF1ZXN0UmVzcG9uc2USMgoOY2hhbmdlX3JlcXVlc3QYASABKAsyGi5tZWRpYXJlZi52MS5DaGFuZ2VSZXF1ZXN0IlsKG0xpc3RNeUNoYW5nZVJlcXVlc3RzUmVxdWVzdBISCgVsaW1pdBgBIAEoBUgAiAEBEhMKBm9mZnNldBgCIAEoBUgBiAEBQggKBl9saW1pdEIJCgdfb2Zmc2V0ImIKHExpc3RNeUNoYW5nZVJlcXVlc3RzUmVzcG9uc2USMwoPY2hhbmdlX3JlcXVlc3RzGAEgAygLMhoubWVkaWFyZWYudjEuQ2hhbmdlUmVxdWVzdBINCgV0b3RhbBgCIAEoBTLYAgoUQ2hhbmdlUmVxdWVzdFNlcnZpY2USaAoTQ3JlYXRlQ2hhbmdlUmVxdWVzdBInLm1lZGlhcmVmLnYxLkNyZWF0ZUNoYW5nZVJlcXVlc3RSZXF1ZXN0GigubWVkaWFyZWYudjEuQ3JlYXRlQ2hhbmdlUmVxdWVzdFJlc3BvbnNlEmQKEEdldENoYW5nZVJlcXVlc3QSJC5tZWRpYXJlZi52MS5HZXRDaGFuZ2VSZXF1ZXN0UmVxdWVzdBolLm1lZGlhcmVmLnYxLkdldENoYW5nZVJlcXVlc3RSZXNwb25zZSIDkAIBEnAKFExpc3RNeUNoYW5nZVJlcXVlc3RzEigubWVkaWFyZWYudjEuTGlzdE15Q2hhbmdlUmVxdWVzdHNSZXF1ZXN0GikubWVkaWFyZWYudjEuTGlzdE15Q2hhbmdlUmVxdWVzdHNSZXNwb25zZSIDkAIBYgZwcm90bzM",
+    "CiBtZWRpYXJlZi92MS9jaGFuZ2VfcmVxdWVzdC5wcm90bxILbWVkaWFyZWYudjEipwMKGkNyZWF0ZUNoYW5nZVJlcXVlc3RSZXF1ZXN0EiUKBnRhcmdldBgBIAEoCzIVLm1lZGlhcmVmLnYxLk1lZGlhUmVmEhEKCW5hbWVzcGFjZRgCIAEoCRIRCgluYXRpdmVfaWQYAyABKAkSGgoNcmF3X25hdGl2ZV9pZBgEIAEoCUgAiAEBEhcKCnZhcmlhbnRfaWQYBSABKAlIAYgBARIgChN2YXJpYW50X2Rlc2NyaXB0aW9uGAYgASgJSAKIAQESGwoTc2V0X2RlZmF1bHRfdmFyaWFudBgHIAEoCBIUCgd0YXNrX2lkGAggASgJSAOIAQESJAoXcmVwbGFjZXNfYXNzb2NpYXRpb25faWQYCSABKAlIBIgBARIrCghzZWdtZW50cxgKIAMoCzIZLm1lZGlhcmVmLnYxLlNlZ21lbnRJbnB1dEIQCg5fcmF3X25hdGl2ZV9pZEINCgtfdmFyaWFudF9pZEIWChRfdmFyaWFudF9kZXNjcmlwdGlvbkIKCghfdGFza19pZEIaChhfcmVwbGFjZXNfYXNzb2NpYXRpb25faWQiUQobQ3JlYXRlQ2hhbmdlUmVxdWVzdFJlc3BvbnNlEjIKDmNoYW5nZV9yZXF1ZXN0GAEgASgLMhoubWVkaWFyZWYudjEuQ2hhbmdlUmVxdWVzdCIlChdHZXRDaGFuZ2VSZXF1ZXN0UmVxdWVzdBIKCgJpZBgBIAEoCSJOChhHZXRDaGFuZ2VSZXF1ZXN0UmVzcG9uc2USMgoOY2hhbmdlX3JlcXVlc3QYASABKAsyGi5tZWRpYXJlZi52MS5DaGFuZ2VSZXF1ZXN0IlsKG0xpc3RNeUNoYW5nZVJlcXVlc3RzUmVxdWVzdBISCgVsaW1pdBgBIAEoBUgAiAEBEhMKBm9mZnNldBgCIAEoBUgBiAEBQggKBl9saW1pdEIJCgdfb2Zmc2V0ImIKHExpc3RNeUNoYW5nZVJlcXVlc3RzUmVzcG9uc2USMwoPY2hhbmdlX3JlcXVlc3RzGAEgAygLMhoubWVkaWFyZWYudjEuQ2hhbmdlUmVxdWVzdBINCgV0b3RhbBgCIAEoBSKlAQoUQ2hhbmdlUmVxdWVzdENvbW1lbnQSCgoCaWQYASABKAkSGQoRY2hhbmdlX3JlcXVlc3RfaWQYAiABKAkSFgoOYXV0aG9yX3VzZXJfaWQYAyABKAkSEwoLYXV0aG9yX25hbWUYBCABKAkSDwoHY29udGVudBgFIAEoCRIUCgxyZXBseV90b19pZHMYBiADKAkSEgoKY3JlYXRlZF9hdBgHIAEoCSJPCiFDcmVhdGVDaGFuZ2VSZXF1ZXN0Q29tbWVudFJlcXVlc3QSGQoRY2hhbmdlX3JlcXVlc3RfaWQYASABKAkSDwoHY29udGVudBgCIAEoCSJYCiJDcmVhdGVDaGFuZ2VSZXF1ZXN0Q29tbWVudFJlc3BvbnNlEjIKB2NvbW1lbnQYASABKAsyIS5tZWRpYXJlZi52MS5DaGFuZ2VSZXF1ZXN0Q29tbWVudCI9CiBMaXN0Q2hhbmdlUmVxdWVzdENvbW1lbnRzUmVxdWVzdBIZChFjaGFuZ2VfcmVxdWVzdF9pZBgBIAEoCSJYCiFMaXN0Q2hhbmdlUmVxdWVzdENvbW1lbnRzUmVzcG9uc2USMwoIY29tbWVudHMYASADKAsyIS5tZWRpYXJlZi52MS5DaGFuZ2VSZXF1ZXN0Q29tbWVudDLYBAoUQ2hhbmdlUmVxdWVzdFNlcnZpY2USaAoTQ3JlYXRlQ2hhbmdlUmVxdWVzdBInLm1lZGlhcmVmLnYxLkNyZWF0ZUNoYW5nZVJlcXVlc3RSZXF1ZXN0GigubWVkaWFyZWYudjEuQ3JlYXRlQ2hhbmdlUmVxdWVzdFJlc3BvbnNlEmQKEEdldENoYW5nZVJlcXVlc3QSJC5tZWRpYXJlZi52MS5HZXRDaGFuZ2VSZXF1ZXN0UmVxdWVzdBolLm1lZGlhcmVmLnYxLkdldENoYW5nZVJlcXVlc3RSZXNwb25zZSIDkAIBEnAKFExpc3RNeUNoYW5nZVJlcXVlc3RzEigubWVkaWFyZWYudjEuTGlzdE15Q2hhbmdlUmVxdWVzdHNSZXF1ZXN0GikubWVkaWFyZWYudjEuTGlzdE15Q2hhbmdlUmVxdWVzdHNSZXNwb25zZSIDkAIBEn0KGkNyZWF0ZUNoYW5nZVJlcXVlc3RDb21tZW50Ei4ubWVkaWFyZWYudjEuQ3JlYXRlQ2hhbmdlUmVxdWVzdENvbW1lbnRSZXF1ZXN0Gi8ubWVkaWFyZWYudjEuQ3JlYXRlQ2hhbmdlUmVxdWVzdENvbW1lbnRSZXNwb25zZRJ/ChlMaXN0Q2hhbmdlUmVxdWVzdENvbW1lbnRzEi0ubWVkaWFyZWYudjEuTGlzdENoYW5nZVJlcXVlc3RDb21tZW50c1JlcXVlc3QaLi5tZWRpYXJlZi52MS5MaXN0Q2hhbmdlUmVxdWVzdENvbW1lbnRzUmVzcG9uc2UiA5ACAWIGcHJvdG8z",
     [file_mediaref_v1_types],
   );
 
@@ -182,6 +182,143 @@ export const ListMyChangeRequestsResponseSchema: GenMessage<ListMyChangeRequests
   messageDesc(file_mediaref_v1_change_request, 5);
 
 /**
+ * A comment on a change request, or the review agent's reply to comments (ADR 0003 amendment 2).
+ *
+ * @generated from message mediaref.v1.ChangeRequestComment
+ */
+export type ChangeRequestComment = Message<"mediaref.v1.ChangeRequestComment"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string change_request_id = 2;
+   */
+  changeRequestId: string;
+
+  /**
+   * `system:review-agent` on the agent's replies.
+   *
+   * @generated from field: string author_user_id = 3;
+   */
+  authorUserId: string;
+
+  /**
+   * @generated from field: string author_name = 4;
+   */
+  authorName: string;
+
+  /**
+   * @generated from field: string content = 5;
+   */
+  content: string;
+
+  /**
+   * Comments an agent reply answers; empty on people's comments.
+   *
+   * @generated from field: repeated string reply_to_ids = 6;
+   */
+  replyToIds: string[];
+
+  /**
+   * @generated from field: string created_at = 7;
+   */
+  createdAt: string;
+};
+
+/**
+ * Describes the message mediaref.v1.ChangeRequestComment.
+ * Use `create(ChangeRequestCommentSchema)` to create a new message.
+ */
+export const ChangeRequestCommentSchema: GenMessage<ChangeRequestComment> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_change_request, 6);
+
+/**
+ * @generated from message mediaref.v1.CreateChangeRequestCommentRequest
+ */
+export type CreateChangeRequestCommentRequest =
+  Message<"mediaref.v1.CreateChangeRequestCommentRequest"> & {
+    /**
+     * @generated from field: string change_request_id = 1;
+     */
+    changeRequestId: string;
+
+    /**
+     * @generated from field: string content = 2;
+     */
+    content: string;
+  };
+
+/**
+ * Describes the message mediaref.v1.CreateChangeRequestCommentRequest.
+ * Use `create(CreateChangeRequestCommentRequestSchema)` to create a new message.
+ */
+export const CreateChangeRequestCommentRequestSchema: GenMessage<CreateChangeRequestCommentRequest> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_change_request, 7);
+
+/**
+ * @generated from message mediaref.v1.CreateChangeRequestCommentResponse
+ */
+export type CreateChangeRequestCommentResponse =
+  Message<"mediaref.v1.CreateChangeRequestCommentResponse"> & {
+    /**
+     * @generated from field: mediaref.v1.ChangeRequestComment comment = 1;
+     */
+    comment?: ChangeRequestComment | undefined;
+  };
+
+/**
+ * Describes the message mediaref.v1.CreateChangeRequestCommentResponse.
+ * Use `create(CreateChangeRequestCommentResponseSchema)` to create a new message.
+ */
+export const CreateChangeRequestCommentResponseSchema: GenMessage<CreateChangeRequestCommentResponse> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_change_request, 8);
+
+/**
+ * @generated from message mediaref.v1.ListChangeRequestCommentsRequest
+ */
+export type ListChangeRequestCommentsRequest =
+  Message<"mediaref.v1.ListChangeRequestCommentsRequest"> & {
+    /**
+     * @generated from field: string change_request_id = 1;
+     */
+    changeRequestId: string;
+  };
+
+/**
+ * Describes the message mediaref.v1.ListChangeRequestCommentsRequest.
+ * Use `create(ListChangeRequestCommentsRequestSchema)` to create a new message.
+ */
+export const ListChangeRequestCommentsRequestSchema: GenMessage<ListChangeRequestCommentsRequest> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_change_request, 9);
+
+/**
+ * @generated from message mediaref.v1.ListChangeRequestCommentsResponse
+ */
+export type ListChangeRequestCommentsResponse =
+  Message<"mediaref.v1.ListChangeRequestCommentsResponse"> & {
+    /**
+     * Oldest first: comments and the agent's replies as one thread.
+     *
+     * @generated from field: repeated mediaref.v1.ChangeRequestComment comments = 1;
+     */
+    comments: ChangeRequestComment[];
+  };
+
+/**
+ * Describes the message mediaref.v1.ListChangeRequestCommentsResponse.
+ * Use `create(ListChangeRequestCommentsResponseSchema)` to create a new message.
+ */
+export const ListChangeRequestCommentsResponseSchema: GenMessage<ListChangeRequestCommentsResponse> =
+  /*@__PURE__*/
+  messageDesc(file_mediaref_v1_change_request, 10);
+
+/**
  * @generated from service mediaref.v1.ChangeRequestService
  */
 export const ChangeRequestService: GenService<{
@@ -210,5 +347,23 @@ export const ChangeRequestService: GenService<{
     methodKind: "unary";
     input: typeof ListMyChangeRequestsRequestSchema;
     output: typeof ListMyChangeRequestsResponseSchema;
+  };
+  /**
+   * Signed-in users only (session, not an API key); a comment queues a review agent session.
+   *
+   * @generated from rpc mediaref.v1.ChangeRequestService.CreateChangeRequestComment
+   */
+  createChangeRequestComment: {
+    methodKind: "unary";
+    input: typeof CreateChangeRequestCommentRequestSchema;
+    output: typeof CreateChangeRequestCommentResponseSchema;
+  };
+  /**
+   * @generated from rpc mediaref.v1.ChangeRequestService.ListChangeRequestComments
+   */
+  listChangeRequestComments: {
+    methodKind: "unary";
+    input: typeof ListChangeRequestCommentsRequestSchema;
+    output: typeof ListChangeRequestCommentsResponseSchema;
   };
 }> = /*@__PURE__*/ serviceDesc(file_mediaref_v1_change_request, 0);

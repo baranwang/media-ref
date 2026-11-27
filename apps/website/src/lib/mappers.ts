@@ -19,6 +19,7 @@ import type {
   ChangeRequestItem,
   ChangeRequestSegmentView,
   ChangeRequestTimelineStep,
+  CommentItem,
   CoverageSegment,
   DemandItem,
   ExplorationItem,
@@ -438,11 +439,16 @@ function segmentView(s: SegmentFields): ChangeRequestSegmentView {
 
 function reviewAgentFromEvidence(evidence: Json | null): ReviewAgentView | null {
   const raw = asJson(evidence?.reviewAgent);
-  if (
-    raw?.verdict !== "approve" &&
-    raw?.verdict !== "reject" &&
-    raw?.verdict !== "reject_with_correction"
-  ) {
+  const verdicts = [
+    "approve",
+    "reject",
+    "reject_with_correction",
+    "keep",
+    "revoke",
+    "revoke_with_correction",
+  ] as const;
+  const verdict = verdicts.find((v) => v === raw?.verdict);
+  if (!raw || !verdict) {
     return null;
   }
   const reasons = (Array.isArray(raw.reasons) ? raw.reasons : []).flatMap((r) => {
@@ -453,7 +459,7 @@ function reviewAgentFromEvidence(evidence: Json | null): ReviewAgentView | null 
   });
   const correction = asJson(raw.correction);
   return {
-    verdict: raw.verdict,
+    verdict,
     reasons,
     opinion: typeof raw.opinion === "string" ? raw.opinion : null,
     correction:
@@ -510,14 +516,17 @@ function timelineFor(
       state: "done",
     });
   } else if (status === "rejected") {
+    const revoked = agent?.verdict === "revoke" || agent?.verdict === "revoke_with_correction";
     steps.push({
-      label: "已驳回",
+      label: revoked ? "已撤下" : "已驳回",
       time: formatDateTime(cr.reviewedAt),
       detail: agent?.correction
-        ? `审核 agent 驳回并改正为第 ${agent.correction.season} 季，会按改正重新提交`
-        : byAgent
-          ? `审核 agent 驳回${cr.decisionReason ? `：${cr.decisionReason}` : ""}`
-          : (cr.decisionReason ?? "审核员驳回了这张变更单"),
+        ? `审核 agent ${revoked ? "撤下" : "驳回"}并改正为第 ${agent.correction.season} 季，会按改正重新提交`
+        : revoked
+          ? "审核 agent 按留言核实后撤下了这条关联"
+          : byAgent
+            ? `审核 agent 驳回${cr.decisionReason ? `：${cr.decisionReason}` : ""}`
+            : (cr.decisionReason ?? "审核员驳回了这张变更单"),
       state: "done",
     });
   }
@@ -555,6 +564,37 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
     checks: checksFromEvidence(cr.id, evidence),
     timeline: timelineFor(cr, status, reviewAgent),
   };
+}
+
+/**
+ * Comments and the review agent's replies as one thread, oldest first. A person's comment is
+ * `waiting` until a reply answers it.
+ */
+export function commentThreadFrom(comments: proto.ChangeRequestComment[]): CommentItem[] {
+  const answered = new Set(comments.flatMap((c) => c.replyToIds));
+  return [...comments]
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+    .map((c) => {
+      const byAgent = c.authorUserId === REVIEW_AGENT_USER_ID;
+      return {
+        id: c.id,
+        byAgent,
+        author: byAgent ? "审核 agent" : c.authorName || "用户",
+        content: c.content,
+        createdAt: c.createdAt,
+        waiting: !byAgent && !answered.has(c.id),
+      };
+    });
+}
+
+const SHORTCUT_PREFIX = { approve: "通过：", reject: "驳回：" } as const;
+
+/** A comment's content; the 通过 and 驳回 shortcuts start it with 「通过：」 or 「驳回：」. */
+export function commentContent(note: string, shortcut?: keyof typeof SHORTCUT_PREFIX): string {
+  const text = note.trim();
+  if (!shortcut) return text;
+  const prefix = SHORTCUT_PREFIX[shortcut];
+  return text.startsWith(prefix) ? text : `${prefix}${text}`;
 }
 
 /** Catalog key for a change-request target ref, e.g. `tmdb:tv:1429`. */

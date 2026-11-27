@@ -2,6 +2,7 @@ import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createDomainConnectError } from "@media-ref/client";
 import {
   BatchMediaQueryError,
+  CommentError,
   ConflictResolutionError,
   InvalidationError,
   MediaServiceError,
@@ -412,7 +413,7 @@ export function rethrowDomainError(error: unknown): never {
     });
   }
 
-  if (error instanceof InvalidationError) {
+  if (error instanceof InvalidationError || error instanceof CommentError) {
     throw createDomainConnectError({
       status: error.status,
       code: error.code,

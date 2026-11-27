@@ -18,6 +18,7 @@ import {
   mediaRef,
   signUpUser,
   TEST_BASE_URL,
+  approveInCore,
 } from "./rpc-helpers.ts";
 
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-demands-integration-tests-0123456789";
@@ -579,7 +580,6 @@ describe("API Worker demand recording on read misses (#27)", () => {
       canSubmit: true,
     });
     const submitRpc = createRpcClients(app, { apiKey: submitKey.key });
-    const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
 
     // 1. Query uncreated tmdb:tv:77777 season=1 three times
     for (let i = 0; i < 3; i++) {
@@ -692,10 +692,13 @@ describe("API Worker demand recording on read misses (#27)", () => {
       segments: [toProtoSegmentInput({ season: 1, baseline: "tmdb" })],
     });
 
-    const approveBody = await reviewerRpc.reviewer.approveChangeRequest({
-      id: submitBody.changeRequest!.id,
-      reason: "Verified TMDB show",
-    });
+    const approveBody = await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        id: submitBody.changeRequest!.id,
+        reason: "Verified TMDB show",
+      },
+    );
 
     // Orphan external-key demands are completely gone
     expect(await listDemands(testDb.readDb, { externalKey: "tmdb:tv:77777" })).toEqual([]);
@@ -750,10 +753,13 @@ describe("API Worker demand recording on read misses (#27)", () => {
       nativeId: "35555555",
       segments: [],
     });
-    const movieApproveBody = await reviewerRpc.reviewer.approveChangeRequest({
-      id: movieSubmitBody.changeRequest!.id,
-      reason: "Verified movie",
-    });
+    const movieApproveBody = await approveInCore(
+      { db: testDb.writeDb, outbound },
+      {
+        id: movieSubmitBody.changeRequest!.id,
+        reason: "Verified movie",
+      },
+    );
 
     expect(await listDemands(testDb.readDb, { externalKey: "tmdb:movie:55555" })).toEqual([]);
     expect(await listDemands(testDb.readDb, { mediaId: movieApproveBody.mediaId })).toEqual([

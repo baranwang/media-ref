@@ -162,8 +162,26 @@ export interface ChangeRequestSegmentView {
 }
 
 /** What the review agent concluded, from `evidence.reviewAgent`. */
+/** A comment on a change request, or the review agent's reply, in the thread. */
+export interface CommentItem {
+  id: string;
+  byAgent: boolean;
+  author: string;
+  content: string;
+  createdAt: string;
+  /** A person's comment no agent reply has answered yet. */
+  waiting: boolean;
+}
+
 export interface ReviewAgentView {
-  verdict: "approve" | "reject" | "reject_with_correction";
+  /** keep and revoke* are its answers to comments on an approved request. */
+  verdict:
+    | "approve"
+    | "reject"
+    | "reject_with_correction"
+    | "keep"
+    | "revoke"
+    | "revoke_with_correction";
   /** One per conflict code it explained. */
   reasons: { code: string; reason: string }[];
   opinion: string | null;

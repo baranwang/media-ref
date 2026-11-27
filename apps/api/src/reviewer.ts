@@ -9,13 +9,11 @@ import {
   type ChangeRequestStatus,
 } from "@media-ref/client";
 import {
-  approveChangeRequest,
   listChangeRequests,
   listNeedsReviewSegments,
   listReviewAlerts,
   mergeMedia,
   overrideMediaExternalId,
-  rejectChangeRequest,
   resolveReviewAlert,
   setAssociationLock,
   setMediaExternalIdLock,
@@ -36,6 +34,14 @@ import {
   toProtoNeedsReviewSegment,
   toProtoReviewAlert,
 } from "./proto-records.ts";
+
+function decidedByReviewAgent() {
+  return createDomainConnectError({
+    status: 409,
+    code: "DECIDED_BY_REVIEW_AGENT",
+    message: "变更单由证据门和审核 agent 判定，请留言",
+  });
+}
 
 const ASSIGNABLE_ROLES = new Set(["user", "reviewer"]);
 
@@ -100,48 +106,16 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
     });
   },
 
-  async approveChangeRequest(req, ctx) {
-    const session = await requireReviewerAuth(ctx);
-    const runtime = getRuntime(ctx);
-
-    try {
-      const result = await approveChangeRequest(runtime.dbWrite, runtime.outbound, {
-        changeRequestId: req.id.trim(),
-        reviewerUserId: session.user.id,
-        reason: req.reason ?? null,
-        catalogConfig: runtime.catalogConfig,
-        tmdbConfig: runtime.tmdbConfig,
-        tmdbGateway: runtime.tmdbGateway,
-      });
-
-      return create(proto.ApproveChangeRequestResponseSchema, {
-        changeRequest: toProtoChangeRequest(result.changeRequest),
-        mediaId: result.mediaId,
-        associationId: result.associationId,
-        revisionId: result.revisionId,
-      });
-    } catch (error) {
-      rethrowDomainError(error);
-    }
+  // People no longer decide change requests (ADR 0003 amendment 2): they comment, and the review
+  // agent verifies and acts. Reviewers keep their other tools.
+  async approveChangeRequest(_req, ctx) {
+    await requireReviewerAuth(ctx);
+    throw decidedByReviewAgent();
   },
 
-  async rejectChangeRequest(req, ctx) {
-    const session = await requireReviewerAuth(ctx);
-    const runtime = getRuntime(ctx);
-
-    try {
-      const changeRequest = await rejectChangeRequest(runtime.dbWrite, {
-        changeRequestId: req.id.trim(),
-        reviewerUserId: session.user.id,
-        reason: req.reason ?? null,
-      });
-
-      return create(proto.RejectChangeRequestResponseSchema, {
-        changeRequest: toProtoChangeRequest(changeRequest),
-      });
-    } catch (error) {
-      rethrowDomainError(error);
-    }
+  async rejectChangeRequest(_req, ctx) {
+    await requireReviewerAuth(ctx);
+    throw decidedByReviewAgent();
   },
 
   async setAssociationLock(req, ctx) {

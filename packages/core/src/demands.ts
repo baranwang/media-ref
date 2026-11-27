@@ -770,6 +770,65 @@ export async function reopenDemandAfterRejectionInTx(
 }
 
 /**
+ * After the review agent takes back an approval (ADR 0003 amendment 2), every demand the approval
+ * could have fulfilled opens again unless another confirmed association still covers it. That is
+ * the same set `fulfillCoveredDemandsForAssociationInTx` fulfils: all of the media's demands in the
+ * group for a whole-media association (`seasons` empty), else the whole-media demand and the
+ * covered seasons'. The revocation counts as a not-found round, like a rejection: the demand backs
+ * off before exploration looks again.
+ */
+export async function reopenDemandsAfterRevokeInTx(
+  executor: DbExecutor,
+  input: {
+    mediaId: string;
+    /** Seasons of the revoked association's segments; empty for a whole-media association. */
+    seasons: readonly number[];
+    /** A season left alone (a correction makes it explorable now instead). */
+    exceptSeason?: number | null;
+    namespaceGroup: NamespaceGroup;
+    now: Date;
+  },
+): Promise<void> {
+  const seasons = [...new Set(input.seasons)];
+  let query = executor
+    .selectFrom("demands")
+    .select(["id", "season", "not_found_count"])
+    .where("media_id", "=", input.mediaId)
+    .where("namespace_group", "=", input.namespaceGroup)
+    .where("status", "in", ["open", "not_found", "fulfilled"]);
+  if (seasons.length > 0) {
+    query = query.where((eb) => eb.or([eb("season", "is", null), eb("season", "in", seasons)]));
+  }
+  const rows = await query.forUpdate().execute();
+  for (const row of rows) {
+    if (input.exceptSeason != null && row.season === input.exceptSeason) {
+      continue;
+    }
+    const target = {
+      mediaId: input.mediaId,
+      season: row.season,
+      namespaceGroup: input.namespaceGroup,
+    };
+    if (await isCoveredByAssociationsInTx(executor, target)) {
+      continue;
+    }
+    const notFoundCount = row.not_found_count + 1;
+    await executor
+      .updateTable("demands")
+      .set({
+        status: "open",
+        not_found_count: notFoundCount,
+        next_eligible_at: new Date(
+          input.now.getTime() + computeNotFoundBackoffSeconds(notFoundCount) * 1000,
+        ),
+        updated_at: input.now,
+      })
+      .where("id", "=", row.id)
+      .execute();
+  }
+}
+
+/**
  * Makes `(media or external key, season, namespace group)` explorable now, for a review agent
  * correction (ADR 0003 §4): creates the demand, or reopens it without a not-found round. A demand
  * being explored or awaiting review is left alone.

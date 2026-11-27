@@ -178,6 +178,15 @@ export {
   type ReviewAgentJobOptions,
 } from "./review-agent.ts";
 export {
+  COMMENT_DAILY_LIMIT,
+  CommentError,
+  createChangeRequestComment,
+  listChangeRequestComments,
+  MAX_COMMENT_LENGTH,
+  type ChangeRequestCommentRecord,
+  type CommentErrorCode,
+} from "./change-request-comments.ts";
+export {
   listExplorationActivity,
   type ExplorationActivityEntry,
   type ExplorationActivityFilter,
