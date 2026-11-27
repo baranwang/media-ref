@@ -27,6 +27,7 @@ export interface CoverageSegment {
 export interface PlatformVariantRow {
   id: string;
   namespace: PlatformNamespace;
+  variantId: string | null;
   label: string;
   isDefault?: boolean;
   /** Season-keyed coverage segments; key 0 represents whole-movie coverage */
@@ -44,6 +45,8 @@ export interface CatalogDirectoryRow {
   isBaseline?: boolean;
   wholeMediaNativeId?: string;
   wholeMediaLabel?: string;
+  /** The directory shows one label. Review needs the evidence state of every whole entry. */
+  wholeMediaEntries?: Omit<CoverageSegment, "start" | "end">[];
   note?: string;
   segmentsBySeason?: Record<number, CoverageSegment[]>;
   allSeasonSegments?: CoverageSegment[];
@@ -203,8 +206,10 @@ export interface ChangeRequestItem {
   /** Title of the platform page, from the evidence check. */
   pageTitle: string | null;
   pageEpisodeCount: number | null;
+  variantId: string | null;
   variantLabel: string | null;
   segments: ChangeRequestSegmentView[];
+  replacesAssociationId?: string | null;
   conflictReason: string | null;
   decisionReason: string | null;
   /** Null when the evidence gate approved it automatically. */

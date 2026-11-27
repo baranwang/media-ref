@@ -119,7 +119,20 @@ function seasonEpisodeCount(seasons: MediaSeasonInfo[], season: number): number 
 
 function associationStatus(assoc: Association): CoverageSegment["status"] {
   if (assoc.status === "delisted") return "muted";
-  return assoc.unconfirmed || assoc.changeRequestId ? "pending" : "confirmed";
+  return assoc.status === "seed_unconfirmed" || assoc.unconfirmed || assoc.changeRequestId
+    ? "pending"
+    : "confirmed";
+}
+
+function coverageEntry(assoc: Association, id: string) {
+  return {
+    id,
+    title: assoc.title ?? assoc.nativeId,
+    nativeId: assoc.nativeId,
+    status: associationStatus(assoc),
+    ...(assoc.changeRequestId ? { changeRequestId: assoc.changeRequestId } : {}),
+    associationId: assoc.id,
+  };
 }
 
 function segmentsBySeason(
@@ -129,15 +142,10 @@ function segmentsBySeason(
 ): Record<number, CoverageSegment[]> {
   const out: Record<number, CoverageSegment[]> = {};
   const bar = (id: string, start: number, end: number, targetStart?: number): CoverageSegment => ({
-    id,
-    title: assoc.title ?? assoc.nativeId,
-    nativeId: assoc.nativeId,
+    ...coverageEntry(assoc, id),
     start,
     end,
     ...(targetStart !== undefined ? { targetStart } : {}),
-    status: associationStatus(assoc),
-    ...(assoc.changeRequestId ? { changeRequestId: assoc.changeRequestId } : {}),
-    associationId: assoc.id,
   });
   // No segments = the association covers the whole media: one full bar per season (key 0 for movies).
   if (assoc.segments.length === 0) {
@@ -239,6 +247,7 @@ function buildPlatformRows(
     return {
       id: groupKey,
       namespace: group.namespace,
+      variantId: group.variantId,
       label: variant?.label ?? "默认版本",
       isDefault: variant?.isDefault ?? true,
       segmentsBySeason: mergeSeasonMaps(
@@ -272,7 +281,10 @@ function buildCatalogRows(
   const baseline = document.media.baseline;
   return CATALOG_ORDER.filter((ns) => byNamespace.has(ns)).map((namespace) => {
     const assocs = byNamespace.get(namespace)!;
-    const whole = assocs.find((a) => a.segments.length === 0);
+    const wholeMediaEntries = assocs
+      .filter((a) => a.segments.length === 0)
+      .map((a) => coverageEntry(a, `${a.id}-whole`));
+    const [whole] = wholeMediaEntries;
     const segmented = assocs.filter((a) => a.segments.length > 0);
     const isBaseline = baseline === namespace;
     const entryCount = assocs.length;
@@ -287,8 +299,9 @@ function buildCatalogRows(
           : `${entryCount} 个条目`,
       ...(whole
         ? {
+            wholeMediaEntries,
             wholeMediaNativeId: whole.nativeId,
-            wholeMediaLabel: `整部 · ${whole.title ?? whole.nativeId}`,
+            wholeMediaLabel: `整部 · ${whole.title}`,
           }
         : {}),
       ...(segmented.length > 0
@@ -557,8 +570,10 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
     pageTitle: typeof collection?.title === "string" ? collection.title : null,
     pageEpisodeCount:
       typeof collection?.featureEpisodeCount === "number" ? collection.featureEpisodeCount : null,
+    variantId: cr.variantId ?? null,
     variantLabel: cr.variantDescription ?? null,
     segments: cr.segments.map(segmentView),
+    replacesAssociationId: cr.replacesAssociationId ?? null,
     conflictReason: cr.conflictReason ?? null,
     decisionReason: cr.decisionReason ?? null,
     reviewerUserId: cr.reviewerUserId ?? null,
@@ -646,6 +661,7 @@ export function conflictTagFor(reason: string | null): string | null {
   if (reason.includes("year")) return "年份对不上";
   if (reason.includes("title")) return "片名对不上";
   if (reason.includes("lock")) return "挑战已锁定记录";
+  if (reason === "evidence_unavailable") return "自动核对失败";
   return "自动核对有冲突";
 }
 

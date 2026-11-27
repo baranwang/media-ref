@@ -8,6 +8,7 @@ import {
   ensureExplorationAgentUser,
   createFakeOutboundClient,
   createTier1Adapter,
+  rejectChangeRequest,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
   type JobQueueMessage,
@@ -336,12 +337,12 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
       "ss34430",
     ];
     const submittedIds: string[] = [];
-    for (const rawInput of urlVariants) {
+    for (const [index, rawInput] of urlVariants.entries()) {
       const res = await submitRpc.changeRequest.createChangeRequest({
         target: mediaRef("tmdb:tv:95479"),
         namespace: "bilibili",
         nativeId: rawInput,
-        variantDescription: "原声",
+        variantDescription: index === 0 ? "原声" : `原声-${index}`,
         segments: [
           toProtoSegmentInput({
             season: 1,
@@ -748,6 +749,63 @@ describe("Bilibili adapter & Evidence Gate Step 1 end-to-end (#10)", () => {
         .where("id", "=", request.id)
         .executeTakeFirst(),
     ).toEqual({ status: "rejected", conflict_reason: "catalog_not_found" });
+    const reopened = await db
+      .selectFrom("demands")
+      .select(["status", "not_found_count", "next_eligible_at"])
+      .where("id", "=", demand.id)
+      .executeTakeFirstOrThrow();
+    expect(reopened).toMatchObject({ status: "open", not_found_count: 1 });
+    expect(reopened.next_eligible_at.getTime()).toBeGreaterThan(now.getTime());
+    expect(outbound.modelRequests).toHaveLength(0);
+  });
+
+  test("cron stops re-enqueueing after a replacement job also fails and hands off to review agent", async () => {
+    const now = new Date("2026-11-24T10:00:00Z");
+    const { db, request, outbound, emitted, worker, demand } = await setupPendingEvidence(now);
+    const dedupeKey = `evidence_check:${request.id}`;
+
+    // Fail the initial evidence_check job -> cron replaces it once
+    await db
+      .updateTable("background_jobs")
+      .set({ status: "failed", error_message: "youku_captcha_challenge" })
+      .where("dedupe_key", "=", dedupeKey)
+      .execute();
+
+    await worker.scheduled();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]!.jobType).toBe("evidence_check");
+
+    // Fail the replacement job as well -> next cron stops looping and moves CR to needs_review + review_agent
+    await db
+      .updateTable("background_jobs")
+      .set({ status: "failed", error_message: "youku_captcha_challenge" })
+      .where("id", "=", emitted[0]!.jobId)
+      .execute();
+    emitted.length = 0;
+
+    await worker.scheduled();
+    expect(emitted.map((job) => job.jobType)).toEqual(["review_agent"]);
+
+    const inReview = await db
+      .selectFrom("change_requests")
+      .select(["status", "conflict_reason", "decision_reason"])
+      .where("id", "=", request.id)
+      .executeTakeFirstOrThrow();
+    expect(inReview).toMatchObject({
+      status: "needs_review",
+      conflict_reason: "evidence_unavailable",
+    });
+    expect(inReview.decision_reason).toContain("youku_captcha_challenge");
+
+    // Review agent rejects cleanly without burning LLM calls and reopens demand with backoff
+    await worker.queue(createQueueBatch(emitted, now).batch);
+    expect(
+      await db
+        .selectFrom("change_requests")
+        .select(["status", "conflict_reason"])
+        .where("id", "=", request.id)
+        .executeTakeFirst(),
+    ).toEqual({ status: "rejected", conflict_reason: "evidence_unavailable" });
     const reopened = await db
       .selectFrom("demands")
       .select(["status", "not_found_count", "next_eligible_at"])
@@ -2032,6 +2090,14 @@ describe("Evidence Gate Step 2 end-to-end (#11)", () => {
     expect(dubDefaultState).toMatchObject({
       status: "needs_review",
       conflictReason: "non_original_default_variant",
+    });
+
+    // Reject Step 1's blocked request (as review_agent would in production) so later steps can revisit ss34432
+    await rejectChangeRequest(testDb.writeDb, {
+      changeRequestId: dubDefaultCr.id,
+      reviewerUserId: user.userId,
+      reason: "Rejected non-original default variant submission",
+      allowedStatuses: ["needs_review"],
     });
 
     // 2. Neutral first variant ("标准版") auto-approves and becomes default
