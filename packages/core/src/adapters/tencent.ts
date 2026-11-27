@@ -389,7 +389,7 @@ interface ParsedEpisodeTab {
   pageContext: string;
 }
 
-function isTabSelected(value: unknown): boolean {
+function isTruthyRpcFlag(value: unknown): boolean {
   return value === true || value === 1 || value === "true" || value === "1";
 }
 
@@ -423,7 +423,7 @@ function extractEpisodeTabs(modules: readonly Record<string, unknown>[]): Parsed
         continue;
       }
       tabs.push({
-        selected: isTabSelected(tabRecord.selected),
+        selected: isTruthyRpcFlag(tabRecord.selected),
         pageContext,
       });
     }
@@ -431,38 +431,49 @@ function extractEpisodeTabs(modules: readonly Record<string, unknown>[]): Parsed
   return tabs;
 }
 
-function selectRemainingTabContexts(
+function extractNextPageContext(
+  modules: readonly Record<string, unknown>[],
+  currentContext: string,
+): string | null {
+  for (const mod of modules) {
+    const moduleParams = asRecord(mod.module_params);
+    if (!moduleParams || !isTruthyRpcFlag(moduleParams.has_next)) {
+      continue;
+    }
+    const explicitNext = nonEmptyString(moduleParams.next_page_context);
+    if (explicitNext && explicitNext !== currentContext) {
+      return explicitNext;
+    }
+    const pageCtx = nonEmptyString(moduleParams.page_context);
+    if (pageCtx && pageCtx !== currentContext) {
+      return pageCtx;
+    }
+  }
+  return null;
+}
+
+function collectRawEpisodeItems(
+  modules: readonly Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const rawItems: Record<string, unknown>[] = [];
+  for (const mod of modules) {
+    rawItems.push(...extractModuleItemParams(mod));
+  }
+  return rawItems;
+}
+
+function resolveInitialTabIndex(
   tabs: readonly ParsedEpisodeTab[],
-  initialItemCount: number,
-): string[] {
+  initialRawItemCount: number,
+): number {
   if (tabs.length === 0) {
-    return [];
+    return -1;
   }
-  const hasExplicitSelection = tabs.some((tab) => tab.selected);
-  const visited = new Set<string>();
-  const remaining: string[] = [];
-
-  for (let i = 0; i < tabs.length; i += 1) {
-    const tab = tabs[i]!;
-    if (hasExplicitSelection && tab.selected) {
-      visited.add(tab.pageContext);
-      continue;
-    }
-    if (!hasExplicitSelection && i === 0 && initialItemCount > 0) {
-      visited.add(tab.pageContext);
-      continue;
-    }
-    if (visited.has(tab.pageContext)) {
-      continue;
-    }
-    visited.add(tab.pageContext);
-    remaining.push(tab.pageContext);
-    if (remaining.length >= MAX_EPISODE_TAB_PAGES) {
-      break;
-    }
+  const explicit = tabs.findIndex((tab) => tab.selected);
+  if (explicit >= 0) {
+    return explicit;
   }
-
-  return remaining;
+  return initialRawItemCount > 0 ? 0 : -1;
 }
 
 function buildEpisodeListPageParams(cid: string, pageContext: string): Record<string, string> {
@@ -644,36 +655,74 @@ export const tencentAdapter: Tier2Adapter<"tencent"> = {
       };
     }
 
+    const episodeModules = collectModuleDatas(episodeEnvelope.moduleListDatas);
+    const initialItems = collectRawEpisodeItems(episodeModules);
+    const tabs = extractEpisodeTabs(episodeModules);
     const featureEpisodes: FeatureEpisode[] = [];
     const seenVids = new Set<string>();
-    const episodeModules = collectModuleDatas(episodeEnvelope.moduleListDatas);
-    let initialRawItemCount = 0;
-    for (const mod of episodeModules) {
-      const items = extractModuleItemParams(mod);
-      initialRawItemCount += items.length;
-      appendFilteredFeatureEpisodes(items, mediaType, seenVids, featureEpisodes);
-    }
 
-    const remainingContexts = selectRemainingTabContexts(
-      extractEpisodeTabs(episodeModules),
-      initialRawItemCount,
-    );
-    for (const pageContext of remainingContexts) {
-      const nextPage = await postPageData(outbound, buildEpisodeListPageParams(cid, pageContext));
-      if (!nextPage.ok) {
-        return {
-          status: "transient_error",
-          reason: nextPage.transientReason,
-        };
+    if (tabs.length > 0) {
+      const initialTabIdx = resolveInitialTabIndex(tabs, initialItems.length);
+      const tabItems: Array<Record<string, unknown>[]> = tabs.map(() => []);
+      const visitedContexts = new Set<string>();
+      if (initialTabIdx >= 0) {
+        tabItems[initialTabIdx] = initialItems;
+        visitedContexts.add(tabs[initialTabIdx]!.pageContext);
       }
-      const nextModules = collectModuleDatas(nextPage.moduleListDatas);
-      for (const mod of nextModules) {
-        appendFilteredFeatureEpisodes(
-          extractModuleItemParams(mod),
-          mediaType,
-          seenVids,
-          featureEpisodes,
-        );
+
+      let fetchedPages = 0;
+      for (let i = 0; i < tabs.length; i += 1) {
+        if (i === initialTabIdx || fetchedPages >= MAX_EPISODE_TAB_PAGES) {
+          continue;
+        }
+        const ctx = tabs[i]!.pageContext;
+        if (visitedContexts.has(ctx)) {
+          continue;
+        }
+        visitedContexts.add(ctx);
+        fetchedPages += 1;
+        const nextPage = await postPageData(outbound, buildEpisodeListPageParams(cid, ctx));
+        if (!nextPage.ok) {
+          return {
+            status: "transient_error",
+            reason: nextPage.transientReason,
+          };
+        }
+        tabItems[i] = collectRawEpisodeItems(collectModuleDatas(nextPage.moduleListDatas));
+      }
+
+      for (const items of tabItems) {
+        appendFilteredFeatureEpisodes(items, mediaType, seenVids, featureEpisodes);
+      }
+      if (initialTabIdx < 0) {
+        appendFilteredFeatureEpisodes(initialItems, mediaType, seenVids, featureEpisodes);
+      }
+    } else {
+      appendFilteredFeatureEpisodes(initialItems, mediaType, seenVids, featureEpisodes);
+      const visitedContexts = new Set<string>();
+      let currentContext = "";
+      let currentModules = episodeModules;
+
+      for (let page = 0; page < MAX_EPISODE_TAB_PAGES; page += 1) {
+        const nextContext = extractNextPageContext(currentModules, currentContext);
+        if (!nextContext || visitedContexts.has(nextContext)) {
+          break;
+        }
+        visitedContexts.add(nextContext);
+        const nextPage = await postPageData(outbound, buildEpisodeListPageParams(cid, nextContext));
+        if (!nextPage.ok) {
+          return {
+            status: "transient_error",
+            reason: nextPage.transientReason,
+          };
+        }
+        currentContext = nextContext;
+        currentModules = collectModuleDatas(nextPage.moduleListDatas);
+        const items = collectRawEpisodeItems(currentModules);
+        if (items.length === 0) {
+          break;
+        }
+        appendFilteredFeatureEpisodes(items, mediaType, seenVids, featureEpisodes);
       }
     }
 

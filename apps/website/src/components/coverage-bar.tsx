@@ -1,5 +1,6 @@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@media-ref/ui/components/tooltip";
 import { cn } from "@media-ref/ui/lib/utils";
+import { formatSegmentEpisodeLabel } from "#/lib/format";
 import type { CoverageSegment } from "#/lib/types";
 
 export function computeRulerTicks(
@@ -99,7 +100,11 @@ export function CoverageTrack({
   className,
 }: CoverageTrackProps) {
   const safeTotal = Math.max(total, 1);
-  const showDiscreteCells = safeTotal > 1 && safeTotal <= 36;
+  const allWholeSeasonNonLinear =
+    mode === "episode" &&
+    segments.length > 0 &&
+    segments.every((s) => s.nonLinear && s.start <= 1 && s.end >= safeTotal);
+  const showDiscreteCells = safeTotal > 1 && safeTotal <= 36 && !allWholeSeasonNonLinear;
 
   return (
     <div
@@ -128,15 +133,16 @@ export function CoverageTrack({
         const leftPct = ((clampedStart - 1) / safeTotal) * 100;
         const widthPct = ((clampedEnd - clampedStart + 1) / safeTotal) * 100;
         const isNarrow = widthPct < 12;
+        const isNonLinearEpisodeBar = mode === "episode" && Boolean(seg.nonLinear);
+        const isWholeSeasonNonLinear =
+          isNonLinearEpisodeBar && clampedStart === 1 && clampedEnd === safeTotal;
 
         const rangeText =
           mode === "season"
             ? clampedStart === clampedEnd
               ? `第 ${clampedStart} 季`
               : `第 ${clampedStart}–${clampedEnd} 季`
-            : clampedStart === clampedEnd
-              ? `第 ${clampedStart} 集`
-              : `第 ${clampedStart}–${clampedEnd} 集`;
+            : formatSegmentEpisodeLabel(clampedStart, clampedEnd, seg.nonLinear, safeTotal);
 
         const barClass =
           seg.status === "pending"
@@ -171,6 +177,11 @@ export function CoverageTrack({
               }
             >
               <span className="truncate">{seg.title}</span>
+              {isNonLinearEpisodeBar && !isNarrow && (
+                <span className="ml-1.5 shrink-0 font-normal opacity-80">
+                  {isWholeSeasonNonLinear ? "· 整季不拆集" : "· 不按集对应"}
+                </span>
+              )}
             </TooltipTrigger>
             <TooltipContent side="top" className="max-w-xs">
               <div className="flex flex-col gap-0.5 text-xs">
@@ -178,6 +189,11 @@ export function CoverageTrack({
                 <div className="text-2xs opacity-80">
                   {rangeText} · <span className="font-mono">{seg.nativeId}</span>
                 </div>
+                {isNonLinearEpisodeBar && (
+                  <div className="text-2xs opacity-80">
+                    分集与资料站不逐集对应，可直接打开平台合集观看
+                  </div>
+                )}
                 <div className="text-2xs opacity-80">
                   {seg.status === "pending"
                     ? seg.changeRequestId
