@@ -144,6 +144,11 @@ export interface ToolSessionInput {
   onQueryReplied?(call: ModelToolCall, result: unknown, step: number): void;
   /** Handles one conclusion call made in turn `step`; returns the tool reply. */
   conclude(call: ModelToolCall, step: number): Promise<unknown>;
+  /**
+   * When set, a turn with no tool call is answered once with this message and the session goes on
+   * with only the conclusion tools; a second such turn ends it as `no_decision`.
+   */
+  noDecisionNudge?: () => string;
   done(): boolean;
 }
 
@@ -153,6 +158,7 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
     messages.push({ role: "tool", toolCallId: id, name, content: JSON.stringify(body) });
 
   let wrappingUp = false;
+  let nudged = false;
   const conclusionTools = tools.filter((t) => input.conclusionToolNames.has(t.name));
   // Searching may use the time up to the wrap-up reserve, not beyond: a slow model turn or tool
   // batch started just before wrap-up would otherwise eat the reserve and end in a timeout.
@@ -193,6 +199,9 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
       if (!wrappingUp && !budget.expired() && searchLeftMs() <= 0) {
         continue; // The search phase ran out mid-turn: the next step wraps up.
       }
+      if (budget.expired()) {
+        return { kind: "time_up" }; // The session's own deadline, not an outage.
+      }
       return {
         kind: "model_error",
         reason: error instanceof Error ? error.message : "model_invocation_failed",
@@ -213,7 +222,13 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
     });
     if (toolCalls.length === 0) {
-      return { kind: "no_decision" };
+      if (!input.noDecisionNudge || nudged) {
+        return { kind: "no_decision" };
+      }
+      nudged = true;
+      wrappingUp = true;
+      messages.push({ role: "user", content: input.noDecisionNudge() });
+      continue;
     }
 
     // Query tools of one turn run side by side, bounded by the search phase; conclusions below

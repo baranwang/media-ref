@@ -1,0 +1,683 @@
+[
+  {
+    "id": "ok-zhuxian-final",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:206484",
+    "namespace": "tencent",
+    "nativeId": "mzc00200w9z1axf",
+    "segments": [
+      {
+        "season": 4,
+        "episodeStart": 1,
+        "episodeEnd": 17,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "诛仙 最终季 = TMDB 第 4 季 1–17"
+  },
+  {
+    "id": "ok-jujutsu-s2",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:95479",
+    "namespace": "bilibili",
+    "nativeId": "ss45574",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 25,
+        "episodeEnd": 47,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "咒术回战 第二季 = TMDB 第 1 季 25–47"
+  },
+  {
+    "id": "ok-doupo-nianfan",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:79481",
+    "namespace": "tencent",
+    "nativeId": "mzc0020027yzd9e",
+    "segments": [
+      {
+        "season": 5,
+        "episodeStart": 1,
+        "episodeEnd": 219,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "斗破苍穹年番 219 集 = TMDB 第 5 季"
+  },
+  {
+    "id": "ok-avatar-s2",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:246",
+    "namespace": "bilibili",
+    "nativeId": "ss41204",
+    "segments": [
+      {
+        "season": 2,
+        "episodeStart": 1,
+        "episodeEnd": 20,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "降世神通 第二季，B 站 2023 年上架"
+  },
+  {
+    "id": "ok-farewell-concubine",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:movie:10997",
+    "namespace": "bilibili",
+    "nativeId": "ss33133",
+    "segments": [],
+    "note": "霸王别姬，B 站标 2013 年"
+  },
+  {
+    "id": "ok-linglong-split",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:91097",
+    "namespace": "bilibili",
+    "nativeId": "ss22088",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 6,
+        "targetEpisodeStart": 1
+      },
+      {
+        "season": 1,
+        "episodeStart": 7,
+        "episodeEnd": null,
+        "targetEpisodeStart": 8
+      }
+    ],
+    "note": "灵笼 第一季，中章夹在 6、7 集之间"
+  },
+  {
+    "id": "ok-wife-s8",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:97199",
+    "namespace": "mgtv",
+    "nativeId": "860862",
+    "segments": [
+      {
+        "season": 8,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "妻子的浪漫旅行2026 = 第 8 季"
+  },
+  {
+    "id": "ok-angel",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:84666",
+    "namespace": "bilibili",
+    "nativeId": "ss26291",
+    "segments": [
+      {
+        "season": 0,
+        "episodeStart": 1,
+        "episodeEnd": 1,
+        "targetEpisodeStart": 13
+      },
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 12,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "天使降临到我身边，第 13 条是特别篇"
+  },
+  {
+    "id": "ok-dazhuzai",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:226045",
+    "namespace": "iqiyi",
+    "nativeId": "5305224104606401",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 50,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "大主宰年番 50 集"
+  },
+  {
+    "id": "ok-zhetian",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:224839",
+    "namespace": "tencent",
+    "nativeId": "mzc00200n53vkqc",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 191,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "遮天 191 集"
+  },
+  {
+    "id": "ok-mushenji",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:236534",
+    "namespace": "bilibili",
+    "nativeId": "ss45969",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 110,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "牧神记 110 集"
+  },
+  {
+    "id": "ok-steins-gate",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:42509",
+    "namespace": "tencent",
+    "nativeId": "gu5m5d0ccelhqw9",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 24,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "命运石之门，平台 25 条对 TMDB 24 集"
+  },
+  {
+    "id": "ok-biaoren",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:107463",
+    "namespace": "tencent",
+    "nativeId": "mzc00200ab0trmk",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "镖人 第 1 季"
+  },
+  {
+    "id": "ok-linglong-s2",
+    "label": "accept",
+    "kind": "right",
+    "targetExternalKey": "tmdb:tv:91097",
+    "namespace": "bilibili",
+    "nativeId": "ss46585",
+    "segments": [
+      {
+        "season": 2,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "灵笼 第二季"
+  },
+  {
+    "id": "bad-season-linglong",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:91097",
+    "namespace": "bilibili",
+    "nativeId": "ss46585",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 12,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "线上真实出过的错：灵笼第二季提交成第 1 季",
+    "expectedCorrection": {
+      "season": 2
+    }
+  },
+  {
+    "id": "bad-season-zhuxian2",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:206484",
+    "namespace": "tencent",
+    "nativeId": "mzc00200faybjea",
+    "segments": [
+      {
+        "season": 3,
+        "episodeStart": 1,
+        "episodeEnd": 26,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "诛仙第 2 季提交成第 3 季",
+    "expectedCorrection": {
+      "season": 2
+    }
+  },
+  {
+    "id": "bad-season-zhuxian1",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:206484",
+    "namespace": "tencent",
+    "nativeId": "mzc00200kwy29cd",
+    "segments": [
+      {
+        "season": 2,
+        "episodeStart": 1,
+        "episodeEnd": 26,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "诛仙第 1 季提交成第 2 季",
+    "expectedCorrection": {
+      "season": 1
+    }
+  },
+  {
+    "id": "bad-season-wife",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:97199",
+    "namespace": "mgtv",
+    "nativeId": "860862",
+    "segments": [
+      {
+        "season": 6,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "线上真实出过的错：第 8 季提交成第 6 季",
+    "expectedCorrection": {
+      "season": 8
+    }
+  },
+  {
+    "id": "bad-season-yiren",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:67063",
+    "namespace": "tencent",
+    "nativeId": "mzc00200fobieel",
+    "segments": [
+      {
+        "season": 5,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "一人之下第 6 季提交成第 5 季",
+    "expectedCorrection": {
+      "season": 6
+    }
+  },
+  {
+    "id": "bad-season-avatar",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:246",
+    "namespace": "bilibili",
+    "nativeId": "ss41204",
+    "segments": [
+      {
+        "season": 3,
+        "episodeStart": 1,
+        "episodeEnd": 20,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "降世神通第二季提交成第 3 季",
+    "expectedCorrection": {
+      "season": 2
+    }
+  },
+  {
+    "id": "bad-season-letsgo",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:231620",
+    "namespace": "tencent",
+    "nativeId": "mzc002001bk7moh",
+    "segments": [
+      {
+        "season": 3,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "现在就出发第 4 季提交成第 3 季",
+    "expectedCorrection": {
+      "season": 4
+    }
+  },
+  {
+    "id": "bad-season-zhanshen",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:259231",
+    "namespace": "tencent",
+    "nativeId": "mzc002000iis17y",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "斩神第 2 季提交成第 1 季",
+    "expectedCorrection": {
+      "season": 2
+    }
+  },
+  {
+    "id": "bad-season-doupo",
+    "label": "reject",
+    "kind": "wrong_season",
+    "targetExternalKey": "tmdb:tv:79481",
+    "namespace": "tencent",
+    "nativeId": "mzc0020027yzd9e",
+    "segments": [
+      {
+        "season": 4,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "斗破苍穹年番提交成第 4 季",
+    "expectedCorrection": {
+      "season": 5
+    }
+  },
+  {
+    "id": "bad-shift-linglong",
+    "label": "reject",
+    "kind": "shifted",
+    "targetExternalKey": "tmdb:tv:91097",
+    "namespace": "bilibili",
+    "nativeId": "ss22088",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": null,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "线上真实出过的错：灵笼整季从位置 1 起，7–12 错开一位",
+    "expectedCorrection": {
+      "season": 1,
+      "segments": [
+        {
+          "season": 1,
+          "episodeStart": 1,
+          "episodeEnd": 6,
+          "targetEpisodeStart": 1
+        },
+        {
+          "season": 1,
+          "episodeStart": 7,
+          "episodeEnd": 12,
+          "targetEpisodeStart": 8
+        }
+      ]
+    }
+  },
+  {
+    "id": "bad-shift-biaoren",
+    "label": "reject",
+    "kind": "shifted",
+    "targetExternalKey": "tmdb:tv:107463",
+    "namespace": "tencent",
+    "nativeId": "mzc00200ab0trmk",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 14,
+        "targetEpisodeStart": 2
+      }
+    ],
+    "note": "镖人从位置 2 起"
+  },
+  {
+    "id": "bad-shift-shanggongzhu",
+    "label": "reject",
+    "kind": "shifted",
+    "targetExternalKey": "tmdb:tv:286171",
+    "namespace": "tencent",
+    "nativeId": "mzc002001w361jz",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 39,
+        "targetEpisodeStart": 2
+      }
+    ],
+    "note": "尚公主从位置 2 起"
+  },
+  {
+    "id": "bad-shift-zoumashangren",
+    "label": "reject",
+    "kind": "shifted",
+    "targetExternalKey": "tmdb:tv:275297",
+    "namespace": "tencent",
+    "nativeId": "mzc00200zsqz54y",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 2,
+        "episodeEnd": 40,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "走马上任第 2 集对位置 1"
+  },
+  {
+    "id": "bad-shift-jujutsu",
+    "label": "reject",
+    "kind": "shifted",
+    "targetExternalKey": "tmdb:tv:95479",
+    "namespace": "bilibili",
+    "nativeId": "ss45574",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 24,
+        "episodeEnd": 46,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "咒术回战第二季错一集：24–46"
+  },
+  {
+    "id": "bad-shift-maou",
+    "label": "reject",
+    "kind": "shifted",
+    "targetExternalKey": "tmdb:tv:280042",
+    "namespace": "bilibili",
+    "nativeId": "ss112978",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 11,
+        "targetEpisodeStart": 2
+      }
+    ],
+    "note": "野生的大魔王出现了！从位置 2 起"
+  },
+  {
+    "id": "bad-work-zoumashangren",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:tv:286171",
+    "namespace": "tencent",
+    "nativeId": "mzc00200zsqz54y",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 40,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "走马上任（40 集）提交到尚公主（40 集）"
+  },
+  {
+    "id": "bad-work-zhuxian-gits",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:tv:1095",
+    "namespace": "tencent",
+    "nativeId": "mzc00200faybjea",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 26,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "诛仙第 2 季（26）提交到攻壳机动队（26）"
+  },
+  {
+    "id": "bad-work-zuimeng",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:tv:294498",
+    "namespace": "tencent",
+    "nativeId": "mzc0020098xcllx",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 18,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "醉梦（18）提交到多喜一家人（18）"
+  },
+  {
+    "id": "bad-work-shawshank",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:movie:424",
+    "namespace": "iqiyi",
+    "nativeId": "577397100",
+    "segments": [],
+    "note": "肖申克的救赎提交到辛德勒的名单"
+  },
+  {
+    "id": "bad-work-concubine",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:movie:278",
+    "namespace": "tencent",
+    "nativeId": "j3czmhisqin799r",
+    "segments": [],
+    "note": "霸王别姬提交到肖申克的救赎"
+  },
+  {
+    "id": "bad-work-mushenji",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:tv:224839",
+    "namespace": "bilibili",
+    "nativeId": "ss45969",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 110,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "牧神记（110）提交到遮天"
+  },
+  {
+    "id": "bad-work-biaoren",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:tv:259231",
+    "namespace": "tencent",
+    "nativeId": "mzc00200ab0trmk",
+    "segments": [
+      {
+        "season": 2,
+        "episodeStart": 1,
+        "episodeEnd": 15,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "镖人（15）提交到斩神第 2 季（15）"
+  },
+  {
+    "id": "bad-work-jiangye",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:tv:279923",
+    "namespace": "bilibili",
+    "nativeId": "ss45962",
+    "segments": [
+      {
+        "season": 1,
+        "episodeStart": 1,
+        "episodeEnd": 18,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "将夜提交到醉梦"
+  },
+  {
+    "id": "bad-work-yiren",
+    "label": "reject",
+    "kind": "other_work",
+    "targetExternalKey": "tmdb:tv:206484",
+    "namespace": "tencent",
+    "nativeId": "mzc00200fobieel",
+    "segments": [
+      {
+        "season": 3,
+        "episodeStart": 1,
+        "episodeEnd": 26,
+        "targetEpisodeStart": 1
+      }
+    ],
+    "note": "一人之下第 6 季（26）提交到诛仙第 3 季（26）"
+  }
+]

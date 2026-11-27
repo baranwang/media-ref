@@ -515,6 +515,67 @@ describe("review agent (#75)", () => {
     },
   );
 
+  test("a model that stops without a conclusion is asked once to conclude, with only the conclusion tools left", async () => {
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss28888" }],
+          ["get_catalog_season", { season: 1 }],
+        ]);
+      }
+      if (turn === 1) {
+        return { content: "看起来没问题。", toolCalls: [], model: "test-model" };
+      }
+      return reply(turn, [["approve", { reasons: reasonsFor(request) }]]);
+    };
+    const { submit, drain, changeRequest, outbound } = track(await setup(model));
+    const id = await submit();
+
+    await drain();
+
+    const cr = await changeRequest(id);
+    expect(cr.status).toBe("approved");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "approve",
+      fallback: null,
+    });
+    const nudged = outbound.modelRequests.at(-1)!;
+    expect(nudged.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: expect.stringContaining("approve"),
+    });
+    expect(nudged.tools!.map((t) => t.name).sort()).toEqual(
+      ["approve", "reject", "reject_with_correction"].sort(),
+    );
+  });
+
+  test("a session that runs out of time mid-turn is a rejection, not an outage to retry", async () => {
+    // The model never answers: the session's time budget ends the call.
+    const model = (() => new Promise(() => {})) as unknown as ScriptedModel;
+    const { testDb, submit, drain, changeRequest } = track(
+      await setup(model, { maxDurationMs: 500 }),
+    );
+    const id = await submit();
+
+    await drain();
+
+    const cr = await changeRequest(id);
+    expect(cr.status).toBe("rejected");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "reject",
+      fallback: "time_up",
+    });
+    expect(
+      await testDb.readDb
+        .selectFrom("background_jobs")
+        .select("id")
+        .where("job_type", "=", "review_agent")
+        .where("status", "=", "pending")
+        .execute(),
+    ).toEqual([]);
+  });
+
   test("fetches in the same turn as the approval do not count: the model never saw them", async () => {
     const model: ScriptedModel = (request) =>
       reply(turnOf(request), [
@@ -754,7 +815,7 @@ describe("review agent (#75)", () => {
     expect(parseWorkerConfig(env({})).reviewAgent).toMatchObject({
       dailyBudget: 0,
       maxSteps: 16,
-      maxDurationMs: 120_000,
+      maxDurationMs: 180_000,
       maxTaskTokens: 300_000,
     });
     expect(
@@ -799,7 +860,7 @@ const correctionFor = (season: number) => ({
 
 /** Fetches the collection and the corrected season, then rejects with that correction. */
 const correctsTo =
-  (season: number): ScriptedModel =>
+  (season: number, reasons: Array<{ code: string; reason: string }> = []): ScriptedModel =>
   (request) => {
     const turn = turnOf(request);
     if (turn === 0) {
@@ -810,7 +871,7 @@ const correctsTo =
     }
     if (turn === 1) {
       return reply(turn, [
-        ["reject_with_correction", { opinion: WIFE_OPINION, ...correctionFor(season) }],
+        ["reject_with_correction", { opinion: WIFE_OPINION, ...correctionFor(season), reasons }],
       ]);
     }
     return reply(turn, [["reject", { opinion: WIFE_OPINION }]]);
@@ -947,6 +1008,133 @@ describe("review agent: reject with correction (#76)", () => {
     expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
       verdict: "reject",
       fallback: "correction_failed_step1: title_mismatch",
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
+  /** Bilibili, with the collection's title or year changed as the platform shows it. */
+  const relabelled = (info: { title?: string; year?: number }) =>
+    createAdapterRegistry([
+      {
+        ...bilibiliAdapter,
+        async fetchCollection(id, outbound) {
+          const result = await bilibiliAdapter.fetchCollection(id, outbound);
+          return result.status === "found"
+            ? { ...result, info: { ...result.info, ...info } }
+            : result;
+        },
+      },
+    ]);
+
+  test.each([
+    {
+      name: "a platform upload year that matches no season (降世神通)",
+      info: { year: 2031, title: "妻子的浪漫旅行" },
+      code: "year_mismatch",
+      reason: "2031 是平台上架年份，不是播出年份",
+    },
+    {
+      name: "a platform title suffix (斗破苍穹年番)",
+      info: { title: "妻子的浪漫旅行 特别版" },
+      code: "title_mismatch",
+      reason: "「特别版」是平台给这一季起的名字，同一部作品",
+    },
+  ])(
+    "a correction keeps a conflict the submission already had when it explains it: $name",
+    async ({ info, code, reason }) => {
+      const ctx = track(await setup(correctsTo(8, [{ code, reason }]), {}, relabelled(info)));
+      const id = await submitAsHuman(ctx);
+
+      await ctx.drain();
+
+      const cr = await ctx.changeRequest(id);
+      expect(cr.status).toBe("rejected");
+      expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+        verdict: "reject_with_correction",
+        correction: correctionFor(8),
+        fallback: null,
+      });
+      expect(await leads(ctx)).toEqual([expect.objectContaining({ season: 8 })]);
+    },
+  );
+
+  test("an open-ended correction on a season still airing is handed over up to the last verified episode", async () => {
+    // TMDB season 8 has 10 episodes; the platform has the first 7 so far.
+    const airing = createAdapterRegistry([
+      {
+        ...bilibiliAdapter,
+        async fetchCollection(id, outbound) {
+          const result = await bilibiliAdapter.fetchCollection(id, outbound);
+          return result.status === "found"
+            ? {
+                ...result,
+                info: { ...result.info, featureEpisodes: result.info.featureEpisodes.slice(0, 7) },
+              }
+            : result;
+        },
+      },
+    ]);
+    const openEnded = {
+      season: 8,
+      segments: [{ season: 8, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 }],
+    };
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 8 }],
+        ]);
+      }
+      return reply(turn, [["reject_with_correction", { opinion: WIFE_OPINION, ...openEnded }]]);
+    };
+    const ctx = track(await setup(model, {}, airing));
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    // Positions 1–7 are what the session saw: exploration resubmits exactly that, and its own
+    // segment check (which reads an open end as the whole 10-episode season) accepts it.
+    const bounded = {
+      season: 8,
+      segments: [{ season: 8, episodeStart: 1, episodeEnd: 7, targetEpisodeStart: 1 }],
+    };
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: { verdict: "reject_with_correction", correction: bounded, fallback: null },
+    });
+    expect(await leads(ctx)).toEqual([
+      expect.objectContaining({ season: 8, segments: bounded.segments }),
+    ]);
+  });
+
+  test("without a reason for it, the submission's own title or year conflict still blocks the correction", async () => {
+    const ctx = track(
+      await setup(correctsTo(8), {}, relabelled({ year: 2031, title: "妻子的浪漫旅行" })),
+    );
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: { verdict: "reject", fallback: "correction_failed_step1: year_mismatch" },
+    });
+    expect(await leads(ctx)).toEqual([]);
+  });
+
+  test("a season's year still decides a correction when the collection's year matches a season: explaining it does not help", async () => {
+    // The collection is from 2026, season 8's year; season 7 aired in 2024.
+    const ctx = track(
+      await setup(correctsTo(7, [{ code: "segment_year_mismatch", reason: "年份不重要" }])),
+    );
+    const id = await submitAsHuman(ctx);
+
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: {
+        verdict: "reject",
+        fallback: expect.stringMatching(/^correction_failed_step2: .*segment_year_mismatch/),
+      },
     });
     expect(await leads(ctx)).toEqual([]);
   });

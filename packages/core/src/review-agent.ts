@@ -84,7 +84,9 @@ export const REVIEW_AGENT_USER_NAME = "Review Agent";
 /** `reporter_key_id` of the leads it writes: it has no API key, and the column has no foreign key. */
 export const REVIEW_AGENT_KEY_ID = REVIEW_AGENT_USER_ID;
 export const DEFAULT_REVIEW_AGENT_MAX_STEPS = 16;
-export const DEFAULT_REVIEW_AGENT_MAX_DURATION_MS = 2 * 60_000;
+/** A 40-episode collection plus its catalog season takes close to 2 minutes; the 5-minute job lease
+ * still leaves room (see LEASE_MARGIN_MS). */
+export const DEFAULT_REVIEW_AGENT_MAX_DURATION_MS = 3 * 60_000;
 export const DEFAULT_REVIEW_AGENT_MAX_TASK_TOKENS = 300_000;
 /** Lease time a review needs beyond its session: the outcome's fenced write and its commit. */
 const LEASE_MARGIN_MS = 30_000;
@@ -103,6 +105,15 @@ const EPISODE_COUNT_CONFLICT_CODES: ReadonlySet<string> = new Set([
   "episode_count_mismatch",
   "episode_count_missing",
 ]);
+/**
+ * Step 1 conflicts a correction may keep when the submission already had them and the model
+ * explained them: they come from how the platform labels the collection (「斗破苍穹年番」, an upload
+ * year), not from the season or episodes the correction changes.
+ */
+const CARRIED_IDENTITY_CONFLICT_CODES: ReadonlySet<string> = new Set([
+  "title_mismatch",
+  "year_mismatch",
+]);
 
 /**
  * Step 2 conflicts a correction may keep when its segments fit the collection without overlap:
@@ -120,15 +131,25 @@ function positionMisfit(
   seasons: CatalogEvidence["seasons"],
 ): string | null {
   const count = (season: number) => seasons.find((s) => s.season === season)?.episodeCount ?? null;
-  const misfit = checkSegmentsFitCollection(segments, collection, count);
+  // An open end runs to the collection's end (a season still airing), at most to the season's end.
+  const available = collection.featureEpisodes.length;
+  const ended = segments.map((s) => ({
+    ...s,
+    episodeEnd:
+      s.episodeEnd ??
+      Math.min(
+        count(s.season) ?? Number.POSITIVE_INFINITY,
+        s.episodeStart + available - s.targetEpisodeStart,
+      ),
+  }));
+  const misfit = checkSegmentsFitCollection(ended, collection, count);
   if (misfit) {
     return misfit;
   }
-  const ranges = segments
-    .map((s) => {
-      const end = s.episodeEnd ?? count(s.season)!;
-      return [s.targetEpisodeStart, s.targetEpisodeStart + end - s.episodeStart] as const;
-    })
+  const ranges = ended
+    .map(
+      (s) => [s.targetEpisodeStart, s.targetEpisodeStart + s.episodeEnd - s.episodeStart] as const,
+    )
     .sort((a, b) => a[0] - b[0]);
   return ranges.some((r, i) => i > 0 && r[0] <= ranges[i - 1]![1])
     ? "segments overlap on platform positions"
@@ -432,7 +453,7 @@ function buildSystemPrompt(mode: ReviewMode, conclusions: string, hasComments: b
     "2. approve only counts if, in this session, you fetched the collection with get_collection and every season the segments name with get_catalog_season, and you give one reason per conflict code saying why that conflict does not make the mapping wrong. Otherwise it counts as reject.",
     ...(correction
       ? [
-          "   reject_with_correction is for a submission that is wrong (for example the wrong season): give the corrected season and segments. It only counts if you fetched the collection and every corrected season in this session and the Evidence Gate's segment check passes on the correction.",
+          "   reject_with_correction is for a submission that is wrong (for example the wrong season): give the corrected season and segments. It only counts if you fetched the collection and every corrected season in this session and the Evidence Gate's segment check passes on the correction. If the collection itself has a title or year conflict (a platform title like 年番, an upload year), give one reason per such conflict code in reasons, as for approve.",
         ]
       : []),
   ];
@@ -443,7 +464,7 @@ function buildSystemPrompt(mode: ReviewMode, conclusions: string, hasComments: b
     "2. keep leaves the mapping live. revoke takes it down, and exploration looks for the season again later; it only counts if, in this session, you fetched the collection with get_collection and every season the segments name with get_catalog_season, and say in opinion what is wrong. Otherwise it counts as keep.",
     ...(correction
       ? [
-          "   revoke_with_correction also gives the corrected season and segments, handed to exploration. The correction only counts if you fetched the collection and every corrected season in this session and the Evidence Gate's segment check passes on it.",
+          "   revoke_with_correction also gives the corrected season and segments, handed to exploration. The correction only counts if you fetched the collection and every corrected season in this session and the Evidence Gate's segment check passes on it; explain a title or year conflict of the collection itself in reasons, as for approve.",
         ]
       : []),
   ];
@@ -506,6 +527,17 @@ const REPLY_PROPERTY = {
     "Your answer to the comments, in plain Chinese: what you concluded and did, and for each request you did not follow, why. Leave out when there are no comments.",
 };
 
+/** For a correction: why a title or year conflict the collection itself has does not matter. */
+const CORRECTION_REASONS_PROPERTY = {
+  type: "array",
+  description:
+    "One reason per title_mismatch / year_mismatch conflict the collection itself has (its platform title or upload year), saying why it does not make the corrected mapping wrong.",
+  items: {
+    type: "object",
+    properties: { code: { type: "string" }, reason: { type: "string" } },
+    required: ["code", "reason"],
+  },
+};
 /** Corrected season and segments, shared by reject_with_correction and revoke_with_correction. */
 const CORRECTION_PROPERTIES = {
   season: { type: "integer", description: "The season the collection really is." },
@@ -551,7 +583,12 @@ const CONCLUSION_TOOL_DEFINITIONS: ModelToolDefinition[] = [
       "The submission is wrong: reject it with the corrected season and segments, and say in opinion what was wrong. Code re-runs the Evidence Gate's segment check on the correction; only if it passes is the request rejected and the correction handed to the exploration agent.",
     parameters: {
       type: "object",
-      properties: { opinion: { type: "string" }, ...CORRECTION_PROPERTIES, reply: REPLY_PROPERTY },
+      properties: {
+        opinion: { type: "string" },
+        ...CORRECTION_PROPERTIES,
+        reasons: CORRECTION_REASONS_PROPERTY,
+        reply: REPLY_PROPERTY,
+      },
       required: ["opinion", "season", "segments"],
     },
   },
@@ -593,7 +630,12 @@ const APPROVED_CONCLUSION_TOOL_DEFINITIONS: ModelToolDefinition[] = [
       "The live mapping is wrong and you know the right one: take it down and hand the corrected season and segments to exploration. Code re-runs the Evidence Gate's segment check on the correction; if it fails, the mapping is only taken down.",
     parameters: {
       type: "object",
-      properties: { opinion: { type: "string" }, ...CORRECTION_PROPERTIES, reply: REPLY_PROPERTY },
+      properties: {
+        opinion: { type: "string" },
+        ...CORRECTION_PROPERTIES,
+        reasons: CORRECTION_REASONS_PROPERTY,
+        reply: REPLY_PROPERTY,
+      },
       required: ["opinion", "season", "segments"],
     },
   },
@@ -920,6 +962,8 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         wrapUpMessage: () =>
           `The time, step or token budget is almost used up. Stop searching and conclude now with ${conclusionNames}.`,
         wrapUpRefusal: `No more searching: conclude with ${conclusionNames}.`,
+        noDecisionNudge: () =>
+          `You stopped without a conclusion. End now by calling exactly one of: ${conclusionNames}.`,
         conclude,
         done: () => conclusion !== null,
       });
@@ -957,7 +1001,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         [...fetchedSeasons].filter(([, step]) => step < conclusionStep).map(([season]) => season),
       ),
     };
-    const correction = concluded?.correction ?? null;
+    let correction = concluded?.correction ?? null;
     const record = (verdict: ReviewVerdict, fallback: string | null, extra: JsonObject = {}) =>
       ({
         verdict,
@@ -986,8 +1030,14 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
         verdict = fallback === null ? "revoke" : "keep";
       }
       if (concluded?.verdict === "revoke_with_correction" && revokeBlocker === null) {
-        fallback = correctionBlocker(cr, correction, fetched, episodeAirYears);
+        fallback = correctionBlocker(cr, correction, fetched, episodeAirYears, {
+          submittedCodes: conflictCodes,
+          reasons: concluded.reasons,
+        });
         verdict = fallback === null ? "revoke_with_correction" : "revoke";
+        if (fallback === null) {
+          correction = boundToCollection(cr, correction!, fetched);
+        }
       }
       const reviewAgent = record(
         verdict,
@@ -1044,7 +1094,13 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
       fallback = approvalBlocker(cr, conflictCodes, concluded.reasons, fetched);
     }
     if (concluded?.verdict === "reject_with_correction") {
-      fallback = correctionBlocker(cr, correction, fetched, episodeAirYears);
+      fallback = correctionBlocker(cr, correction, fetched, episodeAirYears, {
+        submittedCodes: conflictCodes,
+        reasons: concluded.reasons,
+      });
+      if (fallback === null) {
+        correction = boundToCollection(cr, correction!, fetched);
+      }
     }
 
     let prefetchedCatalog: CatalogTargetSnapshot | null = null;
@@ -1303,6 +1359,32 @@ function approvalBlocker(
 }
 
 /**
+ * A checked correction as exploration will resubmit it: an open end on a collection shorter than
+ * the season (still airing) stops at the last position the session saw, so exploration's own
+ * segment check, which reads an open end as the whole season, accepts it unchanged.
+ */
+function boundToCollection(
+  cr: ChangeRequestRecord,
+  correction: ReviewCorrection,
+  fetched: SessionFetches,
+): ReviewCorrection {
+  const available =
+    fetched.fetchedCollections.get(`${cr.namespace}:${cr.nativeId}`)?.featureEpisodes.length ?? 0;
+  const seasons = ((cr.evidence?.catalog as { seasons?: CatalogEvidence["seasons"] } | undefined)
+    ?.seasons ?? []) as CatalogEvidence["seasons"];
+  return {
+    ...correction,
+    segments: correction.segments.map((s) => {
+      const lastSeen = s.episodeStart + available - s.targetEpisodeStart;
+      const count = seasons.find((x) => x.season === s.season)?.episodeCount ?? null;
+      return s.episodeEnd === null && count !== null && lastSeen < count
+        ? { ...s, episodeEnd: lastSeen }
+        : s;
+    }),
+  };
+}
+
+/**
  * Why code does not follow the model's correction (ADR 0003 §4), or null when it does: Evidence
  * Gate step 2 must pass on it, with the catalog and the collection this session fetched.
  */
@@ -1311,6 +1393,7 @@ function correctionBlocker(
   correction: ReviewCorrection | null,
   fetched: SessionFetches,
   episodeAirYears: CatalogEvidence["episodeAirYears"],
+  explained: { submittedCodes: readonly string[]; reasons: readonly ReviewReason[] },
 ): string | null {
   if (!correction) {
     return "invalid_correction";
@@ -1339,12 +1422,21 @@ function correctionBlocker(
   if (!valid.valid) {
     return `correction_invalid_segments: ${[...new Set(valid.errors.map((e) => e.code))].join(", ")}`;
   }
-  // Step 1 on the correction: only an episode count may differ, never the collection's identity.
+  // Step 1 on the correction: an episode count may differ; a title or year conflict only when the
+  // submission already had it (the collection's own label) and the model explained it.
+  const carried = (code: string) =>
+    CARRIED_IDENTITY_CONFLICT_CODES.has(code) &&
+    explained.submittedCodes.includes(code) &&
+    explained.reasons.some((r) => r.code === code);
   const step1 = evaluateEvidenceGateStep1(catalog, collection, { segments });
-  const identity = step1.conflicts.filter((c) => !EPISODE_COUNT_CONFLICT_CODES.has(c.code));
+  const identity = step1.conflicts.filter(
+    (c) => !EPISODE_COUNT_CONFLICT_CODES.has(c.code) && !carried(c.code),
+  );
   if (identity.length > 0) {
     return `correction_failed_step1: ${[...new Set(identity.map((c) => c.code))].join(", ")}`;
   }
+  // A collection year that matches no season of the catalog says nothing about the season either.
+  const yearUninformative = step1.conflicts.some((c) => c.code === "year_mismatch");
   const step2 = evaluateEvidenceGateStep2({
     catalog,
     collection,
@@ -1355,7 +1447,9 @@ function correctionBlocker(
   });
   const misfit = positionMisfit(segments, collection, catalog.seasons);
   const blocking = step2.conflicts.filter(
-    (c) => !(misfit === null && POSITION_GAP_CONFLICT_CODES.has(c.code)),
+    (c) =>
+      !(misfit === null && POSITION_GAP_CONFLICT_CODES.has(c.code)) &&
+      !(yearUninformative && c.code === "segment_year_mismatch"),
   );
   if (blocking.length > 0) {
     return `correction_failed_step2: ${[...new Set(blocking.map((c) => c.code))].join(", ")}`;
