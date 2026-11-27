@@ -1214,6 +1214,8 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     const taskPayload = {
       ...basePayload,
       taskId: sharedTaskId,
+      target: mediaRef("douban:35235320"),
+      segments: [],
       variantDescription: "粤语",
     };
     const concurrentTaskResults = await Promise.all([
@@ -1260,6 +1262,27 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
       prefetchedCatalog: prefetched.target,
       allowedStatuses: ["pending_evidence"],
     });
+
+    // The original pending request was filed before its Douban catalog key resolved to this media.
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: approved.mediaId,
+        namespace: "douban",
+        native_id: "35235320",
+        status: "confirmed",
+        is_external_id: false,
+      })
+      .execute();
+    expect(
+      await expectRpcError(
+        rpc2.changeRequest.createChangeRequest({
+          ...taskPayload,
+          taskId: undefined,
+          target: mediaRef(approved.mediaId),
+        }),
+      ),
+    ).toMatchObject({ status: 409, code: "DUPLICATE_CHANGE_REQUEST" });
 
     // 2. Submitting the exact same confirmed mapping (either by variantDescription or variantId) rejects with 409 NO_CHANGE
     const mediaDoc = await rpc1.media.getMedia({
