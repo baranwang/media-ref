@@ -61,10 +61,7 @@ export async function handleWorkerRequest(
     }),
     browseCache: createWorkersBrowseCache(),
     usageRecorder: createAnalyticsUsageRecorder(env.API_USAGE),
-    usageReader: createAnalyticsUsageReader({
-      accountId: env.CF_ACCOUNT_ID,
-      apiToken: env.ANALYTICS_API_TOKEN,
-    }),
+    usageReader: createAnalyticsUsageReader(env.ANALYTICS_SQL),
     onBackgroundTask: (promise) => {
       backgroundTasks.push(promise);
     },

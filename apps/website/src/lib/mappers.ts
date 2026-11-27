@@ -14,6 +14,7 @@ import {
 import { formatDateTime } from "./format";
 import type {
   ApiKeyItem,
+  ApiTrendDay,
   AutoCheckItem,
   CardItem,
   CatalogDirectoryRow,
@@ -755,4 +756,29 @@ export function apiKeyFromProto(
     expiresAt: key.expiresAt ?? null,
     lastUsedAt: lastUsed.get(key.id) ?? null,
   };
+}
+
+/**
+ * Stacked bar segment percentages (`found`, `notFound`, `submitted`) for the 14-day API usage
+ * chart. Non-zero segments keep at least a 1.5% sliver while the total stays within 100%.
+ */
+export function usageBarHeights(
+  day: Pick<ApiTrendDay, "found" | "notFound" | "submitted">,
+  maxDayTotal: number,
+): { foundPct: number; notFoundPct: number; submitPct: number } {
+  if (maxDayTotal <= 0) {
+    return { foundPct: 0, notFoundPct: 0, submitPct: 0 };
+  }
+  const raw = (value: number) => (value > 0 ? Math.max((value / maxDayTotal) * 100, 1.5) : 0);
+  let foundPct = raw(day.found);
+  let notFoundPct = raw(day.notFound);
+  let submitPct = raw(day.submitted);
+  const total = foundPct + notFoundPct + submitPct;
+  if (total > 100) {
+    const excess = total - 100;
+    if (foundPct >= notFoundPct && foundPct >= submitPct) foundPct = Math.max(0, foundPct - excess);
+    else if (notFoundPct >= submitPct) notFoundPct = Math.max(0, notFoundPct - excess);
+    else submitPct = Math.max(0, submitPct - excess);
+  }
+  return { foundPct, notFoundPct, submitPct };
 }

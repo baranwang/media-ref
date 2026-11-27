@@ -1,11 +1,13 @@
 import { proto, type MediaDocument } from "@media-ref/client";
 import { expect, test } from "vite-plus/test";
 import {
+  apiKeyFromProto,
   changeRequestFromGetResponse,
   changeRequestFromProto,
   commentContent,
   commentThreadFrom,
   mediaItemFrom,
+  usageBarHeights,
 } from "../src/lib/mappers.ts";
 
 test("whole-media platform associations span every season in the all-seasons view", () => {
@@ -359,6 +361,52 @@ test("a rejected change request carries the other request its collection went li
       changeRequest: reviewedCr({ status: proto.ChangeRequestStatus.REJECTED }),
     } as unknown as Parameters<typeof changeRequestFromGetResponse>[0])?.liveChangeRequestId,
   ).toBeNull();
+});
+
+test("maps API key summaries with lastUsedAt from GetApiUsage", () => {
+  const lastUsed = new Map([["key-1", "2026-11-27T08:00:00.000Z"]]);
+  const key = (overrides: Record<string, unknown>) =>
+    ({
+      id: "key-1",
+      name: "Danmu Universal",
+      prefix: "mref_",
+      start: "mref_pnHVRf",
+      enabled: true,
+      canSubmit: true,
+      createdAt: "2026-11-26T10:00:00.000Z",
+      ...overrides,
+    }) as unknown as proto.ApiKeySummary;
+
+  expect(apiKeyFromProto(key({}), lastUsed)).toEqual({
+    id: "key-1",
+    name: "Danmu Universal",
+    prefix: "mref_pnHVRf••••",
+    canSubmit: true,
+    createdAt: "2026-11-26T10:00:00.000Z",
+    expiresAt: null,
+    lastUsedAt: "2026-11-27T08:00:00.000Z",
+  });
+  expect(apiKeyFromProto(key({ id: "key-2", name: undefined }), lastUsed)).toMatchObject({
+    id: "key-2",
+    name: "未命名密钥",
+    lastUsedAt: null,
+  });
+});
+
+test("keeps a visible sliver for small non-zero chart segments without overflowing 100%", () => {
+  expect(usageBarHeights({ found: 0, notFound: 0, submitted: 0 }, 10)).toEqual({
+    foundPct: 0,
+    notFoundPct: 0,
+    submitPct: 0,
+  });
+
+  const small = usageBarHeights({ found: 1, notFound: 1, submitted: 1 }, 1000);
+  expect(small).toEqual({ foundPct: 1.5, notFoundPct: 1.5, submitPct: 1.5 });
+
+  const maxed = usageBarHeights({ found: 998, notFound: 1, submitted: 1 }, 1000);
+  expect(maxed.notFoundPct).toBe(1.5);
+  expect(maxed.submitPct).toBe(1.5);
+  expect(maxed.foundPct + maxed.notFoundPct + maxed.submitPct).toBeCloseTo(100, 6);
 });
 
 test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with catalog associations in CATALOG_ORDER", () => {
