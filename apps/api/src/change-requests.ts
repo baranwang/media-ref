@@ -9,6 +9,7 @@ import {
 import {
   createChangeRequest,
   createChangeRequestComment,
+  findLiveChangeRequestForSameCollection,
   getChangeRequestById,
   isUuid,
   listChangeRequestComments,
@@ -118,8 +119,13 @@ export const changeRequestServiceImpl: ServiceImpl<typeof proto.ChangeRequestSer
       });
     }
 
+    const liveChangeRequestId =
+      changeRequest.status === "approved"
+        ? null
+        : await findLiveChangeRequestForSameCollection(runtime.dbWrite, changeRequest);
     return create(proto.GetChangeRequestResponseSchema, {
       changeRequest: toProtoChangeRequest(changeRequest),
+      ...(liveChangeRequestId ? { liveChangeRequestId } : {}),
     });
   },
 

@@ -27,6 +27,9 @@ message GetChangeRequestRequest {
 
 message GetChangeRequestResponse {
   ChangeRequest change_request = 1;
+  // Another approved change request whose association for the same collection and media is live,
+  // when this one is not that request (e.g. it was rejected and exploration resubmitted it).
+  optional string live_change_request_id = 2;
 }
 
 message ListMyChangeRequestsRequest {

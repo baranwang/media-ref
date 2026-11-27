@@ -699,6 +699,40 @@ export function evaluateConflictMatrix(
   };
 }
 
+/**
+ * Another approved change request whose association for the same collection and media is live,
+ * or null. A rejected request is often resubmitted (by exploration, or after a fix) and goes live
+ * that way; its page should say so rather than read as "this mapping is not in MediaRef".
+ */
+export async function findLiveChangeRequestForSameCollection(
+  db: DbExecutor,
+  cr: {
+    id: string;
+    namespace: AssociationNamespaceRow;
+    nativeId: string;
+    mediaId: string | null;
+    targetExternalKey: string;
+  },
+): Promise<string | null> {
+  const mediaId = await resolveMediaIdForChangeRequest(db, cr.mediaId, cr.targetExternalKey);
+  if (!mediaId) {
+    return null;
+  }
+  const row = await db
+    .selectFrom("change_requests as cr")
+    .innerJoin("associations as a", "a.id", "cr.applied_association_id")
+    .select("cr.id")
+    .where("cr.status", "=", "approved")
+    .where("cr.id", "!=", cr.id)
+    .where("a.status", "=", "confirmed")
+    .where("a.media_id", "=", mediaId)
+    .where("a.namespace", "=", cr.namespace)
+    .where("a.native_id", "=", cr.nativeId)
+    .orderBy("cr.reviewed_at", "desc")
+    .executeTakeFirst();
+  return row?.id ?? null;
+}
+
 async function resolveMediaIdForChangeRequest(
   db: DbExecutor,
   mediaId: string | null,

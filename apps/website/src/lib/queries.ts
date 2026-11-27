@@ -4,6 +4,7 @@ import { createBrowserClients } from "./api-client";
 import type { BrowseSlug } from "./catalogs";
 import {
   apiKeyFromProto,
+  changeRequestFromGetResponse,
   changeRequestFromProto,
   commentThreadFrom,
   REVIEW_AGENT_USER_ID,
@@ -83,8 +84,9 @@ export const changeRequestQuery = (id: string) =>
   queryOptions({
     queryKey: ["change-request", id],
     queryFn: async () => {
-      const res = await browserClients().changeRequest.getChangeRequest({ id });
-      return res.changeRequest ? changeRequestFromProto(res.changeRequest) : null;
+      return changeRequestFromGetResponse(
+        await browserClients().changeRequest.getChangeRequest({ id }),
+      );
     },
   });
 

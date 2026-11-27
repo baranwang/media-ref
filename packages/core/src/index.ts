@@ -137,6 +137,7 @@ export {
   type RecordLeadInput,
 } from "./leads.ts";
 export {
+  findLiveChangeRequestForSameCollection,
   CONFLICT_REASONS,
   ConflictResolutionError,
   evaluateConflictMatrix,
