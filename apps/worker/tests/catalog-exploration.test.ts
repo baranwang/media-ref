@@ -119,7 +119,9 @@ describe("catalog-group exploration", () => {
     tmdbFindEmpty?: boolean;
     /** TMDB `/search` returns no hits cleanly instead of throwing on stubbed requests. */
     tmdbSearchEmpty?: boolean;
-    extraHttpStub?: (request: ExternalHttpRequest) => ExternalHttpResponse | null;
+    extraHttpStub?: (
+      request: ExternalHttpRequest,
+    ) => ExternalHttpResponse | Promise<ExternalHttpResponse> | null;
     invokeModel?: FakeOutboundHandlers["invokeModel"];
     explorationAgent?: ExplorationAgentConfig;
   }) {
@@ -612,6 +614,108 @@ describe("catalog-group exploration", () => {
       ]),
     );
     expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("not_found");
+  });
+
+  test("TMDB fallback bounds submission-time lookup by session deadline and skips write after expiration", async () => {
+    let fakeClockMs = T0.getTime();
+    const t0Start = Date.now();
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "bangumi",
+      type: "tv",
+      title: "冷门译名",
+      originalTitle: null,
+      year: 2026,
+      seasons: [{ season: 1, episodeCount: 12, airYear: 2026 }],
+      externalIds: [],
+      bangumiAssociation: "499996",
+      explorationAgent: { maxDurationMs: 120, clockMs: () => fakeClockMs },
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/499996")) {
+          return json(request.url, { id: 499996, type: 2, name: "冷门译名", eps: 12 });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/search/tv")) {
+          return json(request.url, { results: [] });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/311842")) {
+          return new Promise<ExternalHttpResponse>((resolve) => {
+            setTimeout(() => {
+              fakeClockMs += 5000;
+              resolve(
+                json(request.url, {
+                  id: 311842,
+                  name: "冷门译名",
+                  original_name: "FX戦士くるみちゃん",
+                  first_air_date: "2026-10-01",
+                  seasons: [{ season_number: 1, episode_count: 12, air_date: "2026-10-01" }],
+                  external_ids: {},
+                }),
+              );
+            }, 2500);
+          });
+        }
+        return null;
+      },
+      invokeModel(): ModelInvocationResponse {
+        return {
+          content: null,
+          toolCalls: [{ id: "c1", name: "submit_tmdb_id", arguments: { nativeId: "tv:311842" } }],
+          model: "test-model",
+        };
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(Date.now() - t0Start).toBeLessThan(1500);
+    expect(await externalIds(testDb, mediaId)).toEqual([]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("open");
+  });
+
+  test("TMDB fallback skips write if session deadline passes while uncached lookup completes", async () => {
+    let fakeClockMs = T0.getTime();
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "bangumi",
+      type: "tv",
+      title: "冷门译名",
+      originalTitle: null,
+      year: 2026,
+      seasons: [{ season: 1, episodeCount: 12, airYear: 2026 }],
+      externalIds: [],
+      bangumiAssociation: "499995",
+      explorationAgent: { maxDurationMs: 1000, clockMs: () => fakeClockMs },
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/499995")) {
+          return json(request.url, { id: 499995, type: 2, name: "冷门译名", eps: 12 });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/search/tv")) {
+          return json(request.url, { results: [] });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/311842")) {
+          fakeClockMs += 2000;
+          return json(request.url, {
+            id: 311842,
+            name: "冷门译名",
+            original_name: "FX戦士くるみちゃん",
+            first_air_date: "2026-10-01",
+            seasons: [{ season_number: 1, episode_count: 12, air_date: "2026-10-01" }],
+            external_ids: {},
+          });
+        }
+        return null;
+      },
+      invokeModel(): ModelInvocationResponse {
+        return {
+          content: null,
+          toolCalls: [{ id: "c1", name: "submit_tmdb_id", arguments: { nativeId: "tv:311842" } }],
+          model: "test-model",
+        };
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(await externalIds(testDb, mediaId)).toEqual([]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("open");
   });
 
   test("TMDB lookup falls back to agent session and enforces identity gate on submit_tmdb_id", async () => {

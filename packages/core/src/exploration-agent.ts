@@ -88,6 +88,7 @@ import {
 import {
   DEFAULT_AI_MODEL,
   DEFAULT_AI_PROVIDER,
+  raceWithAbortSignal,
   type ModelMessage,
   type ModelToolCall,
   type ModelToolDefinition,
@@ -1796,159 +1797,178 @@ async function runTmdbAgentFallback(
 ): Promise<PlatformExplorationOutcome> {
   const namespace = "tmdb";
   const fetched = new Map(preFetched);
-  const registry = ctx.adapterRegistry ?? createDefaultAdapterRegistry();
-  const baseToolCtx: ToolContext = {
-    outbound: ctx.outbound,
-    registry,
-    tmdb: {
-      ...ctx.tmdbGateway,
-      async fetchIdentityDetails(type, id) {
-        const detail = await fetchTmdbCandidateDetail(ctx.tmdbGateway, type, id);
-        if (detail) {
-          fetched.set(`${detail.type}:${detail.id}`, detail);
-        }
-        return detail ? (detail as unknown as TmdbIdentityDetails) : null;
-      },
-      async fetchMediaSnapshotAndExternalIds(type, id, opts) {
-        const basic = await ctx.tmdbGateway.fetchMediaSnapshotAndExternalIds(type, id, opts);
-        const detail = toTmdbCandidateDetail(type, id, basic);
-        if (detail) {
-          fetched.set(`${detail.type}:${detail.id}`, detail);
-        }
-        return basic;
-      },
-    },
-    collectionNamespaces: [],
-    register: () => false,
-    noteTransient: () => {},
-    seasons: ctx.media.snapshot.seasons,
-    tmdbTvId: null,
-  };
-
-  const tools: ModelToolDefinition[] = [
-    ...buildCatalogLookupTools(baseToolCtx),
-    {
-      name: "submit_tmdb_id",
-      description:
-        'Record the verified TMDB ID ("tv:123" or "movie:123") after inspecting it with get_catalog_entry.',
-      parameters: {
-        type: "object",
-        properties: {
-          nativeId: { type: "string", description: 'TMDB ID such as "tv:311842" or "movie:550".' },
-          rationale: { type: "string" },
-        },
-        required: ["nativeId"],
-      },
-    },
-    {
-      name: "mark_not_found",
-      description: "Conclude when TMDB truly does not have this media or identity is ambiguous.",
-      parameters: {
-        type: "object",
-        properties: { reason: { type: "string" } },
-        required: ["reason"],
-      },
-    },
-  ];
-
-  const messages: ModelMessage[] = [
-    {
-      role: "system",
-      content: [
-        "You link a media entry in MediaRef to its exact TMDB entry (`tv:<id>` or `movie:<id>`).",
-        'Search TMDB (including original title, Traditional/Simplified variants, English aliases), inspect Douban/Bangumi entries or use web search to find the exact TMDB URL/ID, then ALWAYS call `get_catalog_entry(source="tmdb", id=...)` to inspect the candidate before submitting.',
-        "Only call `submit_tmdb_id` when media type, release/air year, title chain and any external IDs or credits clearly agree. If uncertain, call `mark_not_found` — never guess.",
-      ].join("\n"),
-    },
-    {
-      role: "user",
-      content: JSON.stringify(
-        {
-          target: {
-            type: ctx.media.type,
-            title: ctx.media.snapshot.title,
-            originalTitle: ctx.media.snapshot.originalTitle,
-            year: ctx.media.snapshot.year ?? source.year,
-            seasons: ctx.media.snapshot.seasons,
-            externalIds: {
-              imdb: source.imdbId,
-              tvdb: source.tvdbId,
-              trakt: source.traktId,
-            },
-            aliases: source.aliases,
-            directors: source.directors,
-            studios: source.studios,
-            catalogSources: source.catalogSources,
-          },
-          preCheckedTmdbCandidates: [...fetched.values()].map((c) => ({
-            id: `${c.type}:${c.id}`,
-            title: c.title,
-            originalTitle: c.originalTitle,
-            aliases: c.aliases.slice(0, 8),
-            year: c.year,
-            seasons: c.seasons,
-            directorsAndCreators: c.directorsAndCreators,
-            productionCompanies: c.productionCompanies,
-            externalIds: c.externalIds,
-          })),
-        },
-        null,
-        2,
-      ),
-    },
-  ];
-
-  let outcome: PlatformExplorationOutcome | null = null;
-  const conclude = async (call: ModelToolCall): Promise<unknown> => {
-    const args = call.arguments ?? {};
-    if (call.name === "mark_not_found") {
-      const reason =
-        typeof args.reason === "string" && args.reason.trim()
-          ? args.reason.trim()
-          : fallbackNotFoundReason;
-      outcome = { namespace, status: "not_found", reason };
-      return { ok: true };
-    }
-    const rawId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
-    const match = rawId.match(/^(movie|tv):(\d+)$/);
-    if (!match) {
-      return { ok: false, error: "BAD_TMDB_ID", message: 'Use "tv:123" or "movie:123".' };
-    }
-    const key = `${match[1]}:${match[2]}`;
-    let candidate = fetched.get(key);
-    if (!candidate) {
-      candidate =
-        (await fetchTmdbCandidateDetail(ctx.tmdbGateway, match[1] as MediaType, match[2]!)) ??
-        undefined;
-      if (candidate) {
-        fetched.set(key, candidate);
-      }
-    }
-    if (!candidate) {
-      return { ok: false, error: "NOT_FOUND_ON_TMDB" };
-    }
-    const check = evaluateTmdbIdentityMatch(ctx.media, source, candidate);
-    if (
-      !check.weakMatch ||
-      check.disqualifiedReason === "external_id_conflict" ||
-      candidate.type !== ctx.media.type
-    ) {
-      return {
-        ok: false,
-        error: "IDENTITY_CHECK_FAILED",
-        reason: check.disqualifiedReason ?? "insufficient_identity_evidence",
-      };
-    }
-    outcome = await writeTmdbExternalIdsInTx(ctx, candidate, {
-      agentSearch: typeof args.rationale === "string" ? args.rationale.slice(0, 120) : "agent",
-    });
-    return { ok: true };
-  };
-
   const maxDurationMs = Math.min(config.maxDurationMs, 90_000);
   const budget = createSessionBudget(ctx.outbound, clockMs() + maxDurationMs, clockMs);
   const usage: SessionUsage = { tokens: 0, byModel: new Map() };
   try {
+    const registry = ctx.adapterRegistry ?? createDefaultAdapterRegistry();
+    const baseToolCtx: ToolContext = {
+      outbound: budget.outbound,
+      registry,
+      tmdb: {
+        ...ctx.tmdbGateway,
+        async fetchIdentityDetails(type, id) {
+          const detail = await fetchTmdbCandidateDetail(ctx.tmdbGateway, type, id);
+          if (detail) {
+            fetched.set(`${detail.type}:${detail.id}`, detail);
+          }
+          return detail ? (detail as unknown as TmdbIdentityDetails) : null;
+        },
+        async fetchMediaSnapshotAndExternalIds(type, id, opts) {
+          const basic = await ctx.tmdbGateway.fetchMediaSnapshotAndExternalIds(type, id, opts);
+          const detail = toTmdbCandidateDetail(type, id, basic);
+          if (detail) {
+            fetched.set(`${detail.type}:${detail.id}`, detail);
+          }
+          return basic;
+        },
+      },
+      collectionNamespaces: [],
+      register: () => false,
+      noteTransient: () => {},
+      seasons: ctx.media.snapshot.seasons,
+      tmdbTvId: null,
+    };
+
+    const tools: ModelToolDefinition[] = [
+      ...buildCatalogLookupTools(baseToolCtx),
+      {
+        name: "submit_tmdb_id",
+        description:
+          'Record the verified TMDB ID ("tv:123" or "movie:123") after inspecting it with get_catalog_entry.',
+        parameters: {
+          type: "object",
+          properties: {
+            nativeId: {
+              type: "string",
+              description: 'TMDB ID such as "tv:311842" or "movie:550".',
+            },
+            rationale: { type: "string" },
+          },
+          required: ["nativeId"],
+        },
+      },
+      {
+        name: "mark_not_found",
+        description: "Conclude when TMDB truly does not have this media or identity is ambiguous.",
+        parameters: {
+          type: "object",
+          properties: { reason: { type: "string" } },
+          required: ["reason"],
+        },
+      },
+    ];
+
+    const messages: ModelMessage[] = [
+      {
+        role: "system",
+        content: [
+          "You link a media entry in MediaRef to its exact TMDB entry (`tv:<id>` or `movie:<id>`).",
+          'Search TMDB (including original title, Traditional/Simplified variants, English aliases), inspect Douban/Bangumi entries or use web search to find the exact TMDB URL/ID, then ALWAYS call `get_catalog_entry(source="tmdb", id=...)` to inspect the candidate before submitting.',
+          "Only call `submit_tmdb_id` when media type, release/air year, title chain and any external IDs or credits clearly agree. If uncertain, call `mark_not_found` — never guess.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: JSON.stringify(
+          {
+            target: {
+              type: ctx.media.type,
+              title: ctx.media.snapshot.title,
+              originalTitle: ctx.media.snapshot.originalTitle,
+              year: ctx.media.snapshot.year ?? source.year,
+              seasons: ctx.media.snapshot.seasons,
+              externalIds: {
+                imdb: source.imdbId,
+                tvdb: source.tvdbId,
+                trakt: source.traktId,
+              },
+              aliases: source.aliases,
+              directors: source.directors,
+              studios: source.studios,
+              catalogSources: source.catalogSources,
+            },
+            preCheckedTmdbCandidates: [...fetched.values()].map((c) => ({
+              id: `${c.type}:${c.id}`,
+              title: c.title,
+              originalTitle: c.originalTitle,
+              aliases: c.aliases.slice(0, 8),
+              year: c.year,
+              seasons: c.seasons,
+              directorsAndCreators: c.directorsAndCreators,
+              productionCompanies: c.productionCompanies,
+              externalIds: c.externalIds,
+            })),
+          },
+          null,
+          2,
+        ),
+      },
+    ];
+
+    let outcome: PlatformExplorationOutcome | null = null;
+    const conclude = async (call: ModelToolCall): Promise<unknown> => {
+      if (budget.expired()) {
+        return { ok: false, error: "TIME_UP", message: "Session budget expired." };
+      }
+      const args = call.arguments ?? {};
+      if (call.name === "mark_not_found") {
+        const reason =
+          typeof args.reason === "string" && args.reason.trim()
+            ? args.reason.trim()
+            : fallbackNotFoundReason;
+        outcome = { namespace, status: "not_found", reason };
+        return { ok: true };
+      }
+      const rawId = typeof args.nativeId === "string" ? args.nativeId.trim() : "";
+      const match = rawId.match(/^(movie|tv):(\d+)$/);
+      if (!match) {
+        return { ok: false, error: "BAD_TMDB_ID", message: 'Use "tv:123" or "movie:123".' };
+      }
+      const key = `${match[1]}:${match[2]}`;
+      let candidate = fetched.get(key);
+      if (!candidate) {
+        try {
+          candidate =
+            (await raceWithAbortSignal(
+              fetchTmdbCandidateDetail(ctx.tmdbGateway, match[1] as MediaType, match[2]!),
+              budget.signal,
+              BUDGET_EXCEEDED,
+            )) ?? undefined;
+        } catch (error) {
+          if (budget.expired()) {
+            return { ok: false, error: "TIME_UP", message: "Session budget expired." };
+          }
+          throw error;
+        }
+        if (candidate) {
+          fetched.set(key, candidate);
+        }
+      }
+      if (budget.expired()) {
+        return { ok: false, error: "TIME_UP", message: "Session budget expired." };
+      }
+      if (!candidate) {
+        return { ok: false, error: "NOT_FOUND_ON_TMDB" };
+      }
+      const check = evaluateTmdbIdentityMatch(ctx.media, source, candidate);
+      if (
+        !check.weakMatch ||
+        check.disqualifiedReason === "external_id_conflict" ||
+        candidate.type !== ctx.media.type
+      ) {
+        return {
+          ok: false,
+          error: "IDENTITY_CHECK_FAILED",
+          reason: check.disqualifiedReason ?? "insufficient_identity_evidence",
+        };
+      }
+      outcome = await writeTmdbExternalIdsInTx(ctx, candidate, {
+        agentSearch: typeof args.rationale === "string" ? args.rationale.slice(0, 120) : "agent",
+      });
+      return { ok: true };
+    };
+
     const stop = await runToolSession({
       budget,
       config: {
@@ -1971,6 +1991,9 @@ async function runTmdbAgentFallback(
     });
     if (outcome) {
       return outcome;
+    }
+    if (budget.expired()) {
+      return { namespace, status: "transient_error", reason: BUDGET_EXCEEDED };
     }
     switch (stop.kind) {
       case "time_up":

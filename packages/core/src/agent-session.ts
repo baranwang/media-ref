@@ -276,6 +276,9 @@ export async function runToolSession(input: ToolSessionInput): Promise<SessionSt
         continue;
       }
       reply(call.id, call.name, await input.conclude(call, step));
+      if (!input.done() && budget.expired()) {
+        return { kind: "time_up" };
+      }
     }
     if (input.done()) {
       return { kind: "concluded" };
