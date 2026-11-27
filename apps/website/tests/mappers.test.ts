@@ -1,6 +1,7 @@
 import { proto, type MediaDocument } from "@media-ref/client";
 import { expect, test } from "vite-plus/test";
 import { formatSegmentEpisodeLabel } from "../src/lib/format.ts";
+import { buildReviewCoveragePreview } from "../src/lib/review-preview.ts";
 import {
   apiKeyFromProto,
   changeRequestFromGetResponse,
@@ -447,6 +448,15 @@ test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with ca
       roleLabel: "基准",
       wholeMediaNativeId: "movie:24428",
       wholeMediaLabel: "整部 · movie:24428",
+      wholeMediaEntries: [
+        {
+          id: "external-id:tmdb:movie:24428",
+          nativeId: "movie:24428",
+          title: "movie:24428",
+          status: "confirmed",
+          isExternalId: true,
+        },
+      ],
     },
     {
       id: "catalog:imdb",
@@ -455,6 +465,15 @@ test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with ca
       roleLabel: "1 个条目",
       wholeMediaNativeId: "tt0848228",
       wholeMediaLabel: "整部 · tt0848228",
+      wholeMediaEntries: [
+        {
+          id: "external-id:imdb:tt0848228",
+          nativeId: "tt0848228",
+          title: "tt0848228",
+          status: "confirmed",
+          isExternalId: true,
+        },
+      ],
       note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）",
     },
     {
@@ -464,6 +483,15 @@ test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with ca
       roleLabel: "1 个条目",
       wholeMediaNativeId: "movie:727",
       wholeMediaLabel: "整部 · movie:727",
+      wholeMediaEntries: [
+        {
+          id: "external-id:trakt:movie:727",
+          nativeId: "movie:727",
+          title: "movie:727",
+          status: "confirmed",
+          isExternalId: true,
+        },
+      ],
     },
     {
       id: "catalog:douban",
@@ -472,6 +500,15 @@ test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with ca
       roleLabel: "1 个条目",
       wholeMediaNativeId: "1866479",
       wholeMediaLabel: "整部 · 复仇者联盟",
+      wholeMediaEntries: [
+        {
+          id: "assoc-douban-whole",
+          nativeId: "1866479",
+          title: "复仇者联盟",
+          status: "confirmed",
+          associationId: "assoc-douban",
+        },
+      ],
     },
   ]);
 
@@ -491,11 +528,28 @@ test("catalogRows merges authority externalIds (tmdb, tvdb, imdb, trakt) with ca
       },
     ],
   } as unknown as MediaDocument;
-  expect(
-    mediaItemFrom("m-avengers", withPending, null)!.catalogRows.find((r) => r.namespace === "imdb"),
-  ).toMatchObject({
+  const movieWithPending = mediaItemFrom("m-avengers", withPending, null)!;
+  expect(movieWithPending.catalogRows.find((r) => r.namespace === "imdb")).toMatchObject({
     wholeMediaNativeId: "tt0848228",
     roleLabel: "2 个条目",
+  });
+  const pendingCr = changeRequestFromProto(
+    reviewedCr({
+      id: "cr-imdb",
+      namespace: "imdb",
+      nativeId: "tt0000001",
+      rawNativeId: "tt0000001",
+      segments: [],
+    }),
+  );
+  expect(buildReviewCoveragePreview(pendingCr, movieWithPending)).toMatchObject({
+    season: 0,
+    existingSegments: [{ nativeId: "tt0848228", status: "confirmed", start: 1, end: 1 }],
+    afterSegments: [
+      { nativeId: "tt0848228", status: "confirmed" },
+      { nativeId: "tt0000001", status: "pending", changeRequestId: "cr-imdb" },
+    ],
+    otherPendingCount: 0,
   });
 
   const tvDoc = {

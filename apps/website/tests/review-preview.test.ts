@@ -1,58 +1,42 @@
+import { proto, toProtoSegment, type Association, type MediaDocument } from "@media-ref/client";
 import { expect, test } from "vite-plus/test";
+import { changeRequestFromProto, mediaItemFrom } from "#/lib/mappers";
 import { buildReviewCoveragePreview } from "#/lib/review-preview";
 import type { ChangeRequestItem, CoverageSegment, MediaItem } from "#/lib/types";
 
+function segment(season: number, episodeStart: number, episodeEnd: number) {
+  return { season, episodeStart, episodeEnd, targetEpisodeStart: 1, baseline: "tmdb" as const };
+}
+
+const submitted: proto.ChangeRequest = {
+  $typeName: "mediaref.v1.ChangeRequest",
+  id: "ce7c82d3-e5f6-4d87-8fa8-dd692c59abe6",
+  status: proto.ChangeRequestStatus.PENDING_EVIDENCE,
+  mediaId: "m-1",
+  namespace: "youku",
+  nativeId: "adaec02f09f9469ab8d8",
+  rawNativeId: "adaec02f09f9469ab8d8",
+  evidence: { collection: { title: "沧元图", featureEpisodeCount: 121 } },
+  variantDescription: "原声",
+  setDefaultVariant: false,
+  segments: [toProtoSegment(segment(1, 1, 121))],
+  submitterType: proto.SubmitterType.HUMAN,
+  submitterUserId: "69vU60Zc",
+  createdAt: "2026-11-26T00:00:00.000Z",
+  updatedAt: "2026-11-26T00:00:00.000Z",
+};
+
 function makeChangeRequest(overrides: Partial<ChangeRequestItem> = {}): ChangeRequestItem {
-  return {
-    id: "ce7c82d3-e5f6-4d87-8fa8-dd692c59abe6",
-    status: "pending_evidence",
-    mediaId: "m-1",
-    targetKey: "tmdb:tv:1001",
-    namespace: "youku",
-    nativeId: "adaec02f09f9469ab8d8",
-    pageLink: null,
-    pageTitle: "沧元图",
-    pageEpisodeCount: 121,
-    variantLabel: "原声",
-    segments: [{ season: 1, start: 1, end: 121, targetStart: 1 }],
-    replacesAssociationId: null,
-    conflictReason: null,
-    decisionReason: null,
-    reviewerUserId: null,
-    reviewedByAgent: false,
-    reviewAgent: null,
-    submitterUserId: "69vU60Zc",
-    createdAt: "2026-11-26T00:00:00.000Z",
-    reviewedAt: null,
-    checks: [],
-    timeline: [],
-    ...overrides,
-  };
+  return { ...changeRequestFromProto(submitted), ...overrides };
 }
 
 function makeMedia(segments: CoverageSegment[], overrides: Partial<MediaItem> = {}): MediaItem {
   return {
-    id: "m-1",
-    mediaId: "m-1",
-    catalogKey: "tmdb:tv:1001",
-    title: "沧元图",
-    originalTitle: null,
-    year: 2023,
-    yearRange: "2023–",
-    type: "tv",
-    category: "anime",
-    region: "",
-    statusLabel: "",
-    genres: [],
-    synopsis: "",
-    credits: [],
-    posterUrl: null,
-    backdropUrl: null,
-    baseline: "tmdb",
-    seasons: [{ season: 1, episodeCount: 121 }],
+    ...mappedMedia("tv", []),
     platformRows: [
       {
         id: "youku:v-1",
+        variantId: "v-1",
         namespace: "youku",
         label: "原声",
         isDefault: true,
@@ -60,10 +44,219 @@ function makeMedia(segments: CoverageSegment[], overrides: Partial<MediaItem> = 
         allSeasonSegments: segments,
       },
     ],
-    catalogRows: [],
     ...overrides,
   };
 }
+
+function mappedMedia(
+  type: MediaDocument["media"]["type"],
+  associations: Association[],
+  variants: MediaDocument["variants"] = [],
+  externalIds: MediaDocument["externalIds"] = [],
+) {
+  return mediaItemFrom(
+    "m-1",
+    {
+      media: {
+        id: "m-1",
+        type,
+        baseline: "tmdb",
+        snapshot: {
+          title: "T",
+          originalTitle: null,
+          year: null,
+          type,
+          seasons:
+            type === "movie"
+              ? []
+              : [
+                  { season: 1, episodeCount: 121, airYear: null },
+                  { season: 2, episodeCount: 12, airYear: null },
+                  { season: 3, episodeCount: 0, airYear: null },
+                ],
+        },
+      },
+      externalIds,
+      associations,
+      variants,
+    },
+    null,
+  )!;
+}
+
+test.each([
+  ["movie", "douban", 0, 1],
+  ["tv", "bangumi", 2, 12],
+  ["tv", "douban", 3, 6],
+] as const)("previews whole %s entries from the %s directory", (type, namespace, season, end) => {
+  const live: Association = {
+    id: "live",
+    namespace,
+    nativeId: "101",
+    variantId: null,
+    status: "confirmed",
+    segments: [],
+  };
+  const segments = type === "movie" ? [] : [segment(season, 3, 6)];
+  const cr = changeRequestFromProto({
+    ...submitted,
+    namespace,
+    rawNativeId: "102",
+    nativeId: "102",
+    variantDescription: undefined,
+    evidence: undefined,
+    replacesAssociationId: live.id,
+    segments: segments.map(toProtoSegment),
+  });
+  const pending: Association = {
+    ...live,
+    id: "change-request:other",
+    nativeId: "103",
+    unconfirmed: true,
+    unconfirmedSource: "change_request",
+    changeRequestId: "other",
+  };
+  const media = mappedMedia(type, [
+    { ...live, id: "seed", nativeId: "105", status: "seed_unconfirmed" },
+    live,
+    { ...live, id: "removed", nativeId: "104", status: "delisted" },
+    pending,
+    { ...pending, id: "change-request:another", nativeId: "106", changeRequestId: "another" },
+    {
+      ...pending,
+      id: `change-request:${cr.id}`,
+      nativeId: cr.nativeId,
+      changeRequestId: cr.id,
+      segments,
+    },
+  ]);
+
+  expect(buildReviewCoveragePreview(cr, media)).toMatchObject({
+    season,
+    existingSegments: [
+      { associationId: "live", nativeId: "101", status: "confirmed", start: 1, end },
+    ],
+    otherPendingCount: 2,
+    afterSegments: [{ nativeId: "102", status: "pending", changeRequestId: cr.id }],
+  });
+  const [row] = media.catalogRows;
+  expect(row.wholeMediaLabel).toBe("整部 · 105");
+  expect(row.segmentsBySeason?.[season]?.map((s) => s.nativeId) ?? []).toEqual(
+    type === "movie" ? [] : ["102"],
+  );
+});
+
+test("an authority external ID stays confirmed alongside pending catalog associations", () => {
+  const authority = { namespace: "imdb", nativeId: "tt2560140" } as const;
+  const episodes = [segment(2, 3, 3)];
+  const cr = changeRequestFromProto({
+    ...submitted,
+    ...authority,
+    rawNativeId: authority.nativeId,
+    variantDescription: undefined,
+    segments: episodes.map(toProtoSegment),
+  });
+  const other: Association = {
+    ...authority,
+    id: "change-request:other",
+    title: "待核实的标题",
+    status: "confirmed",
+    variantId: null,
+    segments: [],
+    unconfirmed: true,
+    unconfirmedSource: "change_request",
+    changeRequestId: "other",
+  };
+  const associations = [
+    other,
+    { ...other, id: `change-request:${cr.id}`, changeRequestId: cr.id, segments: episodes },
+  ];
+  const media = mappedMedia("tv", associations, [], [authority]);
+  const [row] = media.catalogRows;
+  expect(row.wholeMediaLabel).toBe("整部 · tt2560140");
+  expect(row.segmentsBySeason?.[2]?.map((bar) => bar.changeRequestId)).toEqual([cr.id]);
+  expect(row.allSeasonSegments).toHaveLength(1);
+  const whole = {
+    id: "external-id:imdb:tt2560140",
+    isExternalId: true,
+    nativeId: authority.nativeId,
+    title: authority.nativeId,
+    status: "confirmed",
+    start: 1,
+    end: 12,
+  };
+  const preview = buildReviewCoveragePreview(cr, media);
+  expect(preview.existingSegments).toEqual([whole]);
+  expect(preview).toMatchObject({
+    otherPendingCount: 1,
+    afterSegments: [whole, { changeRequestId: cr.id, status: "pending", start: 3, end: 3 }],
+  });
+  expect(buildReviewCoveragePreview(cr, mappedMedia("tv", associations))).toMatchObject({
+    existingSegments: [],
+    otherPendingCount: 1,
+  });
+
+  const matching: Association = {
+    ...authority,
+    id: "verified",
+    title: "已核实标题",
+    status: "confirmed",
+    variantId: null,
+    segments: [],
+  };
+  const withMatch = mappedMedia("tv", [...associations, matching], [], [authority]);
+  expect(withMatch.catalogRows[0].wholeMediaLabel).toBe("整部 · 已核实标题");
+  expect(buildReviewCoveragePreview(cr, withMatch).existingSegments).toEqual([
+    { ...whole, title: "已核实标题", associationId: "verified" },
+  ]);
+});
+
+test("previews the submitted variant ID even when the description names another variant", () => {
+  const original = {
+    namespace: "bilibili",
+    id: "10000000-0000-4000-8000-000000000001",
+    label: "原声",
+    isDefault: true,
+  } as const;
+  const dub = {
+    ...original,
+    id: "10000000-0000-4000-8000-000000000002",
+    label: "中配",
+    isDefault: false,
+  };
+  const live: Association = {
+    namespace: "bilibili",
+    id: "original",
+    variantId: original.id,
+    nativeId: "ss1",
+    status: "confirmed",
+    segments: [segment(1, 1, 1)],
+  };
+  const media = mappedMedia(
+    "tv",
+    [live, { ...live, id: "dub", variantId: dub.id, nativeId: "ss2" }],
+    [original, dub],
+  );
+  const request = {
+    ...submitted,
+    namespace: "bilibili",
+    nativeId: "ss3",
+    rawNativeId: "ss3",
+    segments: [toProtoSegment(segment(1, 2, 2))],
+    variantDescription: original.label,
+  };
+
+  expect(
+    buildReviewCoveragePreview(changeRequestFromProto({ ...request, variantId: dub.id }), media),
+  ).toMatchObject({
+    variantLabel: "中配",
+    existingSegments: [{ nativeId: "ss2" }],
+  });
+  expect(buildReviewCoveragePreview(changeRequestFromProto(request), media)).toMatchObject({
+    variantLabel: "原声",
+    existingSegments: [{ nativeId: "ss1" }],
+  });
+});
 
 test("issue #98 repro: pending CR injected by includeUnconfirmed is excluded from '现在' and shown only in '通过后'", () => {
   const cr = makeChangeRequest();
@@ -158,7 +351,7 @@ test("excludes other pending CRs and seeds from '现在' while reporting otherPe
 });
 
 test("finds existing confirmed coverage even when cr.mediaId is null at submission time", () => {
-  const cr = makeChangeRequest({ mediaId: null });
+  const cr = makeChangeRequest({ mediaId: null, targetKey: "tmdb:tv:1001" });
   const confirmedSeg: CoverageSegment = {
     id: "assoc-1-0",
     title: "已有第1-20集",
@@ -232,6 +425,7 @@ test("handles movie whole-media change requests cleanly", () => {
     platformRows: [
       {
         id: "youku:v-1",
+        variantId: "v-1",
         namespace: "youku",
         label: "原声",
         isDefault: true,
