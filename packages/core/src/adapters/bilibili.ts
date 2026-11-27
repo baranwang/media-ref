@@ -583,7 +583,8 @@ export const bilibiliAdapter: Tier3Adapter<"bilibili"> = {
       parseFourDigitYear(publish?.pub_time) ??
       parseFourDigitYear(publish?.pub_time_show);
 
-    const mediaType = mapBilibiliMediaType(result.type);
+    // `type` is the channel (番剧 also lists theatrical films); `show_season_type` is the display type.
+    const mediaType = mapBilibiliMediaType(result.show_season_type ?? result.type);
     const extracted = extractFeatureEpisodes(result.episodes);
     const featureEpisodes = extracted !== null ? selectBroadcastEpisodes(extracted) : null;
     const aliases = collectAliases(result, title);
