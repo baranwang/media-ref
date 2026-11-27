@@ -31,6 +31,7 @@ import {
   enqueueTmdbLookupDemands,
   REVIEW_AGENT_JOB_TYPE,
   scheduleExplorationJobs,
+  retryFailedSeedEvidenceChecks,
   SEED_EVIDENCE_CHECK_JOB_TYPE,
   TMDB_DAILY_EXPORTS_JOB_TYPE,
   TMDB_SYNC_JOB_TYPE,
@@ -281,6 +282,13 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       if (!deps.config?.jobTypes || deps.config.jobTypes.includes(EVIDENCE_CHECK_JOB_TYPE)) {
         await runScheduledStep("evidence_sweep_failed", EVIDENCE_CHECK_JOB_TYPE, () =>
           enqueuePendingEvidenceChecks(deps.db, { now }),
+        );
+      }
+
+      // A seed check that gave up on an outage runs again a day later.
+      if (!deps.config?.jobTypes || deps.config.jobTypes.includes(SEED_EVIDENCE_CHECK_JOB_TYPE)) {
+        await runScheduledStep("seed_retry_sweep_failed", SEED_EVIDENCE_CHECK_JOB_TYPE, () =>
+          retryFailedSeedEvidenceChecks(deps.db, { now }),
         );
       }
 
