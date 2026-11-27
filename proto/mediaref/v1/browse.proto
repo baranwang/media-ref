@@ -105,13 +105,18 @@ message ListDemandsResponse {
 // What the exploration agent did on one namespace of one job.
 message ExplorationPlatformResult {
   string namespace = 1;
-  // "approved" (in effect), "in_review" (being checked or waiting for the review agent), "rejected",
-  // "not_found", "retry" (a source was down or time ran out; tried again later), "searching".
+  // "approved" (in effect), "covered" (already confirmed before this job, or its rejected CR went
+  // live via another path), "in_review" (being checked or waiting for the review agent),
+  // "rejected", "not_found", "retry" (a source was down or time ran out; tried again later),
+  // "searching".
   string status = 2;
   // Plain-language reason, at most 200 characters; internal codes are already translated.
   optional string reason = 3;
-  // Set for "approved", "in_review" and "rejected"; only submitters and reviewers can open it.
+  // Set for "approved", "in_review", "rejected", and "covered" when produced by a change request;
+  // only submitters and reviewers can open it.
   optional string change_request_id = 4;
+  // Set for "covered" when the initially rejected request is now live via another approved request.
+  optional string live_change_request_id = 5;
 }
 
 message ExplorationActivity {

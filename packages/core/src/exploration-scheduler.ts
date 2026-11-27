@@ -204,6 +204,13 @@ export type PlatformExplorationOutcome =
       nativeId?: string;
       /** Written straight into the library (agent external ID), no change request to wait for. */
       directWrite?: boolean;
+      reason?: string;
+      durationMs?: number;
+    }
+  | {
+      namespace: Namespace;
+      status: "already_confirmed";
+      reason?: string;
       durationMs?: number;
     }
   | {
@@ -1735,6 +1742,30 @@ export function createExplorationJobHandler(
           };
         }
 
+        if (
+          await isMediaDemandCoveredInTx(trx, {
+            mediaId: resolvedMediaId,
+            season: targetSeason,
+            namespaceGroup: lockedDemand.namespace_group,
+          })
+        ) {
+          await trx
+            .updateTable("demands")
+            .set({
+              status: "fulfilled",
+              lease_expires_at: null,
+              updated_at: ctx.now,
+            })
+            .where("id", "=", mergedTarget.id)
+            .where("status", "!=", "fulfilled")
+            .execute();
+          return {
+            kind: "already_covered" as const,
+            mediaId: resolvedMediaId,
+            demandId: mergedTarget.id,
+          };
+        }
+
         const leaseExpiresAt =
           lockedDemand.lease_expires_at ?? new Date(ctx.now.getTime() + config.leaseDurationMs);
 
@@ -1802,6 +1833,18 @@ export function createExplorationJobHandler(
         };
       }
 
+      if (mergeTxResult.kind === "already_covered") {
+        return {
+          status: "completed",
+          result: {
+            demandId: mergeTxResult.demandId,
+            mediaId: mergeTxResult.mediaId,
+            skipped: true,
+            reason: "already_covered",
+          },
+        };
+      }
+
       activeMediaId = mergeTxResult.mediaId;
       activeDemandId = mergeTxResult.demandId;
       activeDemandLeaseGeneration = mergeTxResult.demandLeaseGeneration;
@@ -1852,6 +1895,7 @@ export function createExplorationJobHandler(
 
     const outcomes = execResult.platformOutcomes;
     const hasDirectWrite = outcomes.some((o) => o.status === "submitted" && o.directWrite);
+    const hasAlreadyConfirmed = outcomes.some((o) => o.status === "already_confirmed");
     const hasSubmitted = outcomes.some((o) => o.status === "submitted" && !o.directWrite);
     const hasTransientError = outcomes.some((o) => o.status === "transient_error");
     const hasNotFound = outcomes.some((o) => o.status === "not_found");
@@ -1863,6 +1907,8 @@ export function createExplorationJobHandler(
       demandOutcome = "rejected";
     } else if (hasNotFound && !hasSubmitted && !hasTransientError) {
       demandOutcome = "not_found";
+    } else if (hasAlreadyConfirmed && !hasTransientError && !hasNotFound) {
+      demandOutcome = "submitted";
     } else {
       demandOutcome = "transient_error";
     }
@@ -1945,7 +1991,7 @@ export function createExplorationJobHandler(
         }
 
         if (
-          hasDirectWrite &&
+          (hasDirectWrite || hasAlreadyConfirmed) &&
           (await isMediaDemandCoveredInTx(trx, {
             mediaId: targetMedia.id,
             season: activeSeason,

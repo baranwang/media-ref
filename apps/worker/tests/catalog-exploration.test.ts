@@ -6,7 +6,10 @@ import {
   listDemands,
   type ExternalHttpRequest,
   type ExternalHttpResponse,
+  type FakeOutboundHandlers,
   type JobQueueMessage,
+  type ModelInvocationRequest,
+  type ModelInvocationResponse,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
@@ -102,23 +105,33 @@ describe("catalog-group exploration", () => {
   });
 
   async function setup(media: {
-    baseline: "tmdb" | "douban";
+    baseline: "tmdb" | "douban" | "bangumi";
     externalIds: Array<[string, string]>;
     doubanAssociation?: string;
+    bangumiAssociation?: string;
+    type?: "movie" | "tv";
+    title?: string;
+    originalTitle?: string | null;
+    year?: number | null;
+    seasons?: Array<{ season: number; episodeCount: number; airYear?: number | null }>;
     /** TMDB `/find` knows nothing about the IMDb ID. */
     tmdbFindEmpty?: boolean;
+    /** TMDB `/search` returns no hits cleanly instead of throwing on stubbed requests. */
+    tmdbSearchEmpty?: boolean;
+    extraHttpStub?: (request: ExternalHttpRequest) => ExternalHttpResponse | null;
+    invokeModel?: FakeOutboundHandlers["invokeModel"];
   }) {
     const testDb = await createTestDb();
     handles.push(testDb);
     const row = await testDb.writeDb
       .insertInto("media")
       .values({
-        type: "movie",
+        type: media.type ?? "movie",
         baseline: media.baseline,
-        title: "搏击俱乐部",
-        original_title: "Fight Club",
-        year: 1999,
-        seasons: JSON.stringify([]),
+        title: media.title ?? "搏击俱乐部",
+        original_title: media.originalTitle === undefined ? "Fight Club" : media.originalTitle,
+        year: media.year === undefined ? 1999 : media.year,
+        seasons: JSON.stringify(media.seasons ?? []),
       })
       .returning("id")
       .executeTakeFirstOrThrow();
@@ -146,6 +159,17 @@ describe("catalog-group exploration", () => {
         })
         .execute();
     }
+    if (media.bangumiAssociation) {
+      await testDb.writeDb
+        .insertInto("associations")
+        .values({
+          media_id: row.id,
+          namespace: "bangumi",
+          native_id: media.bangumiAssociation,
+          status: "confirmed",
+        })
+        .execute();
+    }
     await testDb.writeDb
       .insertInto("demands")
       .values({
@@ -159,10 +183,24 @@ describe("catalog-group exploration", () => {
       .execute();
 
     const outbound = createFakeOutboundClient({
-      fetchExternal: (request) =>
-        media.tmdbFindEmpty && request.namespace === "tmdb" && request.url.includes("/find/")
-          ? json(request.url, { movie_results: [], tv_results: [] })
-          : httpStub(request),
+      fetchExternal: (request) => {
+        const extra = media.extraHttpStub?.(request);
+        if (extra) {
+          return extra;
+        }
+        if (media.tmdbFindEmpty && request.namespace === "tmdb" && request.url.includes("/find/")) {
+          return json(request.url, { movie_results: [], tv_results: [] });
+        }
+        if (
+          (media.tmdbFindEmpty || media.tmdbSearchEmpty) &&
+          request.namespace === "tmdb" &&
+          request.url.includes("/search/")
+        ) {
+          return json(request.url, { results: [] });
+        }
+        return httpStub(request);
+      },
+      ...(media.invokeModel ? { invokeModel: media.invokeModel } : {}),
     });
     const emitted: JobQueueMessage[] = [];
     let now = T0;
@@ -300,12 +338,280 @@ describe("catalog-group exploration", () => {
       baseline: "douban",
       externalIds: [],
       doubanAssociation: "1292000",
+      tmdbSearchEmpty: true,
     });
 
-    // No IMDb ID: the TMDB lookup has nothing to chain from, so the demand stays unmet and backs off.
+    // When TMDB genuinely has no match, the demand stays unmet and backs off.
     expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
     const demand = (await listDemands(testDb.readDb, { mediaId }))[0]!;
     expect(demand.status).toBe("not_found");
+  });
+
+  test("Bangumi-only TV anime without IMDb ID (FX战士久留美) gets its TMDB ID via title, originalTitle, and year chain", async () => {
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "bangumi",
+      type: "tv",
+      title: "FX战士久留美",
+      originalTitle: "FX戦士くるみちゃん",
+      year: 2026,
+      seasons: [{ season: 1, episodeCount: 12, airYear: 2026 }],
+      externalIds: [],
+      bangumiAssociation: "499999",
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/499999")) {
+          return json(request.url, {
+            id: 499999,
+            type: 2,
+            name: "FX戦士くるみちゃん",
+            name_cn: "FX战士久留美",
+            date: "2026-10-01",
+            eps: 12,
+            infobox: [{ key: "英文名", value: "FX Fighter Kurumi-chan" }],
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/search/tv")) {
+          return json(request.url, {
+            results: [
+              {
+                id: 311842,
+                name: "FX战士久留美",
+                original_name: "FX戦士くるみちゃん",
+                first_air_date: "2026-10-01",
+              },
+            ],
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/311842")) {
+          return json(request.url, {
+            id: 311842,
+            name: "FX战士久留美",
+            original_name: "FX戦士くるみちゃん",
+            first_air_date: "2026-10-01",
+            seasons: [{ season_number: 1, episode_count: 12, air_date: "2026-10-01" }],
+            translations: {
+              translations: [{ data: { name: "FX戰士久留美" } }],
+            },
+            alternative_titles: {
+              results: [{ title: "FX Fighter Kurumi-chan" }],
+            },
+            external_ids: { tvdb_id: 777311 },
+          });
+        }
+        return null;
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(await externalIds(testDb, mediaId)).toEqual([
+      { namespace: "tmdb", native_id: "tv:311842", source: "agent" },
+      { namespace: "tvdb", native_id: "777311", source: "agent" },
+    ]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("fulfilled");
+  });
+
+  test("multi-season TV show falls back to yearless TMDB search when baseline year is for a later season", async () => {
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "bangumi",
+      type: "tv",
+      title: "我推的孩子",
+      originalTitle: "【推しの子】",
+      year: 2024,
+      seasons: [{ season: 1, episodeCount: 11, airYear: 2024 }],
+      externalIds: [],
+      bangumiAssociation: "386809",
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/386809")) {
+          return json(request.url, {
+            id: 386809,
+            type: 2,
+            name: "【推しの子】",
+            name_cn: "我推的孩子",
+            date: "2024-07-03",
+            eps: 13,
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/search/tv")) {
+          // Only hits when searched without `first_air_date_year=2024` (TMDB first aired 2023).
+          const airYear = url.searchParams.get("first_air_date_year");
+          return json(request.url, {
+            results:
+              airYear === null
+                ? [
+                    {
+                      id: 203737,
+                      name: "我推的孩子",
+                      original_name: "【推しの子】",
+                      first_air_date: "2023-04-12",
+                    },
+                  ]
+                : [],
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/203737")) {
+          return json(request.url, {
+            id: 203737,
+            name: "我推的孩子",
+            original_name: "【推しの子】",
+            first_air_date: "2023-04-12",
+            seasons: [
+              { season_number: 1, episode_count: 11, air_date: "2023-04-12" },
+              { season_number: 2, episode_count: 13, air_date: "2024-07-03" },
+            ],
+            external_ids: {},
+          });
+        }
+        return null;
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(await externalIds(testDb, mediaId)).toEqual([
+      { namespace: "tmdb", native_id: "tv:203737", source: "agent" },
+    ]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("fulfilled");
+  });
+
+  test("uncorroborated single-title TMDB search hit is not written without distinguishing identity signals", async () => {
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "bangumi",
+      type: "movie",
+      title: "风声",
+      originalTitle: null,
+      year: 2009,
+      externalIds: [],
+      bangumiAssociation: "12345",
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/12345")) {
+          return json(request.url, { id: 12345, type: 2, name: "风声", date: "2009-09-29" });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/search/movie")) {
+          return json(request.url, {
+            results: [
+              { id: 90001, title: "风声", original_title: "风声", release_date: "2009-09-29" },
+            ],
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/movie/90001")) {
+          return json(request.url, {
+            id: 90001,
+            title: "风声",
+            original_title: "风声",
+            release_date: "2009-09-29",
+            external_ids: {},
+          });
+        }
+        return null;
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(await externalIds(testDb, mediaId)).toEqual([]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("not_found");
+  });
+
+  test("TMDB lookup falls back to agent session and enforces identity gate on submit_tmdb_id", async () => {
+    let step = 0;
+    const toolReplies: unknown[] = [];
+    const { testDb, mediaId, runJobs } = await setup({
+      baseline: "bangumi",
+      type: "tv",
+      title: "冷门译名",
+      originalTitle: null,
+      year: 2026,
+      seasons: [{ season: 1, episodeCount: 12, airYear: 2026 }],
+      externalIds: [],
+      bangumiAssociation: "499998",
+      extraHttpStub(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "bangumi" && url.pathname.endsWith("/subjects/499998")) {
+          return json(request.url, { id: 499998, type: 2, name: "冷门译名", eps: 12 });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/search/tv")) {
+          const q = url.searchParams.get("query");
+          return json(request.url, {
+            results:
+              q === "FX戦士くるみちゃん"
+                ? [
+                    {
+                      id: 311842,
+                      name: "FX战士久留美",
+                      original_name: "FX戦士くるみちゃん",
+                      first_air_date: "2026-10-01",
+                    },
+                  ]
+                : [],
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/999")) {
+          return json(request.url, {
+            id: 999,
+            name: "无关剧集",
+            original_name: "Other Show",
+            first_air_date: "2010-01-01",
+            external_ids: {},
+          });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/311842")) {
+          return json(request.url, {
+            id: 311842,
+            name: "冷门译名",
+            original_name: "FX戦士くるみちゃん",
+            first_air_date: "2026-10-01",
+            seasons: [{ season_number: 1, episode_count: 12, air_date: "2026-10-01" }],
+            external_ids: {},
+          });
+        }
+        return null;
+      },
+      invokeModel(request: ModelInvocationRequest): ModelInvocationResponse {
+        const tools = request.tools ? request.messages.filter((m) => m.role === "tool") : [];
+        if (tools.length > 0) {
+          toolReplies.push(JSON.parse(tools.at(-1)!.content));
+        }
+        step += 1;
+        if (step === 1) {
+          return {
+            content: null,
+            toolCalls: [{ id: "c1", name: "submit_tmdb_id", arguments: { nativeId: "tv:999" } }],
+            model: "test-model",
+          };
+        }
+        if (step === 2) {
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "c2",
+                name: "search_catalog",
+                arguments: { source: "tmdb", query: "FX戦士くるみちゃん", type: "tv", year: 2026 },
+              },
+            ],
+            model: "test-model",
+          };
+        }
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "c3",
+              name: "submit_tmdb_id",
+              arguments: { nativeId: "tv:311842", rationale: "exact air year and episode count" },
+            },
+          ],
+          model: "test-model",
+        };
+      },
+    });
+
+    expect(await runJobs()).toEqual([EXPLORATION_JOB_TYPE]);
+    expect(toolReplies[0]).toMatchObject({ ok: false, error: "IDENTITY_CHECK_FAILED" });
+    expect(await externalIds(testDb, mediaId)).toEqual([
+      { namespace: "tmdb", native_id: "tv:311842", source: "agent" },
+    ]);
+    expect((await listDemands(testDb.readDb, { mediaId }))[0]?.status).toBe("fulfilled");
   });
 
   test("approving the Douban request while TMDB is still missing reopens the demand to retry TMDB", async () => {

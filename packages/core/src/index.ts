@@ -6,6 +6,7 @@ export {
   createDefaultAdapterRegistry,
   createTier1Adapter,
   doubanAdapter,
+  fetchBangumiSubjectMetadata,
   InvalidNativeIdError,
   iqiyiAdapter,
   isTier2Adapter,
@@ -20,6 +21,8 @@ export {
   parseYoukuInput,
   tencentAdapter,
   youkuAdapter,
+  type BangumiSubjectMetadata,
+  type BangumiSubjectMetadataResult,
   type AdapterRegistry,
   type AdapterSearchCandidate,
   type AdapterSearchQuery,
@@ -59,6 +62,7 @@ export {
   fulfillCoveredCatalogDemandsInTx,
   isCoveredByAssociationsInTx,
   isMediaDemandCoveredInTx,
+  isNamespaceCoveredInTx,
   listDemands,
   mergeExternalKeyDemandsIntoMedia,
   enqueueTmdbLookupDemands,
@@ -77,11 +81,13 @@ export {
 } from "./demands.ts";
 export { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES, type AdvisoryLockClass } from "./locks.ts";
 export {
+  collectNormalizedTitleCandidates,
   evaluateEvidenceGate,
   evaluateEvidenceGateStep1,
   evaluateEvidenceGateStep2,
   isNonOriginalVariantDescription,
   normalizeTitleForComparison,
+  stripTrailingQualifiers,
   type CatalogEvidence,
   type EvaluateEvidenceGateInput,
   type EvaluateEvidenceGateStep1Options,

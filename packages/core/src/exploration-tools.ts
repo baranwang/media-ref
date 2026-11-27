@@ -15,6 +15,7 @@ import {
   type CollectionEvidenceResult,
   type CollectionInfo,
 } from "./adapters/index.ts";
+import { fetchBangumiSubjectMetadata } from "./adapters/bangumi.ts";
 import { fetchDoubanFrodo } from "./adapters/douban-api.ts";
 import type { ModelToolDefinition, OutboundClient } from "./outbound.ts";
 import type { TmdbGateway } from "./tmdb.ts";
@@ -22,7 +23,7 @@ import type { TmdbGateway } from "./tmdb.ts";
 const MAX_EPISODES_IN_TOOL_RESULT = 80;
 const KAN360_INDEX_API = "https://api.so.360kan.com/index";
 const SEARCH_SOURCES = ["tmdb", "trakt", "douban", "360kan"] as const;
-const LOOKUP_SOURCES = ["tmdb", "trakt", "douban"] as const;
+const LOOKUP_SOURCES = ["tmdb", "trakt", "douban", "bangumi"] as const;
 
 export interface ToolContext {
   outbound: OutboundClient;
@@ -66,7 +67,7 @@ export function buildQueryTools(ctx: ToolContext): ModelToolDefinition[] {
     {
       name: "get_catalog_entry",
       description:
-        'One catalog entry by ID: tmdb "tv:123"/"movie:123" (seasons, IMDb/TVDB IDs), trakt "show:123"/"movie:123", douban subject ID (also lists its "where to watch" platform links).',
+        'One catalog entry by ID: tmdb "tv:123"/"movie:123" (translations, aliases, credits, seasons, IMDb/TVDB IDs), trakt "show:123"/"movie:123", douban subject ID (aliases, directors, "where to watch" links), bangumi subject ID (aliases, directors, studios).',
       parameters: {
         type: "object",
         properties: {
@@ -164,6 +165,18 @@ export function buildQueryTools(ctx: ToolContext): ModelToolDefinition[] {
   return tools;
 }
 
+const CATALOG_LOOKUP_TOOL_NAMES = new Set([
+  "search_catalog",
+  "get_catalog_entry",
+  "web_search",
+  "web_fetch",
+]);
+
+/** Subset of query tools focused on identifying a media entry across catalogs and the web. */
+export function buildCatalogLookupTools(ctx: ToolContext): ModelToolDefinition[] {
+  return buildQueryTools(ctx).filter((tool) => CATALOG_LOOKUP_TOOL_NAMES.has(tool.name));
+}
+
 export const QUERY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "search_catalog",
   "get_catalog_entry",
@@ -256,11 +269,25 @@ async function getCatalogEntry(ctx: ToolContext, source: string, id: string): Pr
     if (!match) {
       return { error: "BAD_ID", message: 'Use "tv:123" or "movie:123".' };
     }
-    const entry = await ctx.tmdb.fetchMediaSnapshotAndExternalIds(match[1] as MediaType, match[2]!);
+    const type = match[1] as MediaType;
+    const tmdbId = match[2]!;
+    const entry = ctx.tmdb.fetchIdentityDetails
+      ? await ctx.tmdb.fetchIdentityDetails(type, tmdbId)
+      : await ctx.tmdb.fetchMediaSnapshotAndExternalIds(type, tmdbId);
     return entry ?? { error: "NOT_FOUND" };
   }
   if (source === "trakt") {
     return (await ctx.tmdb.lookupTrakt(id)) ?? { error: "NOT_FOUND" };
+  }
+  if (source === "bangumi") {
+    const res = await fetchBangumiSubjectMetadata(id, ctx.outbound);
+    if (res.status === "not_found") {
+      return { error: "NOT_FOUND" };
+    }
+    if (res.status === "transient_error") {
+      return { error: "UPSTREAM_UNAVAILABLE", message: res.reason };
+    }
+    return res.subject;
   }
   if (source === "douban") {
     if (!/^\d+$/.test(id)) {
@@ -274,13 +301,30 @@ async function getCatalogEntry(ctx: ToolContext, source: string, id: string): Pr
       return { error: "UPSTREAM_UNAVAILABLE", message: `Douban HTTP ${response.status}` };
     }
     const d = JSON.parse(response.body) as Record<string, unknown>;
+    const extractNames = (arr: unknown, limit = 10) =>
+      Array.isArray(arr)
+        ? arr.slice(0, limit).flatMap((x) => {
+            const name = (x as Record<string, unknown> | null)?.name;
+            return typeof name === "string" && name.trim() ? [name.trim()] : [];
+          })
+        : [];
+    const aliases = Array.isArray(d.aka)
+      ? d.aka.filter((a): a is string => typeof a === "string" && a.trim().length > 0)
+      : [];
+    const rawImdb =
+      typeof d.imdb === "string" ? d.imdb : typeof d.imdb_id === "string" ? d.imdb_id : null;
+    const imdbId = rawImdb && /^tt\d+$/i.test(rawImdb.trim()) ? rawImdb.trim().toLowerCase() : null;
     return {
       id,
       type: d.type ?? d.subtype ?? null,
       title: d.title ?? null,
       originalTitle: d.original_title ?? null,
+      ...(aliases.length > 0 ? { aliases } : {}),
       year: d.year ?? null,
       episodesCount: d.episodes_count ?? null,
+      ...(imdbId ? { imdbId } : {}),
+      directors: extractNames(d.directors, 5),
+      cast: extractNames(d.actors, 10),
       cardSubtitle: d.card_subtitle ?? null,
       platformLinks: (Array.isArray(d.vendors) ? d.vendors : []).flatMap((v: unknown) => {
         const vendor = v as Record<string, unknown> | null;

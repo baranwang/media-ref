@@ -5,6 +5,8 @@ import {
   changeRequestFromProto,
   commentContent,
   commentThreadFrom,
+  explorationFromProto,
+  explorationResultText,
   mediaItemFrom,
 } from "../src/lib/mappers.ts";
 
@@ -359,4 +361,67 @@ test("a rejected change request carries the other request its collection went li
       changeRequest: reviewedCr({ status: proto.ChangeRequestStatus.REJECTED }),
     } as unknown as Parameters<typeof changeRequestFromGetResponse>[0])?.liveChangeRequestId,
   ).toBeNull();
+});
+
+test("exploration activity maps covered platforms and formats unambiguous summary text", () => {
+  const mapped = explorationFromProto({
+    id: "job-1",
+    card: {
+      key: "tmdb:movie:24428",
+      mediaId: "m1",
+      type: 1,
+      title: "复仇者联盟",
+      year: 2012,
+      platforms: [],
+    },
+    startedAt: "2026-11-27T08:00:00.000Z",
+    finishedAt: "2026-11-27T08:01:00.000Z",
+    platforms: [
+      {
+        namespace: "iqiyi",
+        status: "covered",
+        reason: "此前提交时库里已有收录，当前已在库中生效",
+        changeRequestId: "cr-rejected",
+        liveChangeRequestId: "cr-live",
+      },
+      {
+        namespace: "youku",
+        status: "covered",
+        reason: "此前已在库中收录",
+      },
+      {
+        namespace: "bilibili",
+        status: "covered",
+        reason: "此前已在库中收录",
+      },
+      {
+        namespace: "mgtv",
+        status: "not_found",
+        reason: "找到的合集都不是这部作品",
+      },
+      {
+        namespace: "tencent",
+        status: "approved",
+        changeRequestId: "cr-tencent",
+      },
+    ],
+  } as unknown as Parameters<typeof explorationFromProto>[0])!;
+
+  expect(mapped.platforms[0]).toMatchObject({
+    namespace: "iqiyi",
+    status: "covered",
+    changeRequestId: "cr-rejected",
+    liveChangeRequestId: "cr-live",
+  });
+
+  const labels: Record<string, string> = {
+    iqiyi: "爱奇艺",
+    youku: "优酷",
+    bilibili: "哔哩哔哩",
+    mgtv: "芒果 TV",
+    tencent: "腾讯视频",
+  };
+  expect(explorationResultText(mapped, (ns) => labels[ns] ?? ns)).toBe(
+    "找到腾讯视频上的正片，已生效；爱奇艺、优酷、哔哩哔哩在库中已收录",
+  );
 });

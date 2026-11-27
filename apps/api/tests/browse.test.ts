@@ -228,7 +228,7 @@ describe("BrowseService", () => {
     expect(res.demands[1]!.card?.mediaId).toBe(mediaId);
   });
 
-  test("ListExplorationActivity shows running and finished jobs in plain words, never the caller", async () => {
+  test("listExplorationActivity shows running and finished jobs in plain words, never the caller", async () => {
     const { testDb, rpc, mediaId } = await setup();
     const now = Date.now();
     const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000);
@@ -304,5 +304,197 @@ describe("BrowseService", () => {
       filter: proto.ExplorationFilter.NOT_FOUND,
     });
     expect(notFound.recent.map((r) => r.platforms[0]!.namespace)).toEqual(["tencent"]);
+  });
+
+  test("listExplorationActivity turns rejected outcomes whose platform is now confirmed into covered with live CR link", async () => {
+    const { testDb, rpc } = await setup();
+    const t0 = new Date("2026-11-27T08:00:00.000Z");
+    const media = await testDb.writeDb
+      .insertInto("media")
+      .values({ type: "movie", baseline: "tmdb", title: "复仇者联盟", year: 2012 })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        is_external_id: true,
+        media_id: media.id,
+        namespace: "tmdb",
+        native_id: "movie:24428",
+      })
+      .execute();
+
+    const vIqiyi = await testDb.writeDb
+      .insertInto("variants")
+      .values({ media_id: media.id, platform: "iqiyi", description: "原声", is_default: true })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const assocIqiyi = await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        media_id: media.id,
+        namespace: "iqiyi",
+        native_id: "200001001",
+        variant_id: vIqiyi.id,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const submitterId = (
+      await testDb.writeDb
+        .insertInto("user")
+        .values({
+          id: "activity-u1",
+          name: "Submitter",
+          email: "activity-u1@example.com",
+          emailVerified: true,
+          role: "user",
+          createdAt: t0,
+          updatedAt: t0,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow()
+    ).id;
+
+    const liveIqiyiCr = await testDb.writeDb
+      .insertInto("change_requests")
+      .values({
+        submitter_user_id: submitterId,
+        target_external_key: `tmdb:movie:24428`,
+        media_id: media.id,
+        namespace: "iqiyi",
+        raw_native_id: "200001001",
+        native_id: "200001001",
+        status: "approved",
+        applied_association_id: assocIqiyi.id,
+        segments: JSON.stringify([]),
+        reviewed_at: new Date(t0.getTime() - 10_000),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const rejectedIqiyiCr = await testDb.writeDb
+      .insertInto("change_requests")
+      .values({
+        submitter_user_id: submitterId,
+        target_external_key: media.id,
+        media_id: media.id,
+        namespace: "iqiyi",
+        raw_native_id: "200001001",
+        native_id: "200001001",
+        status: "rejected",
+        conflict_reason: "both_passed_evidence_gate",
+        decision_reason: "无法自动通过：both_passed_evidence_gate",
+        segments: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const approvedTencentCr = await testDb.writeDb
+      .insertInto("change_requests")
+      .values({
+        submitter_user_id: submitterId,
+        target_external_key: media.id,
+        media_id: media.id,
+        namespace: "tencent",
+        raw_native_id: "mzc00200live00",
+        native_id: "mzc00200live00",
+        status: "approved",
+        segments: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const genuinelyRejectedBiliCr = await testDb.writeDb
+      .insertInto("change_requests")
+      .values({
+        submitter_user_id: submitterId,
+        target_external_key: media.id,
+        media_id: media.id,
+        namespace: "bilibili",
+        raw_native_id: "ss99999",
+        native_id: "ss99999",
+        status: "rejected",
+        conflict_reason: "title_mismatch",
+        decision_reason: "无法自动通过：title_mismatch",
+        segments: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    await testDb.writeDb
+      .insertInto("background_jobs")
+      .values({
+        job_type: "exploration",
+        status: "completed",
+        payload: JSON.stringify({ demandId: "d1", mediaId: media.id }),
+        result: JSON.stringify({
+          mediaId: media.id,
+          platformOutcomes: [
+            { namespace: "iqiyi", status: "submitted", changeRequestId: rejectedIqiyiCr.id },
+            { namespace: "youku", status: "already_confirmed", reason: "already_confirmed" },
+            { namespace: "tencent", status: "submitted", changeRequestId: approvedTencentCr.id },
+            {
+              namespace: "bilibili",
+              status: "submitted",
+              changeRequestId: genuinelyRejectedBiliCr.id,
+            },
+            { namespace: "mgtv", status: "not_found", reason: "no_matching_candidate" },
+          ],
+        }),
+        leased_at: t0,
+        completed_at: new Date(t0.getTime() + 1000),
+      })
+      .execute();
+
+    const res = await rpc.browse.listExplorationActivity({ limit: 5 });
+    const platforms = res.recent[0]!.platforms;
+    expect(
+      platforms.map((p: (typeof platforms)[number]) => ({
+        namespace: p.namespace,
+        status: p.status,
+        reason: p.reason ?? null,
+        changeRequestId: p.changeRequestId ?? null,
+        liveChangeRequestId: p.liveChangeRequestId ?? null,
+      })),
+    ).toEqual([
+      {
+        namespace: "iqiyi",
+        status: "covered",
+        reason: "此前提交时库里已有收录，当前已在库中生效",
+        changeRequestId: rejectedIqiyiCr.id,
+        liveChangeRequestId: liveIqiyiCr.id,
+      },
+      {
+        namespace: "youku",
+        status: "covered",
+        reason: "此前已在库中收录",
+        changeRequestId: null,
+        liveChangeRequestId: null,
+      },
+      {
+        namespace: "tencent",
+        status: "approved",
+        reason: null,
+        changeRequestId: approvedTencentCr.id,
+        liveChangeRequestId: null,
+      },
+      {
+        namespace: "bilibili",
+        status: "rejected",
+        reason: "平台片名和资料站对不上",
+        changeRequestId: genuinelyRejectedBiliCr.id,
+        liveChangeRequestId: null,
+      },
+      {
+        namespace: "mgtv",
+        status: "not_found",
+        reason: "找到的合集都不是这部作品",
+        changeRequestId: null,
+        liveChangeRequestId: null,
+      },
+    ]);
   });
 });

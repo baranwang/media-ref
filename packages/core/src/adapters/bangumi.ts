@@ -99,17 +99,42 @@ function extractInfoboxStrings(rawValue: unknown): string[] {
   return [];
 }
 
+export interface BangumiSubjectMetadata {
+  id: string;
+  title: string;
+  originalTitle: string | null;
+  aliases: string[];
+  year: number | null;
+  mediaType: MediaType;
+  episodeCount: number | null;
+  imdbId: string | null;
+  directors: string[];
+  studios: string[];
+}
+
+export type BangumiSubjectMetadataResult =
+  | { status: "found"; subject: BangumiSubjectMetadata }
+  | { status: "not_found"; reason: string }
+  | { status: "transient_error"; reason: string };
+
+const BANGUMI_DIRECTOR_KEYS = new Set(["导演", "总导演", "监督", "director"]);
+const BANGUMI_STUDIO_KEYS = new Set(["动画制作", "制作", "制作会社", "studio"]);
+
 function parseBangumiInfobox(infobox: unknown): {
   aliases: string[];
   imdbId: string | null;
   fallbackYear: number | null;
+  directors: string[];
+  studios: string[];
 } {
   const aliases: string[] = [];
+  const directors: string[] = [];
+  const studios: string[] = [];
   let imdbId: string | null = null;
   let fallbackYear: number | null = null;
 
   if (!Array.isArray(infobox)) {
-    return { aliases, imdbId, fallbackYear };
+    return { aliases, imdbId, fallbackYear, directors, studios };
   }
 
   for (const item of infobox) {
@@ -140,9 +165,23 @@ function parseBangumiInfobox(infobox: unknown): {
       continue;
     }
 
-    if (rawKey === "别名" || rawKey === "中文名") {
+    if (rawKey === "别名" || rawKey === "中文名" || normalizedKey === "英文名") {
       for (const val of values) {
         aliases.push(val);
+      }
+      continue;
+    }
+
+    if (BANGUMI_DIRECTOR_KEYS.has(normalizedKey)) {
+      for (const val of values) {
+        directors.push(val);
+      }
+      continue;
+    }
+
+    if (BANGUMI_STUDIO_KEYS.has(normalizedKey)) {
+      for (const val of values) {
+        studios.push(val);
       }
       continue;
     }
@@ -161,7 +200,7 @@ function parseBangumiInfobox(infobox: unknown): {
     }
   }
 
-  return { aliases, imdbId, fallbackYear };
+  return { aliases, imdbId, fallbackYear, directors, studios };
 }
 
 function dedupeAliases(
@@ -316,11 +355,20 @@ export function parseBangumiInput(raw: string): ParsedNativeIdInput | null {
   };
 }
 
-export async function fetchBangumiCollection(
+async function loadBangumiSubjectPayload(
   canonicalId: string,
   outbound: OutboundClient,
   options: BangumiFetchOptions = {},
-): Promise<CollectionEvidenceResult> {
+): Promise<
+  | {
+      status: "found";
+      subject: BangumiSubjectMetadata;
+      record: Record<string, unknown>;
+      apiBaseUrl: string;
+    }
+  | { status: "not_found"; reason: string }
+  | { status: "transient_error"; reason: string }
+> {
   const subjectId = canonicalId.trim();
   if (!BANGUMI_SUBJECT_ID_PATTERN.test(subjectId)) {
     return { status: "not_found", reason: "invalid_canonical_id" };
@@ -388,49 +436,91 @@ export async function fetchBangumiCollection(
 
   const rawPlatform = nonEmptyString(record.platform)?.toLowerCase() ?? "";
   const mediaType: MediaType = BANGUMI_MOVIE_PLATFORMS.has(rawPlatform) ? "movie" : "tv";
+  const subjectEps = mediaType === "movie" ? 1 : parsePositiveInt(record.eps);
+
+  return {
+    status: "found",
+    apiBaseUrl,
+    record,
+    subject: {
+      id: subjectId,
+      title,
+      originalTitle: originalName,
+      aliases,
+      year,
+      mediaType,
+      episodeCount: subjectEps,
+      imdbId: infobox.imdbId,
+      directors: [...new Set(infobox.directors)],
+      studios: [...new Set(infobox.studios)],
+    },
+  };
+}
+
+/** Fetches lightweight metadata (aliases, directors, studios, IMDb) for a Bangumi subject. */
+export async function fetchBangumiSubjectMetadata(
+  canonicalId: string,
+  outbound: OutboundClient,
+  options: BangumiFetchOptions = {},
+): Promise<BangumiSubjectMetadataResult> {
+  const loaded = await loadBangumiSubjectPayload(canonicalId, outbound, options);
+  if (loaded.status !== "found") {
+    return loaded;
+  }
+  return { status: "found", subject: loaded.subject };
+}
+
+export async function fetchBangumiCollection(
+  canonicalId: string,
+  outbound: OutboundClient,
+  options: BangumiFetchOptions = {},
+): Promise<CollectionEvidenceResult> {
+  const loaded = await loadBangumiSubjectPayload(canonicalId, outbound, options);
+  if (loaded.status !== "found") {
+    return loaded;
+  }
+
+  const { subject, apiBaseUrl } = loaded;
 
   let featureEpisodeCount: number | null;
   let featureEpisodes: FeatureEpisode[];
-  if (mediaType === "movie") {
+  if (subject.mediaType === "movie") {
     featureEpisodeCount = 1;
     featureEpisodes = [{ index: 1 }];
+  } else if (subject.episodeCount !== null) {
+    featureEpisodeCount = subject.episodeCount;
+    featureEpisodes = buildOrdinalEpisodes(subject.episodeCount);
   } else {
-    const subjectEps = parsePositiveInt(record.eps);
-    if (subjectEps !== null) {
-      featureEpisodeCount = subjectEps;
-      featureEpisodes = buildOrdinalEpisodes(subjectEps);
-    } else {
-      const fetchedEps = await fetchBangumiMainEpisodes(
-        subjectId,
-        outbound,
-        apiBaseUrl,
-        options.timeoutMs,
-      );
-      if (!fetchedEps.ok) {
-        return {
-          status: "transient_error",
-          reason: fetchedEps.transientReason,
-        };
-      }
-      featureEpisodeCount = fetchedEps.total;
-      featureEpisodes = fetchedEps.episodes;
+    const fetchedEps = await fetchBangumiMainEpisodes(
+      subject.id,
+      outbound,
+      apiBaseUrl,
+      options.timeoutMs,
+    );
+    if (!fetchedEps.ok) {
+      return {
+        status: "transient_error",
+        reason: fetchedEps.transientReason,
+      };
     }
+    featureEpisodeCount = fetchedEps.total;
+    featureEpisodes = fetchedEps.episodes;
   }
 
-  const externalIds: Partial<Record<Namespace, string>> | undefined = infobox.imdbId
-    ? { imdb: infobox.imdbId }
+  const externalIds: Partial<Record<Namespace, string>> | undefined = subject.imdbId
+    ? { imdb: subject.imdbId }
     : undefined;
 
   return {
     status: "found",
     info: {
       namespace: "bangumi",
-      canonicalId: subjectId,
-      title,
-      ...(originalName ? { originalTitle: originalName } : {}),
-      ...(aliases.length > 0 ? { aliases } : {}),
-      year,
-      mediaType,
+      canonicalId: subject.id,
+      title: subject.title,
+      ...(subject.originalTitle ? { originalTitle: subject.originalTitle } : {}),
+      ...(subject.aliases.length > 0 ? { aliases: subject.aliases } : {}),
+      year: subject.year,
+      mediaType: subject.mediaType,
       featureEpisodeCount,
       featureEpisodes,
       ...(externalIds ? { externalIds } : {}),

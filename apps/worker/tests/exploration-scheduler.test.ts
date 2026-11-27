@@ -2054,4 +2054,137 @@ describe("Exploration scheduler (#28)", () => {
     });
     expect((await demandRow()).status).toBe("fulfilled");
   });
+
+  test("already-covered external_key merge and already_confirmed outcomes fulfill demands without running exploration", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const t0 = new Date("2026-11-27T09:00:00.000Z");
+
+    const media = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "tmdb",
+        title: "复仇者联盟",
+        original_title: "The Avengers",
+        year: 2012,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const bilibiliVariant = await testDb.writeDb
+      .insertInto("variants")
+      .values({ media_id: media.id, platform: "bilibili", description: "原声", is_default: true })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    await testDb.writeDb
+      .insertInto("associations")
+      .values([
+        {
+          media_id: media.id,
+          namespace: "tmdb",
+          native_id: "movie:24428",
+          status: "confirmed",
+          is_external_id: true,
+        },
+        {
+          media_id: media.id,
+          namespace: "bilibili",
+          native_id: "av123456",
+          variant_id: bilibiliVariant.id,
+          status: "confirmed",
+          is_external_id: false,
+        },
+      ])
+      .execute();
+
+    // Unmerged external_key demand pointing to tmdb:movie:24428 (already covered by bilibili association).
+    const extDemand = await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        external_key: "tmdb:movie:24428",
+        season: null,
+        namespace_group: "platform",
+        status: "leased",
+        lease_generation: 1,
+        lease_expires_at: new Date(t0.getTime() + 60_000),
+        next_eligible_at: t0,
+        last_demanded_at: t0,
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    const job = await testDb.writeDb
+      .insertInto("background_jobs")
+      .values({
+        job_type: EXPLORATION_JOB_TYPE,
+        status: "leased",
+        lease_generation: 1,
+        payload: JSON.stringify({
+          demandId: extDemand.id,
+          mediaId: null,
+          externalKey: "tmdb:movie:24428",
+          season: null,
+          namespaceGroup: "platform",
+          targetNamespaces: ["bilibili", "iqiyi"],
+          demandLeaseGeneration: 1,
+        }),
+        leased_at: t0,
+        lease_expires_at: new Date(t0.getTime() + 60_000),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+
+    let executorCalled = false;
+    const handler = createExplorationJobHandler({
+      executor: async () => {
+        executorCalled = true;
+        return { platformOutcomes: [] };
+      },
+      catalogVerifier: async () => ({
+        status: "found",
+        mediaType: "movie",
+        baseline: "tmdb",
+        snapshot: {
+          title: "复仇者联盟",
+          originalTitle: "The Avengers",
+          year: 2012,
+          type: "movie",
+          seasons: [],
+        },
+        externalIds: { tmdb: "movie:24428" },
+      }),
+    });
+
+    const outcome = await handler({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      now: t0,
+      job: {
+        id: job.id,
+        jobType: EXPLORATION_JOB_TYPE,
+        payload: {
+          demandId: extDemand.id,
+          mediaId: null,
+          externalKey: "tmdb:movie:24428",
+          season: null,
+          namespaceGroup: "platform",
+          targetNamespaces: ["bilibili", "iqiyi"],
+          demandLeaseGeneration: 1,
+        },
+        leaseGeneration: 1,
+        leaseExpiresAt: new Date(t0.getTime() + 60_000),
+      },
+    });
+
+    expect(executorCalled).toBe(false);
+    expect(outcome).toMatchObject({
+      status: "completed",
+      result: { mediaId: media.id, skipped: true, reason: "already_covered" },
+    });
+    const demandsAfter = await listDemands(testDb.readDb, { mediaId: media.id });
+    expect(demandsAfter[0]?.status).toBe("fulfilled");
+  });
 });

@@ -1209,4 +1209,53 @@ describe("Exploration agent: discover → judge → gate", () => {
     });
     expect(room.scheduledCount).toBe(1);
   });
+
+  test("skips platforms that already have a confirmed association for the target season without creating duplicate change requests", async () => {
+    const { testDb, mediaId, explore } = await setup({
+      kan360Rows: [["咒术回战", "2020", "34430"]],
+    });
+
+    const variant = await testDb.writeDb
+      .insertInto("variants")
+      .values({ media_id: mediaId, platform: "bilibili", description: "原声", is_default: true })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    const assoc = await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: mediaId,
+        namespace: "bilibili",
+        native_id: "ss34430",
+        variant_id: variant.id,
+        status: "confirmed",
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("segments")
+      .values({
+        association_id: assoc.id,
+        season: 1,
+        episode_start: 1,
+        episode_end: 24,
+        target_episode_start: 1,
+        baseline: "tmdb",
+      })
+      .execute();
+
+    await explore();
+
+    const requests = await testDb.readDb.selectFrom("change_requests").selectAll().execute();
+    expect(requests.filter((r) => r.namespace === "bilibili")).toHaveLength(0);
+
+    const job = await testDb.readDb
+      .selectFrom("background_jobs")
+      .select("result")
+      .where("job_type", "=", EXPLORATION_JOB_TYPE)
+      .executeTakeFirstOrThrow();
+    const outcomes = (
+      job.result as { platformOutcomes?: Array<{ namespace: string; status: string }> }
+    ).platformOutcomes;
+    expect(outcomes?.find((o) => o.namespace === "bilibili")?.status).toBe("already_confirmed");
+  });
 });

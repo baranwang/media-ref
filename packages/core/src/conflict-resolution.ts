@@ -969,6 +969,80 @@ function summarizeGateResult(gate: EvidenceGateResult): JsonObject {
   };
 }
 
+function canAutoMergeSameUnlockedCollection(
+  input: EvaluateEvidenceCheckConflictInput,
+  existing: ConflictingAssociationSnapshot,
+  effectiveVariantDescription: string | null | undefined,
+): boolean {
+  if (
+    input.replacesAssociationId ||
+    input.conflictingAssociations.length !== 1 ||
+    existing.locked
+  ) {
+    return false;
+  }
+  const cr = input.changeRequest;
+  if (existing.namespace !== cr.namespace || existing.nativeId !== cr.nativeId) {
+    return false;
+  }
+  const normVariant = (val: string | null | undefined) => (val ?? "原声").trim();
+  if (
+    existing.variantDescription !== null &&
+    normVariant(existing.variantDescription) !== normVariant(effectiveVariantDescription)
+  ) {
+    return false;
+  }
+
+  const existingSegs = existing.segments;
+  const incomingSegs = cr.segments;
+  if (existingSegs.length === incomingSegs.length) {
+    const sortedExisting = [...existingSegs].sort(
+      (a, b) =>
+        a.season - b.season ||
+        a.episodeStart - b.episodeStart ||
+        a.targetEpisodeStart - b.targetEpisodeStart,
+    );
+    const sortedIncoming = [...incomingSegs].sort(
+      (a, b) =>
+        a.season - b.season ||
+        a.episodeStart - b.episodeStart ||
+        a.targetEpisodeStart - b.targetEpisodeStart,
+    );
+    const identical = sortedExisting.every((s, idx) => {
+      const inc = sortedIncoming[idx]!;
+      return (
+        s.season === inc.season &&
+        s.episodeStart === inc.episodeStart &&
+        s.episodeEnd === inc.episodeEnd &&
+        s.targetEpisodeStart === inc.targetEpisodeStart
+      );
+    });
+    if (identical) {
+      return true;
+    }
+  }
+
+  // Non-overlapping season addition on the same collection (merged by `mergeApprovedSegments`).
+  if (existingSegs.length > 0 && incomingSegs.length > 0) {
+    const existingSeasons = new Set(existingSegs.map((s) => s.season));
+    if (incomingSegs.some((s) => existingSeasons.has(s.season))) {
+      return false;
+    }
+    const seasons = input.catalogEvidence.seasons;
+    const positionRange = (s: NormalizedSegment): [number, number] => {
+      const end = s.episodeEnd ?? seasons.find((x) => x.season === s.season)?.episodeCount;
+      return [s.targetEpisodeStart, end ? s.targetEpisodeStart + end - s.episodeStart : Infinity];
+    };
+    const existingRanges = existingSegs.map(positionRange);
+    const incomingRanges = incomingSegs.map(positionRange);
+    return incomingRanges.every(([ia, ib]) =>
+      existingRanges.every(([ea, eb]) => eb < ia || ib < ea),
+    );
+  }
+
+  return false;
+}
+
 export async function evaluateEvidenceCheckConflict(
   input: EvaluateEvidenceCheckConflictInput,
 ): Promise<ConflictCheckResolution> {
@@ -1220,10 +1294,24 @@ export async function evaluateEvidenceCheckConflict(
     }
   }
 
-  // 4. Evaluate 4-way conflict matrix: ONLY (newPassed=true, oldPassed=false) auto-replaces!
+  // 4. Evaluate 4-way conflict matrix: ONLY (newPassed=true, oldPassed=false) auto-replaces,
+  // unless an unlocked same-collection submission idempotently matches or cleanly extends seasons.
   const anyOldPassed = existingEvidences.some((entry) => entry.passed);
-  const matrix = evaluateConflictMatrix(newPassed, anyOldPassed);
   const primary = conflictingAssociations[0]!;
+  const sameCollectionAutoMerge =
+    newPassed &&
+    anyOldPassed &&
+    canAutoMergeSameUnlockedCollection(input, primary, effectiveVariantDescription);
+  const matrix = sameCollectionAutoMerge
+    ? {
+        action: "auto_replace" as const,
+        newPassed: true,
+        oldPassed: true,
+        conflictReason: null,
+        decisionReason:
+          "Approved automatically: matches or cleanly extends existing unlocked collection",
+      }
+    : evaluateConflictMatrix(newPassed, anyOldPassed);
 
   const evidenceRecord: JsonObject = {
     checkedAt,

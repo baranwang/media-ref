@@ -23,6 +23,7 @@ import type {
   CoverageSegment,
   DemandItem,
   ExplorationItem,
+  ExplorationPlatformView,
   ExplorationStatus,
   MediaItem,
   MediaSeasonInfo,
@@ -84,6 +85,7 @@ export function demandFromProto(entry: proto.DemandEntry): DemandItem | null {
 
 const EXPLORATION_STATUSES = new Set<ExplorationStatus>([
   "approved",
+  "covered",
   "in_review",
   "rejected",
   "not_found",
@@ -106,8 +108,69 @@ export function explorationFromProto(item: proto.ExplorationActivity): Explorati
         : "retry",
       reason: p.reason ?? null,
       changeRequestId: p.changeRequestId ?? null,
+      liveChangeRequestId: p.liveChangeRequestId ?? null,
     })),
   };
+}
+
+function explorationScopeText(item: Pick<ExplorationItem, "card" | "season">): string {
+  if (item.card.type === "movie") return "正片";
+  return item.season === null ? "整部" : `第 ${item.season} 季`;
+}
+
+function formatExplorationPlatformList(
+  platforms: readonly ExplorationPlatformView[],
+  labelFor: (ns: Namespace) => string,
+): string {
+  const names = platforms.map((p) => labelFor(p.namespace));
+  if (names.length <= 3) {
+    return names.join("、");
+  }
+  return `${names.slice(0, 3).join("、")}等 ${names.length} 个平台`;
+}
+
+/** One sentence for a finished exploration job, avoiding contradictions with library coverage. */
+export function explorationResultText(
+  item: Pick<ExplorationItem, "card" | "season" | "platforms">,
+  labelFor: (ns: Namespace) => string = (ns) => ns,
+): string {
+  const approved = item.platforms
+    .filter((p) => p.status === "approved")
+    .map((p) => labelFor(p.namespace));
+  const review = item.platforms
+    .filter((p) => p.status === "in_review")
+    .map((p) => labelFor(p.namespace));
+  const covered = item.platforms.filter((p) => p.status === "covered");
+  const rejected = item.platforms.filter((p) => p.status === "rejected");
+  const scope = explorationScopeText(item);
+  const coveredText =
+    covered.length > 0 ? `${formatExplorationPlatformList(covered, labelFor)}在库中已收录` : null;
+
+  if (approved.length > 0 || review.length > 0) {
+    const names = [...approved, ...review].join("、");
+    const tail =
+      review.length === 0
+        ? "已生效"
+        : approved.length === 0
+          ? "等审核 agent 判定"
+          : "部分等审核 agent 判定";
+    return coveredText
+      ? `找到${names}上的${scope}，${tail}；${coveredText}`
+      : `找到${names}上的${scope}，${tail}`;
+  }
+  if (covered.length > 0) {
+    return rejected.length > 0
+      ? `${coveredText}（${formatExplorationPlatformList(rejected, labelFor)}的结果被驳回）`
+      : coveredText!;
+  }
+  if (rejected.length > 0) {
+    return `${formatExplorationPlatformList(rejected, labelFor)}的结果被审核驳回`;
+  }
+  const retry = item.platforms.filter((p) => p.status === "retry");
+  if (retry.length > 0) {
+    return `${retry.map((p) => labelFor(p.namespace)).join("、")}这次没查完，稍后再看一次`;
+  }
+  return item.platforms.length > 1 ? `${item.platforms.length} 个平台都没有找到` : "没有找到";
 }
 
 // ---------- Media detail ----------

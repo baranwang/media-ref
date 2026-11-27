@@ -1439,4 +1439,84 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       .executeTakeFirstOrThrow();
     expect(oldAssoc.status).toBe("delisted");
   });
+
+  test("idempotent duplicate on the same unlocked confirmed collection auto-approves instead of triggering both_passed_evidence_gate", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-27T10:00:00.000Z");
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createConflictTestStub(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+        submitBaseHourlyLimit: 20,
+      },
+    });
+
+    const user = await setupUser(app, outbound, "idem-user@example.com");
+    const reviewer = await setupUser(app, outbound, "idem-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" }, enableDailyTmdbSync: false },
+      now: () => t0,
+    });
+
+    await seedConfirmedAssociation(app, worker, emitted, {
+      submitKey: user.submitKey,
+      reviewerCookie: reviewer.cookie,
+      nativeId: "ss34430",
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+      ],
+      now: t0,
+    });
+
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
+    const dupRes = await submitRpc.changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    });
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+
+    const dupState = await getChangeRequestStateRpc(
+      app,
+      { apiKey: user.readKey },
+      dupRes.changeRequest!.id,
+    );
+    expect(dupState.status).toBe("approved");
+    expect(dupState.conflictReason).toBeNull();
+  });
 });
