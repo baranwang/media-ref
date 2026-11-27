@@ -15,3 +15,175 @@ test("iqiyi v_ links keep their v_ prefix", () => {
     "https://www.iqiyi.com/v_19rrfe142o.html",
   );
 });
+
+// `nativeId` is what the contribute drawer sends, so each one must be a form the server adapter's
+// parseInput accepts: iQIYI needs the a_/v_ prefix, a Youku video id is only accepted inside a URL.
+test.each([
+  {
+    input: "https://www.bilibili.com/bangumi/play/ss38221?spm_id_from=333.337",
+    namespace: "bilibili",
+    nativeId: "ss38221",
+    url: "https://www.bilibili.com/bangumi/play/ss38221",
+  },
+  {
+    input: "https://www.bilibili.com/bangumi/play/ep402225",
+    namespace: "bilibili",
+    nativeId: "ep402225",
+    url: "https://www.bilibili.com/bangumi/play/ep402225",
+  },
+  {
+    input: "https://www.bilibili.com/bangumi/media/md28234679",
+    namespace: "bilibili",
+    nativeId: "md28234679",
+    url: "https://www.bilibili.com/bangumi/media/md28234679",
+  },
+  {
+    input: "https://v.qq.com/x/cover/mzc00200mp8vo9b/u0044abcdefg.html",
+    namespace: "tencent",
+    nativeId: "mzc00200mp8vo9b",
+    url: "https://v.qq.com/x/cover/mzc00200mp8vo9b.html",
+  },
+  {
+    input: "https://v.qq.com/detail/m/mzc00200mp8vo9b.html",
+    namespace: "tencent",
+    nativeId: "mzc00200mp8vo9b",
+    url: "https://v.qq.com/x/cover/mzc00200mp8vo9b.html",
+  },
+  {
+    input: "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+    namespace: "iqiyi",
+    nativeId: "a_1fkgtbddd2x",
+    url: "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+  },
+  {
+    input: "https://www.iqiyi.com/v_19rrfe142o.html?vfrm=1",
+    namespace: "iqiyi",
+    nativeId: "v_19rrfe142o",
+    url: "https://www.iqiyi.com/v_19rrfe142o.html",
+  },
+  {
+    input: "https://v.youku.com/v_show/id_XNTk3MzA5NzgzMg==.html?spm=a2hja.14919748",
+    namespace: "youku",
+    nativeId: "https://v.youku.com/v_show/id_XNTk3MzA5NzgzMg==.html",
+    url: "https://v.youku.com/v_show/id_XNTk3MzA5NzgzMg==.html",
+  },
+  {
+    input: "https://list.youku.com/show/id_zCC001F06962411DE83B1.html",
+    namespace: "youku",
+    nativeId: "cc001f06962411de83b1",
+    url: "https://list.youku.com/show/id_zcc001f06962411de83b1.html",
+  },
+  {
+    input: "https://www.mgtv.com/b/338497/8038640.html",
+    namespace: "mgtv",
+    nativeId: "338497",
+    url: "https://www.mgtv.com/h/338497.html",
+  },
+  {
+    input: "https://movie.douban.com/subject/26647087/",
+    namespace: "douban",
+    nativeId: "26647087",
+    url: "https://movie.douban.com/subject/26647087/",
+  },
+  {
+    input: "https://www.themoviedb.org/tv/1429-attack-on-titan",
+    namespace: "tmdb",
+    nativeId: "tv:1429",
+    url: "https://www.themoviedb.org/tv/1429?language=zh-CN",
+  },
+  {
+    input: "https://www.imdb.com/title/tt2560140/",
+    namespace: "imdb",
+    nativeId: "tt2560140",
+    url: "https://www.imdb.com/title/tt2560140/",
+  },
+  {
+    input: "https://thetvdb.com/dereferrer/series/267440",
+    namespace: "tvdb",
+    nativeId: "267440",
+    url: "https://thetvdb.com/dereferrer/series/267440",
+  },
+  {
+    input: "https://trakt.tv/shows/attack-on-titan",
+    namespace: "trakt",
+    nativeId: "attack-on-titan",
+    url: "https://trakt.tv/shows/attack-on-titan",
+  },
+  {
+    input: "https://bgm.tv/subject/55770",
+    namespace: "bangumi",
+    nativeId: "55770",
+    url: "https://bgm.tv/subject/55770",
+  },
+])("parses $input", ({ input, namespace, nativeId, url }) => {
+  expect(parseExternalInput(input)).toMatchObject({ namespace, nativeId, url });
+});
+
+test("stored canonical ids build a page whose link parses back to an id the server accepts", () => {
+  expect(buildExternalUrl("youku", "cc001f06962411de83b1")).toBe(
+    "https://list.youku.com/show/id_zcc001f06962411de83b1.html",
+  );
+  expect(buildExternalUrl("youku", "XNTk3MzA5NzgzMg==")).toBe(
+    "https://v.youku.com/v_show/id_XNTk3MzA5NzgzMg==.html",
+  );
+  expect(buildExternalUrl("iqiyi", "a_1fkgtbddd2x")).toBe(
+    "https://www.iqiyi.com/a_1fkgtbddd2x.html",
+  );
+  expect(parseExternalInput(buildExternalUrl("iqiyi", "5328486914190101"))?.nativeId).toBe(
+    "a_1fkgtbddd2x",
+  );
+});
+
+test.each([
+  "bilibili:ss0",
+  "ep00",
+  "https://www.bilibili.com/bangumi/play/ss038221",
+  "https://v.qq.com/detail/m/short.html",
+  "https://v.qq.com/x/cover/MZC00200MP8VO9B.html",
+  "https://www.mgtv.com/h/0338497.html",
+  "https://bgm.tv/subject/0",
+  "douban:026647087",
+  "iqiyi:19rrfe142o",
+  "youku:X",
+  "https://list.youku.com/show/id_zinvalid.html",
+  "https://v.youku.com/v_show/id_X.html",
+])("rejects an invalid adapter ID in %s", (input) => {
+  expect(parseExternalInput(input)).toBeNull();
+});
+
+test("a short iQiyi slug and a 20-hex Youku video ID retain their page context", () => {
+  const album = "https://www.iqiyi.com/a_abc.html";
+  const video = "https://v.youku.com/v_show/id_cc001f06962411de83b1.html";
+  expect(parseExternalInput(album)).toMatchObject({ nativeId: album, url: album });
+  expect(parseExternalInput(video)).toMatchObject({ nativeId: video, url: video });
+});
+
+test("Youku keys preserve the video or show page", () => {
+  const video = "https://v.youku.com/v_show/id_XNTk3MzA5NzgzMg==.html";
+  expect(parseExternalInput("youku:XNTk3MzA5NzgzMg==")).toMatchObject({
+    nativeId: video,
+    url: video,
+  });
+  expect(parseExternalInput(`youku:${video}`)).toMatchObject({ nativeId: video, url: video });
+  expect(parseExternalInput("youku:cc001f06962411de83b1")).toMatchObject({
+    nativeId: "cc001f06962411de83b1",
+    url: "https://list.youku.com/show/id_zcc001f06962411de83b1.html",
+  });
+});
+
+test("canonical keys keep the stored iQiyi ID and the TMDB media type", () => {
+  expect(parseExternalInput("iqiyi:923452300")).toMatchObject({
+    nativeId: "923452300",
+    url: "https://www.iqiyi.com/v_19rrfe142o.html",
+  });
+  expect(parseExternalInput("tmdb:movie:603")).toMatchObject({
+    nativeId: "movie:603",
+    mediaTypeHint: "movie",
+    url: "https://www.themoviedb.org/movie/603?language=zh-CN",
+  });
+});
+
+test("a look-alike host is not a recognised link", () => {
+  expect(parseExternalInput("https://iqiyi.com.example.org/a_1fkgtbddd2x.html")).toBeNull();
+  expect(parseExternalInput("https://notbilibili.com/bangumi/play/ss38221")).toBeNull();
+});
