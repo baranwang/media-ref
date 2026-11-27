@@ -31,8 +31,9 @@
     "EMAIL_FROM": "noreply@mediaref.org",
     // Account that owns the API_USAGE dataset; queried with the ANALYTICS_API_TOKEN secret.
     "CF_ACCOUNT_ID": "9c578ed9cad837fb4a2564db7b36b483",
-    // Bilibili answers HTTP 412 to Cloudflare egress IPs; send it out of greencloud-hk instead.
-    "OUTBOUND_PROXY_CONFIG": "{\"bilibili\":{\"mode\":\"egress\"}}",
+    // Bilibili answers HTTP 412 and Youku its CAPTCHA to Cloudflare egress IPs; send them out of
+    // greencloud-hk instead.
+    "OUTBOUND_PROXY_CONFIG": "{\"bilibili\":{\"mode\":\"egress\"},\"youku\":{\"mode\":\"egress\"}}",
   },
   // greencloud-hk-gateway: the HK machine's Caddy, through the greencloud-hk tunnel. It relays
   // outbound HTTPS (x-egress-host) and serves magpie (x-hk-service: magpie).

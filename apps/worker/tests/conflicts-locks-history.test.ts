@@ -482,10 +482,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
       const state = await getChangeRequestStateRpc(app, { cookie: reviewer.cookie }, crId);
       if (state.status === "needs_review") {
-        await createRpcClients(app, { cookie: reviewer.cookie }).reviewer.approveChangeRequest({
-          id: crId,
-          reason: "test",
-        });
+        await approveInCore({ db: testDb.writeDb, outbound }, { id: crId, reason: "test" });
       } else {
         expect(state.status).toBe("approved");
       }
