@@ -75,15 +75,26 @@ export function buildExternalUrl(
       return `https://www.themoviedb.org/${mediaType}/${nativeId}?language=zh-CN`;
     }
     case "tvdb": {
-      const clean = nativeId.replace(/^(series|movies):/, "");
-      return `https://thetvdb.com/dereferrer/series/${clean}`;
+      const m = nativeId.match(/^(series|movies?|tv|episode|season):(.+)$/i);
+      if (m) {
+        const prefix = m[1]!.toLowerCase();
+        const kind =
+          prefix === "movie" || prefix === "movies" ? "movie" : prefix === "tv" ? "series" : prefix;
+        return `https://thetvdb.com/dereferrer/${kind}/${m[2]!}`;
+      }
+      return `https://thetvdb.com/dereferrer/${mediaType === "movie" ? "movie" : "series"}/${nativeId}`;
     }
     case "imdb":
       return `https://www.imdb.com/title/${nativeId}/`;
     case "douban":
       return `https://movie.douban.com/subject/${nativeId}/`;
-    case "trakt":
+    case "trakt": {
+      const m = nativeId.match(/^(movie|show):(.+)$/i);
+      if (m) {
+        return `https://trakt.tv/${m[1]!.toLowerCase() === "movie" ? "movies" : "shows"}/${m[2]!}`;
+      }
       return `https://trakt.tv/${mediaType === "movie" ? "movies" : "shows"}/${nativeId}`;
+    }
     case "bangumi":
       return `https://bgm.tv/subject/${nativeId}`;
   }
@@ -111,18 +122,20 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
         }
         return null;
       }
-      const tmdbType =
-        ns === "tmdb" && rest.startsWith("movie:")
+      const inferredMediaType: MediaType | undefined =
+        (ns === "tmdb" && rest.startsWith("movie:")) ||
+        (ns === "trakt" && rest.startsWith("movie:"))
           ? "movie"
-          : ns === "tmdb" && rest.startsWith("tv:")
+          : (ns === "tmdb" && rest.startsWith("tv:")) ||
+              (ns === "trakt" && rest.startsWith("show:"))
             ? "tv"
             : undefined;
       return {
         namespace: ns,
         nativeId: rest,
-        url: buildExternalUrl(ns, rest, tmdbType),
+        url: buildExternalUrl(ns, rest, inferredMediaType),
         isCatalog: isCatalogNamespace(ns),
-        ...(tmdbType ? { mediaTypeHint: tmdbType } : {}),
+        ...(inferredMediaType ? { mediaTypeHint: inferredMediaType } : {}),
       };
     }
   }
@@ -284,13 +297,15 @@ export function parseExternalInput(rawInput: string): ParsedExternalLink | null 
   }
 
   if (isHost("thetvdb.com")) {
-    const m = path.match(/\/(?:series|movies|dereferrer\/series)\/([a-z0-9-]+)/i);
+    const m = path.match(/\/(series|movies|dereferrer\/(?:series|movie))\/([a-z0-9-]+)/i);
     if (m) {
+      const mt: MediaType = m[1]!.toLowerCase().includes("movie") ? "movie" : "tv";
       return {
         namespace: "tvdb",
-        nativeId: m[1]!,
-        url: buildExternalUrl("tvdb", m[1]!),
+        nativeId: m[2]!,
+        url: buildExternalUrl("tvdb", m[2]!, mt),
         isCatalog: true,
+        ...(mt === "movie" ? { mediaTypeHint: "movie" as const } : {}),
       };
     }
   }

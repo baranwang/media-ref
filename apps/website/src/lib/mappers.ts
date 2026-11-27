@@ -5,6 +5,7 @@ import {
   isPlatformNamespace,
   type Association,
   type CatalogNamespace,
+  type ExternalId,
   type MediaDocument,
   type Namespace,
   type PlatformNamespace,
@@ -261,46 +262,65 @@ function buildCatalogRows(
   seasons: MediaSeasonInfo[],
   isMovie: boolean,
 ): CatalogDirectoryRow[] {
+  const externalIdByNamespace = new Map<CatalogNamespace, ExternalId>();
+  for (const ext of document.externalIds) {
+    if (isCatalogNamespace(ext.namespace)) {
+      externalIdByNamespace.set(ext.namespace, ext);
+    }
+  }
+
   const byNamespace = new Map<CatalogNamespace, Association[]>();
   for (const assoc of document.associations) {
-    if (!isCatalogNamespace(assoc.namespace)) continue;
+    if (!isCatalogNamespace(assoc.namespace) || assoc.status === "delisted") continue;
     const list = byNamespace.get(assoc.namespace) ?? [];
     list.push(assoc);
     byNamespace.set(assoc.namespace, list);
   }
   const baseline = document.media.baseline;
-  return CATALOG_ORDER.filter((ns) => byNamespace.has(ns)).map((namespace) => {
-    const assocs = byNamespace.get(namespace)!;
-    const whole = assocs.find((a) => a.segments.length === 0);
-    const segmented = assocs.filter((a) => a.segments.length > 0);
-    const isBaseline = baseline === namespace;
-    const entryCount = assocs.length;
-    return {
-      id: `catalog:${namespace}`,
-      namespace,
-      isBaseline,
-      roleLabel: isBaseline
-        ? "基准"
-        : whole && segmented.length > 0
-          ? "整部 + 季"
-          : `${entryCount} 个条目`,
-      ...(whole
-        ? {
-            wholeMediaNativeId: whole.nativeId,
-            wholeMediaLabel: `整部 · ${whole.title ?? whole.nativeId}`,
-          }
-        : {}),
-      ...(segmented.length > 0
-        ? {
-            segmentsBySeason: mergeSeasonMaps(
-              segmented.map((a) => segmentsBySeason(a, seasons, isMovie)),
-            ),
-            allSeasonSegments: seasonRangeSegments(segmented, seasons),
-          }
-        : {}),
-      ...(namespace === "imdb" ? { note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）" } : {}),
-    };
-  });
+  return CATALOG_ORDER.filter((ns) => externalIdByNamespace.has(ns) || byNamespace.has(ns)).map(
+    (namespace) => {
+      const ext = externalIdByNamespace.get(namespace);
+      const assocs = byNamespace.get(namespace) ?? [];
+      const whole = assocs.find((a) => a.segments.length === 0);
+      const segmented = assocs.filter((a) => a.segments.length > 0);
+      const isBaseline = baseline === namespace;
+      const hasWhole = Boolean(whole || ext);
+      const wholeMediaNativeId = whole?.nativeId ?? ext?.nativeId;
+      const wholeMediaLabel = whole
+        ? `整部 · ${whole.title ?? whole.nativeId}`
+        : ext
+          ? `整部 · ${ext.nativeId}`
+          : undefined;
+      const entryCount = assocs.length + (ext && !whole ? 1 : 0);
+      return {
+        id: `catalog:${namespace}`,
+        namespace,
+        isBaseline,
+        roleLabel: isBaseline
+          ? "基准"
+          : hasWhole && segmented.length > 0
+            ? "整部 + 季"
+            : `${entryCount} 个条目`,
+        ...(wholeMediaNativeId !== undefined && wholeMediaLabel !== undefined
+          ? {
+              wholeMediaNativeId,
+              wholeMediaLabel,
+            }
+          : {}),
+        ...(segmented.length > 0
+          ? {
+              segmentsBySeason: mergeSeasonMaps(
+                segmented.map((a) => segmentsBySeason(a, seasons, isMovie)),
+              ),
+              allSeasonSegments: seasonRangeSegments(segmented, seasons),
+            }
+          : {}),
+        ...(namespace === "imdb"
+          ? { note: "IMDb 没有季编号，只有整部和单集（单集暂不收录）" }
+          : {}),
+      };
+    },
+  );
 }
 
 function yearRangeLabel(

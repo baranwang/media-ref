@@ -2,6 +2,8 @@ import { describe, expect, test } from "vite-plus/test";
 import {
   createFakeOutboundClient,
   createTmdbGateway,
+  isTraktSyncEnabled,
+  lookupTraktId,
   parseTmdbNativeId,
   TmdbGatewayError,
   type ExternalHttpResponse,
@@ -245,5 +247,42 @@ describe("TmdbGateway", () => {
     });
 
     expect(TmdbGatewayError).toBeDefined();
+  });
+
+  test("lookupTraktId prefers exact TMDB ID match and rejects mismatched hits; isTraktSyncEnabled ignores blank client IDs", async () => {
+    expect(isTraktSyncEnabled(undefined)).toBe(false);
+    expect(isTraktSyncEnabled({ traktClientId: "   " })).toBe(false);
+    expect(isTraktSyncEnabled({ traktClientId: "cid" })).toBe(true);
+    expect(isTraktSyncEnabled({ traktClientId: "cid", syncTrakt: false })).toBe(false);
+    expect(isTraktSyncEnabled({ syncTrakt: true })).toBe(true);
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request): ExternalHttpResponse {
+        if (request.url.includes("/search/tmdb/24428")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify([
+              { type: "movie", movie: { ids: { trakt: 999999, tmdb: 10000 } } },
+              { type: "movie", movie: { ids: { trakt: 727, tmdb: 24428 } } },
+            ]),
+          };
+        }
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          url: request.url,
+          body: JSON.stringify([{ type: "show", show: { ids: { trakt: 888, tmdb: 999 } } }]),
+        };
+      },
+    });
+
+    await expect(lookupTraktId(outbound, { traktClientId: "cid" }, "movie", "24428")).resolves.toBe(
+      "movie:727",
+    );
+    await expect(
+      lookupTraktId(outbound, { traktClientId: "cid" }, "tv", "1429"),
+    ).resolves.toBeNull();
   });
 });

@@ -219,3 +219,21 @@ test("a look-alike host is not a recognised link", () => {
   expect(parseExternalInput("https://iqiyi.com.example.org/a_1fkgtbddd2x.html")).toBeNull();
   expect(parseExternalInput("https://notbilibili.com/bangumi/play/ss38221")).toBeNull();
 });
+
+test("trakt and tvdb external IDs with type prefixes build valid external URLs", () => {
+  expect(buildExternalUrl("trakt", "movie:727", "movie")).toBe("https://trakt.tv/movies/727");
+  expect(buildExternalUrl("trakt", "show:159384", "tv")).toBe("https://trakt.tv/shows/159384");
+  expect(buildExternalUrl("trakt", "show:159384")).toBe("https://trakt.tv/shows/159384");
+  expect(buildExternalUrl("tvdb", "movie:123", "movie")).toBe(
+    "https://thetvdb.com/dereferrer/movie/123",
+  );
+  expect(buildExternalUrl("tvdb", "series:267440", "tv")).toBe(
+    "https://thetvdb.com/dereferrer/series/267440",
+  );
+  expect(parseExternalInput("trakt:movie:727")).toMatchObject({
+    namespace: "trakt",
+    nativeId: "movie:727",
+    url: "https://trakt.tv/movies/727",
+    mediaTypeHint: "movie",
+  });
+});

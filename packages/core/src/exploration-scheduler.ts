@@ -45,7 +45,7 @@ import {
   type JobHandler,
 } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
-import { isAssociationNamespace, isUuid } from "./media-service.ts";
+import { backfillMissingExternalIdsInTx, isAssociationNamespace, isUuid } from "./media-service.ts";
 import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
 import { formatUtcDate } from "./tmdb-sync.ts";
 import {
@@ -1570,24 +1570,15 @@ export function createExplorationJobHandler(
           mediaSeasons = verifiedCatalog!.snapshot.seasons;
 
           if (verifiedCatalog!.externalIds) {
+            await backfillMissingExternalIdsInTx(trx, {
+              mediaId: created.id,
+              externalIds: verifiedCatalog!.externalIds,
+            });
             for (const ns of EXTERNAL_ID_NAMESPACES) {
               const nativeVal = verifiedCatalog!.externalIds[ns];
-              if (!nativeVal) {
-                continue;
+              if (nativeVal) {
+                mergeExternalKeys.add(formatExternalKey({ namespace: ns, nativeId: nativeVal }));
               }
-              await trx
-                .insertInto("associations")
-                .values({
-                  status: "confirmed",
-                  is_external_id: true,
-                  media_id: created.id,
-                  namespace: ns,
-                  native_id: nativeVal,
-                  source: "sync",
-                })
-                .onConflict((oc) => oc.doNothing())
-                .execute();
-              mergeExternalKeys.add(formatExternalKey({ namespace: ns, nativeId: nativeVal }));
             }
           }
 
@@ -1683,6 +1674,15 @@ export function createExplorationJobHandler(
             .executeTakeFirstOrThrow();
           mediaType = mediaRow.type;
           mediaSeasons = parseSeasonsSnapshotJson(mediaRow.seasons);
+          if (verifiedCatalog?.externalIds) {
+            const addedKeys = await backfillMissingExternalIdsInTx(trx, {
+              mediaId: resolvedMediaId,
+              externalIds: verifiedCatalog.externalIds,
+            });
+            for (const key of addedKeys) {
+              mergeExternalKeys.add(key);
+            }
+          }
         }
 
         const regularSeasons = extractRegularTvSeasons(mediaSeasons ?? []);
