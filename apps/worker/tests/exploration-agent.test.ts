@@ -107,9 +107,11 @@ interface StubOptions {
   kan360Rows: Array<[string, string, string]> | null;
   /** iQIYI search answers HTTP 500 (a failing discovery source). */
   failIqiyiSearch?: boolean;
+  /** bilibili season ids the Douban subject lists under "where to watch". */
+  doubanBilibili?: string[];
 }
 
-function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
+function createHttpStub({ kan360Rows, failIqiyiSearch, doubanBilibili = [] }: StubOptions) {
   return (request: ExternalHttpRequest): ExternalHttpResponse => {
     const url = new URL(request.url);
     const tmdbSeason = url.pathname.match(/\/tv\/95479\/season\/(\d+)$/);
@@ -172,7 +174,14 @@ function createHttpStub({ kan360Rows, failIqiyiSearch }: StubOptions) {
       });
     }
     if (url.hostname === "frodo.douban.com" && url.pathname.startsWith("/api/v2/subject/")) {
-      return jsonResponse(request.url, { title: "咒术回战", year: "2020", vendors: [] });
+      return jsonResponse(request.url, {
+        title: "咒术回战",
+        year: "2020",
+        vendors: doubanBilibili.map((ssid) => ({
+          id: "bilibili",
+          url: `https://www.bilibili.com/bangumi/play/ss${ssid}`,
+        })),
+      });
     }
     if (url.hostname === "api.douban.com") {
       return jsonResponse(request.url, { msg: "movie_not_found", code: 5000 });
@@ -619,6 +628,47 @@ describe("Exploration agent: discover → judge → gate", () => {
     const crs = await testDb.readDb.selectFrom("change_requests").select("native_id").execute();
     expect(crs).toEqual([{ native_id: "ss34430" }]);
   });
+
+  // #130: a seeded subject's links go first among all candidates; a confirmed subject's links
+  // are the only candidates on the platforms it lists.
+  test.each([
+    ["seed_unconfirmed", ["34430", "34431", "45574", "34500"]],
+    ["confirmed", ["34430"]],
+  ] as const)(
+    "a %s Douban subject's link wins the fast path over search hits (#130)",
+    async (status, fetched) => {
+      // Five search-like candidates come first, one of them a dub that passes the gate too.
+      const { testDb, mediaId, outbound, explore } = await setup({
+        kan360Rows: [
+          ["咒术回战（中配）", "2020", "34431"],
+          ["咒术回战", "2020", "45574"],
+          ["咒术回战", "2020", "34500"],
+          ["咒术回战", "2020", "90001"],
+          ["咒术回战", "2020", "90002"],
+        ],
+        doubanBilibili: ["34430"],
+      });
+      await testDb.writeDb
+        .insertInto("associations")
+        .values({ media_id: mediaId, namespace: "douban", native_id: "33376700", status })
+        .execute();
+
+      await explore();
+
+      const bilibiliFetches = outbound.httpRequests
+        .map((r) => new URL(r.url))
+        .filter((u) => u.hostname === "api.bilibili.com")
+        .map((u) => u.searchParams.get("season_id"));
+      expect(bilibiliFetches).toEqual(fetched);
+      expect(openNamespaces(outbound.modelRequests[0]!)).not.toContain("bilibili");
+      const crs = await testDb.readDb
+        .selectFrom("change_requests")
+        .select("native_id")
+        .where("namespace", "=", "bilibili")
+        .execute();
+      expect(crs).toEqual([{ native_id: "ss34430" }]);
+    },
+  );
 
   test("a failing discovery source makes candidate-less platforms transient, never not_found", async () => {
     const { testDb, mediaId, outbound, explore } = await setup({ kan360Rows: null });

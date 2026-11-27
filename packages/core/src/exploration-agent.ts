@@ -740,10 +740,22 @@ interface NamespaceCandidates {
   sourceErrored: boolean;
 }
 
-function platformCandidates(discovery: DiscoveryResult, namespace: Namespace): NamespaceCandidates {
+/**
+ * `doubanConfirmed`: the season's confirmed Douban subject lists its own links, so on a platform
+ * it lists, search hits are not candidates at all (#130). Elsewhere every source counts.
+ */
+function platformCandidates(
+  discovery: DiscoveryResult,
+  namespace: Namespace,
+  doubanConfirmed: boolean,
+): NamespaceCandidates {
+  const fromDouban = (c: DiscoveryResult["candidates"][number]) =>
+    c.sources.some((s) => s.source === "douban");
+  const doubanOnly =
+    doubanConfirmed && discovery.candidates.some((c) => c.namespace === namespace && fromDouban(c));
   const sourcesById = new Map<string, string[]>();
   for (const c of discovery.candidates) {
-    if (c.namespace === namespace) {
+    if (c.namespace === namespace && (!doubanOnly || fromDouban(c))) {
       sourcesById.set(
         c.canonicalId,
         c.sources.map((s) => s.source),
@@ -766,13 +778,13 @@ function platformCandidates(discovery: DiscoveryResult, namespace: Namespace): N
 /**
  * The media's Douban subject when the library already names one, confirmed or seeded (unverified).
  * Platform discovery reads its "where to watch" without the rate-limited IMDb lookup; the links
- * found there are still only candidates.
+ * found there still pass the gate like any candidate.
  */
-async function knownDoubanSubjectId(
+async function knownDoubanSubject(
   db: Db,
   mediaId: string,
   season: number | null,
-): Promise<string | null> {
+): Promise<{ nativeId: string; confirmed: boolean } | null> {
   const rows = await db
     .selectFrom("associations")
     .select(["id", "native_id", "status"])
@@ -798,7 +810,8 @@ async function knownDoubanSubjectId(
     const own = segments.filter((seg) => seg.association_id === r.id);
     return season === null || own.length === 0 || own.some((seg) => seg.season === season);
   });
-  return (covering.find((r) => r.status === "confirmed") ?? covering[0])?.native_id ?? null;
+  const row = covering.find((r) => r.status === "confirmed") ?? covering[0];
+  return row ? { nativeId: row.native_id, confirmed: row.status === "confirmed" } : null;
 }
 
 async function doubanCandidates(
@@ -1020,6 +1033,9 @@ async function submitMapping(
   }
 }
 
+const isVouched = (sources: readonly string[]) =>
+  sources.includes("douban") || sources.includes("client_lead");
+
 /**
  * Discovery candidates and client leads are fetched; exactly one that the gate would already
  * accept is submitted without the model (fast path). Anything else stays open for the agent.
@@ -1122,7 +1138,12 @@ async function prepareTarget(
     }
   }
 
-  for (const [id, sources] of [...sourcesById].slice(0, MAX_CANDIDATES_PER_PLATFORM)) {
+  // Douban's "where to watch" (reached by the media's Douban or IMDb ID) and client leads name a
+  // collection directly; search hits only resemble the title, so they must not use up the slots.
+  const ordered = [...sourcesById].sort(
+    ([, a], [, b]) => Number(isVouched(b)) - Number(isVouched(a)),
+  );
+  for (const [id, sources] of ordered.slice(0, MAX_CANDIDATES_PER_PLATFORM)) {
     if (budget.expired()) {
       return { outcome: transientOutcome(run, target, BUDGET_EXCEEDED) };
     }
@@ -1177,13 +1198,16 @@ async function prepareTarget(
     }
     if (run.passesGate(candidate.info, segments)) passing.push(candidate);
   }
-  if (passing.length === 1) {
+  // Several passing (e.g. two albums of one show): the one Douban lists for this media wins.
+  const fromDouban = passing.filter((c) => c.sources.includes("douban"));
+  const chosen = passing.length === 1 ? passing[0] : fromDouban.length === 1 ? fromDouban[0] : null;
+  if (chosen) {
     const result = await submitMapping(
       run,
       target,
-      passing[0]!.info,
-      mapping(passing[0]!),
-      passing[0]!.suggestedVariantDescription ?? undefined,
+      chosen.info,
+      mapping(chosen),
+      chosen.suggestedVariantDescription ?? undefined,
     );
     if ("status" in result) {
       return { outcome: result };
@@ -2477,15 +2501,11 @@ export function createExplorationAgentExecutor(
         }
         return { platformOutcomes, durationMs: Math.max(0, clockMs() - startMs) };
       }
+      const doubanSubject = await knownDoubanSubject(ctx.db, ctx.media.id, ctx.season);
       const discovery = targets.some((a) => isPlatformNamespace(a.namespace))
-        ? await discover(
-            toDiscoveryInput(
-              ctx.media,
-              ctx.season,
-              await knownDoubanSubjectId(ctx.db, ctx.media.id, ctx.season),
-            ),
-            { outbound: ctx.outbound },
-          )
+        ? await discover(toDiscoveryInput(ctx.media, ctx.season, doubanSubject?.nativeId ?? null), {
+            outbound: ctx.outbound,
+          })
         : null;
 
       const run = createJobRun(ctx, catalog, budget, await loadAiringSeason(ctx, catalog, budget));
@@ -2494,7 +2514,7 @@ export function createExplorationAgentExecutor(
         const candidates =
           adapter.namespace === "douban"
             ? await doubanCandidates(ctx.media, ctx.outbound)
-            : platformCandidates(discovery!, adapter.namespace);
+            : platformCandidates(discovery!, adapter.namespace, doubanSubject?.confirmed ?? false);
         const platformStartMs = clockMs();
         const prepared = await prepareTarget(run, adapter, candidates);
         if ("outcome" in prepared) {
