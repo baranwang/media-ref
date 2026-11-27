@@ -78,7 +78,7 @@ import {
   type ChangeRequestRecord,
 } from "./media-service.ts";
 import type { ModelToolCall, ModelToolDefinition } from "./outbound.ts";
-import { seasonCoverageConflict, type SeasonEpisode } from "./season-coverage.ts";
+import { lastAiredEpisode, seasonCoverageConflict, type SeasonEpisode } from "./season-coverage.ts";
 import { createTmdbGateway, type TmdbGateway, type TmdbGatewayConfig } from "./tmdb.ts";
 import { formatUtcDate } from "./tmdb-sync.ts";
 import { reportPiUsage } from "./tokens-report.ts";
@@ -1173,6 +1173,7 @@ export function createReviewAgentJobHandler(options: ReviewAgentJobOptions = {})
           .map(([key, f]) => [key, f.info]),
       ),
       seasonEpisodes,
+      now: ctx.now,
     };
     let correction = concluded?.correction ?? null;
     const record = (verdict: ReviewVerdict, fallback: string | null, extra: JsonObject = {}) =>
@@ -1510,6 +1511,7 @@ async function rejectPlainlyInTx(
 interface SessionFetches {
   fetchedCollections: ReadonlyMap<string, CollectionInfo>;
   seasonEpisodes: Record<number, SeasonEpisode[]>;
+  now: Date;
 }
 
 /** Whether the session fetched the collection and every season of these segments. */
@@ -1559,8 +1561,9 @@ function approvalBlocker(
 
 /**
  * A checked correction as exploration will resubmit it: an open end on a collection shorter than
- * the season (still airing) stops at the last position the session saw, so exploration's own
- * segment check, which reads an open end as the whole season, accepts it unchanged.
+ * a finished season stops at the last position the session saw, so exploration's own segment
+ * check, which reads an open end as the whole season, accepts it unchanged. A season still airing
+ * keeps its open end once the collection holds every aired episode, as exploration accepts it.
  */
 function boundToCollection(
   cr: ChangeRequestRecord,
@@ -1578,6 +1581,10 @@ function boundToCollection(
         return s;
       }
       const lastSeen = s.episodeStart + available - s.targetEpisodeStart;
+      const aired = lastAiredEpisode(fetched.seasonEpisodes[s.season] ?? [], fetched.now);
+      if (aired !== null && lastSeen >= aired) {
+        return s;
+      }
       const count = seasons.find((x) => x.season === s.season)?.episodeCount ?? null;
       return s.episodeEnd === null && count !== null && lastSeen < count
         ? { ...s, episodeEnd: lastSeen }

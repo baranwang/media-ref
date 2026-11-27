@@ -1959,4 +1959,187 @@ describe("Exploration agent: discover → judge → gate", () => {
       },
     ]);
   });
+
+  test("a season still airing is mapped open-ended, not cut to the episodes aired so far", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const media = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "tv",
+        baseline: "tmdb",
+        title: "连载中的剧",
+        original_title: "连载中的剧",
+        year: 2026,
+        seasons: JSON.stringify([{ season: 1, episodeCount: 26, airYear: 2026 }]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        status: "confirmed",
+        is_external_id: true,
+        media_id: media.id,
+        namespace: "tmdb",
+        native_id: "tv:998878",
+      })
+      .execute();
+    await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: media.id,
+        season: 1,
+        namespace_group: "platform",
+        status: "open",
+        next_eligible_at: T0,
+        last_demanded_at: T0,
+      })
+      .execute();
+
+    // TMDB lists 26 episodes; 16 aired before T0, the rest have no date yet. Tencent carries those 16.
+    const tmdbSeason1 = Array.from({ length: 26 }, (_, i) => ({
+      episode_number: i + 1,
+      name: `第${i + 1}集`,
+      air_date: i < 16 ? `2026-11-${String(i + 1).padStart(2, "0")}` : null,
+    }));
+    const tencentAired = Array.from({ length: 16 }, (_, i) => ({
+      vid: `v_airing_${i + 1}`,
+      title: String(i + 1),
+      c_title_output: String(i + 1),
+      play_title: `第${i + 1}集`,
+      is_trailer: "0",
+      publish_date: `2026-11-${String(i + 1).padStart(2, "0")}`,
+    }));
+    const tencentPage = (item_datas: unknown[], module_params?: object) => ({
+      ret: 0,
+      msg: "",
+      data: {
+        module_list_datas: [
+          {
+            module_datas: [
+              { ...(module_params ? { module_params } : {}), item_data_lists: { item_datas } },
+            ],
+          },
+        ],
+      },
+    });
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/998878/season/1")) {
+          return jsonResponse(request.url, { season_number: 1, episodes: tmdbSeason1 });
+        }
+        if (request.namespace === "tmdb" && url.pathname.endsWith("/tv/998878")) {
+          return jsonResponse(request.url, {
+            id: 998878,
+            name: "连载中的剧",
+            original_name: "连载中的剧",
+            first_air_date: "2026-11-01",
+            seasons: [{ season_number: 1, episode_count: 26, air_date: "2026-11-01" }],
+            external_ids: {},
+          });
+        }
+        if (request.namespace === "trakt") return jsonResponse(request.url, []);
+        if (url.hostname === "api.so.360kan.com") {
+          return jsonResponse(request.url, {
+            code: 0,
+            data: {
+              longData: {
+                rows: [
+                  {
+                    titleTxt: "连载中的剧",
+                    year: "2026",
+                    playlinks: { qq: "https://v.qq.com/x/cover/mzc002000airing.html" },
+                  },
+                ],
+              },
+            },
+          });
+        }
+        if (url.hostname === "api.douban.com") {
+          return jsonResponse(request.url, { msg: "not_found", code: 5000 });
+        }
+        if (url.hostname === "search.video.iqiyi.com") {
+          return jsonResponse(request.url, { code: "A00000", data: { code: 0, docinfos: [] } });
+        }
+        if (url.hostname === "pbaccess.video.qq.com") {
+          const body = JSON.parse(request.body ?? "{}") as { page_params?: { page_id?: string } };
+          return jsonResponse(
+            request.url,
+            body.page_params?.page_id === "detail_page_introduction"
+              ? tencentPage([
+                  {
+                    item_params: {
+                      title: "连载中的剧",
+                      year: "2026",
+                      type: "2",
+                      type_name: "电视剧",
+                    },
+                  },
+                ])
+              : tencentPage(
+                  tencentAired.map((item_params) => ({ item_params })),
+                  {},
+                ),
+          );
+        }
+        throw new Error(`Unexpected outbound request: ${request.namespace} ${request.url}`);
+      },
+      invokeModel: markAllNotFound,
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        exploration: { dailyBudget: 10 },
+      },
+      now: () => T0,
+    });
+
+    await worker.scheduled(createScheduledController(T0));
+    const exploreMsg = emitted.find((m) => m.jobType === EXPLORATION_JOB_TYPE)!;
+    emitted.length = 0;
+    await worker.queue(createQueueBatch([exploreMsg]));
+    // The fast path submits Tencent; the model only concludes the other platforms.
+    expect(openNamespaces(outbound.modelRequests[0]!)).not.toContain("tencent");
+
+    await worker.scheduled(createScheduledController(T0));
+    const evidenceMsgs = emitted.filter((m) => m.jobType === EVIDENCE_CHECK_JOB_TYPE);
+    expect(evidenceMsgs).toHaveLength(1);
+    await worker.queue(createQueueBatch(evidenceMsgs));
+
+    const assoc = await testDb.readDb
+      .selectFrom("associations")
+      .select(["id", "status"])
+      .where("media_id", "=", media.id)
+      .where("namespace", "=", "tencent")
+      .executeTakeFirstOrThrow();
+    expect(assoc.status).toBe("confirmed");
+    expect(
+      await testDb.readDb
+        .selectFrom("segments")
+        .select(["season", "episode_start", "episode_end", "target_episode_start", "non_linear"])
+        .where("association_id", "=", assoc.id)
+        .execute(),
+    ).toEqual([
+      {
+        season: 1,
+        episode_start: 1,
+        episode_end: null,
+        target_episode_start: 1,
+        non_linear: false,
+      },
+    ]);
+  });
 });

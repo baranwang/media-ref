@@ -338,7 +338,8 @@ describe("iQIYI Tier 1 & Tier 2 adapter (#14)", () => {
             code: "A00000",
             data: {
               total: 64,
-              hasMore: true,
+              // The live API says false on every page; total decides whether to read on.
+              hasMore: false,
               epsodelist: makePageEpisodes(1, page1FeatureCount, true),
               updateprevuelist: [{ tvId: 888800000100, contentType: 3, name: "更新预告" }],
             },
