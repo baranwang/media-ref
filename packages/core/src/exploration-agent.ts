@@ -1349,8 +1349,6 @@ async function exploreTmdbExternalId(
       actorUserId: EXPLORATION_AGENT_USER_ID,
       reason: `exploration_shared_catalog:${candidate.namespace}:${candidate.nativeId}`,
       sharedCatalog: candidate,
-      outbound: ctx.outbound,
-      tmdbGateway: ctx.tmdbGateway,
       now: ctx.now,
     });
     if (mergeAttempt.merged && mergeAttempt.targetMediaId !== ctx.media.id) {

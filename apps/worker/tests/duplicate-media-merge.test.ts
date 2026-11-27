@@ -4,6 +4,7 @@ import {
   approveChangeRequest,
   bilibiliAdapter,
   convergeDuplicateMedia,
+  findSharedCatalogDuplicateMediaIdsInTx,
   createAdapterRegistry,
   createChangeRequest,
   createFakeOutboundClient,
@@ -1876,7 +1877,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
         native_id: "35235320",
         is_external_id: false,
         status: "confirmed",
-        needs_review: false,
+        needs_review: true,
         locked: false,
       })
       .returningAll()
@@ -1972,6 +1973,7 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
       .where("native_id", "=", "35235320")
       .executeTakeFirstOrThrow();
     expect(mergedDouban.status).toBe("confirmed");
+    expect(mergedDouban.needs_review).toBe(true);
 
     const mergedSegs = await db
       .selectFrom("segments")
@@ -3446,6 +3448,11 @@ describe("Duplicate media creation prevention & auto-merge (#99)", () => {
         return { status: 404, headers: {}, url: request.url, body: "" };
       },
     });
+    const immediate = await db
+      .transaction()
+      .execute((trx) => findSharedCatalogDuplicateMediaIdsInTx(trx, compatA.id));
+    expect(immediate).toHaveLength(1);
+
     let totalMerged = 0;
     for (let step = 0; step < 12; step += 1) {
       const batchTime = new Date(now.getTime() + step * 5 * 60_000);

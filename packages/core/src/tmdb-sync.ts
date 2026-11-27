@@ -1868,8 +1868,7 @@ export async function mergeMediaInTx(
           .set({
             status: sa.status,
             variant_id: existingTarget.variant_id ?? nextVariantId,
-            needs_review:
-              sa.status === "confirmed" && !sa.needs_review ? false : existingTarget.needs_review,
+            needs_review: sa.needs_review || existingTarget.needs_review,
             locked: Boolean(existingTarget.locked || sa.locked),
             source: existingTarget.source ?? sa.source,
             updated_at: now,
