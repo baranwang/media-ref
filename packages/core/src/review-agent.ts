@@ -324,7 +324,9 @@ export async function ensureReviewAgentUser(dbWrite: Db): Promise<string> {
       role: "user",
       reputation: 0,
     })
-    .onConflict((oc) => oc.column("id").doNothing())
+    // No conflict target: concurrent reviews race this insert, and an `id`-only target still lets
+    // the loser fail on the unique email index.
+    .onConflict((oc) => oc.doNothing())
     .execute();
   return REVIEW_AGENT_USER_ID;
 }
