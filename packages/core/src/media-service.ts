@@ -1074,27 +1074,6 @@ export async function createChangeRequest(
     }
   }
 
-  await assertNotNoOpSubmission(dbWrite, {
-    existingMedia,
-    existingSameCollection,
-    replacesAssociationId: replacesAssociation?.id ?? null,
-    resolvedVariantId,
-    setDefaultVariant,
-    normalizedSegments,
-    namespace,
-  });
-  await assertNoDuplicateInFlightChangeRequest(dbWrite, {
-    existingMedia,
-    canonicalTargetKey,
-    namespace,
-    nativeId,
-    resolvedVariantId,
-    variantDescription,
-    setDefaultVariant,
-    replacesAssociationId: replacesAssociation?.id ?? null,
-    normalizedSegments,
-  });
-
   const hasTier2Adapter = Boolean(adapter && adapter.tier >= 2);
   const resolvedStatus: ChangeRequestStatus =
     input.initialStatus ?? (hasTier2Adapter ? "pending_evidence" : "needs_review");

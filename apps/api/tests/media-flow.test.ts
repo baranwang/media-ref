@@ -1209,6 +1209,22 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     }
     const firstCrId = fulfilled[0]!.value.changeRequest!.id;
 
+    // 1b. Concurrent identical submissions sharing the same taskId stay idempotent (all return the same CR)
+    const sharedTaskId = crypto.randomUUID();
+    const taskPayload = {
+      ...basePayload,
+      taskId: sharedTaskId,
+      variantDescription: "粤语",
+    };
+    const concurrentTaskResults = await Promise.all([
+      rpc1.changeRequest.createChangeRequest(taskPayload),
+      rpc1.changeRequest.createChangeRequest(taskPayload),
+      rpc1.changeRequest.createChangeRequest(taskPayload),
+    ]);
+    const taskCrIds = new Set(concurrentTaskResults.map((r) => r.changeRequest?.id));
+    expect(taskCrIds.size).toBe(1);
+    expect([...taskCrIds][0]).toBeTruthy();
+
     // Different segment range on the same in-flight collection IS allowed
     const extendedPendingRes = await rpc1.changeRequest.createChangeRequest({
       ...basePayload,
