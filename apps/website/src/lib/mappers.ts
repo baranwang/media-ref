@@ -597,6 +597,18 @@ export function commentContent(note: string, shortcut?: keyof typeof SHORTCUT_PR
   return text.startsWith(prefix) ? text : `${prefix}${text}`;
 }
 
+/** One change request as GetChangeRequest returns it, with the request its collection went live through. */
+export function changeRequestFromGetResponse(
+  res: proto.GetChangeRequestResponse,
+): ChangeRequestItem | null {
+  return res.changeRequest
+    ? {
+        ...changeRequestFromProto(res.changeRequest),
+        liveChangeRequestId: res.liveChangeRequestId ?? null,
+      }
+    : null;
+}
+
 /** Catalog key for a change-request target ref, e.g. `tmdb:tv:1429`. */
 export function targetKeyOf(ref: proto.MediaRef | undefined): string {
   const id = ref?.id;

@@ -221,6 +221,21 @@ function ChangeRequestDetailPage() {
       {/* Body Grid (Left detail cards + Right timeline) */}
       <main className="relative z-10 container grid grid-cols-1 gap-8 pb-20 lg:grid-cols-12">
         <div className="flex flex-col gap-8 lg:col-span-8">
+          {cr.status !== "approved" && cr.liveChangeRequestId && (
+            <Alert variant="confirmed">
+              <AlertTitle>这个合集已经生效</AlertTitle>
+              <AlertDescription>
+                后来另一张变更单把它关联上了，按集查询已经能用。
+                <Link
+                  to="/change-requests/$id"
+                  params={{ id: cr.liveChangeRequestId }}
+                  className="ml-1 font-medium underline underline-offset-4"
+                >
+                  查看那张变更单
+                </Link>
+              </AlertDescription>
+            </Alert>
+          )}
           {/* 提交的内容 */}
           <section className="flex flex-col gap-3">
             <div>

@@ -1,6 +1,7 @@
 import { proto, type MediaDocument } from "@media-ref/client";
 import { expect, test } from "vite-plus/test";
 import {
+  changeRequestFromGetResponse,
   changeRequestFromProto,
   commentContent,
   commentThreadFrom,
@@ -236,4 +237,19 @@ test("the 通过 and 驳回 shortcuts send a comment that starts with 「通过�
   expect(commentContent("", "reject")).toBe("驳回：");
   expect(commentContent("驳回：季号错了", "reject")).toBe("驳回：季号错了");
   expect(commentContent("  这是第二季 ")).toBe("这是第二季");
+});
+
+test("a rejected change request carries the other request its collection went live through", () => {
+  const cr = changeRequestFromGetResponse({
+    changeRequest: reviewedCr({ status: proto.ChangeRequestStatus.REJECTED }),
+    liveChangeRequestId: "cr-live",
+  } as unknown as Parameters<typeof changeRequestFromGetResponse>[0]);
+
+  expect(cr?.status).toBe("rejected");
+  expect(cr?.liveChangeRequestId).toBe("cr-live");
+  expect(
+    changeRequestFromGetResponse({
+      changeRequest: reviewedCr({ status: proto.ChangeRequestStatus.REJECTED }),
+    } as unknown as Parameters<typeof changeRequestFromGetResponse>[0])?.liveChangeRequestId,
+  ).toBeNull();
 });

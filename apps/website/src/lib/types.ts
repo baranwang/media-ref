@@ -216,6 +216,11 @@ export interface ChangeRequestItem {
   reviewedAt: string | null;
   checks: AutoCheckItem[];
   timeline: ChangeRequestTimelineStep[];
+  /**
+   * Another approved change request whose mapping of this collection is live (only from
+   * GetChangeRequest; undefined in lists).
+   */
+  liveChangeRequestId?: string | null;
 }
 
 export interface ReviewAlertItem {
