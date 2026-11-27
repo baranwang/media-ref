@@ -30,16 +30,10 @@ function htmlResponse(url: string, html: string, status = 200): ExternalHttpResp
 }
 
 describe("iQIYI Tier 1 & Tier 2 adapter (#14)", () => {
-  test("parses and canonicalizes bare numeric qipuId / albumId without network calls", async () => {
+  test("parses and canonicalizes bare numeric albumId without network calls", async () => {
     const outbound = createFakeOutboundClient();
 
-    const directInputs = [
-      "5328486914190101",
-      "  5328486914190101  ",
-      "202861101",
-      "923452300",
-      "7292991076670500",
-    ];
+    const directInputs = ["5328486914190101", "  5328486914190101  ", "202861101"];
 
     for (const raw of directInputs) {
       const trimmed = raw.trim();
@@ -52,6 +46,36 @@ describe("iQIYI Tier 1 & Tier 2 adapter (#14)", () => {
     }
 
     expect(outbound.httpRequests).toHaveLength(0);
+  });
+
+  test("normalizes a bare 00 tvId via video/baseinfo: an episode to its album, a movie to itself", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const baseinfo: Record<string, Record<string, unknown>> = {
+          "3331093954664600": { tvId: 3331093954664600, albumId: 5602827634103201, channelId: 2 },
+          "923452300": { tvId: 923452300, albumId: 923452300, channelId: 1 },
+        };
+        const id = request.url.replace("https://pcw-api.iqiyi.com/video/video/baseinfo/", "");
+        if (baseinfo[id]) return jsonResponse(request.url, { code: "A00000", data: baseinfo[id] });
+        if (id === "1000000000000000") {
+          return jsonResponse(request.url, { code: "A00001", data: "参数错误" });
+        }
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+
+    expect(parseIqiyiInput("3331093954664600")).toEqual({
+      kind: "qipu",
+      id: "3331093954664600",
+      canonicalId: null,
+    });
+    expect(await iqiyiAdapter.canonicalize(" 3331093954664600 ", outbound)).toBe(
+      "5602827634103201",
+    );
+    expect(await iqiyiAdapter.canonicalize("923452300", outbound)).toBe("923452300");
+    await expect(iqiyiAdapter.canonicalize("1000000000000000", outbound)).rejects.toBeInstanceOf(
+      InvalidNativeIdError,
+    );
   });
 
   test("canonicalizes iQIYI album URLs (www/m/bare) by extracting albumId or qipuId from SSR HTML", async () => {
