@@ -429,6 +429,7 @@ export {
   createSeedLeadsReporter,
   DEFAULT_SEED_VARIANT_DESCRIPTION,
   enqueueSeedEvidenceChecksForMedia,
+  retryFailedSeedEvidenceChecks,
   ensureSeedImporterUser,
   importBangumiDataSeeds,
   importDoubanMovieSeeds,
