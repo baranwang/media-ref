@@ -320,12 +320,12 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
     ];
 
     const submittedTvIds: string[] = [];
-    for (const rawInput of urlVariants) {
+    for (const [index, rawInput] of urlVariants.entries()) {
       const res = await submitRpc.changeRequest.createChangeRequest({
         target: mediaRef("tmdb:tv:73618"),
         namespace: "youku",
         nativeId: rawInput,
-        variantDescription: "原声",
+        variantDescription: index === 0 ? "原声" : `原声-${index}`,
         segments: [
           toProtoSegmentInput({
             season: 1,

@@ -30,6 +30,7 @@ import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
 import { formatEpisodeRange, formatRelativeTime, formatSegmentEpisodeLabel } from "#/lib/format";
 import { conflictTagFor } from "#/lib/mappers";
+import { buildReviewCoveragePreview } from "#/lib/review-preview";
 import {
   agentApprovalsQuery,
   browserClients,
@@ -474,34 +475,15 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
   const media = mediaQuery.data;
 
   const primary = cr.segments[0];
-  const season = primary?.season ?? 1;
-  const seasonSegments = cr.segments.filter((s) => s.season === season);
-  const totalSeasonEpisodes =
-    media?.seasons.find((s) => s.season === season)?.episodeCount ??
-    cr.pageEpisodeCount ??
-    Math.max(1, ...seasonSegments.map((s) => s.end ?? s.start));
-
-  // Titles not yet in the library have no existing coverage.
-  const platformRow = cr.mediaId
-    ? media?.platformRows.find(
-        (row) =>
-          row.namespace === cr.namespace &&
-          (cr.variantLabel ? row.label === cr.variantLabel : row.isDefault),
-      )
-    : undefined;
-  const existingSegments = platformRow?.segmentsBySeason[season] ?? [];
-  const proposedSegments: CoverageSegment[] = seasonSegments.map((s, i) => ({
-    id: `${cr.id}-${i}`,
-    title: cr.pageTitle ?? cr.nativeId,
-    nativeId: cr.nativeId,
-    start: s.start,
-    end: s.end ?? totalSeasonEpisodes,
-    targetStart: s.targetStart,
-    ...(s.nonLinear ? { nonLinear: true } : {}),
-    status: "pending",
-    changeRequestId: cr.id,
-  }));
-  const afterSegments = [...existingSegments, ...proposedSegments];
+  const {
+    season,
+    isMovie,
+    totalSeasonEpisodes,
+    existingSegments,
+    afterSegments,
+    otherPendingCount,
+  } = buildReviewCoveragePreview(cr, media);
+  const seasonLabel = isMovie ? "整部" : `第 ${season} 季`;
 
   const passedCount = cr.checks.filter((c) => c.status === "passed").length;
   const failedCount = cr.checks.filter((c) => c.status === "failed").length;
@@ -532,7 +514,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
               {formatRelativeTime(cr.createdAt)}
             </div>
             <h2 className="text-2xl leading-8 font-bold tracking-tight text-foreground">
-              {title} · 第 {season} 季
+              {title} · {seasonLabel}
             </h2>
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <NamespaceLogo namespace={cr.namespace} className="size-4.5" />
@@ -584,8 +566,9 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
               通过后会怎样
             </h3>
             <p className="text-sm text-muted-foreground">
-              第 {season} 季，以 TMDB 的 {totalSeasonEpisodes} 集为准。横条是{platformLabel}
-              收录的集数
+              {isMovie
+                ? `电影整部映射。横条是${platformLabel}收录情况`
+                : `第 ${season} 季，以 TMDB 的 ${totalSeasonEpisodes} 集为准。横条是${platformLabel}收录的集数`}
             </p>
           </div>
           <CoverageLegend labels={["已确认", "本次提交", "未收录"]} />
@@ -620,38 +603,54 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
               </div>
             </div>
 
+            {otherPendingCount > 0 && (
+              <div className="flex items-center gap-3">
+                <div className="w-18 shrink-0" />
+                <p className="text-2xs text-muted-foreground">
+                  另有 {otherPendingCount} 个同条目待审核变更单（未生效，不计入「现在」）。
+                </p>
+              </div>
+            )}
+
             <div className="mt-1 border-t border-border/60 pt-3 text-xs">
               <div className="flex items-start gap-3">
                 <span className="w-18 shrink-0 text-muted-foreground">提交内容</span>
                 <div className="min-w-0 flex-1">
-                  {cr.segments.map((s) => (
-                    <div key={`${s.season}-${s.start}`} className="font-medium text-foreground">
-                      {s.nonLinear ? (
-                        <>
-                          {NAMESPACE_LABELS[cr.namespace]}
-                          {cr.pageTitle ? `「${cr.pageTitle}」` : ""}按整季合集对应第 {s.season}{" "}
-                          季（
-                          {formatSegmentEpisodeLabel(
-                            s.start,
-                            s.end,
-                            true,
-                            s.end === null ? undefined : totalSeasonEpisodes,
-                          )}
-                          ）
-                        </>
-                      ) : (
-                        <>
-                          {NAMESPACE_LABELS[cr.namespace]}
-                          {cr.pageTitle ? `「${cr.pageTitle}」` : ""}页面上的
-                          {formatEpisodeRange(
-                            s.targetStart,
-                            s.end === null ? null : s.targetStart + (s.end - s.start),
-                          )}
-                          ，就是第 {s.season} 季的{formatEpisodeRange(s.start, s.end)}
-                        </>
-                      )}
+                  {cr.segments.length > 0 ? (
+                    cr.segments.map((s) => (
+                      <div key={`${s.season}-${s.start}`} className="font-medium text-foreground">
+                        {s.nonLinear ? (
+                          <>
+                            {NAMESPACE_LABELS[cr.namespace]}
+                            {cr.pageTitle ? `「${cr.pageTitle}」` : ""}以合集对应第 {s.season} 季（
+                            {formatSegmentEpisodeLabel(
+                              s.start,
+                              s.end,
+                              true,
+                              media?.seasons.find((seasonInfo) => seasonInfo.season === s.season)
+                                ?.episodeCount,
+                            )}
+                            ）
+                          </>
+                        ) : (
+                          <>
+                            {NAMESPACE_LABELS[cr.namespace]}
+                            {cr.pageTitle ? `「${cr.pageTitle}」` : ""}页面上的
+                            {formatEpisodeRange(
+                              s.targetStart,
+                              s.end === null ? null : s.targetStart + (s.end - s.start),
+                            )}
+                            ，就是第 {s.season} 季的{formatEpisodeRange(s.start, s.end)}
+                          </>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="font-medium text-foreground">
+                      {NAMESPACE_LABELS[cr.namespace]}
+                      {cr.pageTitle ? `「${cr.pageTitle}」` : ""}关联整部作品
                     </div>
-                  ))}
+                  )}
                   <div className="mt-0.5 font-mono text-2xs text-muted-foreground">
                     {cr.nativeId}
                   </div>
@@ -669,17 +668,32 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
             自动核对结果
           </h3>
           <p className="text-sm text-muted-foreground">
-            提交后系统按固定规则逐项核对：{passedCount} 项通过
-            {failedCount > 0 ? `，${failedCount} 项没通过` : ""}
-            {warnCount > 0 ? `，${warnCount} 项需要你看一眼` : ""}
+            {cr.checks.length > 0 ? (
+              <>
+                提交后系统按固定规则逐项核对：{passedCount} 项通过
+                {failedCount > 0 ? `，${failedCount} 项没通过` : ""}
+                {warnCount > 0 ? `，${warnCount} 项需要你看一眼` : ""}
+              </>
+            ) : cr.status === "pending_evidence" ? (
+              "系统正在后台拉取并核对页面与资料站信息，完成后会在这里逐项显示结果"
+            ) : (
+              "暂无逐项自动核对记录"
+            )}
           </p>
         </div>
 
         <Card>
           <CardContent className="divide-y divide-border/60 pt-4">
-            {cr.checks.map((chk) => (
-              <CheckItemRow key={chk.id} item={chk} showBadge={false} />
-            ))}
+            {cr.checks.length > 0 ? (
+              cr.checks.map((chk) => <CheckItemRow key={chk.id} item={chk} showBadge={false} />)
+            ) : (
+              <div className="py-2 text-xs text-muted-foreground">
+                {cr.decisionReason ??
+                  (cr.status === "pending_evidence"
+                    ? "自动核对任务处理中，请稍后刷新查看。"
+                    : "该变更单未能完成逐项自动核对。")}
+              </div>
+            )}
           </CardContent>
         </Card>
       </section>

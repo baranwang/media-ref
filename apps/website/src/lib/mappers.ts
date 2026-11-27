@@ -567,6 +567,7 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
       typeof collection?.featureEpisodeCount === "number" ? collection.featureEpisodeCount : null,
     variantLabel: cr.variantDescription ?? null,
     segments: cr.segments.map(segmentView),
+    replacesAssociationId: cr.replacesAssociationId ?? null,
     conflictReason: cr.conflictReason ?? null,
     decisionReason: cr.decisionReason ?? null,
     reviewerUserId: cr.reviewerUserId ?? null,
@@ -654,6 +655,7 @@ export function conflictTagFor(reason: string | null): string | null {
   if (reason.includes("year")) return "年份对不上";
   if (reason.includes("title")) return "片名对不上";
   if (reason.includes("lock")) return "挑战已锁定记录";
+  if (reason === "evidence_unavailable") return "自动核对失败";
   return "自动核对有冲突";
 }
 

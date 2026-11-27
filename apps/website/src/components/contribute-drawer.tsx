@@ -45,6 +45,8 @@ const SUBMIT_ERROR_MESSAGES: Record<string, string> = {
   UNAUTHORIZED: "登录已失效，请重新登录后再提交",
   EMAIL_NOT_VERIFIED: "邮箱还没验证，验证后才能提交变更单",
   SUBMISSION_QUOTA_EXCEEDED: "今天的提交次数已用完，明天再来吧",
+  NO_CHANGE: "当前已有完全一致的已确认关联，无需重复提交",
+  DUPLICATE_CHANGE_REQUEST: "已有一条相同的变更单正在自动核对或审核中，请等待处理",
 };
 
 function submitErrorMessage(error: unknown): string {
