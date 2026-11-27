@@ -18,12 +18,11 @@
     },
   },
   "vars": {
-    // Demands explored per UTC day. With one job per minute the cron runs at most 1440 a day, so
-    // this no longer caps by count; EXPLORATION_DAILY_TOKEN_BUDGET still bounds model spend.
+    // Demands explored per UTC day; EXPLORATION_DAILY_TOKEN_BUDGET still bounds model spend.
     "EXPLORATION_DAILY_BUDGET": "2000",
-    // One exploration job per cron tick: queue messages run one after another in one consumer
-    // invocation (15-minute wall clock), and a job may take up to its 5-minute budget.
-    "EXPLORATION_BATCH_SIZE": "1",
+    // Exploration jobs per cron tick. Each queue message gets its own consumer invocation
+    // (max_batch_size 1 below), so these run in parallel instead of one after another.
+    "EXPLORATION_BATCH_SIZE": "5",
     // Change requests the review agent reviews with a model per UTC day (ADR 0003). Beyond it they
     // wait for the next day; nothing is left for a person (CONSTITUTION.md).
     "REVIEW_AGENT_DAILY_BUDGET": "200",
@@ -62,8 +61,12 @@
     "consumers": [
       {
         "queue": "media-ref-jobs",
-        "max_batch_size": 10,
+        // One message per invocation: a batch runs its messages one after another within one
+        // 15-minute wall clock, and an exploration job may take its full 5-minute budget.
+        "max_batch_size": 1,
         "max_batch_timeout": 5,
+        // Shared by every job type; caps parallel explorations hitting platforms and the model.
+        "max_concurrency": 10,
       },
     ],
   },
