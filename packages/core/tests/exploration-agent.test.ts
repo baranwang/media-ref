@@ -41,4 +41,57 @@ describe("checkSegmentsFitCollection", () => {
       /episode 25/,
     );
   });
+
+  test("nonLinear segments link full-season collections with divergent episode counts", () => {
+    const seasonOf47 = (season: number) => (season === 3 ? 47 : null);
+    // 20 broadcast parts on Tencent covering a 47-entry TMDB season (e.g. 现在就出发 S3).
+    expect(
+      checkSegmentsFitCollection(
+        [
+          {
+            season: 3,
+            episodeStart: 1,
+            episodeEnd: null,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+            nonLinear: true,
+          },
+        ],
+        collection(20),
+        seasonOf47,
+      ),
+    ).toBeNull();
+    expect(
+      checkSegmentsFitCollection(
+        [
+          {
+            season: 3,
+            episodeStart: 1,
+            episodeEnd: null,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+            nonLinear: true,
+          },
+        ],
+        collection(0),
+        seasonOf47,
+      ),
+    ).toMatch(/0 fetched feature episodes/);
+    expect(
+      checkSegmentsFitCollection(
+        [
+          {
+            season: 3,
+            episodeStart: 1,
+            episodeEnd: 50,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+            nonLinear: true,
+          },
+        ],
+        collection(20),
+        seasonOf47,
+      ),
+    ).toMatch(/exceeds season 3 length 47/);
+  });
 });

@@ -1,6 +1,6 @@
 import { Avatar, AvatarFallback } from "@media-ref/ui/components/avatar";
 import { RiRobot2Line } from "@remixicon/react";
-import { formatDateTime, formatEpisodeRange } from "#/lib/format";
+import { formatDateTime, formatSegmentEpisodeLabel } from "#/lib/format";
 import type { ReviewAgentView } from "#/lib/types";
 
 /** The review agent's reasons, opinion and correction, as one reviewer note. */
@@ -32,8 +32,8 @@ export function ReviewAgentNote({
             <div>改正为第 {agent.correction.season} 季：</div>
             {agent.correction.segments.map((s) => (
               <div key={`${s.season}-${s.start}`} className="font-medium text-foreground">
-                第 {s.season} 季 {formatEpisodeRange(s.start, s.end)}
-                {s.targetStart !== s.start && (
+                第 {s.season} 季 {formatSegmentEpisodeLabel(s.start, s.end, s.nonLinear)}
+                {!s.nonLinear && s.targetStart !== s.start && (
                   <span className="font-normal text-muted-foreground">
                     {" "}
                     · 平台从第 {s.targetStart} 集起

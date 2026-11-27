@@ -2942,4 +2942,102 @@ describe("review agent: people comment, the agent verifies and replies (amendmen
       expect.objectContaining({ content: expect.stringContaining("维持通过") }),
     ]);
   });
+
+  test("revoke_with_correction supports nonLinear whole-season variety corrections without clamping episodeEnd to collection size", async () => {
+    const correctsToNonLinear: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 8 }],
+        ]);
+      }
+      return reply(turn, [
+        [
+          "revoke_with_correction",
+          {
+            opinion: "这是整季综艺合集，与 TMDB 分集口径不同，应按整季不拆集关联",
+            season: 8,
+            segments: [
+              {
+                season: 8,
+                episodeStart: 1,
+                episodeEnd: null,
+                targetEpisodeStart: 1,
+                nonLinear: true,
+              },
+            ],
+            reasons: [],
+            reply: "核实后已撤下原分段映射，改为整季不按集对应并重开探索。",
+          },
+        ],
+      ]);
+    };
+    const ctx = track(await setup(byComments(approvesSeason6, correctsToNonLinear)));
+    const media = await createWifeMedia(ctx);
+    // Give S8 (2026) 20 TMDB episodes (e.g. broadcast parts + extras) while ss77777 has 10 eps.
+    await ctx.testDb.writeDb
+      .updateTable("media")
+      .set({
+        seasons: JSON.stringify(
+          WIFE_SEASON_YEARS.map((airYear, i) => ({
+            season: i + 1,
+            episodeCount: i + 1 === 8 ? 20 : wifeEpisodeCount(i + 1),
+            airYear,
+          })),
+        ),
+      })
+      .where("id", "=", media.id)
+      .execute();
+    // Partial 1..10 (matching ss77777's 10 feature episodes) auto-approves on S8 (20 eps).
+    const id = await ctx.submit("ss77777", {
+      targetExternalKey: media.id,
+      segments: wifeSegments(8, 10),
+    });
+    await ctx.drain();
+    const approved = await ctx.changeRequest(id);
+    expect(approved.status).toBe("approved");
+
+    const commentId = await comment(ctx, id, "明明整季都在这，不用拆集看");
+    await ctx.drain();
+
+    const cr = await ctx.changeRequest(id);
+    expect(cr.status).toBe("rejected");
+    expect(cr.decision_reason).toContain("整季（不按集对应）");
+    expect((cr.evidence as Record<string, any>).reviewAgent).toMatchObject({
+      verdict: "revoke_with_correction",
+      fallback: null,
+      correction: {
+        season: 8,
+        segments: [
+          {
+            season: 8,
+            episodeStart: 1,
+            episodeEnd: null,
+            targetEpisodeStart: 1,
+            nonLinear: true,
+          },
+        ],
+      },
+    });
+    expect(
+      await ctx.testDb.readDb.selectFrom("leads").select(["season", "segments"]).execute(),
+    ).toEqual([
+      {
+        season: 8,
+        segments: [
+          {
+            season: 8,
+            episodeStart: 1,
+            episodeEnd: null,
+            targetEpisodeStart: 1,
+            nonLinear: true,
+          },
+        ],
+      },
+    ]);
+    expect(await replyTo(ctx, id, commentId)).toEqual([
+      expect.objectContaining({ content: expect.stringContaining("整季（不按集对应）") }),
+    ]);
+  });
 });

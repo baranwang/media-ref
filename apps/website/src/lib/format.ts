@@ -43,3 +43,24 @@ export function formatEpisodeRange(start: number, end: number | null): string {
   if (end === null) return `第 ${start} 集起`;
   return start === end ? `第 ${start} 集` : `第 ${start}–${end} 集`;
 }
+
+/**
+ * Formats a segment's episode coverage label, indicating when a mapping links a collection
+ * without 1:1 per-episode numbering (`nonLinear`).
+ */
+export function formatSegmentEpisodeLabel(
+  start: number,
+  end: number | null,
+  nonLinear?: boolean,
+  wholeSeasonEpisodes?: number,
+): string {
+  if (!nonLinear) {
+    return formatEpisodeRange(start, end);
+  }
+  const coversWholeSeason =
+    start === 1 &&
+    (end === null || (wholeSeasonEpisodes !== undefined && end >= wholeSeasonEpisodes));
+  return coversWholeSeason
+    ? "整季收录 · 不按集对应"
+    : `${formatEpisodeRange(start, end)}（不按集对应）`;
+}

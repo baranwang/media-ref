@@ -40,7 +40,7 @@ import { CoverageLegend, CoverageRuler, CoverageTrack } from "#/components/cover
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
 import { PLATFORM_COUNT } from "#/lib/catalogs";
-import { formatDate, formatEpisodeRange } from "#/lib/format";
+import { formatDate, formatSegmentEpisodeLabel } from "#/lib/format";
 import { LONG_SERIES_SEASONS } from "#/lib/mappers";
 import { associationRevisionsQuery, mediaDetailQuery } from "#/lib/queries";
 import type { CoverageSegment, PlatformVariantRow } from "#/lib/types";
@@ -150,6 +150,14 @@ function MediaDetailPage() {
         : (row.segmentsBySeason[selectedSeason] ?? []);
   // A platform with nothing for this season has no page to link to, so it gets no row here.
   const platformRows = media.platformRows.filter((row) => segmentsInView(row).length > 0);
+  const platformSegments = platformRows.flatMap(segmentsInView);
+  const hasNonLinearPlatform =
+    !isMovie && !isAllSeasons && platformSegments.some((s) => s.nonLinear);
+  const allNonLinearPlatform =
+    !isMovie &&
+    !isAllSeasons &&
+    platformSegments.length > 0 &&
+    platformSegments.every((s) => s.nonLinear && s.start <= 1 && s.end >= totalEpisodesForAxis);
 
   const availablePlatformCount = new Set(media.platformRows.map((r) => r.namespace)).size;
   const catalogLink = parseExternalInput(media.catalogKey);
@@ -167,7 +175,7 @@ function MediaDetailPage() {
 
   const showCatalogRuler =
     !isMovie &&
-    (platformRows.length === 0 || isLongSeries) &&
+    (platformRows.length === 0 || isLongSeries || allNonLinearPlatform) &&
     catalogRows.some((r) => catalogSegmentsInView(r).length > 0);
 
   const openContribute = (prefill?: { url?: string; variant?: string }) => {
@@ -396,7 +404,11 @@ function MediaDetailPage() {
                     ? "以下平台可看正片"
                     : isAllSeasons
                       ? `全部 ${seasonCount} 季 · 看哪几季缺。切回单季看每一集`
-                      : `第 ${selectedSeason} 季${isLongSeries ? ` · ${totalEpisodesForAxis} 集` : ""} · 以 TMDB 的集数为准，横条是每个平台收录的集数`}
+                      : allNonLinearPlatform
+                        ? `第 ${selectedSeason} 季 · 整季按合集收录，不按 TMDB 的 ${totalEpisodesForAxis} 集逐集拆分，点击「去看」即可`
+                        : hasNonLinearPlatform
+                          ? `第 ${selectedSeason} 季${isLongSeries ? ` · ${totalEpisodesForAxis} 集` : ""} · 以 TMDB 的集数为准；标有「整季不拆集」的平台直接打开合集观看`
+                          : `第 ${selectedSeason} 季${isLongSeries ? ` · ${totalEpisodesForAxis} 集` : ""} · 以 TMDB 的集数为准，横条是每个平台收录的集数`}
               </p>
             </div>
             {platformRows.length > 0 && !isMovie && <CoverageLegend />}
@@ -422,7 +434,7 @@ function MediaDetailPage() {
           ) : (
             <div className="flex flex-col">
               {/* Axis Ruler outside the card, aligned to the coverage track (matching Figma 02A) */}
-              {!isMovie && (
+              {!isMovie && !allNonLinearPlatform && (
                 <div className="flex items-center gap-4 px-5 pb-1.5">
                   <div className="w-52 shrink-0" />
                   <div className="min-w-0 flex-1">
@@ -535,8 +547,15 @@ function MediaDetailPage() {
                                       <span className="w-24 shrink-0 truncate font-mono text-xs text-muted-foreground">
                                         {seg.nativeId}
                                       </span>
-                                      <span className="w-24 shrink-0 text-xs text-muted-foreground">
-                                        {!isMovie ? formatEpisodeRange(seg.start, seg.end) : "正片"}
+                                      <span className="w-36 shrink-0 text-xs text-muted-foreground">
+                                        {!isMovie
+                                          ? formatSegmentEpisodeLabel(
+                                              seg.start,
+                                              seg.end,
+                                              seg.nonLinear,
+                                              totalEpisodesForAxis,
+                                            )
+                                          : "正片"}
                                       </span>
                                       <div className="min-w-0 flex-1">
                                         {seg.status === "pending" ? (
@@ -795,11 +814,14 @@ function RevisionHistory({ segments }: { segments: CoverageSegment[] }) {
               {rev.segments.length === 0
                 ? "整部"
                 : rev.segments
-                    .map((s) =>
-                      s.season > 0
-                        ? `第 ${s.season} 季 ${formatEpisodeRange(s.episodeStart, s.episodeEnd ?? null)}`
-                        : formatEpisodeRange(s.episodeStart, s.episodeEnd ?? null),
-                    )
+                    .map((s) => {
+                      const epLabel = formatSegmentEpisodeLabel(
+                        s.episodeStart,
+                        s.episodeEnd ?? null,
+                        s.nonLinear,
+                      );
+                      return s.season > 0 ? `第 ${s.season} 季 ${epLabel}` : epLabel;
+                    })
                     .join("、")}
             </div>
             <div className="mt-0.5 text-muted-foreground">

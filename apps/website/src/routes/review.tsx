@@ -28,7 +28,7 @@ import { CommentComposer, CommentThread } from "#/components/comment-thread";
 import { CoverageLegend, CoverageRuler, CoverageTrack } from "#/components/coverage-bar";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
-import { formatEpisodeRange, formatRelativeTime } from "#/lib/format";
+import { formatEpisodeRange, formatRelativeTime, formatSegmentEpisodeLabel } from "#/lib/format";
 import { conflictTagFor } from "#/lib/mappers";
 import {
   agentApprovalsQuery,
@@ -50,13 +50,14 @@ function queueTagFor(cr: ChangeRequestItem): string | null {
   );
 }
 
-/** "第 a–b 集" spanning every bar, or "无记录". */
+/** "第 a–b 集" spanning every bar, or non-linear whole-season summary, or "无记录". */
 function spanLabel(segments: CoverageSegment[]): string {
   if (segments.length === 0) return "无记录";
-  return formatEpisodeRange(
+  const range = formatEpisodeRange(
     Math.min(...segments.map((s) => s.start)),
     Math.max(...segments.map((s) => s.end)),
   );
+  return segments.every((s) => s.nonLinear) ? `${range} · 不按集对应` : range;
 }
 
 function ErrorAlert({ title, error }: { title: string; error: Error }) {
@@ -226,7 +227,7 @@ function ReviewWorkbenchPage() {
                               <span className="truncate">
                                 {NAMESPACE_LABELS[cr.namespace]}
                                 {first &&
-                                  ` · 第 ${first.season} 季 ${formatEpisodeRange(first.start, first.end)}`}
+                                  ` · 第 ${first.season} 季 ${formatSegmentEpisodeLabel(first.start, first.end, first.nonLinear)}`}
                               </span>
                             </div>
                             <div className="mt-1.5 flex items-center gap-2">
@@ -392,7 +393,7 @@ function ReviewWorkbenchPage() {
                                 {" "}
                                 · {NAMESPACE_LABELS[cr.namespace]}
                                 {first &&
-                                  ` · 第 ${first.season} 季 ${formatEpisodeRange(first.start, first.end)}`}
+                                  ` · 第 ${first.season} 季 ${formatSegmentEpisodeLabel(first.start, first.end, first.nonLinear)}`}
                               </span>
                             </div>
                             {cr.reviewAgent?.reasons.map((r) => (
@@ -496,6 +497,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
     start: s.start,
     end: s.end ?? totalSeasonEpisodes,
     targetStart: s.targetStart,
+    ...(s.nonLinear ? { nonLinear: true } : {}),
     status: "pending",
     changeRequestId: cr.id,
   }));
@@ -537,7 +539,8 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
               <span>
                 {NAMESPACE_LABELS[cr.namespace]}
                 {cr.variantLabel ? ` · ${cr.variantLabel}` : ""}
-                {primary && ` · 补充${formatEpisodeRange(primary.start, primary.end)}`}
+                {primary &&
+                  ` · 补充${formatSegmentEpisodeLabel(primary.start, primary.end, primary.nonLinear)}`}
               </span>
             </div>
             {tag && (
@@ -623,13 +626,30 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
                 <div className="min-w-0 flex-1">
                   {cr.segments.map((s) => (
                     <div key={`${s.season}-${s.start}`} className="font-medium text-foreground">
-                      {NAMESPACE_LABELS[cr.namespace]}
-                      {cr.pageTitle ? `「${cr.pageTitle}」` : ""}页面上的
-                      {formatEpisodeRange(
-                        s.targetStart,
-                        s.end === null ? null : s.targetStart + (s.end - s.start),
+                      {s.nonLinear ? (
+                        <>
+                          {NAMESPACE_LABELS[cr.namespace]}
+                          {cr.pageTitle ? `「${cr.pageTitle}」` : ""}按整季合集对应第 {s.season}{" "}
+                          季（
+                          {formatSegmentEpisodeLabel(
+                            s.start,
+                            s.end,
+                            true,
+                            s.end === null ? undefined : totalSeasonEpisodes,
+                          )}
+                          ）
+                        </>
+                      ) : (
+                        <>
+                          {NAMESPACE_LABELS[cr.namespace]}
+                          {cr.pageTitle ? `「${cr.pageTitle}」` : ""}页面上的
+                          {formatEpisodeRange(
+                            s.targetStart,
+                            s.end === null ? null : s.targetStart + (s.end - s.start),
+                          )}
+                          ，就是第 {s.season} 季的{formatEpisodeRange(s.start, s.end)}
+                        </>
                       )}
-                      ，就是第 {s.season} 季的{formatEpisodeRange(s.start, s.end)}
                     </div>
                   ))}
                   <div className="mt-0.5 font-mono text-2xs text-muted-foreground">

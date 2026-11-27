@@ -1,5 +1,6 @@
 import { proto, type MediaDocument } from "@media-ref/client";
 import { expect, test } from "vite-plus/test";
+import { formatSegmentEpisodeLabel } from "../src/lib/format.ts";
 import {
   changeRequestFromGetResponse,
   changeRequestFromProto,
@@ -359,4 +360,91 @@ test("a rejected change request carries the other request its collection went li
       changeRequest: reviewedCr({ status: proto.ChangeRequestStatus.REJECTED }),
     } as unknown as Parameters<typeof changeRequestFromGetResponse>[0])?.liveChangeRequestId,
   ).toBeNull();
+});
+
+test("propagates nonLinear on whole-season variety associations and change requests", () => {
+  const document = {
+    media: {
+      id: "m-variety",
+      type: "tv",
+      baseline: "tmdb",
+      snapshot: {
+        title: "现在就出发",
+        seasons: [
+          { season: 1, episodeCount: 20 },
+          { season: 3, episodeCount: 47 },
+        ],
+      },
+    },
+    variants: [],
+    externalIds: [],
+    associations: [
+      {
+        id: "a-tx",
+        namespace: "tencent",
+        nativeId: "mzc00200znyfa5u",
+        title: "现在就出发 第3季",
+        status: "active",
+        segments: [
+          {
+            season: 3,
+            episodeStart: 1,
+            episodeEnd: null,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+            nonLinear: true,
+          },
+        ],
+      },
+    ],
+  } as unknown as MediaDocument;
+
+  const row = mediaItemFrom("m-variety", document, null)!.platformRows[0]!;
+  expect(row.segmentsBySeason[3]).toEqual([
+    expect.objectContaining({
+      nativeId: "mzc00200znyfa5u",
+      start: 1,
+      end: 47,
+      targetStart: 1,
+      nonLinear: true,
+    }),
+  ]);
+
+  const cr = changeRequestFromProto(
+    reviewedCr({
+      segments: [
+        { season: 3, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true },
+      ],
+      evidence: {
+        reviewAgent: {
+          verdict: "revoke_with_correction",
+          reasons: [],
+          opinion: "整季收录，不按集对应",
+          correction: {
+            season: 3,
+            segments: [
+              {
+                season: 3,
+                episodeStart: 1,
+                episodeEnd: null,
+                targetEpisodeStart: 1,
+                nonLinear: true,
+              },
+            ],
+          },
+        },
+      },
+    }),
+  );
+  expect(cr.segments).toEqual([
+    { season: 3, start: 1, end: null, targetStart: 1, nonLinear: true },
+  ]);
+  expect(cr.reviewAgent?.correction).toEqual({
+    season: 3,
+    segments: [{ season: 3, start: 1, end: null, targetStart: 1, nonLinear: true }],
+  });
+  expect(formatSegmentEpisodeLabel(1, 47, true, 47)).toBe("整季收录 · 不按集对应");
+  expect(formatSegmentEpisodeLabel(1, null, true)).toBe("整季收录 · 不按集对应");
+  expect(formatSegmentEpisodeLabel(1, 20, true, 47)).toBe("第 1–20 集（不按集对应）");
+  expect(formatSegmentEpisodeLabel(1, 20, false, 47)).toBe("第 1–20 集");
 });

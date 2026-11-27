@@ -18,6 +18,7 @@ export interface CoverageSegment {
   /** 1-based inclusive end episode (or season in all-seasons mode) */
   end: number;
   targetStart?: number;
+  nonLinear?: boolean;
   status: "confirmed" | "pending" | "muted";
   changeRequestId?: string;
   /** Association that backs this bar (for version history). */
@@ -160,6 +161,7 @@ export interface ChangeRequestSegmentView {
   start: number;
   end: number | null;
   targetStart: number;
+  nonLinear?: boolean;
 }
 
 /** What the review agent concluded, from `evidence.reviewAgent`. */
