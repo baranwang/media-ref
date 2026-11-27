@@ -7,6 +7,7 @@ import {
 } from "@media-ref/client";
 import { Alert, AlertDescription, AlertTitle } from "@media-ref/ui/components/alert";
 import { Button } from "@media-ref/ui/components/button";
+import { Checkbox } from "@media-ref/ui/components/checkbox";
 import {
   Drawer,
   DrawerClose,
@@ -44,6 +45,8 @@ const SUBMIT_ERROR_MESSAGES: Record<string, string> = {
   UNAUTHORIZED: "登录已失效，请重新登录后再提交",
   EMAIL_NOT_VERIFIED: "邮箱还没验证，验证后才能提交变更单",
   SUBMISSION_QUOTA_EXCEEDED: "今天的提交次数已用完，明天再来吧",
+  NO_CHANGE: "当前已有完全一致的已确认关联，无需重复提交",
+  DUPLICATE_CHANGE_REQUEST: "已有一条相同的变更单正在自动核对或审核中，请等待处理",
 };
 
 function submitErrorMessage(error: unknown): string {
@@ -86,6 +89,7 @@ export function ContributeDrawer({
   );
   const [targetStart, setTargetStart] = useState(1);
   const [editingOffset, setEditingOffset] = useState(false);
+  const [nonLinear, setNonLinear] = useState(false);
 
   const existingVariants = useMemo(() => {
     const set = new Set<string>();
@@ -107,6 +111,7 @@ export function ContributeDrawer({
     if (open) {
       const s = initialSeason ?? media.defaultSeason ?? media.seasons[0]?.season ?? 1;
       setSeason(s);
+      setNonLinear(false);
       if (prefillUrl !== undefined) {
         setUrlInput(prefillUrl);
       }
@@ -132,6 +137,12 @@ export function ContributeDrawer({
     const e = Math.max(s, Math.min(episodeEnd, totalEps));
     return { start: s, end: e };
   }, [media.type, scope, episodeStart, episodeEnd, totalEps]);
+
+  const isNonLinear =
+    media.type !== "movie" &&
+    media.seasons.length > 0 &&
+    (scope === "whole_season" || scope === "partial") &&
+    nonLinear;
 
   const spanLength = effectiveRange.end - effectiveRange.start + 1;
   const targetEnd = targetStart + spanLength - 1;
@@ -163,14 +174,19 @@ export function ContributeDrawer({
   const previewSegments: CoverageSegment[] = useMemo(() => {
     const proposed: CoverageSegment = {
       id: "preview-proposed",
-      title: `本次提交 · ${effectiveRange.start}–${effectiveRange.end}`,
+      title: isNonLinear
+        ? scope === "whole_season"
+          ? "本次提交 · 整季"
+          : `本次提交 · ${effectiveRange.start}–${effectiveRange.end}`
+        : `本次提交 · ${effectiveRange.start}–${effectiveRange.end}`,
       nativeId: parsed?.nativeId ?? "",
       start: effectiveRange.start,
       end: effectiveRange.end,
+      ...(isNonLinear ? { nonLinear: true } : {}),
       status: "pending",
     };
     return [...existingSegments, proposed];
-  }, [existingSegments, effectiveRange, parsed?.nativeId]);
+  }, [existingSegments, effectiveRange, isNonLinear, scope, parsed?.nativeId]);
 
   const allVariantOptions = [...existingVariants, ...customVariants];
 
@@ -194,18 +210,20 @@ export function ContributeDrawer({
       const baseline = media.baseline ?? undefined;
       const wholeMedia =
         media.type === "movie" || media.seasons.length === 0 || scope === "whole_media";
+      const effectiveTargetStart = isNonLinear ? 1 : targetStart;
       const segments = wholeMedia
         ? []
         : [
             toProtoSegmentInput(
-              scope === "whole_season" && targetStart === 1
-                ? { season, baseline }
+              scope === "whole_season" && effectiveTargetStart === 1
+                ? { season, baseline, ...(isNonLinear ? { nonLinear: true } : {}) }
                 : {
                     season,
                     episodeStart: effectiveRange.start,
                     episodeEnd: scope === "whole_season" ? null : effectiveRange.end,
-                    targetEpisodeStart: targetStart,
+                    targetEpisodeStart: effectiveTargetStart,
                     baseline,
+                    ...(isNonLinear ? { nonLinear: true } : {}),
                   },
             ),
           ];
@@ -423,32 +441,49 @@ export function ContributeDrawer({
                 </div>
               )}
 
-              <div className="flex items-center justify-between text-xs text-muted-foreground">
-                <span>
-                  在这个{parsed ? NAMESPACE_LABELS[parsed.namespace] : "平台"}页面里是第{" "}
-                  {targetStart}–{targetEnd} 集
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setEditingOffset((v) => !v)}
-                  className="text-foreground underline underline-offset-4 hover:text-primary"
-                >
-                  {editingOffset ? "完成" : "修改"}
-                </button>
-              </div>
-
-              {editingOffset && (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span>平台页面起始集数：第</span>
-                  <Input
-                    type="number"
-                    min={1}
-                    value={targetStart}
-                    onChange={(e) => setTargetStart(Math.max(1, Number(e.target.value) || 1))}
-                    className="w-16 text-center font-mono"
+              {(scope === "whole_season" || scope === "partial") && (
+                <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border/70 bg-muted/20 p-2.5 text-xs">
+                  <Checkbox
+                    checked={nonLinear}
+                    onCheckedChange={(checked) => setNonLinear(Boolean(checked))}
+                    className="mt-0.5"
                   />
-                  <span>集</span>
-                </div>
+                  <span className="leading-5 text-foreground">
+                    不按集对应（如综艺上/下期、加更导致集数与 TMDB 不同，整季打开合集即可）
+                  </span>
+                </label>
+              )}
+
+              {!isNonLinear && (
+                <>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>
+                      在这个{parsed ? NAMESPACE_LABELS[parsed.namespace] : "平台"}页面里是第{" "}
+                      {targetStart}–{targetEnd} 集
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setEditingOffset((v) => !v)}
+                      className="text-foreground underline underline-offset-4 hover:text-primary"
+                    >
+                      {editingOffset ? "完成" : "修改"}
+                    </button>
+                  </div>
+
+                  {editingOffset && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>平台页面起始集数：第</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={targetStart}
+                        onChange={(e) => setTargetStart(Math.max(1, Number(e.target.value) || 1))}
+                        className="w-16 text-center font-mono"
+                      />
+                      <span>集</span>
+                    </div>
+                  )}
+                </>
               )}
 
               {/* Live preview */}

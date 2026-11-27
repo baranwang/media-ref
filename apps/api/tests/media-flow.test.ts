@@ -1,4 +1,5 @@
 import {
+  extractConnectErrorInfo,
   fromProtoChangeRequestStatus,
   fromProtoMediaDocument,
   fromProtoMediaRef,
@@ -7,10 +8,12 @@ import {
   type MediaRef,
 } from "@media-ref/client";
 import {
+  approveChangeRequest,
   bilibiliAdapter,
   createAdapterRegistry,
   createFakeOutboundClient,
   rejectChangeRequest,
+  resolveCatalogTargetSnapshot,
   type ExternalHttpRequest,
 } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
@@ -613,12 +616,18 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
 
     const platform = { ...request, namespace: "bilibili", nativeId: "ss34430", segments: [] };
     const page = "https://www.bilibili.com/bangumi/play/ss34430";
-    for (const [rawNativeId, stored] of [
-      [page, page],
-      ["https://www.bilibili.com/bangumi/play/ss45574", platform.nativeId],
-      ["https://example.invalid/collection", platform.nativeId],
-    ] as const) {
-      const result = await rpc.createChangeRequest({ ...platform, rawNativeId });
+    for (const [index, [rawNativeId, stored]] of (
+      [
+        [page, page],
+        ["https://www.bilibili.com/bangumi/play/ss45574", platform.nativeId],
+        ["https://example.invalid/collection", platform.nativeId],
+      ] as const
+    ).entries()) {
+      const result = await rpc.createChangeRequest({
+        ...platform,
+        rawNativeId,
+        variantDescription: index === 0 ? "原声" : `原声-${index}`,
+      });
       expect(result.changeRequest?.rawNativeId).toBe(stored);
     }
     expect(outbound.httpRequests).toHaveLength(0);
@@ -1122,5 +1131,220 @@ describe("API Worker core write -> review -> read media flow (#8)", () => {
     } finally {
       await readOnlyDb.destroy();
     }
+  });
+
+  test("rejects duplicate in-flight and no-op change requests (#98) while allowing real updates", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const outbound = createFakeOutboundClient({
+      fetchExternal: createCatalogStubHandler(),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      adapterRegistry: createAdapterRegistry([bilibiliAdapter]),
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        tmdb: TMDB,
+      },
+    });
+
+    const contributor = await signUpUser(app, outbound, {
+      email: "noop-contributor@example.com",
+      password: "StrongPassword123!",
+      name: "Contributor",
+      verify: true,
+    });
+    const secondUser = await signUpUser(app, outbound, {
+      email: "noop-other@example.com",
+      password: "StrongPassword123!",
+      name: "Other User",
+      verify: true,
+    });
+    const key1 = await issueApiKeyRpc(app, contributor.cookie, { name: "k1", canSubmit: true });
+    const key2 = await issueApiKeyRpc(app, secondUser.cookie, { name: "k2", canSubmit: true });
+    const rpc1 = createRpcClients(app, { apiKey: key1.key });
+    const rpc2 = createRpcClients(app, { apiKey: key2.key });
+
+    const basePayload = {
+      target: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+      namespace: "bilibili",
+      nativeId: "https://www.bilibili.com/bangumi/play/ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    };
+
+    // 1. Concurrent identical submissions race cleanly: only 1 succeeds, the rest reject as 409 DUPLICATE_CHANGE_REQUEST
+    const concurrentResults = await Promise.allSettled([
+      rpc1.changeRequest.createChangeRequest(basePayload),
+      rpc2.changeRequest.createChangeRequest({
+        ...basePayload,
+        nativeId: "https://m.bilibili.com/bangumi/play/ss34430?from=share",
+      }),
+      rpc2.changeRequest.createChangeRequest({
+        ...basePayload,
+        nativeId: "ss34430",
+      }),
+    ]);
+    const fulfilled = concurrentResults.filter((r) => r.status === "fulfilled");
+    const rejected = concurrentResults.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(2);
+    for (const rej of rejected) {
+      expect(extractConnectErrorInfo(rej.reason)).toMatchObject({
+        status: 409,
+        code: "DUPLICATE_CHANGE_REQUEST",
+      });
+    }
+    const firstCrId = fulfilled[0]!.value.changeRequest!.id;
+
+    // 1b. Concurrent identical submissions sharing the same taskId stay idempotent (all return the same CR)
+    const sharedTaskId = crypto.randomUUID();
+    const taskPayload = {
+      ...basePayload,
+      taskId: sharedTaskId,
+      target: mediaRef("douban:35235320"),
+      segments: [],
+      variantDescription: "粤语",
+    };
+    const concurrentTaskResults = await Promise.all([
+      rpc1.changeRequest.createChangeRequest(taskPayload),
+      rpc1.changeRequest.createChangeRequest(taskPayload),
+      rpc1.changeRequest.createChangeRequest(taskPayload),
+    ]);
+    const taskCrIds = new Set(concurrentTaskResults.map((r) => r.changeRequest?.id));
+    expect(taskCrIds.size).toBe(1);
+    expect([...taskCrIds][0]).toBeTruthy();
+
+    // Different segment range on the same in-flight collection IS allowed
+    const extendedPendingRes = await rpc1.changeRequest.createChangeRequest({
+      ...basePayload,
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    });
+    expect(extendedPendingRes.changeRequest?.id).toBeTruthy();
+
+    // Clean up extended CR by rejecting it, then approve firstCr so collection is confirmed
+    await rejectChangeRequest(testDb.writeDb, {
+      changeRequestId: extendedPendingRes.changeRequest!.id,
+      reviewerUserId: contributor.userId,
+      reason: "Superseded for test setup",
+      allowedStatuses: ["pending_evidence"],
+    });
+    const prefetched = await resolveCatalogTargetSnapshot("tmdb:tv:95479", outbound, {
+      tmdb: TMDB,
+    });
+    if (prefetched.status !== "found") {
+      throw new Error("Expected catalog snapshot for tmdb:tv:95479");
+    }
+    const approved = await approveChangeRequest(testDb.writeDb, outbound, {
+      changeRequestId: firstCrId,
+      reviewerUserId: null,
+      reason: "Confirm E1-12",
+      prefetchedCatalog: prefetched.target,
+      allowedStatuses: ["pending_evidence"],
+    });
+
+    // The original pending request was filed before its Douban catalog key resolved to this media.
+    await testDb.writeDb
+      .insertInto("associations")
+      .values({
+        media_id: approved.mediaId,
+        namespace: "douban",
+        native_id: "35235320",
+        status: "confirmed",
+        is_external_id: false,
+      })
+      .execute();
+    expect(
+      await expectRpcError(
+        rpc2.changeRequest.createChangeRequest({
+          ...taskPayload,
+          taskId: undefined,
+          target: mediaRef(approved.mediaId),
+        }),
+      ),
+    ).toMatchObject({ status: 409, code: "DUPLICATE_CHANGE_REQUEST" });
+
+    // 2. Submitting the exact same confirmed mapping (either by variantDescription or variantId) rejects with 409 NO_CHANGE
+    const mediaDoc = await rpc1.media.getMedia({
+      ref: mediaRef({ tmdb: { type: "tv", id: 95479 } }),
+    });
+    const variantId = mediaDoc.document?.variants[0]?.id;
+    expect(variantId).toBeTruthy();
+
+    expect(
+      await expectRpcError(
+        rpc1.changeRequest.createChangeRequest({
+          ...basePayload,
+          target: mediaRef(approved.mediaId),
+          nativeId: "ss34430",
+        }),
+      ),
+    ).toMatchObject({ status: 409, code: "NO_CHANGE" });
+
+    expect(
+      await expectRpcError(
+        rpc2.changeRequest.createChangeRequest({
+          ...basePayload,
+          variantDescription: undefined,
+          variantId,
+          setDefaultVariant: true, // variant is already default
+        }),
+      ),
+    ).toMatchObject({ status: 409, code: "NO_CHANGE" });
+
+    // 3. Valid modifications against the confirmed collection remain allowed:
+    // extending episode range (1-12 -> 1-24) or switching to a new variant description ("中配")
+    const extendConfirmedRes = await rpc1.changeRequest.createChangeRequest({
+      ...basePayload,
+      segments: [
+        toProtoSegmentInput({
+          season: 1,
+          episodeStart: 1,
+          episodeEnd: 24,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        }),
+      ],
+    });
+    expect(extendConfirmedRes.changeRequest?.id).toBeTruthy();
+
+    const newVariantRes = await rpc2.changeRequest.createChangeRequest({
+      ...basePayload,
+      variantDescription: "中配",
+    });
+    expect(newVariantRes.changeRequest?.id).toBeTruthy();
+
+    // 4. Rejecting a CR does not block a fresh re-submission of the same payload later
+    await rejectChangeRequest(testDb.writeDb, {
+      changeRequestId: newVariantRes.changeRequest!.id,
+      reviewerUserId: secondUser.userId,
+      reason: "Transient check failure",
+      allowedStatuses: ["pending_evidence"],
+    });
+    const resubmittedAfterReject = await rpc2.changeRequest.createChangeRequest({
+      ...basePayload,
+      variantDescription: "中配",
+    });
+    expect(resubmittedAfterReject.changeRequest?.id).not.toBe(newVariantRes.changeRequest!.id);
   });
 });

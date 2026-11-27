@@ -429,12 +429,12 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     ];
     const submittedIds: string[] = [];
 
-    for (const rawInput of urlVariants) {
+    for (const [index, rawInput] of urlVariants.entries()) {
       const body = await submitRpc.changeRequest.createChangeRequest({
         target: mediaRef({ tmdb: { type: "tv", id: 108545 } }),
         namespace: "tencent",
         nativeId: rawInput,
-        variantDescription: "原声",
+        variantDescription: index === 0 ? "原声" : `原声-${index}`,
         segments: [
           toProtoSegmentInput({
             season: 1,

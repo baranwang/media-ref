@@ -133,7 +133,7 @@ const POSITION_GAP_CONFLICT_CODES: ReadonlySet<string> = new Set([
   "segment_episode_count_mismatch",
 ]);
 
-/** Why the segments' platform positions don't fit the collection: past its end, or overlapping. */
+/** Why the segments' platform positions don't fit the collection: empty, past its end, or overlapping. */
 function positionMisfit(
   segments: readonly NormalizedSegment[],
   collection: CollectionInfo,
@@ -142,6 +142,16 @@ function positionMisfit(
   const count = (season: number) => seasons.find((s) => s.season === season)?.episodeCount ?? null;
   // An open end runs to the collection's end (a season still airing), at most to the season's end.
   const available = collection.featureEpisodes.length;
+  if (segments.some((s) => s.nonLinear)) {
+    const nonLinearMisfit = checkSegmentsFitCollection(
+      segments.filter((s) => s.nonLinear),
+      collection,
+      count,
+    );
+    if (nonLinearMisfit) {
+      return nonLinearMisfit;
+    }
+  }
   const ended = segments
     .filter((s) => !s.nonLinear)
     .map((s) => ({
@@ -214,6 +224,7 @@ interface ReviewCorrection {
     episodeStart: number;
     episodeEnd: number | null;
     targetEpisodeStart: number;
+    nonLinear?: boolean;
   }>;
 }
 
@@ -484,6 +495,7 @@ function buildSystemPrompt(mode: ReviewMode, conclusions: string, hasComments: b
     "3. A platform episode number is the position in the collection's feature episode list, counted from 1, not the number in the episode title.",
     "4. Extras (chapters, recaps, specials) mixed into the platform's list shift every later position. Check that each segment's episodes land on the right positions.",
     "   Example: 灵笼 season 1 on Bilibili has 16 entries: 001–006, 中章, 007–012, 终章上, 终章下, 特别篇. TMDB season 1 has 12 episodes; 中章, 终章 and 特别篇 are in TMDB season 0. Mapping the whole season from position 1 puts TMDB 7–12 on positions 7–12, one off. The right segments are episodes 1–6 at positions 1–6 and 7–12 at positions 8–13. Extras at the end of the list need no split.",
+    "   For variety shows or collections covering a complete season whose episode count diverges from TMDB because broadcast parts (第N期上/下) and extras/prologues are grouped differently (e.g. 20 broadcast parts covering the whole run while TMDB lists 47 with extras), do NOT truncate episodeEnd to a shorter linear prefix like 1..20; approve or correct with { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.",
     "5. Long lists come in windows of 80. When a result has episodesTruncated, fetch the rest with get_collection fromPosition and get_catalog_season fromEpisode before judging positions you have not seen; request all the windows you need in one turn.",
     mode === "approved"
       ? "6. If you cannot confirm the mapping is wrong, keep it and say what you found."
@@ -561,6 +573,11 @@ const CORRECTION_PROPERTIES = {
         episodeStart: { type: "integer" },
         episodeEnd: { type: ["integer", "null"] },
         targetEpisodeStart: { type: "integer" },
+        nonLinear: {
+          type: "boolean",
+          description:
+            "True when the collection holds the whole season without 1:1 episode mapping (e.g. variety shows with divergent broadcast splits/extras).",
+        },
       },
       required: ["season", "episodeStart", "targetEpisodeStart"],
     },
@@ -670,6 +687,7 @@ function parseCorrection(args: Record<string, unknown>): ReviewCorrection | null
             episodeStart: s.episodeStart,
             episodeEnd: end,
             targetEpisodeStart: s.targetEpisodeStart,
+            ...(s.nonLinear === true ? { nonLinear: true } : {}),
           },
         ]
       : [];
@@ -684,9 +702,12 @@ function parseCorrection(args: Record<string, unknown>): ReviewCorrection | null
 
 function describeCorrection(correction: ReviewCorrection): string {
   return correction.segments
-    .map(
-      (s) =>
-        `第 ${s.season} 季第 ${s.episodeStart}–${s.episodeEnd ?? "末"} 集对平台第 ${s.targetEpisodeStart} 集起`,
+    .map((s) =>
+      s.nonLinear
+        ? s.episodeStart === 1 && s.episodeEnd === null
+          ? `第 ${s.season} 季整季（不按集对应）`
+          : `第 ${s.season} 季第 ${s.episodeStart}–${s.episodeEnd ?? "末"} 集（不按集对应）`
+        : `第 ${s.season} 季第 ${s.episodeStart}–${s.episodeEnd ?? "末"} 集对平台第 ${s.targetEpisodeStart} 集起`,
     )
     .join("；");
 }
@@ -1532,6 +1553,9 @@ function boundToCollection(
   return {
     ...correction,
     segments: correction.segments.map((s) => {
+      if (s.nonLinear) {
+        return s;
+      }
       const lastSeen = s.episodeStart + available - s.targetEpisodeStart;
       const count = seasons.find((x) => x.season === s.season)?.episodeCount ?? null;
       return s.episodeEnd === null && count !== null && lastSeen < count
@@ -1560,7 +1584,7 @@ function correctionBlocker(
     return notFetched;
   }
   const key = (s: ReviewCorrection["segments"][number]) =>
-    `${s.season}:${s.episodeStart}:${s.episodeEnd}:${s.targetEpisodeStart}`;
+    `${s.season}:${s.episodeStart}:${s.episodeEnd}:${s.targetEpisodeStart}:${Boolean(s.nonLinear)}`;
   if (correction.segments.map(key).join() === cr.segments.map(key).join()) {
     return "correction_same_as_submission";
   }
@@ -1569,9 +1593,12 @@ function correctionBlocker(
   const catalog = { ...(evidence.catalog as unknown as CatalogEvidence), episodeAirYears };
   const collection = fetched.fetchedCollections.get(`${cr.namespace}:${cr.nativeId}`)!;
   const segments = correction.segments.map((s): NormalizedSegment => ({
-    ...s,
+    season: s.season,
+    episodeStart: s.episodeStart,
+    episodeEnd: s.episodeEnd,
+    targetEpisodeStart: s.targetEpisodeStart,
     baseline,
-    nonLinear: false,
+    nonLinear: Boolean(s.nonLinear),
     needsReview: false,
   }));
   // Exploration resubmits the correction through createChangeRequest: it must pass the same check.

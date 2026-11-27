@@ -131,6 +131,8 @@ async function markChangeRequestNeedsReviewInTx(
 }
 
 const MAX_PENDING_EVIDENCE_AGE_MS = 24 * 60 * 60_000;
+// Allow the initial evidence_check job plus one cron replacement before routing to review.
+const MAX_FAILED_EVIDENCE_JOBS = 2;
 
 export async function enqueuePendingEvidenceChecks(db: Db, { now }: { now: Date }): Promise<void> {
   const cutoff = new Date(now.getTime() - MAX_PENDING_EVIDENCE_AGE_MS);
@@ -171,11 +173,40 @@ export async function enqueuePendingEvidenceChecks(db: Db, { now }: { now: Date 
           decisionReason: "Evidence could not be verified before the deadline",
           now,
         });
+        continue;
+      }
+
+      const dedupeKey = `${EVIDENCE_CHECK_JOB_TYPE}:${request.id}`;
+      const failedJobs = await trx
+        .selectFrom("background_jobs")
+        .select("error_message")
+        .where("job_type", "=", EVIDENCE_CHECK_JOB_TYPE)
+        .where("dedupe_key", "=", dedupeKey)
+        .where("status", "=", "failed")
+        .orderBy("updated_at", "desc")
+        .execute();
+
+      if (failedJobs.length >= MAX_FAILED_EVIDENCE_JOBS) {
+        const lastError = failedJobs.find((j) => j.error_message)?.error_message ?? null;
+        await markChangeRequestNeedsReviewInTx(trx, {
+          changeRequestId: request.id,
+          evidence: {
+            ...request.evidence,
+            evidenceExhaustedAt: now.toISOString(),
+            failedEvidenceJobCount: failedJobs.length,
+            ...(lastError ? { lastEvidenceError: lastError } : {}),
+          },
+          conflictReason: "evidence_unavailable",
+          decisionReason: lastError
+            ? `Evidence check failed repeatedly: ${lastError}`
+            : "Evidence check failed repeatedly after maximum retries",
+          now,
+        });
       } else {
         await enqueueJob(trx, {
           jobType: EVIDENCE_CHECK_JOB_TYPE,
           payload: { changeRequestId: request.id },
-          dedupeKey: `${EVIDENCE_CHECK_JOB_TYPE}:${request.id}`,
+          dedupeKey,
           runAfter: now,
         });
       }

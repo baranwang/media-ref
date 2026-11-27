@@ -191,13 +191,20 @@ function segmentsBySeason(
   isMovie: boolean,
 ): Record<number, CoverageSegment[]> {
   const out: Record<number, CoverageSegment[]> = {};
-  const bar = (id: string, start: number, end: number, targetStart?: number): CoverageSegment => ({
+  const bar = (
+    id: string,
+    start: number,
+    end: number,
+    targetStart?: number,
+    nonLinear?: boolean,
+  ): CoverageSegment => ({
     id,
     title: assoc.title ?? assoc.nativeId,
     nativeId: assoc.nativeId,
     start,
     end,
     ...(targetStart !== undefined ? { targetStart } : {}),
+    ...(nonLinear ? { nonLinear: true } : {}),
     status: associationStatus(assoc),
     ...(assoc.changeRequestId ? { changeRequestId: assoc.changeRequestId } : {}),
     associationId: assoc.id,
@@ -218,7 +225,7 @@ function segmentsBySeason(
     const end =
       seg.episodeEnd ?? (isMovie ? 1 : seasonEpisodeCount(seasons, seg.season) || seg.episodeStart);
     (out[season] ??= []).push(
-      bar(`${assoc.id}-${index}`, seg.episodeStart, end, seg.targetEpisodeStart),
+      bar(`${assoc.id}-${index}`, seg.episodeStart, end, seg.targetEpisodeStart, seg.nonLinear),
     );
   });
   for (const list of Object.values(out)) list.sort((a, b) => a.start - b.start);
@@ -490,7 +497,7 @@ export const REVIEW_AGENT_USER_ID = "system:review-agent";
 type SegmentFields = Pick<
   proto.Segment,
   "season" | "episodeStart" | "episodeEnd" | "targetEpisodeStart"
->;
+> & { nonLinear?: boolean };
 
 function segmentView(s: SegmentFields): ChangeRequestSegmentView {
   return {
@@ -498,6 +505,7 @@ function segmentView(s: SegmentFields): ChangeRequestSegmentView {
     start: s.episodeStart,
     end: s.episodeEnd ?? null,
     targetStart: s.targetEpisodeStart,
+    ...(s.nonLinear ? { nonLinear: true } : {}),
   };
 }
 
@@ -622,6 +630,7 @@ export function changeRequestFromProto(cr: proto.ChangeRequest): ChangeRequestIt
       typeof collection?.featureEpisodeCount === "number" ? collection.featureEpisodeCount : null,
     variantLabel: cr.variantDescription ?? null,
     segments: cr.segments.map(segmentView),
+    replacesAssociationId: cr.replacesAssociationId ?? null,
     conflictReason: cr.conflictReason ?? null,
     decisionReason: cr.decisionReason ?? null,
     reviewerUserId: cr.reviewerUserId ?? null,
@@ -709,6 +718,7 @@ export function conflictTagFor(reason: string | null): string | null {
   if (reason.includes("year")) return "年份对不上";
   if (reason.includes("title")) return "片名对不上";
   if (reason.includes("lock")) return "挑战已锁定记录";
+  if (reason === "evidence_unavailable") return "自动核对失败";
   return "自动核对有冲突";
 }
 
