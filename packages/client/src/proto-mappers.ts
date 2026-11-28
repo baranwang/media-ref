@@ -2,7 +2,6 @@ import { create, type JsonObject, type MessageInitShape } from "@bufbuild/protob
 import { Code, ConnectError } from "@connectrpc/connect";
 import {
   ApiKeyAction as ProtoApiKeyAction,
-  ApiKeyScope as ProtoApiKeyScope,
   AssociationSchema,
   AssociationStatus as ProtoAssociationStatus,
   ChangeRequestStatus as ProtoChangeRequestStatus,
@@ -20,7 +19,6 @@ import {
   PlatformRefSchema,
   PlatformStatus as ProtoPlatformStatus,
   PlatformStatusEntrySchema,
-  ReviewAlertStatus as ProtoReviewAlertStatus,
   SeasonSnapshotSchema,
   SegmentInputSchema,
   SegmentSchema,
@@ -825,30 +823,6 @@ export function fromProtoSortOrder(order: ProtoSortOrder): "asc" | "desc" {
   return order === ProtoSortOrder.DESC ? "desc" : "asc";
 }
 
-export function toProtoReviewAlertStatus(
-  status: "open" | "resolved" | undefined,
-): ProtoReviewAlertStatus {
-  if (status === "open") {
-    return ProtoReviewAlertStatus.OPEN;
-  }
-  if (status === "resolved") {
-    return ProtoReviewAlertStatus.RESOLVED;
-  }
-  return ProtoReviewAlertStatus.UNSPECIFIED;
-}
-
-export function fromProtoReviewAlertStatus(
-  status: ProtoReviewAlertStatus,
-): "open" | "resolved" | undefined {
-  if (status === ProtoReviewAlertStatus.OPEN) {
-    return "open";
-  }
-  if (status === ProtoReviewAlertStatus.RESOLVED) {
-    return "resolved";
-  }
-  return undefined;
-}
-
 export function toProtoApiKeyAction(action: "read" | "report" | "submit"): ProtoApiKeyAction {
   switch (action) {
     case "read":
@@ -873,22 +847,6 @@ export function fromProtoApiKeyAction(
     default:
       return undefined;
   }
-}
-
-export function toProtoApiKeyScope(scope: "read_report" | "submit"): ProtoApiKeyScope {
-  return scope === "submit" ? ProtoApiKeyScope.SUBMIT : ProtoApiKeyScope.READ_REPORT;
-}
-
-export function fromProtoApiKeyScope(
-  scope: ProtoApiKeyScope,
-): "read_report" | "submit" | undefined {
-  if (scope === ProtoApiKeyScope.READ_REPORT) {
-    return "read_report";
-  }
-  if (scope === ProtoApiKeyScope.SUBMIT) {
-    return "submit";
-  }
-  return undefined;
 }
 
 export function toProtoSegment(seg: Segment): ProtoSegment {

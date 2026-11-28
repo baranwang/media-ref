@@ -1,4 +1,5 @@
 import { proto, type MediaDocument } from "@media-ref/client";
+import type * as internalProto from "@media-ref/client/internal";
 import { expect, test } from "vite-plus/test";
 import { formatSegmentEpisodeLabel } from "../src/lib/format.ts";
 import { buildReviewCoveragePreview } from "../src/lib/review-preview.ts";
@@ -379,7 +380,7 @@ test("maps API key summaries with lastUsedAt from GetApiUsage", () => {
       canSubmit: true,
       createdAt: "2026-11-26T10:00:00.000Z",
       ...overrides,
-    }) as unknown as proto.ApiKeySummary;
+    }) as unknown as internalProto.ApiKeySummary;
 
   expect(apiKeyFromProto(key({}), lastUsed)).toEqual({
     id: "key-1",

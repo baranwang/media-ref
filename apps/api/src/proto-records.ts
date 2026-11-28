@@ -7,10 +7,10 @@ import {
   toProtoChangeRequestStatus,
   toProtoMediaRefFromKey,
   toProtoMediaType,
-  toProtoReviewAlertStatus,
   toProtoSegment,
   toProtoSubmitterType,
 } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import type {
   AssociationRevisionRecord,
   AssociationSummaryRecord,
@@ -95,8 +95,8 @@ export function toProtoAssociationRevision(
   });
 }
 
-export function toProtoExternalIdRecord(record: ExternalIdRecord): proto.ExternalIdRecord {
-  return create(proto.ExternalIdRecordSchema, {
+export function toProtoExternalIdRecord(record: ExternalIdRecord): internalProto.ExternalIdRecord {
+  return create(internalProto.ExternalIdRecordSchema, {
     id: record.id,
     mediaId: record.mediaId,
     namespace: record.namespace,
@@ -108,13 +108,13 @@ export function toProtoExternalIdRecord(record: ExternalIdRecord): proto.Externa
   });
 }
 
-export function toProtoReviewAlert(record: ReviewAlertRecord): proto.ReviewAlert {
-  return create(proto.ReviewAlertSchema, {
+export function toProtoReviewAlert(record: ReviewAlertRecord): internalProto.ReviewAlert {
+  return create(internalProto.ReviewAlertSchema, {
     id: record.id,
     alertType: record.alertType,
     ...(record.mediaId !== null ? { mediaId: record.mediaId } : {}),
     ...(record.associationId !== null ? { associationId: record.associationId } : {}),
-    status: toProtoReviewAlertStatus(record.status),
+    status: internalProto.toProtoReviewAlertStatus(record.status),
     details: toOptionalJsonObject(record.details) ?? {},
     createdAt: record.createdAt,
     ...(record.resolvedAt !== null ? { resolvedAt: record.resolvedAt } : {}),
@@ -124,8 +124,8 @@ export function toProtoReviewAlert(record: ReviewAlertRecord): proto.ReviewAlert
 
 export function toProtoNeedsReviewSegment(
   record: NeedsReviewSegmentItem,
-): proto.NeedsReviewSegment {
-  return create(proto.NeedsReviewSegmentSchema, {
+): internalProto.NeedsReviewSegment {
+  return create(internalProto.NeedsReviewSegmentSchema, {
     segmentId: record.segmentId,
     associationId: record.associationId,
     mediaId: record.mediaId,
@@ -146,8 +146,8 @@ export function toProtoNeedsReviewSegment(
   });
 }
 
-export function toProtoApiKeySummary(summary: ApiKeySummary): proto.ApiKeySummary {
-  return create(proto.ApiKeySummarySchema, {
+export function toProtoApiKeySummary(summary: ApiKeySummary): internalProto.ApiKeySummary {
+  return create(internalProto.ApiKeySummarySchema, {
     id: summary.id,
     ...(summary.name !== null ? { name: summary.name } : {}),
     ...(summary.prefix !== null ? { prefix: summary.prefix } : {}),

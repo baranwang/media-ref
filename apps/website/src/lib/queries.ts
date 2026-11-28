@@ -1,4 +1,5 @@
 import { proto } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import { queryOptions } from "@tanstack/react-query";
 import { createBrowserClients } from "./api-client";
 import type { BrowseSlug } from "./catalogs";
@@ -74,7 +75,7 @@ export const myChangeRequestsQuery = () =>
   queryOptions({
     queryKey: ["my-change-requests"],
     queryFn: async () => {
-      const res = await browserClients().changeRequest.listMyChangeRequests({ limit: 100 });
+      const res = await browserClients().contributor.listMyChangeRequests({ limit: 100 });
       return res.changeRequests.map(changeRequestFromProto);
     },
   });
@@ -139,7 +140,7 @@ export const reviewAlertsQuery = () =>
     queryKey: ["review-alerts"],
     queryFn: async () => {
       const res = await browserClients().reviewer.listReviewAlerts({
-        status: proto.ReviewAlertStatus.OPEN,
+        status: internalProto.ReviewAlertStatus.OPEN,
         limit: 100,
       });
       return res.alerts.map(reviewAlertFromProto);

@@ -1,5 +1,6 @@
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { proto } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import {
   createDefaultAdapterRegistry,
   resolveAnonymousInvalidationThreshold,
@@ -23,7 +24,7 @@ import {
   universalServerResponseToFetch,
   type UniversalHandler,
 } from "@connectrpc/connect/protocol";
-import { accountServiceImpl } from "./api-keys.ts";
+import { accountServiceImpl, apiKeyServiceImpl } from "./api-keys.ts";
 import { associationServiceImpl } from "./associations.ts";
 import { browseServiceImpl } from "./browse.ts";
 import {
@@ -33,7 +34,7 @@ import {
   type AuthConfig,
   type AuthInstance,
 } from "./auth.ts";
-import { changeRequestServiceImpl } from "./change-requests.ts";
+import { changeRequestServiceImpl, contributorServiceImpl } from "./change-requests.ts";
 import { kApiRequestRuntime, limitRpcByIp, type ApiRequestRuntime } from "./context.ts";
 import { mediaServiceImpl } from "./media.ts";
 import {
@@ -142,8 +143,10 @@ const connectRouter = createConnectRouter({
 connectRouter.service(proto.MediaService, mediaServiceImpl);
 connectRouter.service(proto.ChangeRequestService, changeRequestServiceImpl);
 connectRouter.service(proto.AssociationService, associationServiceImpl);
-connectRouter.service(proto.AccountService, accountServiceImpl);
-connectRouter.service(proto.ReviewerService, reviewerServiceImpl);
+connectRouter.service(proto.ApiKeyService, apiKeyServiceImpl);
+connectRouter.service(internalProto.AccountService, accountServiceImpl);
+connectRouter.service(internalProto.ContributorService, contributorServiceImpl);
+connectRouter.service(internalProto.ReviewerService, reviewerServiceImpl);
 connectRouter.service(proto.BrowseService, browseServiceImpl);
 
 const connectHandlerMap = new Map<string, UniversalHandler>(

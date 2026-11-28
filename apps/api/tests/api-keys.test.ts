@@ -1,5 +1,6 @@
 import type { ExecutionContext, Hyperdrive } from "@cloudflare/workers-types";
 import { fromProtoApiKeyAction, proto, toProtoSegmentInput } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import { createAdapterRegistry, createFakeOutboundClient } from "@media-ref/core";
 import { createDb } from "@media-ref/db";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
@@ -241,7 +242,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
 
       const submitKeyRes = await devRpc.account.createApiKey({
         name: "Submit Key",
-        scopes: [proto.ApiKeyScope.READ_REPORT, proto.ApiKeyScope.SUBMIT],
+        scopes: [internalProto.ApiKeyScope.READ_REPORT, internalProto.ApiKeyScope.SUBMIT],
       });
       const submitKey = {
         id: submitKeyRes.apiKey!.id,
@@ -258,7 +259,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
       // Read-only key works with Authorization: Bearer on GetCurrentApiKey (uses readOnlyDb).
       const bearerMe = await createRpcClients(app, {
         bearerToken: readOnlyKey.key,
-      }).account.getCurrentApiKey({});
+      }).apiKey.getCurrentApiKey({});
       expect(bearerMe).toMatchObject({
         keyId: readOnlyKey.id,
         userId: dev.userId,
@@ -274,7 +275,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
 
       // Read-only key also works with X-API-Key header on GetCurrentApiKey and report RPC (ReportInvalidation).
       const readKeyRpc = createRpcClients(app, { apiKey: readOnlyKey.key });
-      const xApiKeyMe = await readKeyRpc.account.getCurrentApiKey({});
+      const xApiKeyMe = await readKeyRpc.apiKey.getCurrentApiKey({});
       expect(xApiKeyMe.keyId).toBe(readOnlyKey.id);
 
       const reportErr = await expectRpcError(
@@ -314,7 +315,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
       // Submit key succeeds on read, report, and submit RPCs.
       const submitKeyApiRpc = createRpcClients(app, { apiKey: submitKey.key });
       const submitKeyBearerRpc = createRpcClients(app, { bearerToken: submitKey.key });
-      expect((await submitKeyApiRpc.account.getCurrentApiKey({})).canSubmit).toBe(true);
+      expect((await submitKeyApiRpc.apiKey.getCurrentApiKey({})).canSubmit).toBe(true);
       const submitKeyReportErr = await expectRpcError(
         submitKeyBearerRpc.association.reportInvalidation({
           associationId: "00000000-0000-4000-8000-000000000099",
@@ -461,14 +462,14 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
 
     // Valid before expiration.
     expect(
-      (await createRpcClients(app, { apiKey: expiringKey.key }).account.getCurrentApiKey({})).keyId,
+      (await createRpcClients(app, { apiKey: expiringKey.key }).apiKey.getCurrentApiKey({})).keyId,
     ).toBe(expiringKey.apiKey!.id);
 
     // Advance clock past expiresAt.
     currentTime = new Date(Date.now() + 65_000);
 
     const expiredRead = await expectRpcError(
-      createRpcClients(app, { apiKey: expiringKey.key }).account.getCurrentApiKey({}),
+      createRpcClients(app, { apiKey: expiringKey.key }).apiKey.getCurrentApiKey({}),
     );
     expect(expiredRead.status).toBe(401);
     expect(expiredRead.code).toBe("API_KEY_EXPIRED");
@@ -561,7 +562,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
     expect(splitReportBeforeRevoke.code).toBe("ASSOCIATION_NOT_FOUND");
 
     // Read RPC hits dbRead (cachedReadDb), which does not have the row yet.
-    expect((await expectRpcError(keyRpc.account.getCurrentApiKey({}))).status).toBe(401);
+    expect((await expectRpcError(keyRpc.apiKey.getCurrentApiKey({}))).status).toBe(401);
 
     // Copy the user and apikey rows into cachedReadDb to simulate cached read visibility.
     const userRow = await primaryWriteDb.readDb
@@ -579,7 +580,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
     await cachedReadDb.writeDb.insertInto("apikey").values(keyRow).execute();
 
     // Now read RPC succeeds via dbRead.
-    expect((await keyRpc.account.getCurrentApiKey({})).keyId).toBe(created.apiKey!.id);
+    expect((await keyRpc.apiKey.getCurrentApiKey({})).keyId).toBe(created.apiKey!.id);
 
     // Revoke key (deletes on primaryWriteDb while cachedReadDb still holds stale cache entry).
     await userRpc.account.deleteApiKey({ id: created.apiKey!.id });
@@ -609,7 +610,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
     ).toBe(401);
 
     // Read RPC still sees the stale cached row on dbRead, confirming distinct connection routing.
-    expect((await keyRpc.account.getCurrentApiKey({})).keyId).toBe(created.apiKey!.id);
+    expect((await keyRpc.apiKey.getCurrentApiKey({})).keyId).toBe(created.apiKey!.id);
   });
 
   test("validates CreateApiKey input and rejects missing or malformed API key headers", async () => {
@@ -635,7 +636,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
     });
 
     // Missing or non-Bearer auth headers return 401 API_KEY_REQUIRED.
-    const missingErr = await expectRpcError(createRpcClients(app).account.getCurrentApiKey({}));
+    const missingErr = await expectRpcError(createRpcClients(app).apiKey.getCurrentApiKey({}));
     expect(missingErr.status).toBe(401);
     expect(missingErr.code).toBe("API_KEY_REQUIRED");
     expect(missingErr.message).toBe("API key is required");
@@ -643,14 +644,14 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
     const basicAuthErr = await expectRpcError(
       createRpcClients(app, {
         headers: { authorization: "Basic dXNlcjpwYXNz" },
-      }).account.getCurrentApiKey({}),
+      }).apiKey.getCurrentApiKey({}),
     );
     expect(basicAuthErr.status).toBe(401);
     expect(basicAuthErr.code).toBe("API_KEY_REQUIRED");
     expect(basicAuthErr.message).toBe("API key is required");
 
     const wrongKeyErr = await expectRpcError(
-      createRpcClients(app, { apiKey: "mref_nonexistent_key_value" }).account.getCurrentApiKey({}),
+      createRpcClients(app, { apiKey: "mref_nonexistent_key_value" }).apiKey.getCurrentApiKey({}),
     );
     expect(wrongKeyErr.status).toBe(401);
     expect(wrongKeyErr.code).toBe("INVALID_API_KEY");
@@ -664,7 +665,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
       JSON.stringify({ expiresIn: 12.5 }),
     ]) {
       const res = await app.fetch(
-        new Request(`${TEST_BASE_URL}/mediaref.v1.AccountService/CreateApiKey`, {
+        new Request(`${TEST_BASE_URL}/mediaref.internal.v1.AccountService/CreateApiKey`, {
           method: "POST",
           headers: { "content-type": "application/json", cookie: user.cookie },
           body: badBody,
@@ -681,11 +682,14 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
     }> = [
       { input: { name: "   " }, expectedCode: "INVALID_NAME" },
       { input: { name: "a".repeat(65) }, expectedCode: "INVALID_NAME" },
-      { input: { scopes: [proto.ApiKeyScope.UNSPECIFIED] }, expectedCode: "INVALID_PERMISSIONS" },
+      {
+        input: { scopes: [internalProto.ApiKeyScope.UNSPECIFIED] },
+        expectedCode: "INVALID_PERMISSIONS",
+      },
       {
         input: {
           canSubmit: false,
-          scopes: [proto.ApiKeyScope.READ_REPORT, proto.ApiKeyScope.SUBMIT],
+          scopes: [internalProto.ApiKeyScope.READ_REPORT, internalProto.ApiKeyScope.SUBMIT],
         },
         expectedCode: "INVALID_PERMISSIONS",
       },
@@ -760,7 +764,7 @@ describe("API Worker API key management & verification (ConnectRPC)", () => {
       },
     );
 
-    const me = await workerRpc.account.getCurrentApiKey({});
+    const me = await workerRpc.apiKey.getCurrentApiKey({});
     await Promise.all(pending);
 
     expect(observedCorsOrigin).toBe("https://mediaref.org");

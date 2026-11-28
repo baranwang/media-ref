@@ -2,12 +2,12 @@ import { create } from "@bufbuild/protobuf";
 import {
   createDomainConnectError,
   fromProtoChangeRequestStatus,
-  fromProtoReviewAlertStatus,
   isBaselineSource,
   proto,
   type BaselineSource,
   type ChangeRequestStatus,
 } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import {
   listChangeRequests,
   listNeedsReviewSegments,
@@ -73,7 +73,7 @@ function validatePagination(
   return { limit, offset };
 }
 
-export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
+export const reviewerServiceImpl: ServiceImpl<typeof internalProto.ReviewerService> = {
   async listChangeRequests(req, ctx) {
     await requireReviewerAuth(ctx);
     const runtime = getRuntime(ctx);
@@ -100,7 +100,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
       offset,
     });
 
-    return create(proto.ListChangeRequestsResponseSchema, {
+    return create(internalProto.ListChangeRequestsResponseSchema, {
       changeRequests: listed.changeRequests.map(toProtoChangeRequest),
       total: listed.total,
     });
@@ -129,7 +129,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
         now: runtime.now(),
       });
 
-      return create(proto.SetAssociationLockResponseSchema, {
+      return create(internalProto.SetAssociationLockResponseSchema, {
         association: toProtoAssociationSummary(result.association),
         associationId: result.associationId,
         locked: result.locked,
@@ -160,7 +160,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
         now: runtime.now(),
       });
 
-      return create(proto.OverrideMediaExternalIdResponseSchema, {
+      return create(internalProto.OverrideMediaExternalIdResponseSchema, {
         externalId: toProtoExternalIdRecord(externalId),
       });
     } catch (error) {
@@ -180,7 +180,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
         now: runtime.now(),
       });
 
-      return create(proto.SetMediaExternalIdLockResponseSchema, {
+      return create(internalProto.SetMediaExternalIdLockResponseSchema, {
         externalId: toProtoExternalIdRecord(externalId),
       });
     } catch (error) {
@@ -211,7 +211,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
         now: runtime.now(),
       });
 
-      return create(proto.MergeMediaResponseSchema, {
+      return create(internalProto.MergeMediaResponseSchema, {
         sourceMediaId: result.sourceMediaId,
         targetMediaId: result.targetMediaId,
         movedExternalIdCount: result.movedExternalIdCount,
@@ -251,7 +251,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
         now: runtime.now(),
       });
 
-      return create(proto.SwitchMediaBaselineResponseSchema, {
+      return create(internalProto.SwitchMediaBaselineResponseSchema, {
         mediaId: result.mediaId,
         ...(result.previousBaseline !== null ? { previousBaseline: result.previousBaseline } : {}),
         ...(result.baseline !== null ? { baseline: result.baseline } : {}),
@@ -267,8 +267,8 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
     const runtime = getRuntime(ctx);
 
     let status: ReviewAlertStatusRow = "open";
-    if (req.status !== proto.ReviewAlertStatus.UNSPECIFIED) {
-      const mapped = fromProtoReviewAlertStatus(req.status);
+    if (req.status !== internalProto.ReviewAlertStatus.UNSPECIFIED) {
+      const mapped = internalProto.fromProtoReviewAlertStatus(req.status);
       if (!mapped) {
         throw createDomainConnectError({
           status: 400,
@@ -292,7 +292,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
         offset,
       });
 
-      return create(proto.ListReviewAlertsResponseSchema, {
+      return create(internalProto.ListReviewAlertsResponseSchema, {
         alerts: result.alerts.map(toProtoReviewAlert),
         total: result.total,
       });
@@ -312,7 +312,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
         now: runtime.now(),
       });
 
-      return create(proto.ResolveReviewAlertResponseSchema, {
+      return create(internalProto.ResolveReviewAlertResponseSchema, {
         alert: toProtoReviewAlert(alert),
       });
     } catch (error) {
@@ -334,7 +334,7 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
         offset,
       });
 
-      return create(proto.ListNeedsReviewSegmentsResponseSchema, {
+      return create(internalProto.ListNeedsReviewSegmentsResponseSchema, {
         segments: result.segments.map(toProtoNeedsReviewSegment),
         total: result.total,
       });
@@ -380,8 +380,8 @@ export const reviewerServiceImpl: ServiceImpl<typeof proto.ReviewerService> = {
       });
     }
 
-    return create(proto.SetUserRoleResponseSchema, {
-      user: create(proto.UpdatedUserRoleSchema, {
+    return create(internalProto.SetUserRoleResponseSchema, {
+      user: create(internalProto.UpdatedUserRoleSchema, {
         id: updated.id,
         email: updated.email,
         name: updated.name,

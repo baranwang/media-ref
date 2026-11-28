@@ -1,12 +1,7 @@
 import { createClient } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
-import {
-  AccountService,
-  AssociationService,
-  ChangeRequestService,
-  MediaService,
-  ReviewerService,
-} from "@media-ref/client";
+import { AssociationService, ChangeRequestService, MediaService } from "@media-ref/client";
+import { AccountService, ContributorService, ReviewerService } from "@media-ref/client/internal";
 
 export type SocialOAuthProvider = "github" | "trakt";
 
@@ -97,6 +92,7 @@ export function createBrowserClients() {
     account: createClient(AccountService, transport),
     media: createClient(MediaService, transport),
     changeRequest: createClient(ChangeRequestService, transport),
+    contributor: createClient(ContributorService, transport),
     association: createClient(AssociationService, transport),
     reviewer: createClient(ReviewerService, transport),
   };

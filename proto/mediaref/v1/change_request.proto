@@ -32,16 +32,6 @@ message GetChangeRequestResponse {
   optional string live_change_request_id = 2;
 }
 
-message ListMyChangeRequestsRequest {
-  optional int32 limit = 1;
-  optional int32 offset = 2;
-}
-
-message ListMyChangeRequestsResponse {
-  repeated ChangeRequest change_requests = 1;
-  int32 total = 2;
-}
-
 // A comment on a change request, or the review agent's reply to comments (ADR 0003 amendment 2).
 message ChangeRequestComment {
   string id = 1;
@@ -53,15 +43,6 @@ message ChangeRequestComment {
   // Comments an agent reply answers; empty on people's comments.
   repeated string reply_to_ids = 6;
   string created_at = 7;
-}
-
-message CreateChangeRequestCommentRequest {
-  string change_request_id = 1;
-  string content = 2;
-}
-
-message CreateChangeRequestCommentResponse {
-  ChangeRequestComment comment = 1;
 }
 
 message ListChangeRequestCommentsRequest {
@@ -78,12 +59,6 @@ service ChangeRequestService {
   rpc GetChangeRequest(GetChangeRequestRequest) returns (GetChangeRequestResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
-  // Change requests submitted by the signed-in user (session only), newest first.
-  rpc ListMyChangeRequests(ListMyChangeRequestsRequest) returns (ListMyChangeRequestsResponse) {
-    option idempotency_level = NO_SIDE_EFFECTS;
-  }
-  // Signed-in users only (session, not an API key); a comment queues a review agent session.
-  rpc CreateChangeRequestComment(CreateChangeRequestCommentRequest) returns (CreateChangeRequestCommentResponse);
   rpc ListChangeRequestComments(ListChangeRequestCommentsRequest) returns (ListChangeRequestCommentsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }

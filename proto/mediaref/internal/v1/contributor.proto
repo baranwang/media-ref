@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package mediaref.internal.v1;
+
+import "mediaref/v1/change_request.proto";
+import "mediaref/v1/types.proto";
+
+message ListMyChangeRequestsRequest {
+  optional int32 limit = 1;
+  optional int32 offset = 2;
+}
+
+message ListMyChangeRequestsResponse {
+  repeated mediaref.v1.ChangeRequest change_requests = 1;
+  int32 total = 2;
+}
+
+message CreateChangeRequestCommentRequest {
+  string change_request_id = 1;
+  string content = 2;
+}
+
+message CreateChangeRequestCommentResponse {
+  mediaref.v1.ChangeRequestComment comment = 1;
+}
+
+// What a signed-in user does as a contributor. Session only, never an API key.
+service ContributorService {
+  // Change requests submitted by the signed-in user, newest first.
+  rpc ListMyChangeRequests(ListMyChangeRequestsRequest) returns (ListMyChangeRequestsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // A comment queues a review agent session.
+  rpc CreateChangeRequestComment(CreateChangeRequestCommentRequest) returns (CreateChangeRequestCommentResponse);
+}

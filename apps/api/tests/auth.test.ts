@@ -402,7 +402,7 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
     expect(sessionSetCookie).toMatch(/SameSite=Lax/i);
 
     const trustedPreflight = await app.fetch(
-      new Request(`${TEST_BASE_URL}/mediaref.v1.AccountService/GetCurrentUser`, {
+      new Request(`${TEST_BASE_URL}/mediaref.internal.v1.AccountService/GetCurrentUser`, {
         method: "OPTIONS",
         headers: {
           origin: "https://www.mediaref.org",
@@ -419,7 +419,7 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
     );
 
     const untrustedPreflight = await app.fetch(
-      new Request(`${TEST_BASE_URL}/mediaref.v1.AccountService/GetCurrentUser`, {
+      new Request(`${TEST_BASE_URL}/mediaref.internal.v1.AccountService/GetCurrentUser`, {
         method: "OPTIONS",
         headers: {
           origin: "https://unlisted.mediaref.org",

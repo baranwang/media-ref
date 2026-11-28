@@ -153,11 +153,11 @@ describe("account: UpdateApiKey, ListMyChangeRequests, usage", () => {
 
     const res = await createRpcClients(app, {
       cookie: me.cookie,
-    }).changeRequest.listMyChangeRequests({});
+    }).contributor.listMyChangeRequests({});
     expect(res.total).toBe(2);
     expect(res.changeRequests.map((cr) => cr.nativeId)).toEqual(["ss2", "ss1"]);
 
-    const anon = await expectRpcError(createRpcClients(app).changeRequest.listMyChangeRequests({}));
+    const anon = await expectRpcError(createRpcClients(app).contributor.listMyChangeRequests({}));
     expect(anon.code).toBe("UNAUTHORIZED");
   });
 

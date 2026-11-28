@@ -104,7 +104,6 @@ export {
   extractConnectErrorInfo,
   formatMediaRefKey,
   fromProtoApiKeyAction,
-  fromProtoApiKeyScope,
   fromProtoAssociationStatus,
   fromProtoBatchItemResult,
   fromProtoChangeRequestStatus,
@@ -116,7 +115,6 @@ export {
   fromProtoOptionalMediaType,
   fromProtoPlatform,
   fromProtoPlatformStatusEntry,
-  fromProtoReviewAlertStatus,
   fromProtoSegment,
   fromProtoSegmentInput,
   fromProtoSortOrder,
@@ -128,7 +126,6 @@ export {
   parseRetryAfterHeaderValue,
   toOptionalJsonObject,
   toProtoApiKeyAction,
-  toProtoApiKeyScope,
   toProtoAssociationStatus,
   toProtoBatchItemResult,
   toProtoChangeRequestStatus,
@@ -141,7 +138,6 @@ export {
   toProtoNamespaceGroup,
   toProtoPlatform,
   toProtoPlatformStatusEntry,
-  toProtoReviewAlertStatus,
   toProtoSegment,
   toProtoSegmentInput,
   toProtoSortOrder,
@@ -150,10 +146,9 @@ export {
 } from "./proto-mappers.ts";
 export type { DecodedMediaRefResult, ExtractedConnectErrorInfo } from "./proto-mappers.ts";
 export * as proto from "./proto.ts";
-export { AccountService } from "./gen/mediaref/v1/account_pb.ts";
+export { ApiKeyService } from "./gen/mediaref/v1/api_key_pb.ts";
 export { AssociationService } from "./gen/mediaref/v1/association_pb.ts";
 export { BrowseService } from "./gen/mediaref/v1/browse_pb.ts";
 export { ChangeRequestService } from "./gen/mediaref/v1/change_request_pb.ts";
 export { MediaService } from "./gen/mediaref/v1/media_pb.ts";
-export { ReviewerService } from "./gen/mediaref/v1/reviewer_pb.ts";
 export { ErrorInfoDetailSchema } from "./gen/mediaref/v1/types_pb.ts";

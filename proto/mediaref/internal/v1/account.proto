@@ -1,8 +1,14 @@
 syntax = "proto3";
 
-package mediaref.v1;
+package mediaref.internal.v1;
 
-import "mediaref/v1/types.proto";
+import "mediaref/v1/api_key.proto";
+
+enum ApiKeyScope {
+  API_KEY_SCOPE_UNSPECIFIED = 0;
+  API_KEY_SCOPE_READ_REPORT = 1;
+  API_KEY_SCOPE_SUBMIT = 2;
+}
 
 message User {
   string id = 1;
@@ -12,17 +18,13 @@ message User {
   string role = 5;
 }
 
-message ApiKeyPermissions {
-  repeated ApiKeyAction media = 1;
-}
-
 message ApiKeySummary {
   string id = 1;
   optional string name = 2;
   optional string prefix = 3;
   optional string start = 4;
   bool enabled = 5;
-  ApiKeyPermissions permissions = 6;
+  mediaref.v1.ApiKeyPermissions permissions = 6;
   bool can_submit = 7;
   string created_at = 8;
   optional string expires_at = 9;
@@ -32,21 +34,6 @@ message GetCurrentUserRequest {}
 
 message GetCurrentUserResponse {
   User user = 1;
-}
-
-message GetCurrentApiKeyRequest {}
-
-message GetCurrentApiKeyResponse {
-  string key_id = 1;
-  string user_id = 2;
-  optional string name = 3;
-  optional string prefix = 4;
-  optional string start = 5;
-  ApiKeyPermissions permissions = 6;
-  bool can_submit = 7;
-  bool email_verified = 8;
-  string role = 9;
-  optional string expires_at = 10;
 }
 
 message CreateApiKeyRequest {
@@ -112,9 +99,6 @@ message GetApiUsageResponse {
 
 service AccountService {
   rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse) {
-    option idempotency_level = NO_SIDE_EFFECTS;
-  }
-  rpc GetCurrentApiKey(GetCurrentApiKeyRequest) returns (GetCurrentApiKeyResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse);
