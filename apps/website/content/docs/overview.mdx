@@ -1,0 +1,42 @@
+---
+title: 概览
+breadcrumb: 文档 / 入门
+description: MediaRef 是一个开放的影视对应关系库：把 TMDB、豆瓣、Bangumi 等目录站上的作品，对到各视频平台的具体页面，精确到季和集。
+---
+
+## MediaRef 能做什么 [#what]
+
+播放器、媒体库或脚本手里通常只有一个目录站编号，比如 TMDB 的 `tv:95479`。MediaRef 告诉你这部作品在哔哩哔哩、腾讯视频、爱奇艺、优酷、芒果 TV 上是哪个页面，以及「TMDB 第 1 季第 30 集」是那个页面的第几集。
+
+数据通过公开 API 提供，每个请求都要带 API 密钥。接口地址是 `https://api.mediaref.org`，协议是 Connect，JSON 和 Protobuf 都能用。
+
+## 基本概念 [#concepts]
+
+| 概念                     | 意思                                                                                                  |
+| ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| 作品（Media）            | 一部电影或一部剧，库里唯一有自己 ID 的东西。季和集只是它内部的坐标                                    |
+| 外部编号                 | 权威目录（TMDB、IMDb、TVDB、Trakt）上代表整部作品的编号，用来找到作品                                 |
+| 关联（Association）      | 一条记录：某个平台页面或目录条目属于这部作品                                                          |
+| 段（Segment）            | 关联里的一项：作品某一季的一段连续集数，对应页面里的哪一段。不带段的关联覆盖整部作品                  |
+| 基准（Baseline）         | 季号和集号按哪个目录站算，默认是 TMDB                                                                 |
+| 变体（Variant）          | 作品在一个平台上的一种呈现，比如原声、中配。平台上的每条关联都属于一个变体                            |
+| 变更单（Change Request） | 新增或修改一条关联的提议。系统自动打开页面核对，对上了直接生效，拿不准的交给审核 agent 判定，不等人审 |
+
+## 接口一览 [#services]
+
+| 服务                 | 能做什么                                                                                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MediaService         | 用任意编号查作品和它的全部关联：[GetMedia](/docs/media-service/get-media)、[BatchGetMedia](/docs/media-service/batch-get-media)                                                       |
+| BrowseService        | 按片名或网址找作品，读目录站条目详情：[Search](/docs/browse-service/search)、[GetCatalogDetail](/docs/browse-service/get-catalog-detail)                                              |
+| AssociationService   | 报告失效、查一条关联的修改历史：[ReportInvalidation](/docs/association-service/report-invalidation)、[ListAssociationRevisions](/docs/association-service/list-association-revisions) |
+| ChangeRequestService | 提交和查询变更单：[CreateChangeRequest](/docs/change-request-service/create-change-request)、[GetChangeRequest](/docs/change-request-service/get-change-request)                      |
+| ApiKeyService        | 查当前密钥的权限和过期时间：[GetCurrentApiKey](/docs/api-key-service/get-current-api-key)                                                                                             |
+
+<Hint>文档只收录公开的 `mediaref.v1` 接口。网站自己用的账号、审核等接口不公开，随时会改。</Hint>
+
+## 从哪里开始 [#next]
+
+- 第一次接入：看[快速开始](/docs/quickstart)，三步查到某一集在哪个平台。
+- 带密钥和限流：看[鉴权与限流](/docs/auth)。
+- 选接入方式：[TypeScript SDK](/docs/typescript-sdk)、[从 proto 生成客户端](/docs/proto)，或者[直接调用 HTTP](/docs/http)。
+- 给 AI 读：整份文档的 Markdown 索引在 [`/docs/llms.txt`](/docs/llms.txt)。

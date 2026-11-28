@@ -56,7 +56,8 @@ export function PageActions({ url, path }: { url: string; path: string }) {
         new ClipboardItem({
           "text/plain": fetch(markdownUrl).then(async (res) => {
             if (!res.ok) throw new Error(`${markdownUrl}: ${res.status}`);
-            return res.blob();
+            // The file is served as text/markdown; Chromium rejects a blob whose type differs from the key.
+            return new Blob([await res.text()], { type: "text/plain" });
           }),
         }),
       ]);

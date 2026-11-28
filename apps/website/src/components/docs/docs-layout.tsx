@@ -1,14 +1,17 @@
+import { Button } from "@media-ref/ui/components/button";
+import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@media-ref/ui/components/drawer";
 import { ScrollArea } from "@media-ref/ui/components/scroll-area";
 import { cn } from "@media-ref/ui/lib/utils";
+import { RiMenuLine } from "@remixicon/react";
 import { Link, useLocation } from "@tanstack/react-router";
 import { AnchorProvider, TOCItem, type TOCItemType } from "fumadocs-core/toc";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { TopNav } from "#/components/top-nav";
 
 interface NavItem {
   label: string;
-  /** Docs page slug under /docs; left out for pages not written yet (rendered as plain text). */
-  page?: string;
+  /** Docs page slug under /docs. */
+  page: string;
   /** RPC names render in mono and indent under their service. */
   rpc?: boolean;
 }
@@ -23,7 +26,7 @@ const NAV: NavGroup[] = [
   {
     title: "入门",
     items: [
-      { label: "概览" },
+      { label: "概览", page: "overview" },
       { label: "快速开始", page: "quickstart" },
       { label: "鉴权与限流", page: "auth" },
       { label: "错误处理", page: "errors" },
@@ -72,23 +75,16 @@ const NAV: NavGroup[] = [
       { label: "直接调用 HTTP", page: "http" },
     ],
   },
-  { title: "其他", items: [{ label: "更新日志" }] },
+  { title: "其他", items: [{ label: "更新日志", page: "changelog" }] },
 ];
 
 function SidebarItem({ item, pathname }: { item: NavItem; pathname: string }) {
-  const active = item.page !== undefined && `/docs/${item.page}` === pathname;
+  const active = `/docs/${item.page}` === pathname;
   const className = cn(
     "flex h-8 items-center rounded-md pr-2.5",
     item.rpc ? "pl-4 font-mono text-xs" : "pl-2.5 text-sm",
     active ? "bg-accent text-foreground" : "text-muted-foreground",
   );
-  if (!item.page) {
-    return (
-      <span className={className} title="还没写">
-        {item.label}
-      </span>
-    );
-  }
   return (
     <Link
       to="/docs/$"
@@ -160,6 +156,31 @@ function Rail({ className, children }: { className: string; children: ReactNode 
   );
 }
 
+/** Below `lg` the sidebar is hidden, so the docs navigation opens in a drawer instead. */
+function MobileNav() {
+  const { pathname } = useLocation();
+  const [open, setOpen] = useState(false);
+  useEffect(() => setOpen(false), [pathname]);
+  return (
+    <div className="mb-6 lg:hidden">
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+        <RiMenuLine />
+        文档目录
+      </Button>
+      <Drawer open={open} onOpenChange={setOpen} swipeDirection="left">
+        <DrawerContent>
+          <DrawerHeader className="border-b border-border/60 pb-3">
+            <DrawerTitle>文档目录</DrawerTitle>
+          </DrawerHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <Sidebar />
+          </div>
+        </DrawerContent>
+      </Drawer>
+    </div>
+  );
+}
+
 export function DocsLayout({ toc, children }: { toc: TOCItemType[]; children: ReactNode }) {
   // Only top-level sections go in the TOC; the design lists one entry per H2.
   const sections = toc.filter((item) => item.depth === 2);
@@ -171,7 +192,10 @@ export function DocsLayout({ toc, children }: { toc: TOCItemType[]; children: Re
           <Rail className="hidden w-50 lg:block">
             <Sidebar />
           </Rail>
-          <main className="min-w-0 flex-1 pt-12 pb-24">{children}</main>
+          <main className="min-w-0 flex-1 pt-12 pb-24">
+            <MobileNav />
+            {children}
+          </main>
           <Rail className="hidden w-46 xl:block">
             <OnThisPage toc={sections} />
           </Rail>

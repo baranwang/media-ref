@@ -2,6 +2,7 @@
   "title": "MediaRef 开发者文档",
   "pages": [
     "---入门---",
+    "overview",
     "quickstart",
     "auth",
     "errors",
@@ -14,6 +15,8 @@
     "---接入方式---",
     "typescript-sdk",
     "proto",
-    "http"
+    "http",
+    "---其他---",
+    "changelog"
   ]
 }
