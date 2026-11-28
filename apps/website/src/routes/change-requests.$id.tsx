@@ -65,7 +65,7 @@ function ChangeRequestDetailPage() {
 
   if (sessionChecked && !user) {
     return (
-      <div className="min-h-screen bg-background text-foreground">
+      <div className="flex-1 bg-background text-foreground">
         <TopNav />
         <main className="container py-28">
           <Empty>
@@ -86,7 +86,7 @@ function ChangeRequestDetailPage() {
 
   if (query.isError && !isMissing(query.error)) {
     return (
-      <div className="min-h-screen bg-background text-foreground">
+      <div className="flex-1 bg-background text-foreground">
         <TopNav />
         <main className="container py-28">
           <Alert variant="destructive">
@@ -100,13 +100,13 @@ function ChangeRequestDetailPage() {
 
   if (!query.isError && cr === undefined) {
     return (
-      <div className="min-h-screen bg-background text-foreground">
+      <div className="flex-1 bg-background text-foreground">
         <TopNav />
         <section className="container flex flex-col gap-6 pt-8 sm:flex-row sm:items-start">
           <Skeleton className="h-39 w-26 shrink-0 rounded-lg" />
           <div className="flex flex-1 flex-col gap-3">
             <Skeleton className="h-4 w-40" />
-            <Skeleton className="h-9 w-72" />
+            <Skeleton className="h-9 w-full max-w-72" />
             <Skeleton className="h-4 w-56" />
           </div>
         </section>
@@ -116,11 +116,13 @@ function ChangeRequestDetailPage() {
 
   if (!cr) {
     return (
-      <div className="min-h-screen bg-background text-foreground">
+      <div className="flex-1 bg-background text-foreground">
         <TopNav />
         <main className="container flex flex-col items-center justify-center py-28 text-center">
           <h1 className="text-xl font-semibold">找不到这张变更单</h1>
-          <p className="mt-2 text-sm text-muted-foreground">编号 #{id} 不存在，或你没有查看权限</p>
+          <p className="mt-2 text-sm text-muted-foreground">
+            编号 <span className="break-all">#{id}</span> 不存在，或你没有查看权限
+          </p>
           <Button className="mt-6" nativeButton={false} render={<Link to="/change-requests" />}>
             返回我的变更单
           </Button>
@@ -139,7 +141,7 @@ function ChangeRequestDetailPage() {
         : { label: "待审核", variant: "warning" as const };
 
   return (
-    <div className="relative min-h-screen bg-background text-foreground">
+    <div className="relative flex-1 bg-background text-foreground">
       {/* Page-level backdrop with smooth fade matching Figma 03B */}
       {media?.posterUrl && (
         <div
@@ -162,7 +164,7 @@ function ChangeRequestDetailPage() {
       <section className="relative z-10 container flex flex-col gap-5 pt-8 pb-8">
         <Link
           to="/change-requests"
-          className="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+          className="-my-2.5 inline-flex w-fit items-center gap-1 py-2.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
         >
           <RiArrowLeftSLine className="size-4" />
           我的变更单
@@ -184,7 +186,7 @@ function ChangeRequestDetailPage() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
-              <h1 className="text-3xl leading-9 font-bold tracking-tight text-foreground">
+              <h1 className="text-3xl leading-9 font-bold tracking-tight wrap-anywhere text-foreground">
                 {media?.title ?? cr.pageTitle ?? cr.nativeId}
               </h1>
               <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
@@ -198,7 +200,7 @@ function ChangeRequestDetailPage() {
             </p>
 
             <div className="text-xs text-muted-foreground">
-              编号 <span className="font-mono text-foreground/85">#{cr.id}</span>
+              编号 <span className="font-mono break-all text-foreground/85">#{cr.id}</span>
             </div>
 
             {media && (
@@ -251,14 +253,14 @@ function ChangeRequestDetailPage() {
             <Card>
               <CardContent className="flex flex-col gap-4 pt-4">
                 <dl className="divide-y divide-border/60 text-xs">
-                  <div className="flex items-center gap-3 py-2.5 first:pt-0">
+                  <div className="flex flex-col gap-1 py-2.5 first:pt-0 sm:flex-row sm:items-center sm:gap-3">
                     <dt className="w-24 shrink-0 text-muted-foreground">平台</dt>
                     <dd className="flex items-center gap-2 font-medium text-foreground">
                       <NamespaceLogo namespace={cr.namespace} className="size-5" />
                       {NAMESPACE_LABELS[cr.namespace]}
                     </dd>
                   </div>
-                  <div className="flex items-center gap-3 py-2.5">
+                  <div className="flex flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-3">
                     <dt className="w-24 shrink-0 text-muted-foreground">
                       {cr.pageLink?.source === "submission" ? "提交时的链接" : "条目链接"}
                     </dt>
@@ -270,28 +272,30 @@ function ChangeRequestDetailPage() {
                           rel="noreferrer"
                           className="inline-flex max-w-full items-center gap-1 truncate font-mono text-xs text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground"
                         >
-                          <span className="truncate">{cr.pageLink.href}</span>
+                          <span className="min-w-0 truncate">{cr.pageLink.href}</span>
                           <RiArrowRightUpLine className="size-3.5 shrink-0" />
                         </a>
                       ) : (
-                        <span className="font-mono">{cr.nativeId}</span>
+                        <span className="font-mono break-all">{cr.nativeId}</span>
                       )}
                     </dd>
                   </div>
-                  <div className="flex items-center gap-3 py-2.5">
+                  <div className="flex flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-3">
                     <dt className="w-24 shrink-0 text-muted-foreground">页面标题</dt>
-                    <dd className="min-w-0 flex-1 text-foreground">
+                    <dd className="min-w-0 flex-1 wrap-break-word text-foreground">
                       {cr.pageTitle ?? cr.nativeId}
                       {cr.pageEpisodeCount ? ` · 共 ${cr.pageEpisodeCount} 集` : ""}
                     </dd>
                   </div>
                   {cr.variantLabel && (
-                    <div className="flex items-center gap-3 py-2.5">
+                    <div className="flex flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-3">
                       <dt className="w-24 shrink-0 text-muted-foreground">版本</dt>
-                      <dd className="min-w-0 flex-1 text-foreground">{cr.variantLabel}</dd>
+                      <dd className="min-w-0 flex-1 wrap-break-word text-foreground">
+                        {cr.variantLabel}
+                      </dd>
                     </div>
                   )}
-                  <div className="flex items-center gap-3 py-2.5 last:pb-0">
+                  <div className="flex flex-col gap-1 py-2.5 last:pb-0 sm:flex-row sm:items-center sm:gap-3">
                     <dt className="w-24 shrink-0 text-muted-foreground">对应集数</dt>
                     <dd className="flex min-w-0 flex-1 flex-col gap-1 font-medium text-foreground">
                       {cr.segments.map((s) => (
@@ -373,7 +377,7 @@ function ChangeRequestDetailPage() {
                           {formatDateTime(cr.reviewedAt)}
                         </span>
                       </div>
-                      <p className="mt-1.5 text-sm leading-6 text-foreground/90">
+                      <p className="mt-1.5 text-sm leading-6 wrap-break-word text-foreground/90">
                         {cr.decisionReason}
                       </p>
                     </div>
@@ -401,7 +405,7 @@ function ChangeRequestDetailPage() {
         </div>
 
         {/* Right column: Timeline */}
-        <aside className="flex flex-col gap-3 lg:col-span-4">
+        <aside className="order-first flex flex-col gap-3 lg:order-none lg:col-span-4">
           <div>
             <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">进度</h2>
             <p className="mt-0.5 text-sm text-muted-foreground">
@@ -443,7 +447,9 @@ function ChangeRequestDetailPage() {
                           {step.time}
                         </span>
                       </div>
-                      <p className="mt-0.5 text-xs text-muted-foreground">{step.detail}</p>
+                      <p className="mt-0.5 text-xs wrap-break-word text-muted-foreground">
+                        {step.detail}
+                      </p>
                     </div>
                   </li>
                 ))}

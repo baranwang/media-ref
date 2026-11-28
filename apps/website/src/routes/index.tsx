@@ -32,7 +32,7 @@ function DiscoveryHomePage() {
   const backdropUrl = tmdbTrending?.find((card) => card.posterUrl)?.posterUrl;
 
   return (
-    <div className="relative min-h-screen bg-background text-foreground">
+    <div className="relative flex-1 bg-background text-foreground">
       {/* Page-level atmospheric backdrop that fades smoothly behind the first shelf header */}
       {backdropUrl && (
         <div
@@ -52,8 +52,8 @@ function DiscoveryHomePage() {
       <TopNav hideSearch transparent />
 
       {/* Hero Centerpiece — above <main> so the search dropdown overlaps the shelves (#133) */}
-      <section className="relative z-20 container flex flex-col items-center pt-24 pb-10 text-center">
-        <h1 className="font-display text-4xl leading-tight font-bold tracking-tight text-foreground sm:text-display">
+      <section className="relative z-20 container flex flex-col items-center pt-12 pb-8 text-center sm:pt-24 sm:pb-10">
+        <h1 className="font-display text-3xl leading-tight font-bold tracking-tight text-foreground sm:text-display">
           这部剧，在哪儿能看？
         </h1>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-muted-foreground sm:text-base">
@@ -74,7 +74,7 @@ function DiscoveryHomePage() {
         {/* Urgent contributions section */}
         <section className="flex flex-col gap-5">
           <div className="flex items-end justify-between gap-4">
-            <div className="flex flex-col gap-1">
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
               <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
                 急需补充
               </h2>
@@ -84,7 +84,7 @@ function DiscoveryHomePage() {
             </div>
             <Link
               to="/wanted"
-              className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+              className="-my-2.5 shrink-0 py-2.5 text-xs font-medium whitespace-nowrap text-muted-foreground transition-colors hover:text-foreground"
             >
               查看全部
             </Link>
@@ -104,7 +104,7 @@ function Shelf({ slug }: { slug: BrowseSlug }) {
   return (
     <section className="flex flex-col gap-5">
       <div className="flex items-end justify-between gap-4">
-        <div className="flex flex-col gap-1">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex items-center gap-2">
             <NamespaceLogo namespace={slug} className="size-6" />
             <h2 className="text-xl leading-7 font-bold tracking-tight text-foreground">
@@ -117,7 +117,7 @@ function Shelf({ slug }: { slug: BrowseSlug }) {
         <Link
           to="/discover/$catalog"
           params={{ catalog: slug }}
-          className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+          className="-my-2.5 shrink-0 py-2.5 text-xs font-medium whitespace-nowrap text-muted-foreground transition-colors hover:text-foreground"
         >
           查看全部
         </Link>
@@ -134,7 +134,7 @@ function Shelf({ slug }: { slug: BrowseSlug }) {
           </EmptyHeader>
         </Empty>
       ) : (
-        <div className="grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-3 md:grid-cols-6">
+        <div className="grid grid-cols-2 gap-x-3.5 gap-y-6 sm:grid-cols-3 sm:gap-x-5 md:grid-cols-6">
           {isPending
             ? Array.from({ length: SHELF_SIZE }, (_, i) => <MediaCardSkeleton key={i} />)
             : data.map((item) => <MediaCard key={item.key} item={item} />)}
@@ -167,7 +167,7 @@ function UrgentList() {
         <div className="divide-y divide-border/70">
           {isPending
             ? Array.from({ length: URGENT_SIZE }, (_, i) => (
-                <div key={i} className="flex items-center gap-3.5 px-5 py-3.5">
+                <div key={i} className="flex items-center gap-3.5 px-4 py-3.5 sm:px-5">
                   <Skeleton className="h-12 w-8 shrink-0 rounded-md" />
                   <div className="flex flex-col gap-1.5">
                     <Skeleton className="h-4 w-40" />
@@ -178,7 +178,7 @@ function UrgentList() {
             : data.map(({ id, card, demandCount }) => (
                 <div
                   key={id}
-                  className="flex items-center justify-between gap-4 px-5 py-3.5 transition-colors hover:bg-muted/25"
+                  className="flex items-center justify-between gap-4 px-4 py-3.5 transition-colors hover:bg-muted/25 sm:px-5"
                 >
                   <Link
                     to="/media/$mediaId"
@@ -199,16 +199,17 @@ function UrgentList() {
                       <div className="truncate text-sm font-medium text-foreground">
                         {card.title}
                       </div>
-                      <div className="mt-0.5 text-xs text-muted-foreground">
+                      <div className="mt-0.5 truncate text-xs text-muted-foreground">
                         {card.year ? `${card.year} · ` : ""}
                         {categoryLabelOf(card.category)} · 已收录 {card.platforms.length} /{" "}
                         {PLATFORM_COUNT}
+                        <span className="sm:hidden"> · {formatCount(demandCount)} 次查询</span>
                       </div>
                     </div>
                   </Link>
 
                   <div className="flex shrink-0 items-center gap-5">
-                    <div className="text-right">
+                    <div className="hidden text-right sm:block">
                       <div className="font-mono text-base font-bold text-foreground">
                         {formatCount(demandCount)} 次
                       </div>

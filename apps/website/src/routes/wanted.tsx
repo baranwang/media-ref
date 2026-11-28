@@ -41,7 +41,7 @@ function WantedPage() {
   const shown = tab === "all" ? all : all.filter((d) => d.card.type === tab);
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="flex-1 bg-background text-foreground">
       <TopNav />
 
       <main className="container flex flex-col pb-20">
@@ -91,10 +91,10 @@ function WantedPage() {
                 return (
                   <div
                     key={item.id}
-                    className="flex flex-wrap items-center justify-between gap-4 px-5 py-3.5 transition-colors hover:bg-muted/25"
+                    className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2.5 px-4 py-3.5 transition-colors hover:bg-muted/25 sm:px-5"
                   >
                     <div className="flex min-w-0 flex-1 items-center gap-4">
-                      <span className="w-5 shrink-0 text-center font-mono text-sm font-medium text-muted-foreground">
+                      <span className="min-w-5 shrink-0 text-center font-mono text-sm font-medium text-muted-foreground">
                         {idx + 1}
                       </span>
 
@@ -132,13 +132,18 @@ function WantedPage() {
                       </Link>
                     </div>
 
-                    <div className="flex shrink-0 items-center gap-4">
-                      <div className="hidden w-44 flex-col items-start gap-1.5 sm:flex">
+                    {/* Below md: a second line under poster+title (rank min-w-5 + gap-4 = pl-9); 已收录 and 被查询 stack left, 补充 sits right */}
+                    <div className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 pl-9 md:flex md:w-auto md:shrink-0 md:gap-4 md:pl-0">
+                      <div className="flex items-center gap-1.5 md:w-44 md:flex-col md:items-start">
                         <span className="text-xs text-muted-foreground">已收录</span>
                         {media.platforms.length > 0 ? (
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5 md:gap-2">
                             {media.platforms.map((ns) => (
-                              <NamespaceLogo key={ns} namespace={ns} className="size-7" />
+                              <NamespaceLogo
+                                key={ns}
+                                namespace={ns}
+                                className="size-4.5 md:size-7"
+                              />
                             ))}
                           </div>
                         ) : (
@@ -146,13 +151,14 @@ function WantedPage() {
                         )}
                       </div>
 
-                      <div className="w-30 text-right text-sm font-medium text-foreground">
+                      <div className="col-start-1 text-sm font-medium text-foreground md:w-30 md:text-right">
                         被查询 {item.demandCount} 次
                       </div>
 
                       <Button
                         variant="outline"
                         size="sm"
+                        className="col-start-2 row-span-2 row-start-1"
                         nativeButton={false}
                         render={
                           <Link

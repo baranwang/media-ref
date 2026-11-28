@@ -122,7 +122,7 @@ export function CommentThread({ changeRequestId }: { changeRequestId: string }) 
               <span className="text-muted-foreground">{formatDateTime(c.createdAt)}</span>
               {c.waiting && <Badge variant="warning">等审核 agent 回复</Badge>}
             </div>
-            <p className="mt-1.5 text-sm leading-6 whitespace-pre-line text-foreground/90">
+            <p className="mt-1.5 text-sm leading-6 wrap-break-word whitespace-pre-line text-foreground/90">
               {c.content}
             </p>
           </div>

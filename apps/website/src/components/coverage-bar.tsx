@@ -41,12 +41,16 @@ export function CoverageRuler({
       {ticks.map((tick, idx) => {
         const isFirst = idx === 0;
         const isLast = idx === ticks.length - 1;
+        // Phones fit about half the labels: keep every other middle tick, never the ones
+        // right next to the first or last label.
+        const hideOnPhone = !isFirst && !isLast && (idx % 2 === 1 || idx === ticks.length - 2);
         return (
           <span
             key={`${tick.label}-${tick.pos}`}
             style={{ left: `${tick.pos}%` }}
             className={cn(
               "absolute top-1/2 -translate-y-1/2 font-mono text-2xs text-muted-foreground/80",
+              hideOnPhone && "max-sm:hidden",
               isFirst ? "translate-x-0" : isLast ? "-translate-x-full" : "-translate-x-1/2",
             )}
           >
@@ -177,7 +181,7 @@ export function CoverageTrack({
             >
               <span className="truncate">{seg.title}</span>
               {isNonLinearEpisodeBar && !isNarrow && (
-                <span className="ml-1.5 shrink-0 font-normal opacity-80">
+                <span className="ml-1.5 truncate font-normal opacity-80">
                   {isWholeSeasonNonLinear ? "· 整季不拆集" : "· 不按集对应"}
                 </span>
               )}

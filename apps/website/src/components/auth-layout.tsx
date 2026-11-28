@@ -52,6 +52,7 @@ export function AuthLayout({
                     <img
                       src={posters[(row * COLLAGE_COLUMNS + col) % posters.length]}
                       alt=""
+                      loading="lazy"
                       referrerPolicy="no-referrer"
                       className="h-full w-full object-cover"
                     />
