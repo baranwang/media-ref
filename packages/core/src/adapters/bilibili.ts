@@ -157,7 +157,8 @@ function parseUnixDate(rawTimestamp: unknown): string | null {
     return null;
   }
   const ms = rawTimestamp > 1e12 ? rawTimestamp : rawTimestamp * 1000;
-  const date = new Date(ms);
+  // Air dates are China Standard Time dates, as in `parseUnixYear`.
+  const date = new Date(ms + CST_OFFSET_MS);
   if (Number.isNaN(date.getTime())) {
     return null;
   }

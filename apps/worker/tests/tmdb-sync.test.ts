@@ -167,6 +167,66 @@ async function readMedia(
   }
 }
 
+/**
+ * `count` tracked movies (TMDB movie:1..count) and a fake TMDB that lists `tmdb.changed` as the
+ * day's movie changes, answers 500 for ids in `tmdb.failing`, and records every movie it serves.
+ */
+async function setupTrackedMovies(handles: TestDbHandle[], count: number) {
+  const testDb = await createTestDb();
+  handles.push(testDb);
+  const db = testDb.writeDb;
+  for (let id = 1; id <= count; id += 1) {
+    const media = await db
+      .insertInto("media")
+      .values({ type: "movie", title: `Movie ${id}`, baseline: "tmdb" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("associations")
+      .values({
+        media_id: media.id,
+        namespace: "tmdb",
+        native_id: `movie:${id}`,
+        status: "confirmed",
+        is_external_id: true,
+      })
+      .execute();
+  }
+
+  const tmdb = { changed: [] as number[], failing: new Set<string>(), fetched: [] as string[] };
+  const outbound = createFakeOutboundClient({
+    fetchExternal({ url }) {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/changes")) {
+        const ids = path === "/3/movie/changes" ? tmdb.changed : [];
+        const body = { page: 1, total_pages: 1, results: ids.map((id) => ({ id })) };
+        return { url, status: 200, headers: {}, body: JSON.stringify(body) };
+      }
+      const id = path.match(/^\/3\/movie\/(\d+)$/)?.[1];
+      if (!id) throw new Error(`Unexpected URL ${url}`);
+      tmdb.fetched.push(id);
+      if (tmdb.failing.has(id)) {
+        return { url, status: 500, headers: {}, body: "boom" };
+      }
+      const body = { id: Number(id), title: `Title ${id}`, release_date: "2020-01-01" };
+      return { url, status: 200, headers: {}, body: JSON.stringify(body) };
+    },
+  });
+  const run = (iso: string, options: { fullRefreshPageSize?: number } = {}) =>
+    runTmdbDailySync(db, outbound, {
+      now: new Date(iso),
+      tmdbConfig: { accessToken: "test" },
+      ...options,
+    });
+  const cursor = () =>
+    db
+      .selectFrom("sync_state")
+      .select(["last_synced_date", "metadata"])
+      .where("sync_key", "=", "tmdb_changes_movie")
+      .executeTakeFirstOrThrow();
+  return { db, tmdb, run, cursor };
+}
+
 describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
   const handles: TestDbHandle[] = [];
 
@@ -352,6 +412,97 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     now = new Date("2026-11-23T05:00:00.000Z");
     await worker.scheduled(createScheduledController(now));
     expect(emitted).toHaveLength(0);
+  });
+
+  test("one item that keeps failing does not hold the cursor back; it is retried on later runs", async () => {
+    const { tmdb, run, cursor } = await setupTrackedMovies(handles, 2);
+
+    await run("2026-11-10T04:00:00Z");
+    tmdb.changed = [1, 2];
+    tmdb.failing.add("2");
+    const day2 = await run("2026-11-11T04:00:00Z");
+    expect(day2.transientErrors).toHaveLength(1);
+    expect(day2.movie).toMatchObject({ cursorAdvanced: true, refreshedCount: 1 });
+    expect(await cursor()).toMatchObject({
+      last_synced_date: "2026-11-11",
+      metadata: { retryTmdbIds: ["2"] },
+    });
+
+    // Day 3: neither item changed, but the failed one is retried, succeeds and leaves the list.
+    tmdb.changed = [];
+    tmdb.failing.clear();
+    tmdb.fetched.length = 0;
+    const day3 = await run("2026-11-12T04:00:00Z");
+    expect(day3.transientErrors).toEqual([]);
+    expect(tmdb.fetched).toEqual(["2"]);
+    const after = await cursor();
+    expect(after.last_synced_date).toBe("2026-11-12");
+    expect(after.metadata).not.toHaveProperty("retryTmdbIds");
+  });
+
+  test("a full refresh runs one page per run and advances the date only after the last page", async () => {
+    const { db, tmdb, run, cursor } = await setupTrackedMovies(handles, 3);
+    await db
+      .insertInto("sync_state")
+      .values({ sync_key: "tmdb_changes_movie", last_synced_date: "2026-10-01", metadata: "{}" })
+      .execute();
+    const now = "2026-11-12T04:00:00Z";
+
+    const first = await run(now, { fullRefreshPageSize: 2 });
+    expect(first.movie).toMatchObject({
+      mode: "full_refresh",
+      candidateCount: 2,
+      cursorAdvanced: false,
+    });
+    expect((await cursor()).last_synced_date).toBe("2026-10-01");
+    expect((await cursor()).metadata).toHaveProperty("fullRefreshAfterMediaId");
+
+    const second = await run(now, { fullRefreshPageSize: 2 });
+    expect(second.movie).toMatchObject({
+      mode: "full_refresh",
+      candidateCount: 1,
+      cursorAdvanced: true,
+    });
+    expect(tmdb.fetched.sort()).toEqual(["1", "2", "3"]);
+    const after = await cursor();
+    expect(after.last_synced_date).toBe("2026-11-12");
+    expect(after.metadata).not.toHaveProperty("fullRefreshAfterMediaId");
+  });
+
+  test("a full refresh over several days keeps earlier pages' failures and resumes from its first day", async () => {
+    const { db, tmdb, run, cursor } = await setupTrackedMovies(handles, 3);
+    await db
+      .insertInto("sync_state")
+      .values({ sync_key: "tmdb_changes_movie", last_synced_date: "2026-10-01", metadata: "{}" })
+      .execute();
+
+    // Day 1: the first page's two movies fail.
+    for (const id of ["1", "2", "3"]) tmdb.failing.add(id);
+    const first = await run("2026-11-10T04:00:00Z", { fullRefreshPageSize: 2 });
+    expect(first.movie).toMatchObject({ mode: "full_refresh", cursorAdvanced: false });
+    const failed = [...tmdb.fetched].sort();
+    expect(failed).toHaveLength(2);
+    expect((await cursor()).metadata).toMatchObject({ fullRefreshStartedOn: "2026-11-10" });
+
+    // Day 3: the last page succeeds. The failures stay listed, and the date resumes from day 1.
+    tmdb.failing.clear();
+    const last = await run("2026-11-12T04:00:00Z", { fullRefreshPageSize: 2 });
+    expect(last.movie).toMatchObject({ mode: "full_refresh", cursorAdvanced: true });
+    const afterRefresh = await cursor();
+    expect(afterRefresh.last_synced_date).toBe("2026-11-10");
+    expect(afterRefresh.metadata).not.toHaveProperty("fullRefreshStartedOn");
+    expect(
+      [...((afterRefresh.metadata as { retryTmdbIds?: string[] }).retryTmdbIds ?? [])].sort(),
+    ).toEqual(failed);
+
+    // The next run asks for changes since day 1 and retries the earlier failures.
+    tmdb.fetched.length = 0;
+    const next = await run("2026-11-12T05:00:00Z");
+    expect(next.movie).toMatchObject({ mode: "changes", startDate: "2026-11-10" });
+    expect(tmdb.fetched.sort()).toEqual(failed);
+    const after = await cursor();
+    expect(after.last_synced_date).toBe("2026-11-12");
+    expect(after.metadata).not.toHaveProperty("retryTmdbIds");
   });
 
   test("catches up missed days (<=14d via /changes, >14d via full refresh) and leaves cursor unadvanced on transient 5xx", async () => {

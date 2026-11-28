@@ -13,16 +13,19 @@ import {
   createExplorationJobHandler,
   createInvalidationRecheckJobHandler,
   createReviewAgentJobHandler,
+  DEFAULT_REVIEW_AGENT_MAX_DURATION_MS,
   createSeedEvidenceCheckJobHandler,
   createTmdbDailyExportsJobHandler,
   createTmdbSyncJobHandler,
   resolveExplorationAgentConfig,
+  resolveExplorationSchedulerConfig,
   enqueueTmdbDailyExportsIfDue,
   enqueueTmdbDailySyncIfDue,
   EVIDENCE_CHECK_JOB_TYPE,
   EXPLORATION_JOB_TYPE,
   failJobWithFencing,
   getJobById,
+  releaseDemandAfterFailedExploration,
   INVALIDATION_RECHECK_JOB_TYPE,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
@@ -193,6 +196,46 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
     // tmdb_sync has no session budget and may use the whole invocation. A shorter lease lets cron
     // claim a second copy while the first still runs, and fencing then drops the first's result.
     [TMDB_SYNC_JOB_TYPE]: Math.max(leaseDurationMs, INVOCATION_WALL_TIME_MS + 5 * 60_000),
+    // A review refuses to start with less than its session budget left (see review-agent.ts).
+    [REVIEW_AGENT_JOB_TYPE]: Math.max(
+      leaseDurationMs,
+      (deps.config?.reviewAgent?.maxDurationMs ?? DEFAULT_REVIEW_AGENT_MAX_DURATION_MS) +
+        5 * 60_000,
+    ),
+  };
+  // Session jobs restart their lease on delivery, so queue delay does not eat the session budget.
+  const leasedOnDelivery = new Set<string>([EXPLORATION_JOB_TYPE, REVIEW_AGENT_JOB_TYPE]);
+  // A demand must outlive its job's dispatch lease plus its execution lease; otherwise the
+  // scheduler supersedes a session that is still running and throws its result away.
+  const explorationConfig = {
+    ...deps.config?.exploration,
+    leaseDurationMs: Math.max(
+      resolveExplorationSchedulerConfig(deps.config?.exploration).leaseDurationMs,
+      2 * leaseDurationMsByType[EXPLORATION_JOB_TYPE] + 60_000,
+    ),
+  };
+  // A job that failed for good: an exploration job also releases its demand with a backoff.
+  const failJob = async (
+    job: { id: string; jobType: string; leaseGeneration: number },
+    errorMessage: string,
+    now: Date,
+  ) => {
+    const result = await failJobWithFencing(deps.db, {
+      jobId: job.id,
+      leaseGeneration: job.leaseGeneration,
+      errorMessage,
+      now,
+    });
+    if (result.applied && job.jobType === EXPLORATION_JOB_TYPE) {
+      // The stored payload, not the delivered one: a run that bound an external-key demand to its
+      // media rewrote it to name the media demand it leased instead.
+      await releaseDemandAfterFailedExploration(deps.db, {
+        payload: result.job.payload,
+        now,
+        config: explorationConfig,
+      });
+    }
+    return result;
   };
   const dispatchFailureRetryDelayMs = deps.config?.dispatchFailureRetryDelayMs ?? 0;
   const defaultRetryDelayMs = deps.config?.defaultRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
@@ -226,7 +269,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       catalogConfig: deps.config?.catalog,
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
-      config: deps.config?.exploration,
+      config: explorationConfig,
       executor:
         deps.explorationExecutor ??
         createExplorationAgentExecutor({
@@ -281,7 +324,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
         await runScheduledStep("exploration_schedule_failed", EXPLORATION_JOB_TYPE, () =>
           scheduleExplorationJobs(deps.db, {
             now,
-            config: deps.config?.exploration,
+            config: explorationConfig,
             adapterRegistry: deps.adapterRegistry,
           }),
         );
@@ -324,7 +367,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           jobType: job.jobType,
           leaseGeneration: job.leaseGeneration,
           payload: job.payload,
-          ...(job.jobType === EXPLORATION_JOB_TYPE && job.leaseExpiresAt
+          ...(leasedOnDelivery.has(job.jobType) && job.leaseExpiresAt
             ? { dispatchLeaseExpiresAt: job.leaseExpiresAt.toISOString() }
             : {}),
         };
@@ -390,15 +433,14 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
         let currentJob;
         try {
-          currentJob =
-            body.jobType === EXPLORATION_JOB_TYPE
-              ? await startLeasedJob(
-                  deps.db,
-                  body,
-                  resolveNow(deps.now),
-                  leaseDurationMsByType[EXPLORATION_JOB_TYPE],
-                )
-              : await getJobById(deps.db, body.jobId);
+          currentJob = leasedOnDelivery.has(body.jobType)
+            ? await startLeasedJob(
+                deps.db,
+                body,
+                resolveNow(deps.now),
+                leaseDurationMsByType[body.jobType as keyof typeof leaseDurationMsByType],
+              )
+            : await getJobById(deps.db, body.jobId);
         } catch (error) {
           logJobError("job_read_failed", body.jobId, body.jobType, error);
           summary.retriedInQueue += 1;
@@ -440,6 +482,11 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           continue;
         }
 
+        const jobRef = {
+          id: body.jobId,
+          jobType: body.jobType,
+          leaseGeneration: body.leaseGeneration,
+        };
         try {
           const outcome = await handler({
             db: deps.db,
@@ -475,12 +522,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
           if (outcome.status === "retry") {
             if (currentJob.attempts >= currentJob.maxAttempts) {
-              const failResult = await failJobWithFencing(deps.db, {
-                jobId: body.jobId,
-                leaseGeneration: body.leaseGeneration,
-                errorMessage: outcome.errorMessage,
-                now: commitNow,
-              });
+              const failResult = await failJob(jobRef, outcome.errorMessage, commitNow);
               if (failResult.applied) {
                 summary.failed += 1;
               } else {
@@ -507,12 +549,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
             continue;
           }
 
-          const failResult = await failJobWithFencing(deps.db, {
-            jobId: body.jobId,
-            leaseGeneration: body.leaseGeneration,
-            errorMessage: outcome.errorMessage,
-            now: commitNow,
-          });
+          const failResult = await failJob(jobRef, outcome.errorMessage, commitNow);
           if (failResult.applied) {
             summary.failed += 1;
           } else {
@@ -526,12 +563,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
           try {
             if (currentJob.attempts >= currentJob.maxAttempts) {
-              const failResult = await failJobWithFencing(deps.db, {
-                jobId: body.jobId,
-                leaseGeneration: body.leaseGeneration,
-                errorMessage,
-                now: errorNow,
-              });
+              const failResult = await failJob(jobRef, errorMessage, errorNow);
               if (failResult.applied) {
                 summary.failed += 1;
               } else {

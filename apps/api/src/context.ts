@@ -206,152 +206,83 @@ export async function requireOwnerAuth(ctx: HandlerContext): Promise<Authenticat
   return session;
 }
 
+/**
+ * An API key with `permission` when the request carries one, otherwise a signed-in session
+ * (with a verified email when `verifiedSession` is set). `missing` is the 401 message for neither.
+ */
+async function resolveKeyOrSession(
+  ctx: HandlerContext,
+  options: {
+    permission: ApiKeyAction;
+    db: "read" | "write";
+    verifiedSession: boolean;
+    missing: string;
+  },
+): Promise<{ apiKey: VerifiedApiKey } | { session: AuthenticatedSession }> {
+  if (extractApiKeyFromHeaders(ctx.requestHeader) !== null) {
+    return { apiKey: await requireApiKeyAuth(ctx, options) };
+  }
+  const session = await getAuthenticatedSession(getRuntime(ctx).getAuth(), ctx.requestHeader);
+  if (!session) {
+    throw createDomainConnectError({ status: 401, code: "UNAUTHORIZED", message: options.missing });
+  }
+  if (options.verifiedSession) {
+    requireVerifiedEmail(session);
+  }
+  return { session };
+}
+
 export async function resolveSubmitterAuth(
   ctx: HandlerContext,
 ): Promise<{ userId: string; keyId: string | null }> {
-  const runtime = getRuntime(ctx);
-  const rawApiKey = extractApiKeyFromHeaders(ctx.requestHeader);
-  if (rawApiKey !== null) {
-    const verified = await verifyApiKey({
-      db: runtime.dbWrite,
-      rawKey: rawApiKey,
-      requiredPermission: "submit",
-      now: runtime.now(),
-    });
-    if (!verified.ok) {
-      throw createDomainConnectError({
-        status: verified.status,
-        code: verified.code,
-        message: verified.message,
-      });
-    }
-    return {
-      userId: verified.apiKey.userId,
-      keyId: verified.apiKey.keyId,
-    };
-  }
-
-  const session = await getAuthenticatedSession(runtime.getAuth(), ctx.requestHeader);
-  if (!session) {
-    throw createDomainConnectError({
-      status: 401,
-      code: "UNAUTHORIZED",
-      message: "Authentication or API key with submit permission is required",
-    });
-  }
-
-  requireVerifiedEmail(session);
-
-  return {
-    userId: session.user.id,
-    keyId: null,
-  };
+  const auth = await resolveKeyOrSession(ctx, {
+    permission: "submit",
+    db: "write",
+    verifiedSession: true,
+    missing: "Authentication or API key with submit permission is required",
+  });
+  return "apiKey" in auth
+    ? { userId: auth.apiKey.userId, keyId: auth.apiKey.keyId }
+    : { userId: auth.session.user.id, keyId: null };
 }
 
 export async function resolveChangeRequestReaderAuth(ctx: HandlerContext): Promise<void> {
-  const runtime = getRuntime(ctx);
-  const rawApiKey = extractApiKeyFromHeaders(ctx.requestHeader);
-  if (rawApiKey !== null) {
-    const verified = await verifyApiKey({
-      db: runtime.dbWrite,
-      rawKey: rawApiKey,
-      requiredPermission: "read",
-      now: runtime.now(),
-    });
-    if (!verified.ok) {
-      throw createDomainConnectError({
-        status: verified.status,
-        code: verified.code,
-        message: verified.message,
-      });
-    }
-    return;
-  }
-
-  const session = await getAuthenticatedSession(runtime.getAuth(), ctx.requestHeader);
-  if (!session) {
-    throw createDomainConnectError({
-      status: 401,
-      code: "UNAUTHORIZED",
-      message: "Authentication or API key is required",
-    });
-  }
+  await resolveKeyOrSession(ctx, {
+    permission: "read",
+    db: "write",
+    verifiedSession: false,
+    missing: "Authentication or API key is required",
+  });
 }
 
 export async function resolveInvalidationReporterAuth(
   ctx: HandlerContext,
 ): Promise<InvalidationReporterInput> {
-  const runtime = getRuntime(ctx);
-  const rawApiKey = extractApiKeyFromHeaders(ctx.requestHeader);
-  if (rawApiKey !== null) {
-    const verified = await verifyApiKey({
-      db: runtime.dbWrite,
-      rawKey: rawApiKey,
-      requiredPermission: "report",
-      now: runtime.now(),
-    });
-    if (!verified.ok) {
-      throw createDomainConnectError({
-        status: verified.status,
-        code: verified.code,
-        message: verified.message,
-      });
-    }
-    return {
-      reporterType: "api_key",
-      reporterKeyId: verified.apiKey.keyId,
-      reporterUserId: verified.apiKey.userId,
-    };
-  }
-
-  const session = await getAuthenticatedSession(runtime.getAuth(), ctx.requestHeader);
-  if (!session) {
-    throw createDomainConnectError({
-      status: 401,
-      code: "UNAUTHORIZED",
-      message: "Authentication or API key with report permission is required",
-    });
-  }
-
-  requireVerifiedEmail(session);
-  return {
-    reporterType: "user",
-    reporterUserId: session.user.id,
-  };
+  const auth = await resolveKeyOrSession(ctx, {
+    permission: "report",
+    db: "write",
+    verifiedSession: true,
+    missing: "Authentication or API key with report permission is required",
+  });
+  return "apiKey" in auth
+    ? {
+        reporterType: "api_key",
+        reporterKeyId: auth.apiKey.keyId,
+        reporterUserId: auth.apiKey.userId,
+      }
+    : { reporterType: "user", reporterUserId: auth.session.user.id };
 }
 
 export async function resolveAssociationHistoryReaderAuth(
   ctx: HandlerContext,
 ): Promise<{ useReadDb: boolean }> {
-  const runtime = getRuntime(ctx);
-  const rawApiKey = extractApiKeyFromHeaders(ctx.requestHeader);
-  if (rawApiKey !== null) {
-    const verified = await verifyApiKey({
-      db: runtime.dbRead,
-      rawKey: rawApiKey,
-      requiredPermission: "read",
-      now: runtime.now(),
-    });
-    if (!verified.ok) {
-      throw createDomainConnectError({
-        status: verified.status,
-        code: verified.code,
-        message: verified.message,
-      });
-    }
-    return { useReadDb: true };
-  }
-
-  const session = await getAuthenticatedSession(runtime.getAuth(), ctx.requestHeader);
-  if (!session) {
-    throw createDomainConnectError({
-      status: 401,
-      code: "UNAUTHORIZED",
-      message: "Authentication or read API key is required",
-    });
-  }
-
-  return { useReadDb: false };
+  const auth = await resolveKeyOrSession(ctx, {
+    permission: "read",
+    db: "read",
+    verifiedSession: false,
+    missing: "Authentication or read API key is required",
+  });
+  return { useReadDb: "apiKey" in auth };
 }
 
 export function rethrowDomainError(error: unknown): never {

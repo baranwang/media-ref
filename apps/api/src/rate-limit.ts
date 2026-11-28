@@ -268,6 +268,23 @@ export function resolveSubmissionQuotaConfig(input: {
   };
 }
 
+/** The read limits in effect: configured values, or the defaults. */
+function resolveReadLimits(config: ReadRateLimitConfig | undefined): Required<ReadRateLimitConfig> {
+  const positive = (value: number | undefined, fallback: number) =>
+    value && value > 0 ? Math.floor(value) : fallback;
+  const nonNegative = (value: number | undefined, fallback: number) =>
+    value !== undefined ? Math.max(0, Math.floor(value)) : fallback;
+  return {
+    readPeriodSeconds: positive(config?.readPeriodSeconds, DEFAULT_READ_PERIOD_SECONDS),
+    readRetryAfterSeconds: positive(
+      config?.readRetryAfterSeconds,
+      DEFAULT_READ_RETRY_AFTER_SECONDS,
+    ),
+    readKeyLimit: nonNegative(config?.readKeyLimit, DEFAULT_READ_KEY_LIMIT),
+    readIpLimit: nonNegative(config?.readIpLimit, DEFAULT_READ_IP_LIMIT),
+  };
+}
+
 const fallbackReadLimitersByConfig = new Map<string, ReadRateLimitRuntime>();
 
 export function resolveModuleScopedReadRateLimitRuntime(input: {
@@ -275,25 +292,9 @@ export function resolveModuleScopedReadRateLimitRuntime(input: {
   readIpLimiter?: RateLimitBinding;
   config?: ReadRateLimitConfig;
 }): ReadRateLimitRuntime {
-  const readPeriodSeconds =
-    input.config?.readPeriodSeconds && input.config.readPeriodSeconds > 0
-      ? Math.floor(input.config.readPeriodSeconds)
-      : DEFAULT_READ_PERIOD_SECONDS;
-
-  const readRetryAfterSeconds =
-    input.config?.readRetryAfterSeconds && input.config.readRetryAfterSeconds > 0
-      ? Math.floor(input.config.readRetryAfterSeconds)
-      : DEFAULT_READ_RETRY_AFTER_SECONDS;
-
-  const readKeyLimit =
-    input.config?.readKeyLimit !== undefined
-      ? Math.max(0, Math.floor(input.config.readKeyLimit))
-      : DEFAULT_READ_KEY_LIMIT;
-
-  const readIpLimit =
-    input.config?.readIpLimit !== undefined
-      ? Math.max(0, Math.floor(input.config.readIpLimit))
-      : DEFAULT_READ_IP_LIMIT;
+  const { readPeriodSeconds, readRetryAfterSeconds, readKeyLimit, readIpLimit } = resolveReadLimits(
+    input.config,
+  );
 
   if (input.readKeyLimiter && input.readIpLimiter) {
     return {
@@ -323,25 +324,9 @@ export function createReadRateLimitRuntime(input: {
   config?: ReadRateLimitConfig;
   now?: () => Date;
 }): ReadRateLimitRuntime {
-  const readPeriodSeconds =
-    input.config?.readPeriodSeconds && input.config.readPeriodSeconds > 0
-      ? Math.floor(input.config.readPeriodSeconds)
-      : DEFAULT_READ_PERIOD_SECONDS;
-
-  const readRetryAfterSeconds =
-    input.config?.readRetryAfterSeconds && input.config.readRetryAfterSeconds > 0
-      ? Math.floor(input.config.readRetryAfterSeconds)
-      : DEFAULT_READ_RETRY_AFTER_SECONDS;
-
-  const readKeyLimit =
-    input.config?.readKeyLimit !== undefined
-      ? Math.max(0, Math.floor(input.config.readKeyLimit))
-      : DEFAULT_READ_KEY_LIMIT;
-
-  const readIpLimit =
-    input.config?.readIpLimit !== undefined
-      ? Math.max(0, Math.floor(input.config.readIpLimit))
-      : DEFAULT_READ_IP_LIMIT;
+  const { readPeriodSeconds, readRetryAfterSeconds, readKeyLimit, readIpLimit } = resolveReadLimits(
+    input.config,
+  );
 
   return {
     keyLimiter:

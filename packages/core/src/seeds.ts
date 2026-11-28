@@ -43,7 +43,12 @@ import {
 } from "./jobs.ts";
 import { recordLead } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
-import { extractCollectionDisplay, isUuid, type AssociationNamespace } from "./media-service.ts";
+import {
+  extractCollectionDisplay,
+  isUuid,
+  resolveCanonicalMediaById,
+  type AssociationNamespace,
+} from "./media-service.ts";
 import type { ExternalHttpResponse, OutboundClient } from "./outbound.ts";
 import {
   createTmdbGateway,
@@ -60,8 +65,6 @@ export const SEED_IMPORTER_USER_ID = "system:seed-importer";
 export const SEED_IMPORTER_USER_EMAIL = "seed-importer@system.mediaref.internal";
 export const SEED_IMPORTER_USER_NAME = "Seed Importer";
 export const SEED_IMPORTER_KEY_ID = "system:seed-importer";
-
-const MAX_MERGE_HOPS = 10;
 
 const POSITIVE_INT_PATTERN = /^[1-9]\d*$/;
 const IMDB_ID_PATTERN = /^tt\d+$/i;
@@ -408,38 +411,6 @@ export function createSeedLeadsReporter(dbWrite: Db): SeedLeadReporter {
       reporterKeyId: SEED_IMPORTER_KEY_ID,
     });
   };
-}
-
-async function resolveCanonicalMediaById(
-  db: Db | Transaction<Database>,
-  mediaId: string,
-): Promise<ResolvedMediaRow | null> {
-  let currentId = mediaId;
-  for (let hop = 0; hop < MAX_MERGE_HOPS; hop += 1) {
-    const row = await db
-      .selectFrom("media")
-      .select([
-        "id",
-        "type",
-        "baseline",
-        "title",
-        "original_title",
-        "year",
-        "seasons",
-        "merged_into_media_id",
-      ])
-      .where("id", "=", currentId)
-      .executeTakeFirst();
-
-    if (!row) {
-      return null;
-    }
-    if (!row.merged_into_media_id || row.merged_into_media_id === row.id) {
-      return row;
-    }
-    currentId = row.merged_into_media_id;
-  }
-  return null;
 }
 
 async function loadActiveAssociationsWithSegmentsInTx(

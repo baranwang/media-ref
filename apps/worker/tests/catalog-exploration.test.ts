@@ -433,7 +433,7 @@ describe("catalog-group exploration", () => {
   );
 
   test.each([
-    ["tvdb", "123"],
+    ["tvdb", "movie:123"],
     ["trakt", "movie:123"],
   ] as const)(
     "a conflicting %s ID does not lend the IMDb-verified title to its owner",
@@ -748,7 +748,7 @@ describe("catalog-group exploration", () => {
         testDb,
         "Fight Club",
         namespace,
-        namespace === "tmdb" ? "movie:550" : "42",
+        namespace === "tmdb" ? "movie:550" : "movie:42",
       );
       await testDb.writeDb
         .insertInto("demands")
@@ -803,7 +803,7 @@ describe("catalog-group exploration", () => {
 
   test.each([
     ["tmdb", "movie:550"],
-    ["tvdb", "77550"],
+    ["tvdb", "movie:77550"],
   ] as const)(
     "TMDB search keeps fetched titles off an unrelated %s holder",
     async (namespace, nativeId) => {
@@ -878,7 +878,7 @@ describe("catalog-group exploration", () => {
       externalIds: [["imdb", "tt0137523"]],
       tmdbExternalIds: { tvdb_id: "42" },
     });
-    const holder = await addMovieIdHolder(testDb, "Fight Club", "tvdb", "42");
+    const holder = await addMovieIdHolder(testDb, "Fight Club", "tvdb", "movie:42");
     await testDb.writeDb
       .insertInto("demands")
       .values({
@@ -899,7 +899,7 @@ describe("catalog-group exploration", () => {
     expect((await externalIds(testDb, mediaId)).map((row) => row.native_id)).toEqual([
       "tt0137523",
       "movie:550",
-      "42",
+      "movie:42",
     ]);
     expect(await testDb.readDb.selectFrom("review_alerts").select("id").execute()).toEqual([]);
   });

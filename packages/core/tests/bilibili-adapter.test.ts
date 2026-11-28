@@ -262,6 +262,8 @@ describe("Bilibili Tier 1 & Tier 2 adapter", () => {
       "341212",
     ]);
     expect(result.info.featureEpisodes.map((ep) => ep.index)).toEqual([1, 2, 3]);
+    // pub_time 1601659500 is 2020-10-03 01:25 CST (2020-10-02 in UTC).
+    expect(result.info.featureEpisodes[0]?.airDate).toBe("2020-10-03");
     expect(result.info.aliases).toContain("Jujutsu Kaisen");
     expect(result.info.externalIds).toBeUndefined();
   });

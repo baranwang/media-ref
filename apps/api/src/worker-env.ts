@@ -29,6 +29,7 @@ export interface ApiWorkerEnv {
   TRAKT_API_BASE_URL?: string;
   RATE_LIMITER_READ_KEY?: RateLimitBinding;
   RATE_LIMITER_READ_IP?: RateLimitBinding;
+  RATE_LIMITER_AUTH_IP?: RateLimitBinding;
   RATE_LIMIT_READ_KEY_LIMIT?: string;
   RATE_LIMIT_READ_IP_LIMIT?: string;
   RATE_LIMIT_READ_PERIOD_SECONDS?: string;

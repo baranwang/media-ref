@@ -428,7 +428,7 @@ describe("Mango TV (mgtv) Tier 1 & Tier 2 adapter", () => {
     expect(outbound.httpRequests).toHaveLength(1);
   });
 
-  test("returns transient_error on network timeout, 5xx, 403, invalid JSON, or mid-pagination / video/info failure", async () => {
+  test("returns transient_error on network timeout, 5xx, 403, invalid JSON, mid-pagination failure or empty page, or video/info failure", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
         const url = new URL(request.url);
@@ -462,6 +462,23 @@ describe("Mango TV (mgtv) Tier 1 & Tier 2 adapter", () => {
           }
           return { status: 502, headers: {}, body: "Bad Gateway", url: request.url };
         }
+        if (cid === "502004") {
+          // Page 2 of 2 comes back empty: the list is truncated, not short.
+          const first = url.searchParams.get("page") === "1";
+          return jsonResponse(request.url, {
+            code: 200,
+            msg: "",
+            data: {
+              total: 60,
+              count: 50,
+              total_page: 2,
+              info: { title: "空页测试" },
+              list: first
+                ? [makeMgtvEpisodeItem("502004", 770004, { isIntact: "1", t1: "1" })]
+                : [],
+            },
+          });
+        }
         if (cid === "500003") {
           if (url.pathname === "/episode/list") {
             return jsonResponse(request.url, {
@@ -483,7 +500,7 @@ describe("Mango TV (mgtv) Tier 1 & Tier 2 adapter", () => {
       },
     });
 
-    for (const cid of ["403000", "503000", "408000", "900001", "502002", "500003"]) {
+    for (const cid of ["403000", "503000", "408000", "900001", "502002", "502004", "500003"]) {
       const result = await mgtvAdapter.fetchCollection(cid, outbound);
       expect(result.status).toBe("transient_error");
     }

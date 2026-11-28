@@ -279,7 +279,7 @@ describe("Exploration scheduler (#28)", () => {
     ]);
   });
 
-  test("verifies non-TMDB external keys against their catalog at exploration start (404 -> invalid_key, 503 -> retry, zero media)", async () => {
+  test("verifies non-TMDB external keys against their catalog at exploration start (404 -> invalid_key, 503 -> released with backoff, zero media)", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);
 
@@ -363,8 +363,8 @@ describe("Exploration scheduler (#28)", () => {
 
     const { batch } = createQueueBatch(emitted, t0);
     const summary = await worker.queue(batch);
-    expect(summary.completed).toBe(2);
-    expect(summary.rescheduled).toBe(1);
+    expect(summary.completed).toBe(3);
+    expect(summary.rescheduled).toBe(0);
 
     // Executor was never invoked because none of the keys resolved to a valid media
     expect(executedContexts).toHaveLength(0);
@@ -379,10 +379,14 @@ describe("Exploration scheduler (#28)", () => {
     const bangumi404 = await listDemands(testDb.readDb, { externalKey: "bangumi:88888888" });
     expect(bangumi404[0]?.status).toBe("invalid_key");
 
-    // Transient 503 Douban demand was NOT marked invalid_key or not_found
+    // Transient 503 Douban demand was NOT marked invalid_key or not_found; it is released with a
+    // backoff instead of staying leased (a re-lease would charge the daily budget again).
     const douban503 = await listDemands(testDb.readDb, { externalKey: "douban:77777777" });
-    expect(douban503[0]?.status).toBe("leased");
-    expect(douban503[0]?.notFoundCount).toBe(0);
+    expect(douban503[0]).toMatchObject({
+      status: "open",
+      notFoundCount: 0,
+      nextEligibleAt: "2026-11-23T11:00:00.000Z",
+    });
 
     // Zero media rows created
     const mediaRows = await testDb.readDb.selectFrom("media").select("id").execute();
@@ -393,6 +397,127 @@ describe("Exploration scheduler (#28)", () => {
       "bangumi",
       "douban",
       "douban",
+    ]);
+  });
+
+  test("a job that fails for good releases its demand with a backoff instead of leaving it leased", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T10:00:00.000Z");
+    const media = await testDb.writeDb
+      .insertInto("media")
+      .values({
+        type: "movie",
+        baseline: "tmdb",
+        title: "Crashing Movie",
+        original_title: "Crashing Movie",
+        year: 2022,
+        seasons: JSON.stringify([]),
+      })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await testDb.writeDb
+      .insertInto("demands")
+      .values({
+        media_id: media.id,
+        season: null,
+        namespace_group: "platform",
+        demand_count: 1,
+        status: "open",
+        next_eligible_at: t0,
+        last_demanded_at: t0,
+      })
+      .execute();
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      adapterRegistry: createTier3PlatformRegistry(),
+      explorationExecutor: async () => {
+        throw new Error("model gateway down");
+      },
+      config: {
+        enableDailyTmdbSync: false,
+        exploration: { dailyBudget: 10, jobMaxAttempts: 1 },
+      },
+      now: () => t0,
+    });
+
+    await worker.scheduled(createScheduledController(t0));
+    expect(emitted).toHaveLength(1);
+    const summary = await worker.queue(createQueueBatch(emitted, t0).batch);
+    expect(summary.failed).toBe(1);
+
+    const demand = (await listDemands(testDb.readDb, { mediaId: media.id }))[0]!;
+    expect(demand).toMatchObject({ status: "open", nextEligibleAt: "2026-11-23T11:00:00.000Z" });
+  });
+
+  test("a job that fails for good after binding an external-key demand releases the media demand it leased", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T10:00:00.000Z");
+    await seedTmdbExportIds(testDb.writeDb, [{ mediaType: "tv", tmdbId: "95479" }], "2026-11-23");
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.namespace === "tmdb" && request.url.includes("/tv/95479")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              id: 95479,
+              name: "咒术回战",
+              first_air_date: "2020-10-03",
+              seasons: [{ season_number: 1, episode_count: 24, air_date: "2020-10-03" }],
+            }),
+            url: request.url,
+          };
+        }
+        throw new Error(`Unexpected outbound URL: ${request.url}`);
+      },
+    });
+    await recordDemandForRead(testDb.writeDb, {
+      rawKey: "tmdb:tv:95479",
+      queryResult: { kind: "not_found", key: "tmdb:tv:95479" },
+      namespaceGroup: "platform",
+      now: t0,
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      adapterRegistry: createTier3PlatformRegistry(),
+      explorationExecutor: async () => {
+        throw new Error("model gateway down");
+      },
+      config: {
+        enableDailyTmdbSync: false,
+        exploration: { dailyBudget: 10, jobMaxAttempts: 1 },
+      },
+      now: () => t0,
+    });
+
+    await worker.scheduled(createScheduledController(t0));
+    expect((await worker.queue(createQueueBatch(emitted, t0).batch)).failed).toBe(1);
+
+    // The external-key demand became a media demand mid-run; that one is released, not left leased.
+    expect(await listDemands(testDb.readDb, { externalKey: "tmdb:tv:95479" })).toEqual([]);
+    const [media] = await testDb.readDb.selectFrom("media").select("id").execute();
+    expect(await listDemands(testDb.readDb, { mediaId: media!.id })).toMatchObject([
+      { status: "open", nextEligibleAt: "2026-11-23T11:00:00.000Z", leaseExpiresAt: null },
     ]);
   });
 
@@ -492,6 +617,8 @@ describe("Exploration scheduler (#28)", () => {
     expect(readResult.kind).toBe("ok");
     const readByImdb = await queryMediaByKey(testDb.readDb, "imdb:tt12343534");
     expect(readByImdb.kind).toBe("ok");
+    // IMDb ids are stored lower-case; an upper-case read still finds the media.
+    expect((await queryMediaByKey(testDb.readDb, "imdb:TT12343534")).kind).toBe("ok");
 
     // External-key demand was merged into media-scoped season demands: S1 backs off without a change request, S2 stays eligible
     const extDemands = await listDemands(testDb.readDb, { externalKey: "tmdb:tv:95479" });
@@ -512,7 +639,7 @@ describe("Exploration scheduler (#28)", () => {
       handles.push(handle);
       const db = handle.writeDb;
       const now = new Date("2026-11-23T11:00:00Z");
-      const keys = ["tmdb:movie:10", "imdb:tt0000002", "tvdb:20", "trakt:movie:7"];
+      const keys = ["tmdb:movie:10", "imdb:tt0000002", "tvdb:movie:20", "trakt:movie:7"];
       await db
         .insertInto("demands")
         .values(
@@ -524,7 +651,7 @@ describe("Exploration scheduler (#28)", () => {
           })),
         )
         .execute();
-      const tvdbDemand = await listDemands(db, { externalKey: "tvdb:20" });
+      const tvdbDemand = await listDemands(db, { externalKey: "tvdb:movie:20" });
       const createMovie = (title: string) =>
         db
           .insertInto("media")
@@ -548,7 +675,7 @@ describe("Exploration scheduler (#28)", () => {
           {
             media_id: tvdbOwner.id,
             namespace: "tvdb",
-            native_id: "20",
+            native_id: "movie:20",
             status: foreign ? "confirmed" : "seed_unconfirmed",
             is_external_id: foreign,
           },
@@ -590,7 +717,7 @@ describe("Exploration scheduler (#28)", () => {
       expect(emitted).toMatchObject([{ payload: { externalKey: "trakt:movie:7" } }]);
       expect((await worker.queue(createQueueBatch(emitted, now).batch)).completed).toBe(1);
 
-      expect(await listDemands(db, { externalKey: "tvdb:20" })).toEqual(tvdbDemand);
+      expect(await listDemands(db, { externalKey: "tvdb:movie:20" })).toEqual(tvdbDemand);
       const mediaDemands = await listDemands(db, { mediaId: selected.id });
       const externalIds = await db
         .selectFrom("associations")
@@ -1053,9 +1180,10 @@ describe("Exploration scheduler (#28)", () => {
     const gen1Msg = emitted[0]!;
     expect(gen1Msg.payload.demandLeaseGeneration).toBe(1);
 
-    // Expire demand lease (15m + 1s) -> scheduler supersedes gen1 job and re-claims at demandLeaseGeneration 2
+    // Expire demand lease (twice the 10m job lease + 1m, + 1s) -> scheduler supersedes gen1 job and
+    // re-claims at demandLeaseGeneration 2
     emitted.length = 0;
-    now = new Date(t0.getTime() + 15 * 60_000 + 1_000);
+    now = new Date(t0.getTime() + 21 * 60_000 + 1_000);
     await worker.scheduled(createScheduledController(now));
     expect(emitted).toHaveLength(1);
     const gen2Msg = emitted[0]!;

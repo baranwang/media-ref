@@ -1,10 +1,23 @@
 import {
   EXTERNAL_ID_NAMESPACES,
   formatExternalKey,
+  parseExternalKey,
   type ExternalIdNamespace,
+  type ExternalKey,
 } from "@media-ref/client";
 import type { Database } from "@media-ref/db";
 import type { Transaction } from "kysely";
+
+/**
+ * The external key as stored: IMDb ids are kept lower-case (`tt0903747`), so a read of
+ * `imdb:TT0903747` must find it and record demand under the same key.
+ */
+export function parseStoredExternalKey(raw: string): ExternalKey | null {
+  const parsed = parseExternalKey(raw);
+  return parsed?.namespace === "imdb"
+    ? { namespace: "imdb", nativeId: parsed.nativeId.toLowerCase() }
+    : parsed;
+}
 
 /** Report only keys confirmed on this media, including which ones this call inserted. */
 export async function backfillMissingExternalIdsInTx(

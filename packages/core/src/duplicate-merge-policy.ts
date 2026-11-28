@@ -15,6 +15,7 @@ import type {
   AssociationNamespaceRow,
   AssociationStatusRow,
   Database,
+  Db,
   SeasonSnapshotRow,
 } from "@media-ref/db";
 import type { Transaction } from "kysely";
@@ -418,8 +419,9 @@ export function selectCanonicalMergeTarget(
   return a.id < b.id ? { target: a, source: b } : { target: b, source: a };
 }
 
+/** Follows `merged_into_media_id` to the media a redirect ends at; null on a missing row or a cycle. */
 export async function resolveCanonicalMediaIdInTx(
-  trx: DbExecutor,
+  trx: Db | DbExecutor,
   mediaId: string,
 ): Promise<string | null> {
   let currentId = mediaId;

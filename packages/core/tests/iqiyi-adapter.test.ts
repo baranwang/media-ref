@@ -29,6 +29,56 @@ function htmlResponse(url: string, html: string, status = 200): ExternalHttpResp
   };
 }
 
+const VARIETY_ALBUM_ID = "2657274641350501";
+
+/**
+ * A variety album with no list episodes, so the adapter falls back to the signed source selector.
+ * `albumVideos` is the selector entry's `videos`: a list of groups, or a page URL to follow.
+ */
+function varietyAlbumStub(albumVideos: unknown) {
+  let signed: URLSearchParams | null = null;
+  const outbound = createFakeOutboundClient({
+    fetchExternal(request) {
+      const url = new URL(request.url);
+      if (request.url === `https://pcw-api.iqiyi.com/album/album/baseinfo/${VARIETY_ALBUM_ID}`) {
+        return jsonResponse(request.url, {
+          code: "A00000",
+          data: {
+            albumId: Number(VARIETY_ALBUM_ID),
+            name: "新说唱2025",
+            channelId: 6,
+            firstVideo: { tvId: 1920084229702900, period: "2025-06-07" },
+          },
+        });
+      }
+      if (url.pathname === "/albums/album/avlistinfo") {
+        return jsonResponse(request.url, {
+          code: "A00000",
+          data: { epsodelist: [{ tvId: 8572445604693100, contentType: 28, name: "发布会" }] },
+        });
+      }
+      if (url.pathname === "/prelw/tvg/v2/lw/base_info") {
+        signed = url.searchParams;
+        const selector = {
+          bk_id: "source_selector_bk",
+          data: {
+            data: [
+              { entity_id: 4016143587352901, videos: "https://mesh.if.iqiyi.com/x" },
+              { entity_id: Number(VARIETY_ALBUM_ID), videos: albumVideos },
+            ],
+          },
+        };
+        return jsonResponse(request.url, {
+          status_code: 0,
+          data: { template: { tabs: [{ blocks: [selector] }] } },
+        });
+      }
+      throw new Error(`Unexpected request: ${request.url}`);
+    },
+  });
+  return { outbound, signed: () => signed };
+}
+
 describe("iQIYI Tier 1 & Tier 2 adapter (#14)", () => {
   test("parses and canonicalizes bare numeric albumId without network calls", async () => {
     const outbound = createFakeOutboundClient();
@@ -1317,7 +1367,6 @@ describe("iQIYI Tier 3 search (#30)", () => {
   });
 
   test("variety: an album with no list episodes falls back to the signed source selector", async () => {
-    const albumId = "2657274641350501";
     const item = (qipu: number, phase: string, title: string, mark = 0) => ({
       qipu_id: qipu,
       phase_title: phase,
@@ -1325,72 +1374,21 @@ describe("iQIYI Tier 3 search (#30)", () => {
       mark_type_show: mark,
       publish_date: "20250607",
     });
-    let signed: URLSearchParams | null = null;
-    const outbound = createFakeOutboundClient({
-      fetchExternal(request) {
-        const url = new URL(request.url);
-        if (request.url === `https://pcw-api.iqiyi.com/album/album/baseinfo/${albumId}`) {
-          return jsonResponse(request.url, {
-            code: "A00000",
-            data: {
-              albumId: Number(albumId),
-              name: "新说唱2025",
-              channelId: 6,
-              firstVideo: { tvId: 1920084229702900, period: "2025-06-07" },
-            },
-          });
-        }
-        if (url.pathname === "/albums/album/avlistinfo") {
-          return jsonResponse(request.url, {
-            code: "A00000",
-            data: { epsodelist: [{ tvId: 8572445604693100, contentType: 28, name: "发布会" }] },
-          });
-        }
-        if (url.pathname === "/prelw/tvg/v2/lw/base_info") {
-          signed = url.searchParams;
-          return jsonResponse(request.url, {
-            status_code: 0,
-            data: {
-              template: {
-                tabs: [
-                  {
-                    blocks: [
-                      {
-                        bk_id: "source_selector_bk",
-                        data: {
-                          data: [
-                            { entity_id: 4016143587352901, videos: "https://mesh.if.iqiyi.com/x" },
-                            {
-                              entity_id: Number(albumId),
-                              videos: [
-                                {
-                                  title: "2025",
-                                  data: [
-                                    item(1, "发布会", "明星制作人齐立FLAG"),
-                                    item(2, "第1期上", "第1期上 超燃魔王秀"),
-                                    item(3, "第1期下", "第1期下 莆田Rap"),
-                                    item(4, "第1期纯享", "第1期纯享 说唱OG"),
-                                    item(5, "第2期上", "下期预告", 17),
-                                    item(6, "第2期上", "第2期上 锐评刘海哥"),
-                                  ],
-                                },
-                              ],
-                            },
-                          ],
-                        },
-                      },
-                    ],
-                  },
-                ],
-              },
-            },
-          });
-        }
-        throw new Error(`Unexpected request: ${request.url}`);
+    const { outbound, signed } = varietyAlbumStub([
+      {
+        title: "2025",
+        data: [
+          item(1, "发布会", "明星制作人齐立FLAG"),
+          item(2, "第1期上", "第1期上 超燃魔王秀"),
+          item(3, "第1期下", "第1期下 莆田Rap"),
+          item(4, "第1期纯享", "第1期纯享 说唱OG"),
+          item(5, "第2期上", "下期预告", 17),
+          item(6, "第2期上", "第2期上 锐评刘海哥"),
+        ],
       },
-    });
+    ]);
 
-    const result = await iqiyiAdapter.fetchCollection(albumId, outbound);
+    const result = await iqiyiAdapter.fetchCollection(VARIETY_ALBUM_ID, outbound);
     expect(result.status).toBe("found");
     if (result.status !== "found") return;
     expect(result.info.featureEpisodes).toEqual([
@@ -1416,8 +1414,15 @@ describe("iQIYI Tier 3 search (#30)", () => {
         airDate: "2025-06-07",
       },
     ]);
-    expect(signed!.get("entity_id")).toBe("1920084229702900");
-    expect(signed!.get("sign")).toMatch(/^[0-9A-F]{32}$/);
+    expect(signed()!.get("entity_id")).toBe("1920084229702900");
+    expect(signed()!.get("sign")).toMatch(/^[0-9A-F]{32}$/);
+  });
+
+  test("variety: a source-selector page URL off iQIYI is not fetched", async () => {
+    const { outbound } = varietyAlbumStub("https://evil.example/page");
+    const result = await iqiyiAdapter.fetchCollection(VARIETY_ALBUM_ID, outbound);
+    expect(result.status).toBe("transient_error");
+    expect(outbound.httpRequests.some((r) => r.url.includes("evil.example"))).toBe(false);
   });
 
   test("user uploads (RUGC, with an uploader id) are not collections", async () => {

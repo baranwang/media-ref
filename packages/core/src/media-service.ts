@@ -14,7 +14,6 @@ import {
   type BaselineSource,
   type ChangeRequestStatus,
   type ExternalIdNamespace,
-  type MediaDocument,
   type NormalizedSegment,
   type SegmentInput,
   type SegmentValidationError,
@@ -67,7 +66,6 @@ import { MAX_LEAD_VARIANT_DESCRIPTION_LENGTH } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import type { OutboundClient } from "./outbound.ts";
 import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
-import { queryMediaByKey, type MediaQueryItem } from "./read-media.ts";
 import { type TmdbGateway, type TmdbGatewayConfig, type TmdbMediaFetchResult } from "./tmdb.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -235,16 +233,6 @@ export interface RejectChangeRequestInput {
   allowedStatuses?: readonly ChangeRequestStatus[];
 }
 
-export type ReadMediaDocumentResult =
-  | {
-      kind: "ok";
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-      items: MediaQueryItem[];
-    }
-  | { kind: "not_found" }
-  | { kind: "invalid_key"; message: string };
-
 export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
@@ -374,7 +362,7 @@ function toChangeRequestRecord(row: Selectable<ChangeRequestsTable>): ChangeRequ
 
 type DbExecutor = Db | Transaction<Database>;
 
-interface ResolvedMediaRow {
+export interface ResolvedMediaRow {
   id: string;
   type: "movie" | "tv";
   baseline: BaselineSource | null;
@@ -385,37 +373,30 @@ interface ResolvedMediaRow {
   merged_into_media_id: string | null;
 }
 
-async function resolveCanonicalMediaById(
+/** The media a merge redirect chain ends at, as a row; null on a missing row or a cycle. */
+export async function resolveCanonicalMediaById(
   db: DbExecutor,
   mediaId: string,
 ): Promise<ResolvedMediaRow | null> {
-  let currentId = mediaId;
-  for (let hop = 0; hop < 10; hop++) {
-    const row = await db
-      .selectFrom("media")
-      .select([
-        "id",
-        "type",
-        "baseline",
-        "title",
-        "original_title",
-        "year",
-        "seasons",
-        "merged_into_media_id",
-      ])
-      .where("id", "=", currentId)
-      .executeTakeFirst();
-
-    if (!row) {
-      return null;
-    }
-
-    if (!row.merged_into_media_id || row.merged_into_media_id === row.id) {
-      return row;
-    }
-    currentId = row.merged_into_media_id;
+  const canonicalId = await resolveCanonicalMediaIdInTx(db, mediaId);
+  if (!canonicalId) {
+    return null;
   }
-  return null;
+  const row = await db
+    .selectFrom("media")
+    .select([
+      "id",
+      "type",
+      "baseline",
+      "title",
+      "original_title",
+      "year",
+      "seasons",
+      "merged_into_media_id",
+    ])
+    .where("id", "=", canonicalId)
+    .executeTakeFirst();
+  return row ?? null;
 }
 
 type ParsedTargetKey =
@@ -2212,14 +2193,36 @@ export async function approveChangeRequestInTransaction(
       .forUpdate()
       .executeTakeFirst();
 
-    normalizedSegments =
+    const confirmedSegments =
       existingAssociation?.status === "confirmed"
-        ? mergeApprovedSegments(
-            await loadSegments(trx, existingAssociation.id),
-            requestedSegments,
-            media.seasons,
-          )
-        : requestedSegments;
+        ? await loadSegments(trx, existingAssociation.id)
+        : null;
+    normalizedSegments = confirmedSegments
+      ? mergeApprovedSegments(confirmedSegments, requestedSegments, media.seasons)
+      : requestedSegments;
+    // An open-ended segment's end comes from a season's episode count: the evidence check uses the
+    // fresh catalog's, the merge the stored ones. An automatic approval drops another season's
+    // segment only when explicit positions overlap, never because the two counts disagree.
+    if (input.enforceUnlockedCheck && confirmedSegments && requestedSegments.length > 0) {
+      const explicitRange = (seg: NormalizedSegment): [number, number] => [
+        seg.targetEpisodeStart,
+        seg.targetEpisodeStart + (seg.episodeEnd ?? seg.episodeStart) - seg.episodeStart,
+      ];
+      const claimed = requestedSegments.filter((seg) => !seg.nonLinear).map(explicitRange);
+      const requestedSeasons = new Set(requestedSegments.map((seg) => seg.season));
+      const uncertain = confirmedSegments.filter((seg) => {
+        if (requestedSeasons.has(seg.season) || normalizedSegments.includes(seg)) return false;
+        const [start, end] = explicitRange(seg);
+        return claimed.every(([a, b]) => end < a || b < start);
+      });
+      if (uncertain.length > 0) {
+        throw new MediaServiceError(
+          "SEGMENT_OVERLAP",
+          409,
+          `Approval would drop season ${uncertain.map((seg) => seg.season).join(", ")} on positions only its episode count claims`,
+        );
+      }
+    }
 
     replacedAssociation =
       effectiveReplacesAssociationId &&
@@ -2965,26 +2968,5 @@ export async function revokeChangeRequestInTx(
   return {
     changeRequest: toChangeRequestRecord(updated),
     deletedSeasons: [...new Set(snapshot.map((seg) => seg.season))],
-  };
-}
-
-export async function readMediaDocument(
-  dbRead: Db,
-  rawKey: string,
-): Promise<ReadMediaDocumentResult> {
-  const result = await queryMediaByKey(dbRead, rawKey, { includeUnconfirmed: false });
-  if (result.kind === "invalid_key") {
-    return { kind: "invalid_key", message: result.message };
-  }
-  if (result.kind === "not_found" || result.items.length === 0) {
-    return { kind: "not_found" };
-  }
-
-  const primary = result.items[0]!;
-  return {
-    kind: "ok",
-    document: primary.document,
-    matchedAssociationId: primary.matchedAssociationId,
-    items: result.items,
   };
 }

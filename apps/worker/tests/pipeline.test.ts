@@ -7,16 +7,116 @@ import type {
   ScheduledController,
 } from "@cloudflare/workers-types";
 import {
-  createDefaultJobHandlers,
   createFakeOutboundClient,
   enqueueJob,
   EVIDENCE_CHECK_JOB_TYPE,
   getJobById,
+  type JobHandlerRegistry,
   type JobQueueMessage,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test, vi } from "vite-plus/test";
 import workerDefault, { createBackgroundWorker } from "../src/index.ts";
+
+// Test-only handlers: `echo` returns its payload; `record_marker` writes schema_meta on commit.
+function createDefaultJobHandlers(): JobHandlerRegistry {
+  return {
+    async echo(ctx) {
+      return {
+        status: "completed",
+        result: {
+          echoed: ctx.job.payload,
+          leaseGeneration: ctx.job.leaseGeneration,
+        },
+      };
+    },
+
+    async record_marker(ctx) {
+      const key = typeof ctx.job.payload.key === "string" ? ctx.job.payload.key.trim() : "";
+      if (!key) {
+        return {
+          status: "failed",
+          errorMessage: "record_marker payload requires a non-empty string key",
+        };
+      }
+
+      const mode = ctx.job.payload.mode === "increment" ? "increment" : "set";
+      let resolvedValue = typeof ctx.job.payload.value === "string" ? ctx.job.payload.value : "ok";
+
+      if (typeof ctx.job.payload.probeUrl === "string" && ctx.job.payload.probeUrl.length > 0) {
+        const probeNamespace =
+          typeof ctx.job.payload.probeNamespace === "string" &&
+          ctx.job.payload.probeNamespace.length > 0
+            ? ctx.job.payload.probeNamespace
+            : "bilibili";
+        const probeKind = ctx.job.payload.probeKind === "catalog" ? "catalog" : "platform";
+
+        const response = await ctx.outbound.fetchExternal({
+          kind: probeKind,
+          namespace: probeNamespace,
+          url: ctx.job.payload.probeUrl,
+          method: "GET",
+        });
+
+        if (response.status >= 500) {
+          return {
+            status: "retry",
+            errorMessage: `upstream_status_${response.status}`,
+          };
+        }
+
+        resolvedValue = response.body;
+      }
+
+      return {
+        status: "completed",
+        result: {
+          key,
+          mode,
+          value: resolvedValue,
+          leaseGeneration: ctx.job.leaseGeneration,
+        },
+        async onCommit(trx) {
+          if (mode === "increment") {
+            await trx
+              .insertInto("schema_meta")
+              .values({
+                key,
+                value: "1",
+                updated_at: ctx.now,
+              })
+              .onConflict((oc) =>
+                oc.column("key").doUpdateSet((eb) => ({
+                  value: eb.cast<string>(
+                    eb(eb.cast<number>("schema_meta.value", "integer"), "+", 1),
+                    "text",
+                  ),
+                  updated_at: ctx.now,
+                })),
+              )
+              .execute();
+            return;
+          }
+
+          await trx
+            .insertInto("schema_meta")
+            .values({
+              key,
+              value: resolvedValue,
+              updated_at: ctx.now,
+            })
+            .onConflict((oc) =>
+              oc.column("key").doUpdateSet({
+                value: resolvedValue,
+                updated_at: ctx.now,
+              }),
+            )
+            .execute();
+        },
+      };
+    },
+  };
+}
 
 interface TrackedMessage {
   message: Message<JobQueueMessage>;
