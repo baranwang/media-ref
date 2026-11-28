@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { CollectionInfo } from "../src/adapters/index.ts";
 import { checkSegmentsFitCollection } from "../src/exploration-agent.ts";
+import { positionMisfit } from "../src/review-agent.ts";
 import { runQueryTool, type ToolContext } from "../src/exploration-tools.ts";
 import {
   lastAiredEpisode,
@@ -74,6 +75,73 @@ describe("checkSegmentsFitCollection", () => {
         now,
       ),
     ).toBe(3);
+    // Not premiered: the first episode is dated today or later. An undated first episode is unknown.
+    expect(lastAiredEpisode([ep(1, "2026-11-28"), ep(2, "2026-11-29")], now)).toBe(0);
+    expect(lastAiredEpisode([ep(1, "2026-11-27"), ep(2, "2026-11-28")], now)).toBe(0);
+    expect(lastAiredEpisode([ep(1, null), ep(2, "2026-12-01")], now)).toBeNull();
+  });
+
+  test("an open end of a season not yet premiered fits an empty collection; a finished one does not", () => {
+    const notPremiered = (season: number) => (season === 1 ? 0 : null);
+    expect(
+      checkSegmentsFitCollection([seg(null)], collection(0), seasonOf24, notPremiered),
+    ).toBeNull();
+    expect(checkSegmentsFitCollection([seg(null)], collection(0), seasonOf24)).toMatch(
+      /reaches collection episode 24, but ss1 has 0/,
+    );
+    // A finite range still claims positions the collection must hold.
+    expect(checkSegmentsFitCollection([seg(3)], collection(0), seasonOf24, notPremiered)).toMatch(
+      /reaches collection episode 3/,
+    );
+    // Episodes already where the unaired season would start belong to another season.
+    expect(
+      checkSegmentsFitCollection([seg(null)], collection(10), seasonOf24, notPremiered),
+    ).toMatch(/has not aired episode 1, but ss1 already has 10 feature episodes from position 1/);
+    // A finished season at positions 1–24 and the next, unaired season after it.
+    const season2 = (season: number) => (season === 2 ? 0 : null);
+    const both = (season: number) => (season === 1 || season === 2 ? 24 : null);
+    expect(
+      checkSegmentsFitCollection(
+        [seg(24), { ...seg(null), season: 2, targetEpisodeStart: 25 }],
+        collection(24),
+        both,
+        season2,
+      ),
+    ).toBeNull();
+  });
+
+  test("positionMisfit lets an unaired open end sit after the collection, never on its positions", () => {
+    const seasons = [
+      { season: 1, episodeCount: 12, airYear: 2026 },
+      { season: 2, episodeCount: 10, airYear: 2026 },
+    ];
+    const open2 = (targetEpisodeStart: number) => ({
+      season: 2,
+      episodeStart: 1,
+      episodeEnd: null,
+      targetEpisodeStart,
+      baseline: "tmdb" as const,
+      nonLinear: false,
+      needsReview: false,
+    });
+    const s1 = { ...open2(1), season: 1, episodeEnd: 12 };
+    expect(positionMisfit([open2(1)], collection(0), seasons, { 2: 0 })).toBeNull();
+    expect(positionMisfit([s1, open2(13)], collection(12), seasons, { 2: 0 })).toBeNull();
+    // On S1's positions: overlaps, as before the change.
+    expect(positionMisfit([s1, open2(1)], collection(12), seasons, { 2: 0 })).toBe(
+      "segments overlap on platform positions",
+    );
+    // Two unaired open ends cannot both start at the same next position.
+    expect(
+      positionMisfit(
+        [open2(13), { ...open2(13), season: 3 }],
+        collection(12),
+        [...seasons, { season: 3, episodeCount: 8, airYear: 2027 }],
+        { 2: 0, 3: 0 },
+      ),
+    ).toBe("segments overlap on platform positions");
+    // Premiere day: TMDB says nothing aired yet but the platform has episode 1 — fits as before.
+    expect(positionMisfit([open2(1)], collection(1), seasons, { 2: 0 })).toBeNull();
   });
 
   test("an open end with an unknown season length is refused", () => {

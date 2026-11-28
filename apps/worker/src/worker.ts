@@ -256,6 +256,8 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
     }),
     [INVALIDATION_RECHECK_JOB_TYPE]: createInvalidationRecheckJobHandler({
       adapterRegistry: deps.adapterRegistry,
+      tmdbConfig: deps.config?.catalog?.tmdb ?? deps.config?.tmdb,
+      tmdbGateway: deps.config?.catalog?.tmdbGateway ?? deps.tmdbGateway,
     }),
     [TMDB_SYNC_JOB_TYPE]: createTmdbSyncJobHandler({
       tmdbConfig: deps.config?.tmdb,

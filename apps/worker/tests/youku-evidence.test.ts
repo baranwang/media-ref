@@ -517,12 +517,12 @@ describe("Youku adapter (Tier 1-2) end-to-end evidence check (#15)", () => {
 
     const geoInspect = await inspectCr(geoLockedCrId);
     expect(geoInspect.status).toBe("needs_review");
-    expect(geoInspect.conflictReason).toBe("episode_count_missing");
+    expect(geoInspect.conflictReason).toBe("segment_episode_count_missing");
     expect(geoInspect.evidence?.collection?.featureEpisodeCount).toBeNull();
 
     const truncatedInspect = await inspectCr(truncatedCrId);
     expect(truncatedInspect.status).toBe("needs_review");
-    expect(truncatedInspect.conflictReason).toBe("episode_count_missing");
+    expect(truncatedInspect.conflictReason).toBe("segment_episode_count_missing");
     expect(truncatedInspect.evidence?.collection?.featureEpisodeCount).toBeNull();
 
     const missingYearInspect = await inspectCr(missingYearCrId);

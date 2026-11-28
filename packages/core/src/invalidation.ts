@@ -20,10 +20,16 @@ import {
   type AdapterRegistry,
   type CollectionEvidenceResult,
 } from "./adapters/index.ts";
-import { evaluateEvidenceGateStep1, type CatalogEvidence } from "./evidence-gate.ts";
+import {
+  evaluateEvidenceGateStep1,
+  evaluateEvidenceGateStep2,
+  type CatalogEvidence,
+} from "./evidence-gate.ts";
 import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { extractCollectionDisplay, isUuid, resolveCanonicalMediaById } from "./media-service.ts";
+import { withUnairedSeasons } from "./season-coverage.ts";
+import { createTmdbGateway, type TmdbGateway, type TmdbGatewayConfig } from "./tmdb.ts";
 
 export const INVALIDATION_RECHECK_JOB_TYPE = "invalidation_recheck";
 export const DEFAULT_ANONYMOUS_INVALIDATION_THRESHOLD = 3;
@@ -317,6 +323,9 @@ export async function reportInvalidAssociation(
 
 export interface InvalidationRecheckJobOptions {
   adapterRegistry?: AdapterRegistry;
+  /** Tells a season that has not premiered, so its empty collection is rechecked as approved. */
+  tmdbConfig?: TmdbGatewayConfig;
+  tmdbGateway?: TmdbGateway;
 }
 
 function parseJsonObject(raw: unknown): JsonObject {
@@ -973,7 +982,31 @@ export function createInvalidationRecheckJobHandler(
     }));
 
     const step1 = evaluateEvidenceGateStep1(catalogEvidence, collectionResult.info, { segments });
-    if (step1.decision === "pass") {
+    // With segments the episode count is checked against them in Step 2; only that part reruns here,
+    // so a collection that lost the positions its segments claim is still caught. An empty one of a
+    // season not yet premiered stays approved, as the evidence job approved it.
+    const countCatalog =
+      step1.decision === "pass" && collectionResult.info.featureEpisodeCount === 0
+        ? await withUnairedSeasons(
+            options.tmdbGateway ?? createTmdbGateway(ctx.outbound, options.tmdbConfig),
+            catalogEvidence,
+            segments,
+            ctx.now,
+          )
+        : catalogEvidence;
+    const countConflicts =
+      step1.decision === "pass"
+        ? evaluateEvidenceGateStep2({
+            catalog: countCatalog,
+            collection: collectionResult.info,
+            segments,
+            setDefaultVariant: false,
+            variantDescription: null,
+            step1,
+          }).conflicts.filter((c) => c.field === "featureEpisodeCount")
+        : [];
+    const conflicts = [...step1.conflicts, ...countConflicts];
+    if (conflicts.length === 0) {
       const display = extractCollectionDisplay({ collection: collectionResult.info });
       return {
         status: "completed",
@@ -1007,8 +1040,8 @@ export function createInvalidationRecheckJobHandler(
     const mismatchDetails: JsonObject = {
       namespace: association.namespace,
       nativeId: association.native_id,
-      conflicts: step1.conflicts,
-      reasons: step1.reasons,
+      conflicts,
+      reasons: conflicts.map((c) => c.message),
       collection: {
         namespace: collectionResult.info.namespace,
         canonicalId: collectionResult.info.canonicalId,
@@ -1027,7 +1060,7 @@ export function createInvalidationRecheckJobHandler(
       result: {
         associationId: association.id,
         outcome: "content_mismatch",
-        conflicts: step1.conflicts.map((conflict) => conflict.code),
+        conflicts: conflicts.map((conflict) => conflict.code),
       },
       async onCommit(trx) {
         await flagAssociationContentMismatchInTx(trx, {

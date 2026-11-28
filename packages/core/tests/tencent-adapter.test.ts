@@ -543,7 +543,7 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
     );
   });
 
-  test("returns null year and null featureEpisodeCount when missing or trailer-only so Evidence Gate routes to needs_review", async () => {
+  test("returns null year when missing, and featureEpisodeCount 0 for a trailer-only cid (no feature episodes yet)", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {
         const body = JSON.parse(request.body ?? "{}") as {
@@ -581,9 +581,42 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
           );
         }
 
+        if (cid === "mzc00200empty01") {
+          if (body.page_params?.page_id === "detail_page_introduction") {
+            return jsonResponse(
+              request.url,
+              makeIntroPayload({ title: "三体", year: "2023", type: "2", episode_all: "30" }),
+            );
+          }
+          // An episode list with no items at all: unreadable, not an empty cover.
+          return jsonResponse(request.url, makeEpisodePagePayload([]));
+        }
+
+        if (cid === "mzc00200unread1") {
+          if (body.page_params?.page_id === "detail_page_introduction") {
+            return jsonResponse(
+              request.url,
+              makeIntroPayload({ title: "三体", year: "2023", type: "2", episode_all: "30" }),
+            );
+          }
+          // A trailer next to an item with no is_trailer marking: not known to hold only trailers.
+          return jsonResponse(
+            request.url,
+            makeEpisodePagePayload([
+              { vid: "tr1", title: "1", is_trailer: "1" },
+              { vid: "x1", title: "1" },
+            ]),
+          );
+        }
+
         throw new Error(`Unexpected cid: ${cid}`);
       },
     });
+
+    const empty = await tencentAdapter.fetchCollection("mzc00200empty01", outbound);
+    expect(empty.status === "found" && empty.info.featureEpisodeCount).toBeNull();
+    const unread = await tencentAdapter.fetchCollection("mzc00200unread1", outbound);
+    expect(unread.status === "found" && unread.info.featureEpisodeCount).toBeNull();
 
     const noYear = await tencentAdapter.fetchCollection("mzc00200noyear1", outbound);
     expect(noYear.status).toBe("found");
@@ -596,7 +629,7 @@ describe("Tencent Video Tier 1 & Tier 2 adapter (#13)", () => {
     expect(noEps.status).toBe("found");
     if (noEps.status === "found") {
       expect(noEps.info.year).toBe(2023);
-      expect(noEps.info.featureEpisodeCount).toBeNull();
+      expect(noEps.info.featureEpisodeCount).toBe(0);
       expect(noEps.info.featureEpisodes).toEqual([]);
     }
   });

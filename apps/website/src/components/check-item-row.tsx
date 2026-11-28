@@ -40,7 +40,11 @@ export function CheckItemRow({
           }
           className="mt-0.5 ml-6.5 shrink-0 sm:ml-0"
         >
-          {item.status === "passed" ? "通过" : item.status === "failed" ? "未通过" : "需要人工确认"}
+          {item.status === "passed"
+            ? "通过"
+            : item.status === "failed"
+              ? "未通过"
+              : "待审核 agent 核实"}
         </Badge>
       )}
     </div>

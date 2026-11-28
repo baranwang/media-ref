@@ -480,7 +480,7 @@ function parseModelSegments(
 /**
  * Evidence door: every linear segment must land inside the collection's fetched feature episodes
  * (with an open end resolved against its baseline season length, or for a season still airing
- * against the episodes aired so far). Non-linear segments map the
+ * against the episodes aired so far, none before its premiere). Non-linear segments map the
  * season at collection level rather than 1:1 to episode indexes, requiring only a non-empty
  * collection and valid segment bounds. Returns a reason when a segment does not fit.
  */
@@ -526,7 +526,15 @@ export function checkSegmentsFitCollection(
     let end = rawEnd;
     if (end === null) {
       const aired = lastAired(seg.season);
-      end = aired === null ? seasonCount : Math.max(start, aired);
+      // None of its episodes has aired (a season not yet premiered): nothing may sit there yet, so
+      // a collection already holding episodes from its first position is another season's.
+      if (aired !== null && aired < start) {
+        if (available >= targetStart) {
+          return `season ${seg.season} has not aired episode ${start}, but ${info.canonicalId} already has ${available} feature episodes from position ${targetStart}`;
+        }
+        continue;
+      }
+      end = aired === null ? seasonCount : aired;
       if (end === null) {
         return `episodeEnd is required: season ${seg.season} has no known episode count`;
       }
@@ -536,7 +544,7 @@ export function checkSegmentsFitCollection(
       return "episodeEnd must not be before episodeStart";
     }
     const lastTarget = targetStart + span;
-    if (available === 0 || lastTarget > available) {
+    if (lastTarget > available) {
       return `segment reaches collection episode ${lastTarget}, but ${info.canonicalId} has ${available} fetched feature episodes`;
     }
   }
@@ -692,6 +700,7 @@ function buildAgentSystemPrompt(namespaces: readonly Namespace[]): string {
     "   NEVER truncate to a shorter linear prefix like 1..20; inspect get_catalog_season + get_collection and submit { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.",
     "   Match a substantive finale subtitle or final broadcast installment before claiming the whole season. Platform publication dates can be delayed. Map only the verified finite range for Part 1, using nonLinear when its episodes are grouped differently.",
     "   target.airingSeason is a season still airing: a collection holding the episodes aired so far is the whole season, so submit { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1 }. NEVER cut it to the aired count.",
+    "   lastAiredEpisode 0 means the season has not premiered: a collection of the right title, year and type with no episodes yet is that season; submit it the same way.",
     "6. passesAutomaticCheckWithDefaultMapping is a hint from a deterministic check, not a decision.",
     "   alreadyMappedToSeasons lists seasons of this media the collection already holds, with their platform positions:",
     "   it is not this season's unless it really holds both; then map this season onto positions those seasons do not use.",
@@ -937,6 +946,11 @@ function createJobRun(
   const seasonEpisodes: Record<number, readonly SeasonEpisode[]> = { ...catalog.seasonEpisodes };
   if (airing) seasonEpisodes[airing.season] = airing.episodes;
   const evidence = { ...catalog, seasonEpisodes };
+  // As the evidence job marks it: only an empty collection needs the not-yet-premiered allowance.
+  const gateEvidence = (info: CollectionInfo) =>
+    airing?.aired === 0 && info.featureEpisodeCount === 0
+      ? { ...evidence, unairedSeasons: [airing.season] }
+      : evidence;
   const tmdbTvId = catalog.canonicalId.match(/^tv:(\d+)$/)?.[1];
   const segmentMisfit = (info: CollectionInfo, segments: readonly SegmentInput[]) =>
     checkSegmentsFitCollection(
@@ -969,7 +983,7 @@ function createJobRun(
     passesGate: (info, segments) =>
       segmentMisfit(info, segments) === null &&
       evaluateEvidenceGate({
-        catalog: evidence,
+        catalog: gateEvidence(info),
         collection: info,
         segments: normalizeSegments(segments),
       }).decision === "pass",

@@ -23,14 +23,20 @@ const AIRING_RECENT_BROADCAST_DAYS = 30;
  * before it still counts, so a collection must reach it); null when it has finished or the
  * catalog cannot tell. Airing needs evidence beyond missing dates: some episode has aired, the last
  * one has not, and either an episode is scheduled for today or later or the latest broadcast is
- * recent (a finished season whose finale merely lacks a date stays finished).
+ * recent (a finished season whose finale merely lacks a date stays finished). 0 when the season
+ * has not premiered: its first episode is dated today or later (undated stays unknown).
  */
 export function lastAiredEpisode(episodes: readonly SeasonEpisode[], now: Date): number | null {
   const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
   const today = day(now.getTime());
   const aired = episodes.filter((ep) => ep.airDate !== null && ep.airDate < today);
-  const last = episodes.toSorted((a, b) => a.episode - b.episode).at(-1);
-  if (!last || aired.length === 0 || (last.airDate !== null && last.airDate < today)) return null;
+  const sorted = episodes.toSorted((a, b) => a.episode - b.episode);
+  const last = sorted.at(-1);
+  if (last && aired.length === 0) {
+    const first = sorted[0]!;
+    return first.airDate !== null && first.airDate >= today ? 0 : null;
+  }
+  if (!last || (last.airDate !== null && last.airDate < today)) return null;
   const scheduled = episodes.some((ep) => ep.airDate !== null && ep.airDate >= today);
   const recent =
     aired
@@ -124,6 +130,33 @@ export async function fetchSegmentEpisodeEvidence(
     }
   }
   return { ...catalog, seasonEpisodes };
+}
+
+/**
+ * Notes which seasons of open-ended linear segments have not premiered at `now`, so the gate lets a
+ * collection with no episodes yet cover them. A failed fetch notes nothing: an outage is not proof.
+ */
+export async function withUnairedSeasons(
+  gateway: TmdbGateway,
+  catalog: CatalogEvidence,
+  segments: readonly SegmentInput[],
+  now: Date,
+): Promise<CatalogEvidence> {
+  const tmdbId = catalog.namespace === "tmdb" && catalog.canonicalId.match(/^tv:(\d+)$/)?.[1];
+  if (!tmdbId) return catalog;
+  const unairedSeasons: number[] = [];
+  for (const season of new Set(
+    segments.filter((s) => !s.nonLinear && s.episodeEnd == null).map((s) => s.season),
+  )) {
+    try {
+      const episodes =
+        catalog.seasonEpisodes?.[season] ?? (await gateway.fetchSeasonEpisodes(tmdbId, season));
+      if (episodes && lastAiredEpisode(episodes, now) === 0) unairedSeasons.push(season);
+    } catch {
+      // Unknown airing state: the gate keeps asking for episodes.
+    }
+  }
+  return unairedSeasons.length > 0 ? { ...catalog, unairedSeasons } : catalog;
 }
 
 function subtitle(label: string, collectionTitle: string): string | null {

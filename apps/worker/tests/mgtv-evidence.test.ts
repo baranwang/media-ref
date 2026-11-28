@@ -605,7 +605,7 @@ describe("Mango TV (mgtv) adapter & Evidence Gate end-to-end (#16)", () => {
       await getChangeRequestStateRpc(app, { apiKey: user.readKey }, missingEpsCr.changeRequest!.id),
     ).toMatchObject({
       status: "needs_review",
-      conflictReason: "episode_count_missing",
+      conflictReason: "segment_episode_count_missing",
     });
     expect(
       await getChangeRequestStateRpc(app, { apiKey: user.readKey }, notFoundCr.changeRequest!.id),
