@@ -158,7 +158,7 @@ function LoginPage() {
                         search: { email: form.state.values.email || undefined },
                       })
                     }
-                    className="text-xs text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+                    className="-my-2.5 py-2.5 text-xs text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
                   >
                     忘记密码？
                   </button>
@@ -227,7 +227,7 @@ function LoginPage() {
             还没有账号？{" "}
             <Link
               to="/signup"
-              className="font-medium text-foreground underline-offset-4 hover:underline"
+              className="py-2.5 font-medium text-foreground underline-offset-4 hover:underline"
             >
               注册
             </Link>

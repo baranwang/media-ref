@@ -217,7 +217,7 @@ function SignupPage() {
             已有账号？{" "}
             <Link
               to="/login"
-              className="font-medium text-foreground underline-offset-4 hover:underline"
+              className="py-2.5 font-medium text-foreground underline-offset-4 hover:underline"
             >
               登录
             </Link>

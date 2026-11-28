@@ -5,9 +5,11 @@ import {
   Link,
   Outlet,
   Scripts,
+  useLocation,
   createRootRouteWithContext,
 } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
+import { SiteFooter } from "#/components/site-footer";
 import { AppStoreProvider } from "#/lib/app-store";
 import type { RouterContext } from "#/router";
 import appCss from "../styles.css?url";
@@ -64,7 +66,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
 
 function RootNotFound() {
   return (
-    <main className="container flex min-h-svh flex-col items-center justify-center text-center">
+    <main className="container flex flex-1 flex-col items-center justify-center py-28 text-center">
       <h1 className="font-display text-4xl font-bold tracking-tight text-foreground">页面不存在</h1>
       <p className="mt-2 text-sm text-muted-foreground">你访问的地址没有对应的媒体或页面。</p>
       <Button className="mt-6" nativeButton={false} render={<Link to="/" />}>
@@ -75,10 +77,31 @@ function RootNotFound() {
 }
 
 function RootLayout() {
+  // Auth screens are a full-height split layout of their own.
+  const { pathname } = useLocation();
+  const showFooter = !["/login", "/signup", "/verify-email"].includes(pathname);
+
+  useEffect(() => {
+    // iOS zooms into inputs under 16px on focus; maximum-scale stops that, and iOS still allows pinch zoom.
+    // Android honours maximum-scale as a pinch-zoom ban, so this stays iOS-only (iPadOS reports as Macintosh).
+    const ua = navigator.userAgent;
+    const isIOS =
+      /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+    if (!isIOS) return;
+    document
+      .querySelector('meta[name="viewport"]')
+      ?.setAttribute("content", "width=device-width, initial-scale=1, maximum-scale=1");
+  }, []);
+
   return (
     <TooltipProvider>
       <AppStoreProvider>
-        <Outlet />
+        <div className="flex min-h-svh flex-col">
+          <div className="flex flex-1 flex-col">
+            <Outlet />
+          </div>
+          {showFooter && <SiteFooter />}
+        </div>
       </AppStoreProvider>
     </TooltipProvider>
   );
@@ -90,7 +113,7 @@ function RootDocument({ children }: { children: ReactNode }) {
       <head>
         <HeadContent />
       </head>
-      <body className="min-h-screen bg-background font-sans text-foreground antialiased selection:bg-primary/25 selection:text-foreground">
+      <body className="min-h-svh bg-background font-sans text-foreground antialiased selection:bg-primary/25 selection:text-foreground">
         {children}
         <Scripts />
       </body>

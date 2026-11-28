@@ -28,7 +28,7 @@ export function ReviewAgentNote({
           {time && <span className="text-muted-foreground">{formatDateTime(time)}</span>}
         </div>
         {agent.correction && (
-          <div className="text-sm leading-6 text-foreground/90">
+          <div className="text-sm leading-6 wrap-break-word text-foreground/90">
             <div>改正为第 {agent.correction.season} 季：</div>
             {agent.correction.segments.map((s) => (
               <div key={`${s.season}-${s.start}`} className="font-medium text-foreground">
@@ -43,18 +43,25 @@ export function ReviewAgentNote({
             ))}
           </div>
         )}
-        {agent.opinion && <p className="text-sm leading-6 text-foreground/90">{agent.opinion}</p>}
+        {agent.opinion && (
+          <p className="text-sm leading-6 wrap-break-word text-foreground/90">{agent.opinion}</p>
+        )}
         {agent.reasons.length > 0 && (
           <ul className="flex flex-col gap-1.5">
             {agent.reasons.map((r, i) => (
-              <li key={`${i}-${r.code}`} className="text-sm leading-6 text-foreground/90">
+              <li
+                key={`${i}-${r.code}`}
+                className="text-sm leading-6 wrap-break-word text-foreground/90"
+              >
                 {r.reason}
                 <span className="ml-2 font-mono text-2xs text-muted-foreground">{r.code}</span>
               </li>
             ))}
           </ul>
         )}
-        {empty && fallback && <p className="text-sm leading-6 text-foreground/90">{fallback}</p>}
+        {empty && fallback && (
+          <p className="text-sm leading-6 wrap-break-word text-foreground/90">{fallback}</p>
+        )}
       </div>
     </div>
   );

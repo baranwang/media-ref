@@ -145,20 +145,20 @@ function ReviewWorkbenchPage() {
         onValueChange={(v) => setActiveTab(v as "queue" | "alerts" | "agent")}
         className="mt-6"
       >
-        <TabsList className="grid w-full max-w-md grid-cols-3">
-          <TabsTrigger value="queue" className="gap-1.5 px-3">
+        <TabsList className="no-scrollbar w-full max-w-md justify-start overflow-x-auto overflow-y-hidden">
+          <TabsTrigger value="queue" className="shrink-0 gap-1.5 px-3">
             <span>待审核</span>
             <span className="font-mono text-2xs text-muted-foreground">
               {queueQuery.data?.length}
             </span>
           </TabsTrigger>
-          <TabsTrigger value="alerts" className="gap-1.5 px-3">
+          <TabsTrigger value="alerts" className="shrink-0 gap-1.5 px-3">
             <span>告警</span>
             <span className="font-mono text-2xs text-muted-foreground">
               {alertsQuery.data?.length}
             </span>
           </TabsTrigger>
-          <TabsTrigger value="agent" className="gap-1.5 px-3">
+          <TabsTrigger value="agent" className="shrink-0 gap-1.5 px-3">
             <span>审核 agent 放行</span>
             <span className="font-mono text-2xs text-muted-foreground">
               {agentQuery.data?.length}
@@ -191,7 +191,7 @@ function ReviewWorkbenchPage() {
                   <CardDescription>最新提交的在最上面</CardDescription>
                 </CardHeader>
                 <CardContent className="p-2">
-                  <div className="flex flex-col gap-1">
+                  <div className="flex max-h-80 flex-col gap-1 overflow-y-auto lg:max-h-none">
                     {pendingQueue.map((cr) => {
                       const card = cards[cr.targetKey];
                       const active = selectedCr?.id === cr.id;
@@ -201,7 +201,15 @@ function ReviewWorkbenchPage() {
                         <button
                           key={cr.id}
                           type="button"
-                          onClick={() => setSelectedId(cr.id)}
+                          onClick={() => {
+                            setSelectedId(cr.id);
+                            // Below lg the detail sits under the queue, so bring it into view.
+                            if (window.matchMedia("(max-width: 1023px)").matches) {
+                              document
+                                .getElementById("review-detail")
+                                ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                            }
+                          }}
                           className={cn(
                             "flex w-full items-start gap-3 rounded-lg p-2.5 text-left transition-colors",
                             active ? "bg-accent ring-1 ring-border" : "hover:bg-muted/50",
@@ -288,7 +296,7 @@ function ReviewWorkbenchPage() {
                   {openAlerts.map((alert) => (
                     <div
                       key={alert.id}
-                      className="flex flex-wrap items-center justify-between gap-4 px-5 py-4"
+                      className="flex flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-5"
                     >
                       <div className="flex min-w-0 flex-1 items-start gap-3.5">
                         {alert.namespace && (
@@ -314,7 +322,7 @@ function ReviewWorkbenchPage() {
                         </div>
                       </div>
 
-                      <div className="flex shrink-0 items-center gap-4">
+                      <div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:shrink-0 sm:gap-4">
                         <span className="text-xs text-muted-foreground">
                           {formatRelativeTime(alert.createdAt)}
                         </span>
@@ -380,7 +388,7 @@ function ReviewWorkbenchPage() {
                     return (
                       <div
                         key={cr.id}
-                        className="flex flex-wrap items-center justify-between gap-4 px-5 py-4"
+                        className="flex flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-5"
                       >
                         <div className="flex min-w-0 flex-1 items-start gap-3.5">
                           <NamespaceLogo
@@ -388,7 +396,7 @@ function ReviewWorkbenchPage() {
                             className="mt-0.5 size-7 shrink-0"
                           />
                           <div className="min-w-0">
-                            <div className="text-sm font-medium text-foreground">
+                            <div className="text-sm font-medium wrap-break-word text-foreground">
                               {cards[cr.targetKey]?.title ?? cr.pageTitle ?? cr.nativeId}
                               <span className="font-normal text-muted-foreground">
                                 {" "}
@@ -408,7 +416,7 @@ function ReviewWorkbenchPage() {
                           </div>
                         </div>
 
-                        <div className="flex shrink-0 items-center gap-4">
+                        <div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:shrink-0 sm:gap-4">
                           {cr.reviewedAt && (
                             <span className="text-xs text-muted-foreground">
                               {formatRelativeTime(cr.reviewedAt)}
@@ -448,7 +456,7 @@ function ReviewWorkbenchPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="flex-1 bg-background text-foreground">
       <TopNav />
 
       <main className="container flex flex-col pb-20">
@@ -502,10 +510,10 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
   const platformLabel = `${NAMESPACE_LABELS[cr.namespace]}${variantLabel ?? ""}`;
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col gap-10">
+    <div id="review-detail" className="flex w-full min-w-0 flex-1 scroll-mt-20 flex-col gap-10">
       {/* Detail Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex items-start gap-5">
+        <div className="flex min-w-0 items-start gap-5">
           {posterUrl && (
             <img
               src={posterUrl}
@@ -513,13 +521,13 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
               className="h-27 w-18 shrink-0 rounded-lg object-cover ring-1 ring-border"
             />
           )}
-          <div className="flex flex-col gap-1.5">
+          <div className="flex min-w-0 flex-col gap-1.5">
             <div className="text-xs text-muted-foreground">
-              变更单 <span className="font-mono">#{cr.id}</span> ·{" "}
+              变更单 <span className="font-mono break-all">#{cr.id}</span> ·{" "}
               <span className="font-mono">{cr.submitterUserId.slice(0, 8)}</span> 提交于{" "}
               {formatRelativeTime(cr.createdAt)}
             </div>
-            <h2 className="text-2xl leading-8 font-bold tracking-tight text-foreground">
+            <h2 className="text-2xl leading-8 font-bold tracking-tight wrap-break-word text-foreground">
               {title} · {seasonLabel}
             </h2>
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -539,7 +547,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {detailId && (
             <Button
               variant="outline"
@@ -587,30 +595,30 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
             {showCoverage && (
               <>
                 <div className="flex items-center gap-3">
-                  <div className="w-18 shrink-0" />
+                  <div className="hidden w-18 shrink-0 sm:block" />
                   <div className="min-w-0 flex-1">
                     <CoverageRuler total={totalSeasonEpisodes} />
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <div className="w-18 shrink-0 text-xs">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                  <div className="text-xs sm:w-18 sm:shrink-0">
                     <div className="font-medium text-foreground">现在</div>
                     <div className="text-2xs text-muted-foreground">
                       {spanLabel(existingSegments)}
                     </div>
                   </div>
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 sm:flex-1">
                     <CoverageTrack total={totalSeasonEpisodes} segments={existingSegments} />
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <div className="w-18 shrink-0 text-xs">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                  <div className="text-xs sm:w-18 sm:shrink-0">
                     <div className="font-medium text-foreground">通过后</div>
                     <div className="text-2xs text-muted-foreground">{spanLabel(afterSegments)}</div>
                   </div>
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 sm:flex-1">
                     <CoverageTrack total={totalSeasonEpisodes} segments={afterSegments} />
                   </div>
                 </div>
@@ -619,7 +627,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
 
             {otherPendingCount > 0 && (
               <div className="flex items-center gap-3">
-                <div className="w-18 shrink-0" />
+                <div className="hidden w-18 shrink-0 sm:block" />
                 <p className="text-2xs text-muted-foreground">
                   另有 {otherPendingCount} 个同条目待审核变更单（未生效，不计入「现在」）。
                 </p>
@@ -665,7 +673,7 @@ function ReviewDetail({ cr, card }: { cr: ChangeRequestItem; card: CardItem | un
                       {cr.pageTitle ? `「${cr.pageTitle}」` : ""}关联整部作品
                     </div>
                   )}
-                  <div className="mt-0.5 font-mono text-2xs text-muted-foreground">
+                  <div className="mt-0.5 font-mono text-2xs break-all text-muted-foreground">
                     {cr.nativeId}
                   </div>
                 </div>

@@ -27,13 +27,14 @@ import { Tabs, TabsList, TabsTrigger } from "@media-ref/ui/components/tabs";
 import { cn } from "@media-ref/ui/lib/utils";
 import {
   RiAddLine,
+  RiArrowDownSLine,
   RiArrowLeftSLine,
   RiArrowRightSLine,
   RiArrowRightUpLine,
 } from "@remixicon/react";
 import { useQueries, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NAMESPACE_LABELS, NamespaceLogo } from "#/components/brand-logos";
 import { ContributeDrawer } from "#/components/contribute-drawer";
 import { CoverageLegend, CoverageRuler, CoverageTrack } from "#/components/coverage-bar";
@@ -110,6 +111,18 @@ function MediaDetailPage() {
     }
   }, [media, search.season, search.view, search.contribute]);
 
+  const seasonTabsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const list = seasonTabsRef.current;
+    const tab = list?.querySelector("[data-active]");
+    if (!list || !tab) return;
+    // Scroll the tab strip only: scrollIntoView would also scroll the page to the tabs on load.
+    const t = tab.getBoundingClientRect();
+    const l = list.getBoundingClientRect();
+    if (t.left < l.left) list.scrollLeft -= l.left - t.left;
+    else if (t.right > l.right) list.scrollLeft += t.right - l.right;
+  }, [selectedSeason]);
+
   const currentSeasonInfo = useMemo(
     () => media?.seasons.find((s) => s.season === selectedSeason),
     [media, selectedSeason],
@@ -117,7 +130,7 @@ function MediaDetailPage() {
 
   if (!media) {
     return (
-      <div className="min-h-screen bg-background text-foreground">
+      <div className="flex-1 bg-background text-foreground">
         <TopNav />
         <main className="container flex flex-col items-center justify-center py-28 text-center">
           <h1 className="text-xl font-semibold">找不到这部媒体</h1>
@@ -184,7 +197,7 @@ function MediaDetailPage() {
   };
 
   return (
-    <div className="relative min-h-screen bg-background text-foreground">
+    <div className="relative flex-1 bg-background text-foreground">
       {/* Page-level backdrop with vertical & horizontal fade matching Figma 02A */}
       <div
         aria-hidden="true"
@@ -204,10 +217,11 @@ function MediaDetailPage() {
 
       <TopNav transparent />
 
-      {/* Hero Section (02A / 02B / 02E) */}
-      <section className="relative z-10 container flex flex-col gap-8 pt-12 pb-10 md:flex-row md:gap-10">
+      {/* Hero Section (02A / 02B / 02E). Below md: poster beside the heading, the rest full width;
+          the two wrappers below are display:contents there so their children join this grid. */}
+      <section className="relative z-10 container grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-4 pt-8 pb-8 sm:gap-x-6 sm:pt-12 sm:pb-10 md:flex md:flex-row md:gap-10">
         {/* 240x360 Poster */}
-        <div className="aspect-2/3 w-50 shrink-0 overflow-hidden rounded-xl bg-card shadow-2xl ring-1 ring-white/10 md:aspect-auto md:h-90 md:w-60">
+        <div className="aspect-2/3 w-24 shrink-0 overflow-hidden rounded-xl bg-card shadow-2xl ring-1 ring-white/10 sm:w-32 md:aspect-auto md:h-90 md:w-60">
           {media.posterUrl && (
             <img
               src={media.posterUrl}
@@ -219,52 +233,58 @@ function MediaDetailPage() {
         </div>
 
         {/* Right Info Column aligned with bottom of poster */}
-        <div className="flex min-w-0 flex-1 flex-col justify-between gap-5 md:min-h-90">
-          <div className="flex flex-col gap-3.5">
-            {/* Metadata line */}
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
-              {[
-                media.type === "movie" ? "电影" : "剧集",
-                media.yearRange,
-                media.region,
-                isMovie
-                  ? ""
-                  : `${seasonCount} 季 · ${media.totalEpisodes ?? totalEpisodesForAxis} 集`,
-                media.statusLabel,
-              ]
-                .filter(Boolean)
-                .flatMap((part, i) => [
-                  ...(i > 0 ? [<span key={`sep-${i}`}>·</span>] : []),
-                  <span key={part}>{part}</span>,
-                ])}
-            </div>
+        <div className="contents md:flex md:min-h-90 md:min-w-0 md:flex-1 md:flex-col md:justify-between md:gap-5">
+          <div className="contents md:flex md:flex-col md:gap-3.5">
+            <div className="flex min-w-0 flex-col gap-2 self-center sm:gap-3.5 md:self-auto">
+              {/* Metadata line */}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+                {[
+                  media.type === "movie" ? "电影" : "剧集",
+                  media.yearRange,
+                  media.region,
+                  isMovie
+                    ? ""
+                    : `${seasonCount} 季 · ${media.totalEpisodes ?? totalEpisodesForAxis} 集`,
+                  media.statusLabel,
+                ]
+                  .filter(Boolean)
+                  .flatMap((part, i) => [
+                    ...(i > 0 ? [<span key={`sep-${i}`}>·</span>] : []),
+                    <span key={part}>{part}</span>,
+                  ])}
+              </div>
 
-            {/* Display Serif Title (44px) + Original Title */}
-            <div className="flex flex-col gap-1.5">
-              <h1 className="font-display text-4xl leading-tight font-bold tracking-tight text-foreground md:text-display">
-                {media.title}
-              </h1>
-              {media.originalTitle && (
-                <p className="text-base leading-5 text-muted-foreground">{media.originalTitle}</p>
-              )}
-            </div>
+              {/* Display Serif Title (44px) + Original Title */}
+              <div className="flex flex-col gap-1.5">
+                <h1 className="font-display text-2xl leading-tight font-bold tracking-tight text-foreground sm:text-4xl md:text-display">
+                  {media.title}
+                </h1>
+                {media.originalTitle && (
+                  <p className="text-base leading-5 text-muted-foreground">{media.originalTitle}</p>
+                )}
+              </div>
 
-            {/* Genres */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              {media.genres.map((genre) => (
-                <Badge key={genre} variant="secondary" className="rounded-md px-2 py-0.5 text-2xs">
-                  {genre}
-                </Badge>
-              ))}
+              {/* Genres */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {media.genres.map((genre) => (
+                  <Badge
+                    key={genre}
+                    variant="secondary"
+                    className="rounded-md px-2 py-0.5 text-2xs"
+                  >
+                    {genre}
+                  </Badge>
+                ))}
+              </div>
             </div>
 
             {/* Synopsis clamped to 3 lines */}
-            <p className="line-clamp-3 max-w-3xl text-sm leading-6 text-foreground/85">
+            <p className="col-span-2 line-clamp-3 max-w-3xl text-sm leading-6 text-foreground/85">
               {media.synopsis}
             </p>
 
             {/* Credits + Platform count */}
-            <div className="flex flex-wrap items-center gap-x-8 gap-y-2 pt-1">
+            <div className="col-span-2 flex flex-wrap items-center gap-x-8 gap-y-2 pt-1">
               {media.credits.map((credit) => (
                 <div key={credit.role} className="flex flex-col gap-0.5">
                   <span className="text-2xs text-muted-foreground">{credit.role}</span>
@@ -281,7 +301,7 @@ function MediaDetailPage() {
           </div>
 
           {/* Action buttons aligned to poster bottom */}
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="col-span-2 flex flex-wrap items-center gap-2.5">
             <Button variant="default" size="lg" onClick={() => openContribute()} className="px-3.5">
               <RiAddLine />
               补充关联
@@ -315,9 +335,16 @@ function MediaDetailPage() {
                   setViewMode("season");
                 }}
               >
-                <TabsList>
+                <TabsList
+                  ref={seasonTabsRef}
+                  className="no-scrollbar max-w-full justify-start overflow-x-auto overflow-y-hidden"
+                >
                   {media.seasons.map((s) => (
-                    <TabsTrigger key={s.season} value={String(s.season)} className="gap-1.5 px-3">
+                    <TabsTrigger
+                      key={s.season}
+                      value={String(s.season)}
+                      className="shrink-0 gap-1.5 px-3"
+                    >
                       <span>第 {s.season} 季</span>
                       <span className="font-mono text-2xs text-muted-foreground">
                         {s.episodeCount}
@@ -435,15 +462,15 @@ function MediaDetailPage() {
             <div className="flex flex-col">
               {/* Axis Ruler outside the card, aligned to the coverage track (matching Figma 02A) */}
               {!isMovie && !allNonLinearPlatform && (
-                <div className="flex items-center gap-4 px-5 pb-1.5">
-                  <div className="w-52 shrink-0" />
+                <div className="flex items-center gap-4 px-4 pb-1.5 sm:px-5">
+                  <div className="hidden w-52 shrink-0 md:block" />
                   <div className="min-w-0 flex-1">
                     <CoverageRuler
                       total={totalEpisodesForAxis}
                       mode={isAllSeasons ? "season" : "episode"}
                     />
                   </div>
-                  <div className="w-16 shrink-0" />
+                  <div className="hidden w-16 shrink-0 md:block" />
                 </div>
               )}
 
@@ -464,6 +491,7 @@ function MediaDetailPage() {
                         <div
                           role="button"
                           tabIndex={0}
+                          aria-expanded={isAllSeasons ? undefined : isExpanded}
                           onClick={() =>
                             segments.length > 0 &&
                             !isAllSeasons &&
@@ -480,14 +508,14 @@ function MediaDetailPage() {
                             }
                           }}
                           className={cn(
-                            "flex items-center gap-4 px-5 py-3.5 transition-colors",
+                            "flex flex-wrap items-center gap-x-4 gap-y-2.5 px-4 py-3.5 transition-colors sm:px-5 md:flex-nowrap",
                             segments.length > 0 && !isAllSeasons
                               ? "cursor-pointer hover:bg-muted/35"
                               : "cursor-default",
                           )}
                         >
                           {/* Platform Identity */}
-                          <div className="flex w-52 shrink-0 items-center gap-3">
+                          <div className="flex min-w-0 flex-1 items-center gap-3 md:w-52 md:flex-none">
                             <NamespaceLogo namespace={row.namespace} className="size-7 shrink-0" />
                             <div className="min-w-0">
                               <div className="truncate text-sm font-medium text-foreground">
@@ -498,10 +526,20 @@ function MediaDetailPage() {
                                 {row.isDefault ? " · 默认" : ""}
                               </div>
                             </div>
+                            {/* Touch screens get no hover cue, so show that the row expands */}
+                            {!isAllSeasons && (
+                              <RiArrowDownSLine
+                                aria-hidden="true"
+                                className={cn(
+                                  "size-4 shrink-0 text-muted-foreground transition-transform lg:hidden",
+                                  isExpanded && "rotate-180",
+                                )}
+                              />
+                            )}
                           </div>
 
-                          {/* Coverage Bar */}
-                          <div className="min-w-0 flex-1">
+                          {/* Coverage Bar: full-width second line below md */}
+                          <div className="order-last min-w-0 basis-full md:order-none md:flex-1 md:basis-0">
                             <CoverageTrack
                               total={totalEpisodesForAxis}
                               segments={segments}
@@ -510,13 +548,13 @@ function MediaDetailPage() {
                           </div>
 
                           {/* External Link */}
-                          <div className="flex w-16 shrink-0 justify-end">
+                          <div className="flex shrink-0 justify-end md:w-16">
                             <a
                               href={externalUrl}
                               target="_blank"
                               rel="noreferrer"
                               onClick={(e) => e.stopPropagation()}
-                              className="inline-flex items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                              className="inline-flex items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
                             >
                               去看
                               <RiArrowRightUpLine className="size-3.5" />
@@ -526,8 +564,8 @@ function MediaDetailPage() {
 
                         {/* Expanded Segment Details (aligned directly under coverage track, matching 02A) */}
                         {isExpanded && (
-                          <div className="flex gap-4 border-t border-border/40 bg-background/25 px-5 py-2">
-                            <div className="w-52 shrink-0" />
+                          <div className="flex gap-4 border-t border-border/40 bg-background/25 px-4 py-2 sm:px-5">
+                            <div className="hidden w-52 shrink-0 lg:block" />
                             <div className="min-w-0 flex-1">
                               <div className="flex flex-col divide-y divide-border/40">
                                 {segments.map((seg) => {
@@ -539,53 +577,58 @@ function MediaDetailPage() {
                                   return (
                                     <div
                                       key={seg.id}
-                                      className="flex items-center gap-4 py-2 text-xs"
+                                      className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 text-xs lg:flex-nowrap"
                                     >
-                                      <span className="w-28 shrink-0 truncate text-sm font-medium text-foreground">
-                                        {seg.title}
-                                      </span>
-                                      <span className="w-24 shrink-0 truncate font-mono text-xs text-muted-foreground">
-                                        {seg.nativeId}
-                                      </span>
-                                      <span className="w-36 shrink-0 text-xs text-muted-foreground">
-                                        {!isMovie
-                                          ? formatSegmentEpisodeLabel(
-                                              seg.start,
-                                              seg.end,
-                                              seg.nonLinear,
-                                              totalEpisodesForAxis,
-                                            )
-                                          : "正片"}
-                                      </span>
-                                      <div className="min-w-0 flex-1">
-                                        {seg.status === "pending" ? (
-                                          <span className="inline-flex items-center gap-1.5 text-status-warning-fg/90">
-                                            <span className="size-1.5 rounded-full bg-status-warning-fg" />
-                                            {seg.changeRequestId ? (
-                                              <Link
-                                                to="/change-requests/$id"
-                                                params={{ id: seg.changeRequestId }}
-                                                className="underline-offset-4 hover:underline"
-                                              >
-                                                审核中 · 变更单 #{seg.changeRequestId}
-                                              </Link>
-                                            ) : (
-                                              "待审核"
-                                            )}
-                                          </span>
-                                        ) : (
-                                          <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-                                            <span className="size-1.5 rounded-full bg-status-confirmed-fg" />
-                                            已确认
-                                          </span>
-                                        )}
+                                      {/* Below lg: title over nativeId, 去看 beside them, the rest on a second line */}
+                                      <div className="flex min-w-0 flex-1 flex-col lg:flex-none lg:flex-row lg:items-center lg:gap-4">
+                                        <span className="truncate text-sm font-medium text-foreground lg:w-28">
+                                          {seg.title}
+                                        </span>
+                                        <span className="truncate font-mono text-2xs text-muted-foreground lg:w-24 lg:text-xs">
+                                          {seg.nativeId}
+                                        </span>
+                                      </div>
+                                      <div className="order-last flex basis-full flex-wrap items-center gap-x-4 gap-y-1 lg:contents">
+                                        <span className="shrink-0 text-xs text-muted-foreground lg:w-36">
+                                          {!isMovie
+                                            ? formatSegmentEpisodeLabel(
+                                                seg.start,
+                                                seg.end,
+                                                seg.nonLinear,
+                                                totalEpisodesForAxis,
+                                              )
+                                            : "正片"}
+                                        </span>
+                                        <div className="min-w-0 flex-auto lg:flex-1">
+                                          {seg.status === "pending" ? (
+                                            <span className="inline-flex items-center gap-1.5 text-status-warning-fg/90">
+                                              <span className="size-1.5 shrink-0 rounded-full bg-status-warning-fg" />
+                                              {seg.changeRequestId ? (
+                                                <Link
+                                                  to="/change-requests/$id"
+                                                  params={{ id: seg.changeRequestId }}
+                                                  className="min-w-0 wrap-anywhere underline-offset-4 hover:underline"
+                                                >
+                                                  审核中 · 变更单 #{seg.changeRequestId}
+                                                </Link>
+                                              ) : (
+                                                "待审核"
+                                              )}
+                                            </span>
+                                          ) : (
+                                            <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                                              <span className="size-1.5 rounded-full bg-status-confirmed-fg" />
+                                              已确认
+                                            </span>
+                                          )}
+                                        </div>
                                       </div>
 
                                       <a
                                         href={segUrl}
                                         target="_blank"
                                         rel="noreferrer"
-                                        className="inline-flex w-16 shrink-0 items-center justify-end gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                                        className="inline-flex shrink-0 items-center justify-end gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground lg:w-16 pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
                                       >
                                         去看
                                         <RiArrowRightUpLine className="size-3.5" />
@@ -599,7 +642,7 @@ function MediaDetailPage() {
                                 <button
                                   type="button"
                                   onClick={() => setHistory({ row, segments })}
-                                  className="transition-colors hover:text-foreground"
+                                  className="transition-colors hover:text-foreground pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
                                 >
                                   版本历史
                                 </button>
@@ -615,7 +658,7 @@ function MediaDetailPage() {
                                       variant: row.isDefault ? `${row.label}（默认）` : row.label,
                                     })
                                   }
-                                  className="transition-colors hover:text-foreground"
+                                  className="transition-colors hover:text-foreground pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
                                 >
                                   修正这条关联
                                 </button>
@@ -649,15 +692,15 @@ function MediaDetailPage() {
             <div className="flex flex-col">
               {/* Show ruler outside card for catalog when where-to-watch is empty or in long-series mode */}
               {showCatalogRuler && (
-                <div className="flex items-center gap-4 px-5 pb-1.5">
-                  <div className="w-52 shrink-0" />
+                <div className="flex items-center gap-4 px-4 pb-1.5 sm:px-5">
+                  <div className="hidden w-52 shrink-0 md:block" />
                   <div className="min-w-0 flex-1">
                     <CoverageRuler
                       total={totalEpisodesForAxis}
                       mode={isAllSeasons ? "season" : "episode"}
                     />
                   </div>
-                  <div className="w-16 shrink-0" />
+                  <div className="hidden w-16 shrink-0 md:block" />
                 </div>
               )}
 
@@ -678,8 +721,11 @@ function MediaDetailPage() {
                     const hasSeasonTrack = seasonSegments.length > 0;
 
                     return (
-                      <div key={cat.id} className="flex items-center gap-4 px-5 py-3.5">
-                        <div className="flex w-52 shrink-0 items-center gap-3">
+                      <div
+                        key={cat.id}
+                        className="flex flex-wrap items-center gap-x-4 gap-y-2.5 px-4 py-3.5 sm:px-5 md:flex-nowrap"
+                      >
+                        <div className="flex min-w-0 flex-1 items-center gap-3 md:w-52 md:flex-none">
                           <NamespaceLogo namespace={cat.namespace} className="size-7 shrink-0" />
                           <div className="min-w-0">
                             <div className="truncate text-sm font-medium text-foreground">
@@ -693,28 +739,31 @@ function MediaDetailPage() {
                           </div>
                         </div>
 
-                        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                          {hasWholeTrack && (
-                            <div className="flex h-5.5 w-full items-center rounded-sm bg-coverage-muted px-2.5 text-2xs font-semibold text-coverage-muted-foreground">
-                              <span className="truncate">{cat.wholeMediaLabel}</span>
-                            </div>
-                          )}
+                        {(hasWholeTrack || hasSeasonTrack) && (
+                          <div className="order-last flex min-w-0 basis-full flex-col gap-1.5 md:order-none md:flex-1 md:basis-0">
+                            {hasWholeTrack && (
+                              <div className="flex h-5.5 w-full items-center rounded-sm bg-coverage-muted px-2.5 text-2xs font-semibold text-coverage-muted-foreground">
+                                <span className="truncate">{cat.wholeMediaLabel}</span>
+                              </div>
+                            )}
 
-                          {hasSeasonTrack && (
-                            <CoverageTrack
-                              total={totalEpisodesForAxis}
-                              segments={seasonSegments}
-                              mode={isAllSeasons ? "season" : "episode"}
-                            />
-                          )}
-                        </div>
+                            {hasSeasonTrack && (
+                              <CoverageTrack
+                                total={totalEpisodesForAxis}
+                                segments={seasonSegments}
+                                mode={isAllSeasons ? "season" : "episode"}
+                              />
+                            )}
+                          </div>
+                        )}
 
-                        <div className="flex w-16 shrink-0 justify-end">
+                        {/* ml-auto keeps the link right-aligned when there is no track */}
+                        <div className="ml-auto flex shrink-0 justify-end md:w-16">
                           <a
                             href={openUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                            className="inline-flex items-center gap-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
                           >
                             打开
                             <RiArrowRightUpLine className="size-3.5" />
@@ -806,7 +855,7 @@ function RevisionHistory({ segments }: { segments: CoverageSegment[] }) {
     <div className="flex flex-col divide-y divide-border/70 text-xs">
       {revisions.map((rev) => (
         <div key={rev.id} className="flex items-start justify-between gap-3 py-2.5">
-          <div>
+          <div className="min-w-0 flex-1 wrap-break-word">
             <div className="font-medium text-foreground">
               修订 #{rev.revisionNumber} ·{" "}
               {rev.segments.length === 0

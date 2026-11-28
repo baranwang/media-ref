@@ -60,6 +60,7 @@ import {
   TableRow,
 } from "@media-ref/ui/components/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@media-ref/ui/components/tooltip";
+import { cn } from "@media-ref/ui/lib/utils";
 import {
   RiAddLine,
   RiCheckLine,
@@ -145,6 +146,7 @@ function ApiKeysPage() {
   );
   const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [resendCooldown, setResendCooldown] = useState(0);
   const [resendError, setResendError] = useState<string | null>(null);
 
@@ -193,6 +195,8 @@ function ApiKeysPage() {
   const totalFound = usage.reduce((s, d) => s + d.found, 0);
   const totalNotFound = usage.reduce((s, d) => s + d.notFound, 0);
   const totalSubmitted = usage.reduce((s, d) => s + d.submitted, 0);
+  // Tap target for touch screens, where the bar tooltips never open; defaults to the latest day.
+  const selectedUsage = usage.find((d) => d.date === selectedDay) ?? usage.at(-1);
   const maxDayTotal = niceCeiling(
     Math.max(0, ...usage.map((d) => d.found + d.notFound + d.submitted)),
   );
@@ -246,7 +250,12 @@ function ApiKeysPage() {
               <DropdownMenu>
                 <DropdownMenuTrigger
                   render={
-                    <Button variant="ghost" size="icon-sm" aria-label={`操作密钥 ${item.name}`} />
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`操作密钥 ${item.name}`}
+                      className="pointer-coarse:size-9"
+                    />
                   }
                 >
                   <RiMoreLine />
@@ -332,7 +341,7 @@ function ApiKeysPage() {
   };
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="flex-1 bg-background text-foreground">
       <TopNav />
 
       <main className="container flex flex-col gap-6 pb-20">
@@ -382,7 +391,7 @@ function ApiKeysPage() {
             <RiErrorWarningLine className="size-4" />
             <AlertTitle className="text-sm font-medium">邮箱还没验证，暂时不能创建密钥</AlertTitle>
             <AlertDescription className="mt-1 flex flex-col gap-3 text-xs">
-              <span>
+              <span className="wrap-break-word">
                 验证邮件已经发到 {maskEmail(user.email)}
                 ，点开邮件里的链接就完成了。验证之前，所有媒体页面照常可以浏览。
               </span>
@@ -424,17 +433,18 @@ function ApiKeysPage() {
                   <span>
                     完整密钥只显示这一次，关掉这条提示后再也看不到了。请现在复制，保存到你的播放器或脚本里。
                   </span>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <InputGroup className="h-8 flex-1 rounded-lg border-status-confirmed-border bg-background/80 dark:bg-background/80">
+                  <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                    <InputGroup className="h-8 rounded-lg border-status-confirmed-border bg-background/80 sm:flex-1 dark:bg-background/80 pointer-coarse:h-10">
                       <InputGroupInput
                         readOnly
                         value={newlyCreatedKey.secret}
                         aria-label="完整 API 密钥"
-                        className="font-mono text-xs text-foreground select-all"
+                        className="font-mono text-sm text-foreground select-all sm:text-xs"
                       />
                       <InputGroupAddon align="inline-end">
                         <InputGroupButton
                           size="xs"
+                          className="pointer-coarse:h-8 pointer-coarse:px-2"
                           onClick={() => void handleCopySecret()}
                           aria-label="复制密钥"
                         >
@@ -515,7 +525,7 @@ function ApiKeysPage() {
                     </div>
 
                     {/* Chart plot */}
-                    <div className="relative flex-1">
+                    <div className="relative min-w-0 flex-1">
                       {/* Horizontal gridlines */}
                       <div
                         aria-hidden="true"
@@ -527,8 +537,8 @@ function ApiKeysPage() {
                       </div>
 
                       {/* Bars */}
-                      <div className="relative grid h-45 grid-cols-14 items-end gap-2 sm:gap-3">
-                        {usage.map((day) => {
+                      <div className="relative grid h-45 grid-cols-14 items-end gap-1 sm:gap-3">
+                        {usage.map((day, i) => {
                           const { foundPct, notFoundPct, submitPct } = usageBarHeights(
                             day,
                             maxDayTotal,
@@ -536,7 +546,7 @@ function ApiKeysPage() {
                           return (
                             <div
                               key={day.date}
-                              className="flex h-full flex-col items-center justify-end gap-2"
+                              className="flex h-full min-w-0 flex-col items-center justify-end gap-2"
                             >
                               <Tooltip>
                                 <TooltipTrigger
@@ -544,6 +554,8 @@ function ApiKeysPage() {
                                     <button
                                       type="button"
                                       aria-label={`${day.date} API 调用统计`}
+                                      aria-pressed={day.date === selectedUsage?.date}
+                                      onClick={() => setSelectedDay(day.date)}
                                       className="flex h-39 w-full max-w-8 flex-col justify-end overflow-hidden rounded-t-xs transition-opacity hover:opacity-85 focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
                                     />
                                   }
@@ -570,7 +582,13 @@ function ApiKeysPage() {
                                   </div>
                                 </TooltipContent>
                               </Tooltip>
-                              <span className="font-mono text-2xs text-muted-foreground/80">
+                              {/* Below sm only every third label (counted from today) fits; the rest keep their slot. */}
+                              <span
+                                className={cn(
+                                  "font-mono text-2xs whitespace-nowrap text-muted-foreground/80",
+                                  (usage.length - 1 - i) % 3 !== 0 && "invisible sm:visible",
+                                )}
+                              >
                                 {day.date}
                               </span>
                             </div>
@@ -579,6 +597,16 @@ function ApiKeysPage() {
                       </div>
                     </div>
                   </div>
+                )}
+                {selectedUsage && !usageQuery.isPending && !usageQuery.isError && (
+                  <p className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground pointer-fine:sm:hidden">
+                    <span className="font-mono font-medium text-foreground">
+                      {selectedUsage.date}
+                    </span>
+                    <span>查到媒体 {formatCount(selectedUsage.found)}</span>
+                    <span>没查到 {formatCount(selectedUsage.notFound)}</span>
+                    <span>提交变更单 {formatCount(selectedUsage.submitted)}</span>
+                  </p>
                 )}
               </CardContent>
             </Card>
@@ -624,7 +652,7 @@ function ApiKeysPage() {
                                 header.id === "name"
                                   ? "pl-5"
                                   : header.id === "actions"
-                                    ? "w-12 pr-4 text-right"
+                                    ? "w-12 pr-4 text-right max-lg:sticky max-lg:right-0 max-lg:bg-card"
                                     : undefined
                               }
                             >
@@ -644,7 +672,7 @@ function ApiKeysPage() {
                                 cell.column.id === "name"
                                   ? "pl-5"
                                   : cell.column.id === "actions"
-                                    ? "pr-4 text-right"
+                                    ? "pr-4 text-right max-lg:sticky max-lg:right-0 max-lg:bg-card"
                                     : undefined
                               }
                             >

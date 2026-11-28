@@ -70,7 +70,8 @@ function VerifyEmailPage() {
         <div className="flex flex-col gap-2">
           <h1 className="text-2xl font-bold tracking-tight text-foreground">查看你的邮箱</h1>
           <p className="text-xs leading-5 text-muted-foreground">
-            确认邮件已经发到 <span className="font-mono text-foreground">{targetEmail}</span>
+            确认邮件已经发到{" "}
+            <span className="font-mono break-all text-foreground">{targetEmail}</span>
             ，点邮件里的链接就能完成注册。
           </p>
         </div>

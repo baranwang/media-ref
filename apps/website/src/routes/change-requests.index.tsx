@@ -28,7 +28,7 @@ function ChangeRequestsListPage() {
   const { data: cards } = useQuery(cardsByKeyQuery(changeRequests.map((cr) => cr.targetKey)));
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="flex-1 bg-background text-foreground">
       <TopNav />
 
       <main className="container flex flex-col pb-20">
@@ -94,7 +94,7 @@ function ChangeRequestsListPage() {
                     key={cr.id}
                     to="/change-requests/$id"
                     params={{ id: cr.id }}
-                    className="flex flex-wrap items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-muted/30"
+                    className="flex flex-col gap-2 px-4 py-4 transition-colors hover:bg-muted/30 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4 sm:px-5"
                   >
                     <div className="flex min-w-0 items-center gap-3.5">
                       {media?.posterUrl && (
@@ -107,7 +107,7 @@ function ChangeRequestsListPage() {
                       )}
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="truncate text-sm font-medium text-foreground">
+                          <span className="max-w-full min-w-0 truncate text-sm font-medium text-foreground">
                             {media?.title ?? cr.pageTitle ?? cr.nativeId}
                           </span>
                           <Badge
@@ -135,7 +135,10 @@ function ChangeRequestsListPage() {
                       </div>
                     </div>
 
-                    <span className="shrink-0 text-xs text-muted-foreground">
+                    {/* Phones: under the text column (poster w-9 + gap-3.5 = pl-12.5) */}
+                    <span
+                      className={`shrink-0 text-xs text-muted-foreground ${media?.posterUrl ? "pl-12.5 sm:pl-0" : ""}`}
+                    >
                       {formatDateTime(cr.createdAt)}
                     </span>
                   </Link>

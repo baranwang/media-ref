@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@media-ref/ui/components/select";
 import { Tabs, TabsList, TabsTrigger } from "@media-ref/ui/components/tabs";
+import { useIsMobile } from "@media-ref/ui/hooks/use-mobile";
 import { cn } from "@media-ref/ui/lib/utils";
 import { RiAddLine, RiCheckLine, RiErrorWarningLine } from "@remixicon/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -74,6 +75,7 @@ export function ContributeDrawer({
 }: ContributeDrawerProps) {
   const { user, sessionChecked } = useAppStore();
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const queryClient = useQueryClient();
 
   const defaultSeason = initialSeason ?? media.defaultSeason ?? media.seasons[0]?.season ?? 1;
@@ -244,8 +246,13 @@ export function ContributeDrawer({
   });
 
   return (
-    <Drawer open={open} onOpenChange={onOpenChange} swipeDirection="right">
-      <DrawerContent className="w-full max-w-sm">
+    <Drawer
+      open={open}
+      onOpenChange={onOpenChange}
+      showSwipeHandle={isMobile}
+      swipeDirection={isMobile ? "down" : "right"}
+    >
+      <DrawerContent>
         <DrawerHeader className="border-b border-border/60 pb-3">
           <DrawerTitle>补充 / 修正关联</DrawerTitle>
           <DrawerDescription>
@@ -296,7 +303,7 @@ export function ContributeDrawer({
               <>
                 <div className="flex items-center gap-2">
                   <Select value={variant} onValueChange={(v) => v && setVariant(v)}>
-                    <SelectTrigger className="flex-1">
+                    <SelectTrigger className="min-w-0 flex-1">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -311,6 +318,7 @@ export function ContributeDrawer({
                     type="button"
                     variant="outline"
                     size="default"
+                    className="shrink-0"
                     onClick={() => setAddingVariant((v) => !v)}
                   >
                     <RiAddLine />
@@ -357,9 +365,10 @@ export function ContributeDrawer({
                     setEpisodeEnd(info?.episodeCount ?? 1);
                   }}
                 >
-                  <TabsList className="grid w-full grid-cols-4">
+                  {/* 5–8 seasons wrap to a second row, so the list can't keep its fixed h-8 */}
+                  <TabsList className="grid w-full grid-cols-4 group-data-horizontal/tabs:h-auto pointer-coarse:group-data-horizontal/tabs:h-auto">
                     {media.seasons.map((s) => (
-                      <TabsTrigger key={s.season} value={String(s.season)}>
+                      <TabsTrigger key={s.season} value={String(s.season)} className="py-1">
                         第 {s.season} 季
                       </TabsTrigger>
                     ))}
@@ -395,10 +404,18 @@ export function ContributeDrawer({
 
               <Tabs value={scope} onValueChange={(v) => setScope(v as ScopeKind)}>
                 <TabsList className="grid w-full grid-cols-4">
-                  <TabsTrigger value="whole_media">整部</TabsTrigger>
-                  <TabsTrigger value="whole_season">整季</TabsTrigger>
-                  <TabsTrigger value="partial">部分集数</TabsTrigger>
-                  <TabsTrigger value="single">单集</TabsTrigger>
+                  <TabsTrigger value="whole_media" className="max-sm:px-1">
+                    整部
+                  </TabsTrigger>
+                  <TabsTrigger value="whole_season" className="max-sm:px-1">
+                    整季
+                  </TabsTrigger>
+                  <TabsTrigger value="partial" className="max-sm:px-1">
+                    部分集数
+                  </TabsTrigger>
+                  <TabsTrigger value="single" className="max-sm:px-1">
+                    单集
+                  </TabsTrigger>
                 </TabsList>
               </Tabs>
 
@@ -456,7 +473,7 @@ export function ContributeDrawer({
 
               {!isNonLinear && (
                 <>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                     <span>
                       在这个{parsed ? NAMESPACE_LABELS[parsed.namespace] : "平台"}页面里是第{" "}
                       {targetStart}–{targetEnd} 集
@@ -464,7 +481,7 @@ export function ContributeDrawer({
                     <button
                       type="button"
                       onClick={() => setEditingOffset((v) => !v)}
-                      className="text-foreground underline underline-offset-4 hover:text-primary"
+                      className="shrink-0 text-foreground underline underline-offset-4 hover:text-primary pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
                     >
                       {editingOffset ? "完成" : "修改"}
                     </button>
@@ -554,23 +571,26 @@ export function ContributeDrawer({
           ) : (
             <p className="text-xs text-muted-foreground">提交后会自动取证核对</p>
           )}
-          <Button
-            type="button"
-            variant="default"
-            size="lg"
-            className="w-full"
-            disabled={!parsed || !user?.emailVerified || submit.isPending}
-            onClick={() => submit.mutate()}
-          >
-            {submit.isPending ? "提交中…" : "提交变更单"}
-          </Button>
-          <DrawerClose
-            render={
-              <Button type="button" variant="outline" size="lg" className="w-full">
-                取消
-              </Button>
-            }
-          />
+          {/* Side by side on phones so the keyboard leaves room for the form; stacked from sm */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-1">
+            <Button
+              type="button"
+              variant="default"
+              size="lg"
+              className="w-full"
+              disabled={!parsed || !user?.emailVerified || submit.isPending}
+              onClick={() => submit.mutate()}
+            >
+              {submit.isPending ? "提交中…" : "提交变更单"}
+            </Button>
+            <DrawerClose
+              render={
+                <Button type="button" variant="outline" size="lg" className="w-full">
+                  取消
+                </Button>
+              }
+            />
+          </div>
         </DrawerFooter>
       </DrawerContent>
     </Drawer>

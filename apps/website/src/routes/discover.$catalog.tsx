@@ -80,12 +80,12 @@ function DiscoverCatalogPage() {
   }, [items, category, sortBy]);
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="flex-1 bg-background text-foreground">
       <TopNav />
 
       <main className="container flex flex-col pb-20">
         {/* Page Head */}
-        <section className="flex flex-col gap-2 pt-12">
+        <section className="flex flex-col gap-2 pt-8 sm:pt-12">
           <Breadcrumb>
             <BreadcrumbList>
               <BreadcrumbItem>
@@ -110,10 +110,14 @@ function DiscoverCatalogPage() {
 
         {/* Filter Bar */}
         <section className="flex flex-wrap items-center justify-between gap-3 pt-7">
-          <Tabs value={category} onValueChange={(v) => setCategory(v as CategoryFilter)}>
-            <TabsList>
+          <Tabs
+            value={category}
+            onValueChange={(v) => setCategory(v as CategoryFilter)}
+            className="max-w-full min-w-0"
+          >
+            <TabsList className="no-scrollbar max-w-full justify-start overflow-x-auto overflow-y-hidden">
               {CATEGORY_TABS.map((tab) => (
-                <TabsTrigger key={tab.value} value={tab.value} className="gap-1.5 px-3">
+                <TabsTrigger key={tab.value} value={tab.value} className="shrink-0 gap-1.5 px-3">
                   <span>{tab.label}</span>
                   {items && (
                     <span className="font-mono text-2xs text-muted-foreground">
@@ -126,7 +130,7 @@ function DiscoverCatalogPage() {
           </Tabs>
 
           <Select value={sortBy} onValueChange={(v) => v && setSortBy(v as SortOption)}>
-            <SelectTrigger className="w-40">
+            <SelectTrigger className="w-full sm:w-40">
               <SelectValue>{sortBy === "popular" ? config.sortLabel : "按缺平台优先"}</SelectValue>
             </SelectTrigger>
             <SelectContent>
@@ -148,7 +152,7 @@ function DiscoverCatalogPage() {
             </EmptyHeader>
           </Empty>
         ) : (
-          <section className="grid grid-cols-2 gap-x-5 gap-y-8 pt-6 sm:grid-cols-3 md:grid-cols-6">
+          <section className="grid grid-cols-2 gap-x-3.5 gap-y-8 pt-6 sm:grid-cols-3 sm:gap-x-5 md:grid-cols-6">
             {isPending
               ? Array.from({ length: 12 }, (_, i) => <MediaCardSkeleton key={i} />)
               : filteredItems.map((item) => <MediaCard key={item.key} item={item} />)}

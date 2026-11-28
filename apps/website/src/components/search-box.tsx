@@ -16,6 +16,7 @@ interface SearchBoxProps {
   size?: "nav" | "hero";
   className?: string;
   initialQuery?: string;
+  autoFocus?: boolean;
 }
 
 export function SearchBox({
@@ -23,6 +24,7 @@ export function SearchBox({
   size = "nav",
   className,
   initialQuery = "",
+  autoFocus = false,
 }: SearchBoxProps) {
   const navigate = useNavigate();
   const [query, setQuery] = useState(initialQuery);
@@ -49,13 +51,13 @@ export function SearchBox({
   }, [query]);
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: PointerEvent) => {
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
         setOpen(false);
       }
     };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    document.addEventListener("pointerdown", handleClickOutside);
+    return () => document.removeEventListener("pointerdown", handleClickOutside);
   }, []);
 
   const openMedia = (mediaId: string) => {
@@ -98,7 +100,7 @@ export function SearchBox({
         className={cn(
           "rounded-lg",
           size === "hero"
-            ? "h-11 border-input bg-input backdrop-blur-md dark:bg-input"
+            ? "h-11 border-input bg-input backdrop-blur-md dark:bg-input pointer-coarse:h-11"
             : "h-8 border-input bg-input/30",
         )}
       >
@@ -115,10 +117,12 @@ export function SearchBox({
           onFocus={() => setOpen(true)}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
+          autoFocus={autoFocus}
           aria-label="搜索媒体或粘贴链接"
           className={cn(
             "h-full",
-            size === "hero" ? "pr-3.5 text-sm md:text-sm" : "pr-2.5 text-xs md:text-xs",
+            // 14px on phones like the other form controls; iOS input zoom is blocked in __root.tsx.
+            size === "hero" ? "pr-3.5 text-sm" : "pr-2.5 text-sm md:text-xs",
           )}
         />
       </InputGroup>
@@ -126,9 +130,9 @@ export function SearchBox({
       {showDropdown && (
         <div
           role="listbox"
-          className="absolute inset-x-0 top-full z-50 mt-1.5 overflow-hidden rounded-lg border border-border bg-popover/95 p-1 text-popover-foreground shadow-2xl backdrop-blur-xl"
+          className="absolute inset-x-0 top-full z-50 mt-1.5 max-h-[60dvh] overflow-y-auto overscroll-contain rounded-lg border border-border bg-popover/95 p-1 text-popover-foreground shadow-2xl backdrop-blur-xl md:max-h-[calc(100dvh-8rem)]"
         >
-          <div className="px-2 py-1.5 text-xs text-muted-foreground">
+          <div className="truncate px-2 py-1.5 text-xs text-muted-foreground">
             {result?.matchedAsLink ? `这个${linkLabel}网址对应的媒体` : `片名里有「${trimmed}」`}
           </div>
           {search.isError && debouncedQuery === trimmed ? (
@@ -139,46 +143,53 @@ export function SearchBox({
             <div className="px-2 py-4 text-center text-xs text-muted-foreground">搜索中…</div>
           ) : visibleMatches.length > 0 ? (
             <div className="flex flex-col gap-0.5">
-              {visibleMatches.map((item, idx) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  onMouseEnter={() => setActiveIndex(idx)}
-                  onClick={() => openMedia(item.id)}
-                  className={cn(
-                    "flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left transition-colors",
-                    idx === activeIndex ? "bg-accent" : "hover:bg-accent/60",
-                  )}
-                >
-                  {item.posterUrl ? (
-                    <img
-                      src={item.posterUrl}
-                      alt={item.title}
-                      referrerPolicy="no-referrer"
-                      className="h-12 w-8 shrink-0 rounded object-cover"
-                    />
-                  ) : (
-                    <div className="h-12 w-8 shrink-0 rounded bg-muted" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-foreground">{item.title}</div>
-                    <div className="truncate text-xs text-muted-foreground">
-                      {item.year ? `${item.year} · ` : ""}
-                      {categoryLabelOf(item.category)}
-                      {item.originalTitle && item.originalTitle !== item.title
-                        ? ` · ${item.originalTitle}`
-                        : ""}
+              {visibleMatches.map((item, idx) => {
+                const logos = item.platforms.map((ns) => (
+                  <NamespaceLogo key={ns} namespace={ns} className="size-4.5" />
+                ));
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onMouseEnter={() => setActiveIndex(idx)}
+                    onClick={() => openMedia(item.id)}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left transition-colors",
+                      idx === activeIndex ? "bg-accent" : "hover:bg-accent/60",
+                    )}
+                  >
+                    {item.posterUrl ? (
+                      <img
+                        src={item.posterUrl}
+                        alt={item.title}
+                        referrerPolicy="no-referrer"
+                        className="h-12 w-8 shrink-0 rounded object-cover"
+                      />
+                    ) : (
+                      <div className="h-12 w-8 shrink-0 rounded bg-muted" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-foreground">
+                        {item.title}
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {item.year ? `${item.year} · ` : ""}
+                        {categoryLabelOf(item.category)}
+                        {item.originalTitle && item.originalTitle !== item.title
+                          ? ` · ${item.originalTitle}`
+                          : ""}
+                      </div>
+                      {/* Below sm the logos sit under the subtitle so they can't squeeze the title. */}
+                      {logos.length > 0 && (
+                        <div className="mt-1 flex items-center gap-1 sm:hidden">{logos}</div>
+                      )}
                     </div>
-                  </div>
-                  {item.platforms.length > 0 && (
-                    <div className="flex shrink-0 items-center gap-1">
-                      {item.platforms.map((ns) => (
-                        <NamespaceLogo key={ns} namespace={ns} className="size-4.5" />
-                      ))}
-                    </div>
-                  )}
-                </button>
-              ))}
+                    {logos.length > 0 && (
+                      <div className="hidden shrink-0 items-center gap-1 sm:flex">{logos}</div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           ) : result.matchedAsLink ? (
             <div className="px-2 py-3 text-xs text-muted-foreground">

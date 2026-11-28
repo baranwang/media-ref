@@ -136,8 +136,8 @@ function RunningCard({ item, now }: { item: ExplorationItem; now: number | null 
   return (
     <Card>
       <CardContent className="flex flex-col pt-4">
-        <div className="flex gap-5 pb-4">
-          <Poster item={item} className="h-27 w-18" />
+        <div className="flex gap-3.5 pb-4 sm:gap-5">
+          <Poster item={item} className="h-21 w-14 sm:h-27 sm:w-18" />
           <div className="flex min-w-0 flex-1 flex-col gap-1.5">
             <div className="flex items-center gap-1.5 text-xs font-medium text-primary">
               <span className="relative flex size-2">
@@ -207,26 +207,29 @@ function ActivityRow({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-4 px-5 py-3.5 text-left transition-colors hover:bg-muted/25"
+        className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-muted/25 sm:gap-4 sm:px-5"
       >
         <Poster item={item} className="h-15 w-10" />
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="truncate text-sm font-medium text-foreground">{item.card.title}</span>
-          <span className="text-xs text-muted-foreground">{metaText(item)}</span>
-          <span className="flex min-w-0 gap-2 text-xs">
-            <span className="shrink-0 text-muted-foreground">结果</span>
-            <span className="truncate text-foreground/90">{resultText(item)}</span>
-          </span>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-2">
-          <div className="flex h-4 items-center gap-2">
-            {foundPlatforms.map((p) => (
-              <NamespaceLogo key={p.namespace} namespace={p.namespace} className="size-4" />
-            ))}
+        {/* Below sm the logos and time drop under the title so it keeps the row's width. */}
+        <div className="flex min-w-0 flex-1 flex-col gap-1 sm:flex-row sm:items-center sm:gap-4">
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <span className="truncate text-sm font-medium text-foreground">{item.card.title}</span>
+            <span className="text-xs text-muted-foreground">{metaText(item)}</span>
+            <span className="flex min-w-0 gap-2 text-xs">
+              <span className="shrink-0 text-muted-foreground">结果</span>
+              <span className="truncate text-foreground/90">{resultText(item)}</span>
+            </span>
           </div>
-          <span className="text-xs text-muted-foreground">
-            {now !== null && formatRelativeTime(item.finishedAt, new Date(now))}
-          </span>
+          <div className="flex shrink-0 items-center gap-2 sm:flex-col sm:items-end">
+            <div className="flex h-4 items-center gap-2 max-sm:empty:hidden">
+              {foundPlatforms.map((p) => (
+                <NamespaceLogo key={p.namespace} namespace={p.namespace} className="size-4" />
+              ))}
+            </div>
+            <span className="text-xs text-muted-foreground">
+              {now !== null && formatRelativeTime(item.finishedAt, new Date(now))}
+            </span>
+          </div>
         </div>
         <RiArrowDownSLine
           className={cn(
@@ -237,7 +240,7 @@ function ActivityRow({
       </button>
 
       {open && (
-        <div className="flex flex-col pr-5 pb-4 pl-19">
+        <div className="flex flex-col px-4 pb-4 sm:pr-5 sm:pl-19">
           <ul className="divide-y divide-border/60">
             {item.platforms.map((p) => {
               const badge = STATUS_BADGE[p.status];
@@ -250,7 +253,9 @@ function ActivityRow({
                       <Badge variant={badge.variant}>{badge.label}</Badge>
                     </div>
                     {p.reason && (
-                      <p className="text-xs leading-5 text-muted-foreground">{p.reason}</p>
+                      <p className="text-xs leading-5 wrap-anywhere text-muted-foreground">
+                        {p.reason}
+                      </p>
                     )}
                     {canSeeChangeRequests && (p.changeRequestId || p.liveChangeRequestId) && (
                       <div className="flex flex-wrap gap-3 text-xs">
@@ -258,7 +263,7 @@ function ActivityRow({
                           <Link
                             to="/change-requests/$id"
                             params={{ id: p.liveChangeRequestId }}
-                            className="inline-flex items-center gap-0.5 text-foreground/90 underline underline-offset-4 hover:text-foreground"
+                            className="inline-flex items-center gap-0.5 text-foreground/90 underline underline-offset-4 hover:text-foreground pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
                           >
                             查看生效变更单
                             <RiArrowRightUpLine className="size-3" />
@@ -268,7 +273,7 @@ function ActivityRow({
                           <Link
                             to="/change-requests/$id"
                             params={{ id: p.changeRequestId }}
-                            className="inline-flex items-center gap-0.5 text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                            className="inline-flex items-center gap-0.5 text-muted-foreground underline underline-offset-4 hover:text-foreground pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
                           >
                             {p.liveChangeRequestId ? "查看原变更单" : "查看变更单"}
                             <RiArrowRightUpLine className="size-3" />
@@ -285,7 +290,7 @@ function ActivityRow({
             <Link
               to="/media/$mediaId"
               params={{ mediaId: item.card.id }}
-              className="inline-flex items-center gap-1 text-foreground hover:underline"
+              className="inline-flex items-center gap-1 text-foreground hover:underline pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
             >
               打开作品页
               <RiArrowRightUpLine className="size-3.5" />
@@ -294,7 +299,7 @@ function ActivityRow({
               <Link
                 to="/change-requests/$id"
                 params={{ id: primaryChangeRequest }}
-                className="inline-flex items-center gap-1 text-foreground hover:underline"
+                className="inline-flex items-center gap-1 text-foreground hover:underline pointer-coarse:-my-2.5 pointer-coarse:py-2.5"
               >
                 查看变更单
                 <RiArrowRightUpLine className="size-3.5" />
@@ -323,7 +328,7 @@ function ExplorationPage() {
   const backdrop = (running[0] ?? recent[0])?.card.posterUrl;
 
   return (
-    <div className="relative min-h-screen bg-background text-foreground">
+    <div className="relative flex-1 bg-background text-foreground">
       {backdrop && (
         <div
           aria-hidden="true"

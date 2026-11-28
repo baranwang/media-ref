@@ -39,9 +39,9 @@ export function MediaCard({ item }: { item: CardItem }) {
         </p>
       </div>
 
-      <div className="flex h-5 items-center gap-2">
+      <div className="flex h-5 items-center gap-1.5 sm:gap-2">
         {item.platforms.map((ns) => (
-          <NamespaceLogo key={ns} namespace={ns} className="size-5" />
+          <NamespaceLogo key={ns} namespace={ns} className="size-4.5 sm:size-5" />
         ))}
       </div>
     </Link>
