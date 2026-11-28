@@ -4,6 +4,8 @@ EMAIL_FROM=
 AUTH_SECRET=
 # Public base URL for authentication callbacks.
 API_BASE_URL=
+# Website origin whose /login page MCP OAuth sends signed-out users to.
+WEBSITE_URL=
 # Domain shared by authentication cookies.
 COOKIE_DOMAIN=
 # Comma-separated additional trusted web origins.
