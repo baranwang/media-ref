@@ -1,0 +1,4 @@
+{
+  "title": "BrowseService",
+  "pages": ["search", "get-catalog-detail"]
+}

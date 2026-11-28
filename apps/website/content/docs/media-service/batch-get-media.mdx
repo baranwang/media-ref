@@ -1,0 +1,106 @@
+---
+title: BatchGetMedia
+breadcrumb: 接口参考 / MediaService
+badges: ["只读"]
+description: 一次查最多 100 部作品。每个编号单独给结果，某一个没查到或写错，不影响其他的。
+---
+
+<Endpoint method="POST" url="https://api.mediaref.org/mediaref.v1.MediaService/BatchGetMedia" />
+
+## 请求参数 [#request]
+
+| 字段                 | 类型           | 说明                                                                                   |
+| -------------------- | -------------- | -------------------------------------------------------------------------------------- |
+| `refs`               | MediaRef[]     | 必填。1 到 100 个编号，写法和 [GetMedia](/docs/media-service/get-media#media-ref) 一样 |
+| `season`             | int32          | 可选。和 GetMedia 相同：不筛选返回内容，只帮探索 agent 定方向                          |
+| `namespaceGroup`     | NamespaceGroup | 可选。和 GetMedia 相同                                                                 |
+| `includeUnconfirmed` | bool           | 可选。连还没核实的对应关系一起返回                                                     |
+
+## 返回内容 [#response]
+
+`results` 和 `refs` 一一对应，顺序相同。每一项要么有 `success`，要么有 `error`。
+
+| 字段            | 类型             | 说明                                                 |
+| --------------- | ---------------- | ---------------------------------------------------- |
+| `ref`           | MediaRef         | 这一项查的编号                                       |
+| `success.items` | MediaQueryItem[] | 查到的作品，每部带完整档案 `document`                |
+| `error.code`    | string           | `INVALID_KEY`：编号写得不对；`NOT_FOUND`：库里还没有 |
+| `error.message` | string           | 出错原因                                             |
+
+<Hint>整批只算一次请求，限流按次数算。这个接口不支持 GET。</Hint>
+
+## 错误 [#errors]
+
+整个请求失败时才返回下面这些；单个编号的问题放在它自己的 `error` 里。鉴权和限流的错误见[错误处理](/docs/errors#codes)。
+
+| HTTP  | 业务错误码             | 原因                           |
+| ----- | ---------------------- | ------------------------------ |
+| `400` | `BATCH_LIMIT_EXCEEDED` | `refs` 是空的，或者超过 100 个 |
+| `400` | `INVALID_QUERY`        | `season` 不是合法的季号        |
+
+## 代码示例 [#example]
+
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]} defaultValue="TypeScript">
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.MediaService/BatchGetMedia \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "refs": [
+      { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+      { "douban": "1292052" }
+    ]
+  }'
+```
+
+```ts
+import { createMediaRefClient } from "@media-ref/client";
+
+const client = createMediaRefClient({ apiKey: process.env.MEDIAREF_API_KEY! });
+// 超过 100 个时 SDK 会自动拆成几次请求
+const { results } = await client.getMediaBatch([
+  { tmdb: { type: "tv", id: 95479 } },
+  { douban: "1292052" },
+]);
+
+for (const result of results) {
+  if (result.ok) console.log(result.key, result.items.length);
+  else console.log(result.key, result.error);
+}
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.MediaService/BatchGetMedia",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={
+        "refs": [
+            {"tmdb": {"type": "MEDIA_TYPE_TV", "id": 95479}},
+            {"douban": "1292052"},
+        ]
+    },
+)
+res.raise_for_status()
+for result in res.json()["results"]:
+    print(result.get("success") or result.get("error"))
+```
+
+```go
+body := strings.NewReader(`{
+  "refs": [
+    { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+    { "douban": "1292052" }
+  ]
+}`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.MediaService/BatchGetMedia", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
+```
+
+</CodeTabs>

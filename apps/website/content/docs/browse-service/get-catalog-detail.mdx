@@ -1,0 +1,89 @@
+---
+title: GetCatalogDetail
+breadcrumb: 接口参考 / BrowseService
+badges: ["只读", "支持 GET"]
+description: 读一个目录站条目的详情：简介、类型、地区、演职员和每季集数。库里还没有的作品也能查。
+---
+
+<Endpoint method="POST" url="https://api.mediaref.org/mediaref.v1.BrowseService/GetCatalogDetail" />
+
+## 请求参数 [#request]
+
+| 字段  | 类型   | 说明                                                                                                       |
+| ----- | ------ | ---------------------------------------------------------------------------------------------------------- |
+| `key` | string | 必填。目录站编号，比如 `tmdb:tv:95479`、`douban:1292052`、`bangumi:294993`。Search 返回的 `key` 可以直接用 |
+
+<Hint>
+  TMDB、豆瓣、Bangumi 的条目直接读；TVDB、IMDb、Trakt 的编号会先换成对应的 TMDB 条目再读。
+</Hint>
+
+## 返回内容 [#response]
+
+`detail` 是一个 CatalogDetail：
+
+| 字段          | 类型            | 说明                                                                             |
+| ------------- | --------------- | -------------------------------------------------------------------------------- |
+| `card`        | CatalogCard     | 片名、年份、海报等，和 [Search](/docs/browse-service/search#response) 返回的一样 |
+| `overview`    | string          | 简介                                                                             |
+| `backdropUrl` | string          | 背景图地址                                                                       |
+| `genres`      | string[]        | 类型                                                                             |
+| `regions`     | string[]        | 地区                                                                             |
+| `credits`     | CatalogCredit[] | 演职员，每项有 `role` 和 `name`                                                  |
+| `status`      | string          | 目录站标了的话，是 `ongoing`（连载中）或 `ended`（已完结）                       |
+| `yearEnd`     | int32           | 完结年份                                                                         |
+| `seasons`     | CatalogSeason[] | 每季的 `season` 和 `episodeCount`                                                |
+
+## 错误 [#errors]
+
+鉴权和限流的错误见[错误处理](/docs/errors#codes)。
+
+| HTTP  | 业务错误码                | 原因                                       |
+| ----- | ------------------------- | ------------------------------------------ |
+| `404` | `CATALOG_ENTRY_NOT_FOUND` | `key` 写得不对，或者目录站上找不到这个条目 |
+
+## 代码示例 [#example]
+
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.BrowseService/GetCatalogDetail \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "key": "tmdb:tv:95479" }'
+```
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { BrowseService, createMediaRefTransport } from "@media-ref/client";
+
+const transport = createMediaRefTransport({ apiKey: process.env.MEDIAREF_API_KEY! });
+const browse = createClient(BrowseService, transport);
+
+const { detail } = await browse.getCatalogDetail({ key: "tmdb:tv:95479" });
+console.log(detail?.card?.title, detail?.seasons);
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.BrowseService/GetCatalogDetail",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={"key": "tmdb:tv:95479"},
+)
+res.raise_for_status()
+detail = res.json()["detail"]
+print(detail["card"]["title"], detail.get("seasons", []))
+```
+
+```go
+body := strings.NewReader(`{ "key": "tmdb:tv:95479" }`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.BrowseService/GetCatalogDetail", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
+```
+
+</CodeTabs>

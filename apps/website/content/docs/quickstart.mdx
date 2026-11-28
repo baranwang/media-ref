@@ -1,0 +1,156 @@
+---
+title: 快速开始
+breadcrumb: 文档 / 入门
+description: MediaRef 把电影和剧集对到各个视频平台的具体页面和集数。拿一把 API 密钥，三步就能查到「TMDB 第 1 季第 30 集」在哔哩哔哩是哪个页面的第几集。
+---
+
+<Callout title="这里只收录对外接口">
+  账号、审核、我的变更单这些网站自己用的接口不在文档里。它们随时会改，请不要在你的程序里调用。
+</Callout>
+
+<Steps>
+
+## 创建 API 密钥 [#create-key]
+
+登录后到「API 密钥」页创建一把。完整密钥只显示一次，记得马上存好。只查数据的话，给它「查询媒体」权限就够了，不用开「提交变更单」。
+
+<div>
+  <ButtonLink to="/api-keys">去创建密钥</ButtonLink>
+</div>
+
+## 发第一个请求 [#first-request]
+
+每个接口都是一个 HTTP 地址：`/mediaref.v1.<服务>/<方法>`。用 JSON 发请求体，把密钥放在 `Authorization` 头里，其他写法和限流见[鉴权与限流](/docs/auth)。下面查的是 TMDB 编号 95479 这部剧。
+
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.MediaService/GetMedia \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ref": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+    "season": 1,
+    "namespaceGroup": "NAMESPACE_GROUP_PLATFORM"
+  }'
+```
+
+```ts
+import { createMediaRefClient } from "@media-ref/client";
+
+const client = createMediaRefClient({ apiKey: process.env.MEDIAREF_API_KEY! });
+const res = await client.getMedia(
+  { tmdb: { type: "tv", id: 95479 } },
+  { season: 1, namespaceGroup: "platform" },
+);
+// 库里没有这部作品时 res 是 null
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.MediaService/GetMedia",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={
+        "ref": {"tmdb": {"type": "MEDIA_TYPE_TV", "id": 95479}},
+        "season": 1,
+        "namespaceGroup": "NAMESPACE_GROUP_PLATFORM",
+    },
+)
+res.raise_for_status()
+document = res.json()["document"]
+```
+
+```go
+body := strings.NewReader(`{
+  "ref": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+  "season": 1,
+  "namespaceGroup": "NAMESPACE_GROUP_PLATFORM"
+}`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.MediaService/GetMedia", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
+```
+
+</CodeTabs>
+
+<Hint>`season` 和 `namespaceGroup` 不会筛掉返回内容。它们告诉 MediaRef 你要找的是哪一季、要视频平台还是目录站，库里还没有的，探索 agent 会去补。标了「支持 GET」的接口也能发 GET：把请求体放进查询参数 `?encoding=json&message=<请求体>`，这是 Connect 协议的 GET 写法。</Hint>
+
+## 读懂返回结果 [#response]
+
+返回的是这部作品的完整档案。最常用的是 `associations`：它在每个平台上对应哪个页面，以及分集怎么对上。
+
+<CodeBlock title="响应 · JSON">
+
+```json
+{
+  "ref": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+  "document": {
+    "media": { "id": "0193f2c4-7a1e-…", "type": "MEDIA_TYPE_TV" },
+    "associations": [
+      {
+        "namespace": "bilibili",
+        "nativeId": "ss45574",
+        "status": "ASSOCIATION_STATUS_CONFIRMED",
+        "segments": [
+          {
+            "season": 1,
+            "episodeStart": 25,
+            "episodeEnd": 47,
+            "targetEpisodeStart": 1,
+            "baseline": "tmdb"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+</CodeBlock>
+
+| 字段        | 意思                                             |
+| ----------- | ------------------------------------------------ |
+| `namespace` | 哪个平台或目录站，比如 bilibili、iqiyi、douban   |
+| `nativeId`  | 平台上的编号，ss45574 是 B 站的番剧页            |
+| `segments`  | 分集映射：TMDB 第 25–47 集是这个页面的第 1–23 集 |
+
+<Hint>
+  所以 TMDB 第 1 季第 30 集，就是 B 站 `ss45574` 的第 6 集。用 TypeScript SDK 的话，`resolveEpisode`
+  会替你算好。
+</Hint>
+
+</Steps>
+
+## 选择接入方式 [#integrations]
+
+接口定义是公开的 proto 文件，所以任何语言都能接。挑一种最顺手的：
+
+<ApproachCard
+  page="typescript-sdk"
+  title="TypeScript SDK"
+  badge="官方维护"
+  badgeVariant="confirmed"
+  command="npm install @media-ref/client"
+>
+  带完整类型，内置 `resolveEpisode` 帮你换算集数。Node.js、Bun、Deno 和 Cloudflare Workers
+  里都能用。
+</ApproachCard>
+
+<ApproachCard
+  page="proto"
+  title="从 proto 生成客户端"
+  badge="Go · Python · Kotlin · Swift"
+  command={
+    'buf generate "https://github.com/baranwang/media-ref.git#subdir=proto" --path mediaref/v1'
+  }
+>
+  用 buf 从公开的 proto 文件生成 Connect 客户端，Go、Python、Kotlin、Swift
+  都有官方实现，类型和服务端完全一致。生成时选 Connect 协议，或者 gRPC-Web。
+</ApproachCard>
+
+<ApproachCard page="http" title="直接调用 HTTP" badge="不用装依赖" badgeVariant="outline" command="POST https://api.mediaref.org/mediaref.v1.MediaService/GetMedia">任何能发 HTTP 的语言都行：POST JSON 到 `/mediaref.v1.<服务>/<方法>`。适合脚本、Shell 和还没有生成器的语言。</ApproachCard>

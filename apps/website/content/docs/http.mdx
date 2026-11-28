@@ -1,0 +1,59 @@
+---
+title: 直接调用 HTTP
+breadcrumb: 文档 / 接入方式
+badges: ["不用装依赖"]
+description: 任何能发 HTTP 请求的语言都能接：把 JSON 发到接口地址就行。适合脚本、Shell 和还没有生成器的语言。
+---
+
+## 请求怎么发 [#request]
+
+<Endpoint method="POST" url="https://api.mediaref.org/mediaref.v1.<服务>/<方法>" />
+
+| 部分           | 写法                                                                                            |
+| -------------- | ----------------------------------------------------------------------------------------------- |
+| 地址           | `https://api.mediaref.org/mediaref.v1.<服务>/<方法>`，比如 `/mediaref.v1.MediaService/GetMedia` |
+| 方法           | `POST`                                                                                          |
+| `Content-Type` | `application/json`                                                                              |
+| 密钥           | `Authorization: Bearer <密钥>`，或 `X-API-Key: <密钥>`                                          |
+| 请求体         | 接口的请求参数，写成 JSON                                                                       |
+
+## JSON 的写法 [#json]
+
+请求和返回都按 proto3 的 JSON 规则：
+
+| 规则                         | 例子                                                              |
+| ---------------------------- | ----------------------------------------------------------------- |
+| 字段名用小驼峰               | `namespaceGroup`、`includeUnconfirmed`                            |
+| 枚举写完整名字               | `"MEDIA_TYPE_TV"`、`"NAMESPACE_GROUP_PLATFORM"`                   |
+| 多选一的字段，只写选中的那个 | `{ "ref": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } } }` |
+| 不认识的字段会报错           | 多写一个拼错的字段，返回 400                                      |
+| 返回里省略默认值             | `false`、`0`、空数组不会出现，读的时候要给默认值                  |
+
+## 用 GET 调用 [#get]
+
+接口页上标了「支持 GET」的，也可以发 GET：把请求体 JSON 做 URL 编码，放进 `message` 参数。这是 Connect 协议的 GET 写法。
+
+<CodeBlock title="curl">
+
+```bash
+curl --get https://api.mediaref.org/mediaref.v1.BrowseService/Search \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  --data-urlencode 'connect=v1' \
+  --data-urlencode 'encoding=json' \
+  --data-urlencode 'message={"query":"咒术回战","limit":5}'
+```
+
+</CodeBlock>
+
+<Hint>
+  支持 GET 的有 GetMedia、Search、GetCatalogDetail、ListAssociationRevisions、GetChangeRequest 和
+  GetCurrentApiKey。BatchGetMedia、ReportInvalidation、CreateChangeRequest 只能 POST。
+</Hint>
+
+## 返回和出错 [#response]
+
+成功时 HTTP 200，响应体是接口的返回内容。出错时返回对应的 HTTP 状态码，响应体里有 Connect 错误码和业务错误码，读法见[错误处理](/docs/errors)。
+
+## 浏览器里调用 [#browser]
+
+API 只允许 mediaref.org 自己跨域调用，别的网站在浏览器里直接请求会被拦下。请从你的服务端调用，也别把密钥放进前端代码。

@@ -1,0 +1,106 @@
+---
+title: GetMedia
+breadcrumb: 接口参考 / MediaService
+badges: ["只读", "支持 GET"]
+description: 用任意一个外部编号查一部作品：它在各个视频平台、各个目录站上对应哪个页面，分集怎么对上。
+---
+
+<Endpoint method="POST" url="https://api.mediaref.org/mediaref.v1.MediaService/GetMedia" />
+
+## 请求参数 [#request]
+
+| 字段                 | 类型           | 说明                                                          |
+| -------------------- | -------------- | ------------------------------------------------------------- |
+| `ref`                | MediaRef       | 必填。要查的作品，写法见下一节                                |
+| `season`             | int32          | 可选。你要找的是哪一季；不筛选返回内容，只帮探索 agent 定方向 |
+| `namespaceGroup`     | NamespaceGroup | 可选。你要的是视频平台还是目录站；同样不筛选返回内容          |
+| `includeUnconfirmed` | bool           | 可选。连还没核实的对应关系一起返回                            |
+
+## MediaRef 的写法 [#media-ref]
+
+下面几种编号任选一种。也可以拿平台页面反查，比如用 B 站的 `ss45574` 查它对应哪部作品。
+
+| 字段       | 例子                                                         |
+| ---------- | ------------------------------------------------------------ |
+| `tmdb`     | `{ "type": "MEDIA_TYPE_TV", "id": 95479 }`                   |
+| `tvdb`     | `{ "type": "MEDIA_TYPE_TV", "id": 377543 }`                  |
+| `trakt`    | `{ "type": "MEDIA_TYPE_TV", "id": "159384" }`                |
+| `imdb`     | `"tt12343534"`                                               |
+| `douban`   | `"1292052"`                                                  |
+| `bangumi`  | `"294993"`                                                   |
+| `platform` | `{ "platform": "PLATFORM_BILIBILI", "nativeId": "ss45574" }` |
+| `mediaId`  | `"0193f2c4-7a1e-…"`                                          |
+
+## 返回内容 [#response]
+
+| 字段                   | 类型             | 说明                                 |
+| ---------------------- | ---------------- | ------------------------------------ |
+| `ref`                  | MediaRef         | 你传进来的编号，原样返回             |
+| `document`             | MediaDocument    | 作品档案：外部编号、各平台的对应关系 |
+| `matchedAssociationId` | string           | 用平台编号查时，命中的是哪一条       |
+| `items`                | MediaQueryItem[] | 一个编号对上多部作品时逐部列出       |
+
+## 错误 [#errors]
+
+| HTTP  | 业务错误码         | 原因                                |
+| ----- | ------------------ | ----------------------------------- |
+| `400` | `INVALID_KEY`      | `ref` 写得不对，或者一个都没填      |
+| `400` | `INVALID_QUERY`    | `season` 不是合法的季号             |
+| `401` | `API_KEY_REQUIRED` | 没带密钥                            |
+| `401` | `INVALID_API_KEY`  | 密钥不对，或者已经吊销              |
+| `404` | `MEDIA_NOT_FOUND`  | 库里还没有这部作品                  |
+| `429` | `RATE_LIMITED`     | 超出限流，按 `Retry-After` 等一会儿 |
+
+## 代码示例 [#example]
+
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]} defaultValue="TypeScript">
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.MediaService/GetMedia \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "ref": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } } }'
+```
+
+```ts
+import { createMediaRefClient, resolveEpisode } from "@media-ref/client";
+
+const client = createMediaRefClient({ apiKey: process.env.MEDIAREF_API_KEY! });
+const res = await client.getMedia(
+  { tmdb: { type: "tv", id: 95479 } },
+  { season: 1, namespaceGroup: "platform" },
+);
+
+if (res) {
+  const ep = resolveEpisode(res.document, {
+    namespace: "bilibili",
+    season: 1,
+    episode: 30,
+  });
+  // 比如 ep.kind 是 "mapped"，ep.nativeId 是 "ss45574"，ep.targetEpisode 是 6
+}
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.MediaService/GetMedia",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={"ref": {"tmdb": {"type": "MEDIA_TYPE_TV", "id": 95479}}},
+)
+res.raise_for_status()
+associations = res.json()["document"].get("associations", [])
+```
+
+```go
+body := strings.NewReader(`{ "ref": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } } }`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.MediaService/GetMedia", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
+```
+
+</CodeTabs>

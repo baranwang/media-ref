@@ -31,6 +31,9 @@ export function SiteFooter() {
           </nav>
           <div className="flex flex-col items-start gap-2.5">
             <span className="font-medium text-foreground">开发者</span>
+            <Link to="/docs" className={linkClass}>
+              开发者文档
+            </Link>
             <Link to="/api-keys" className={linkClass}>
               API 密钥
             </Link>

@@ -1,0 +1,82 @@
+---
+title: GetCurrentApiKey
+breadcrumb: 接口参考 / ApiKeyService
+badges: ["只读", "支持 GET"]
+description: 查发起这次请求的密钥：它属于谁、有哪些权限、什么时候过期。适合在程序启动时检查密钥能不能用。
+---
+
+<Endpoint method="POST" url="https://api.mediaref.org/mediaref.v1.ApiKeyService/GetCurrentApiKey" />
+
+## 请求参数 [#request]
+
+不需要参数，发一个空对象 `{}` 就行。
+
+## 返回内容 [#response]
+
+| 字段                | 类型           | 说明                                                                                                      |
+| ------------------- | -------------- | --------------------------------------------------------------------------------------------------------- |
+| `keyId`             | string         | 密钥 ID                                                                                                   |
+| `userId`            | string         | 密钥所属账号的 ID                                                                                         |
+| `name`              | string         | 创建时起的名字                                                                                            |
+| `prefix` / `start`  | string         | 密钥的前缀和开头几位，方便认出是哪一把                                                                    |
+| `permissions.media` | ApiKeyAction[] | `API_KEY_ACTION_READ`（查询）、`API_KEY_ACTION_REPORT`（报告失效）、`API_KEY_ACTION_SUBMIT`（提交变更单） |
+| `canSubmit`         | bool           | 能不能提交变更单                                                                                          |
+| `emailVerified`     | bool           | 账号邮箱有没有验证，没验证不能提交变更单                                                                  |
+| `role`              | string         | 账号角色                                                                                                  |
+| `expiresAt`         | string         | 过期时间（ISO 8601），永不过期时没有这个字段                                                              |
+
+## 错误 [#errors]
+
+| HTTP  | 业务错误码         | 原因                   |
+| ----- | ------------------ | ---------------------- |
+| `401` | `API_KEY_REQUIRED` | 没带密钥               |
+| `401` | `INVALID_API_KEY`  | 密钥不对，或者已经吊销 |
+| `401` | `API_KEY_EXPIRED`  | 密钥过期了             |
+| `401` | `API_KEY_DISABLED` | 密钥被停用了           |
+
+## 代码示例 [#example]
+
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.ApiKeyService/GetCurrentApiKey \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { ApiKeyService, createMediaRefTransport } from "@media-ref/client";
+
+const transport = createMediaRefTransport({ apiKey: process.env.MEDIAREF_API_KEY! });
+const apiKeys = createClient(ApiKeyService, transport);
+
+const key = await apiKeys.getCurrentApiKey({});
+if (!key.canSubmit) console.warn("这把密钥只能查询");
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.ApiKeyService/GetCurrentApiKey",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={},
+)
+res.raise_for_status()
+key = res.json()
+print(key["keyId"], key.get("canSubmit", False))
+```
+
+```go
+body := strings.NewReader(`{}`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.ApiKeyService/GetCurrentApiKey", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
+```
+
+</CodeTabs>

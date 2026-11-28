@@ -1,0 +1,4 @@
+{
+  "title": "AssociationService",
+  "pages": ["report-invalidation", "list-association-revisions"]
+}
