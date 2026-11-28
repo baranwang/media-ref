@@ -653,6 +653,30 @@ describe("resolveEpisode — collection_only, unmapped, status filtering, and ca
     expect("targetEpisode" in noBaselineRes).toBe(false);
   });
 
+  test("two episodes in one platform entry: the second resolves to unmapped, later episodes shift back one", () => {
+    // 银魂 on Bilibili opens with 「01-02」: episode 1 at position 1, episode 2 unmapped, 3–49 at 2–48.
+    const doc = createJujutsuKaisenDoc();
+    doc.associations = [
+      {
+        id: "assoc-merged",
+        namespace: "bilibili",
+        nativeId: "ss38157",
+        variantId: "var-bili-orig",
+        status: "confirmed",
+        segments: [
+          { season: 1, episodeStart: 1, episodeEnd: 1, targetEpisodeStart: 1, baseline: "tmdb" },
+          { season: 1, episodeStart: 3, episodeEnd: 49, targetEpisodeStart: 2, baseline: "tmdb" },
+        ],
+      },
+    ];
+    const at = (episode: number) => {
+      const r = resolveEpisode(doc, { namespace: "bilibili", season: 1, episode });
+      return r.kind === "mapped" ? r.targetEpisode : r.kind === "unmapped" ? r.reason : r.kind;
+    };
+
+    expect([1, 2, 3, 49].map(at)).toEqual([1, "episode_out_of_range", 2, 48]);
+  });
+
   test("resolves catalog associations (e.g. Douban one-entry-per-season) without requiring a platform variant", () => {
     const doc: MediaDocument = {
       media: {
