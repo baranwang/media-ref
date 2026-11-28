@@ -30,7 +30,7 @@ Non-RPC HTTP/JSON routes:
 
 - `GET /health`
 - `GET|POST /api/auth/*` (Better Auth email/password + GitHub & Trakt OAuth)
-- `POST /mcp`: stateless MCP server ([`src/mcp.ts`](./src/mcp.ts)) for AI agents. It needs an API key (`Authorization: Bearer` or `X-API-Key`), and each tool calls a public `mediaref.v1` RPC through the same router, so auth, permissions and rate limits are the RPC's own. It is not served on the `InternalApi` entrypoint.
+- `POST /mcp`: stateless MCP server ([`src/mcp.ts`](./src/mcp.ts)) for AI agents. Its tools are generated from the `mediaref.v1` service descriptors: one tool per unary RPC (`GetMedia` → `get_media`), input schema from the request message, arguments and results in protobuf JSON. Calls are forwarded through the same router with the caller's API key (`Authorization: Bearer` or `X-API-Key`), so auth, permissions and rate limits are the RPC's own. Not served on the `InternalApi` entrypoint.
 
 ## Entrypoints & Bindings
 

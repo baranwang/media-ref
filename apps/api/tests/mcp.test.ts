@@ -10,6 +10,7 @@ import { approveInCore, issueApiKeyRpc, signUpUser, TEST_BASE_URL } from "./rpc-
 
 const TEST_AUTH_SECRET = "test-secret-for-media-ref-mcp-integration-tests-0123456789abcdef";
 
+// Every unary RPC in proto/mediaref/v1, nothing from mediaref.internal.v1.
 const TOOL_NAMES = [
   "batch_get_media",
   "create_change_request",
@@ -18,10 +19,15 @@ const TOOL_NAMES = [
   "get_current_api_key",
   "get_media",
   "list_association_revisions",
+  "list_change_request_comments",
+  "list_demands",
+  "list_exploration_activity",
+  "list_trending",
   "report_invalidation",
-  "resolve_episode",
   "search",
 ];
+
+const JJK = { tmdb: { type: "MEDIA_TYPE_TV", id: 95479 } };
 
 function catalogStub(request: ExternalHttpRequest) {
   if (
@@ -127,12 +133,20 @@ describe("MCP server at /mcp", () => {
     const readKey = await issueApiKeyRpc(app, user.cookie, { name: "read" });
 
     const created = await callTool(app, submitKey.key, "create_change_request", {
-      target: "tmdb:tv:95479",
+      target: JJK,
       namespace: "bilibili",
       nativeId: "ss34430",
       variantDescription: "原声",
       segments: [
-        { season: 1, episodeStart: 1, episodeEnd: 24, targetEpisodeStart: 1, baseline: "tmdb" },
+        {
+          explicit: {
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: 24,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+          },
+        },
       ],
     });
     expect(created.isError).toBe(false);
@@ -159,38 +173,49 @@ describe("MCP server at /mcp", () => {
     expect(init.body.result.serverInfo.name).toBe("mediaref");
 
     const list = await mcp(app, "tools/list", {}, headers);
-    const names = (list.body.result.tools as { name: string }[]).map((tool) => tool.name).sort();
-    expect(names).toEqual(TOOL_NAMES);
+    const tools = list.body.result.tools as {
+      name: string;
+      inputSchema: { properties: Record<string, any> };
+      annotations: { readOnlyHint: boolean };
+    }[];
+    expect(tools.map((tool) => tool.name).sort()).toEqual(TOOL_NAMES);
+
+    // Schemas and hints come from the proto descriptors.
+    const getMedia = tools.find((tool) => tool.name === "get_media")!;
+    expect(getMedia.annotations.readOnlyHint).toBe(true);
+    expect(getMedia.inputSchema.properties.namespaceGroup.enum).toContain(
+      "NAMESPACE_GROUP_PLATFORM",
+    );
+    expect(getMedia.inputSchema.properties.ref.properties.tmdb.description).toMatch(
+      /^Set only one of: mediaId, tmdb, imdb/,
+    );
+    const create = tools.find((tool) => tool.name === "create_change_request")!;
+    expect(create.annotations.readOnlyHint).toBe(false);
+    expect(Object.keys(create.inputSchema.properties.segments.items.properties)).toEqual([
+      "wholeSeason",
+      "explicit",
+    ]);
   });
 
-  test("reads media and resolves an episode", async () => {
+  test("forwards get_media and returns the response as protobuf JSON", async () => {
     const { app, readKey } = await setup();
 
     const media = await callTool(app, readKey, "get_media", {
-      ref: "tmdb:tv:95479",
-      namespaceGroup: "platform",
+      ref: JJK,
+      namespaceGroup: "NAMESPACE_GROUP_PLATFORM",
     });
     expect(media.isError).toBe(false);
-    expect(media.data.key).toBe("tmdb:tv:95479");
+    expect(media.data.document.media.snapshot.title).toBe("咒术回战");
     expect(media.data.document.associations).toEqual([
-      expect.objectContaining({ namespace: "bilibili", nativeId: "ss34430", status: "confirmed" }),
+      expect.objectContaining({
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        status: "ASSOCIATION_STATUS_CONFIRMED",
+      }),
     ]);
 
-    const resolved = await callTool(app, readKey, "resolve_episode", {
-      ref: "tmdb:tv:95479",
-      namespace: "bilibili",
-      season: 1,
-      episode: 3,
-    });
-    expect(resolved.data).toMatchObject({
-      kind: "mapped",
-      nativeId: "ss34430",
-      targetEpisode: 3,
-      media: { key: "tmdb:tv:95479", title: "咒术回战" },
-    });
-
-    const invalid = await callTool(app, readKey, "get_media", { ref: "not a key" });
-    expect(invalid).toMatchObject({ isError: true, data: { error: "INVALID_ARGUMENT" } });
+    const unknownField = await callTool(app, readKey, "get_media", { ref: JJK, season: 1, x: 1 });
+    expect(unknownField).toMatchObject({ isError: true, data: { error: "INVALID_ARGUMENT" } });
   });
 
   test("rejects requests without a key and tool calls with an invalid key", async () => {
@@ -200,7 +225,7 @@ describe("MCP server at /mcp", () => {
     expect(missing.status).toBe(401);
     expect(missing.body.code).toBe("API_KEY_REQUIRED");
 
-    const invalid = await callTool(app, "mr_not-a-real-key", "get_media", { ref: "tmdb:tv:95479" });
+    const invalid = await callTool(app, "mr_not-a-real-key", "get_media", { ref: JJK });
     expect(invalid).toMatchObject({
       isError: true,
       data: { error: "INVALID_API_KEY", status: 401 },
@@ -211,10 +236,11 @@ describe("MCP server at /mcp", () => {
     const { app, readKey } = await setup();
 
     const denied = await callTool(app, readKey, "create_change_request", {
-      target: "tmdb:tv:95479",
+      target: JJK,
       namespace: "iqiyi",
       nativeId: "a_19rrh1ss1p",
-      segments: [{ season: 1, baseline: "tmdb" }],
+      variantDescription: "国语",
+      segments: [{ wholeSeason: { season: 1, baseline: "tmdb" } }],
     });
     expect(denied).toMatchObject({
       isError: true,
@@ -226,16 +252,9 @@ describe("MCP server at /mcp", () => {
     const { app, readKey } = await setup(2);
 
     for (let i = 0; i < 2; i++) {
-      expect((await callTool(app, readKey, "get_media", { ref: "tmdb:tv:95479" })).isError).toBe(
-        false,
-      );
+      expect((await callTool(app, readKey, "get_media", { ref: JJK })).isError).toBe(false);
     }
-    const limited = await callTool(app, readKey, "resolve_episode", {
-      ref: "tmdb:tv:95479",
-      namespace: "bilibili",
-      season: 1,
-      episode: 1,
-    });
+    const limited = await callTool(app, readKey, "batch_get_media", { refs: [JJK] });
     expect(limited).toMatchObject({
       isError: true,
       data: { error: "RATE_LIMITED", status: 429, retryAfterSeconds: 60 },
