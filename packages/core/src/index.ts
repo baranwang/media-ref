@@ -387,6 +387,7 @@ export {
 export {
   createTmdbSyncJobHandler,
   DEFAULT_TMDB_FULL_REFRESH_BATCH_SIZE,
+  DEFAULT_TMDB_SYNC_MAX_DURATION_MS,
   detectChangedSeasons,
   diffUtcDays,
   enqueueTmdbDailySyncIfDue,

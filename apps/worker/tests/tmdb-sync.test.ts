@@ -4,6 +4,7 @@ import { resolveEpisode, type MediaDocument, type SegmentInput } from "@media-re
 import {
   createAdapterRegistry,
   createFakeOutboundClient,
+  createTmdbSyncJobHandler,
   DOUBAN_API,
   enqueueTmdbDailySyncIfDue,
   runTmdbDailySync,
@@ -14,7 +15,7 @@ import {
   TMDB_SYNC_KEY_TV,
 } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
-import { afterEach, describe, expect, test } from "vite-plus/test";
+import { afterEach, describe, expect, test, vi } from "vite-plus/test";
 import { createBackgroundWorker } from "../src/index.ts";
 import {
   approveInCore,
@@ -1931,5 +1932,238 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
       DOUBAN_API.minIntervalMs = prevDouban.minIntervalMs;
       DOUBAN_API.retryDelayMs = prevDouban.retryDelayMs;
     }
+  });
+
+  describe("staying under the queue invocation wall clock (#156)", () => {
+    const tmdbConfig = { accessToken: "test-tmdb-token", traktClientId: "test-trakt-client" };
+    const staleUpdatedAt = new Date("2026-01-01T00:00:00.000Z");
+
+    // movie:200 has a stale title and no Trakt ID yet; movie:100 is stored exactly as TMDB and
+    // Trakt return it. Both are in yesterday's /movie/changes. Fixed ids make movie:200 go first.
+    async function seedTwoChangedMovies(testDb: TestDbHandle) {
+      const [current, stale] = await testDb.writeDb
+        .insertInto("media")
+        .values([
+          {
+            id: "00000000-0000-4000-8000-000000000002",
+            type: "movie",
+            baseline: "tmdb",
+            title: "现行片",
+            original_title: "Current Film",
+            year: 2001,
+            seasons: "[]",
+            updated_at: staleUpdatedAt,
+          },
+          {
+            id: "00000000-0000-4000-8000-000000000001",
+            type: "movie",
+            baseline: "tmdb",
+            title: "旧标题",
+            original_title: "Stale Film",
+            year: 2002,
+            seasons: "[]",
+            updated_at: staleUpdatedAt,
+          },
+        ])
+        .returning("id")
+        .execute();
+      await testDb.writeDb
+        .insertInto("associations")
+        .values(
+          [
+            [current!.id, "tmdb", "movie:100"],
+            [current!.id, "imdb", "tt0000100"],
+            [current!.id, "trakt", "movie:1"],
+            [stale!.id, "tmdb", "movie:200"],
+          ].map(([media_id, namespace, native_id]) => ({
+            status: "confirmed" as const,
+            is_external_id: true,
+            media_id: media_id!,
+            namespace: namespace as "tmdb" | "imdb" | "trakt",
+            native_id: native_id!,
+            source: "sync" as const,
+          })),
+        )
+        .execute();
+      await testDb.writeDb
+        .insertInto("sync_state")
+        .values({ sync_key: TMDB_SYNC_KEY_MOVIE, last_synced_date: "2026-11-27" })
+        .execute();
+      return { currentId: current!.id, staleId: stale!.id };
+    }
+
+    function createTmdbOutbound(onDetail?: () => void) {
+      const json = (request: ExternalHttpRequest, body: unknown): ExternalHttpResponse => ({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        url: request.url,
+        body: JSON.stringify(body),
+      });
+      return createFakeOutboundClient({
+        fetchExternal(request) {
+          const url = new URL(request.url);
+          if (url.pathname.endsWith("/movie/changes")) {
+            return json(request, {
+              page: 1,
+              total_pages: 1,
+              total_results: 2,
+              results: [{ id: 100 }, { id: 200 }],
+            });
+          }
+          if (url.pathname.endsWith("/tv/changes")) {
+            return json(request, { page: 1, total_pages: 1, total_results: 0, results: [] });
+          }
+          if (url.pathname.endsWith("/movie/100")) {
+            onDetail?.();
+            return json(request, {
+              id: 100,
+              title: "现行片",
+              original_title: "Current Film",
+              release_date: "2001-05-01",
+              external_ids: { imdb_id: "tt0000100" },
+            });
+          }
+          if (url.pathname.endsWith("/movie/200")) {
+            onDetail?.();
+            return json(request, {
+              id: 200,
+              title: "新标题",
+              original_title: "Stale Film",
+              release_date: "2002-05-01",
+              external_ids: { imdb_id: "tt0000200" },
+            });
+          }
+          if (request.namespace === "trakt" && url.pathname.endsWith("/search/tmdb/100")) {
+            return json(request, [{ type: "movie", movie: { ids: { trakt: 1, tmdb: 100 } } }]);
+          }
+          if (request.namespace === "trakt" && url.pathname.endsWith("/search/tmdb/200")) {
+            return json(request, [{ type: "movie", movie: { ids: { trakt: 2, tmdb: 200 } } }]);
+          }
+          throw new Error(`Unexpected outbound request: ${request.url}`);
+        },
+      });
+    }
+
+    async function readMovie(testDb: TestDbHandle, id: string) {
+      return testDb.readDb
+        .selectFrom("media")
+        .select(["title", "updated_at"])
+        .where("id", "=", id)
+        .executeTakeFirstOrThrow();
+    }
+
+    test("an item already matching TMDB and Trakt skips its write", async () => {
+      const testDb = await createTestDb();
+      handles.push(testDb);
+      const { currentId, staleId } = await seedTwoChangedMovies(testDb);
+      const outbound = createTmdbOutbound();
+      const now = new Date("2026-11-28T00:01:00.000Z");
+
+      const result = await runTmdbDailySync(testDb.writeDb, outbound, { now, tmdbConfig });
+
+      expect(result.transientErrors).toEqual([]);
+      expect(result.deadlineReached).toBe(false);
+      expect(result.movie).toMatchObject({ candidateCount: 2, refreshedCount: 2 });
+      expect(result.movie.cursorAdvanced).toBe(true);
+      // No write for the unchanged movie, so it doesn't move up in "recently updated" ordering.
+      expect(await readMovie(testDb, currentId)).toEqual({
+        title: "现行片",
+        updated_at: staleUpdatedAt,
+      });
+      expect(await readMovie(testDb, staleId)).toEqual({ title: "新标题", updated_at: now });
+      const staleExternalIds = await testDb.readDb
+        .selectFrom("associations")
+        .select(["namespace", "native_id"])
+        .where("media_id", "=", staleId)
+        .where("is_external_id", "=", true)
+        .orderBy("namespace")
+        .execute();
+      expect(staleExternalIds).toEqual([
+        { namespace: "imdb", native_id: "tt0000200" },
+        { namespace: "tmdb", native_id: "movie:200" },
+        { namespace: "trakt", native_id: "movie:2" },
+      ]);
+    });
+
+    test("stops at its deadline without advancing the cursor, and the next run finishes", async () => {
+      const testDb = await createTestDb();
+      handles.push(testDb);
+      const { currentId, staleId } = await seedTwoChangedMovies(testDb);
+      const now = new Date("2026-11-28T00:01:00.000Z");
+
+      // Past deadline: nothing is fetched beyond the tracked-media read.
+      const idle = createTmdbOutbound();
+      const expired = await runTmdbDailySync(testDb.writeDb, idle, {
+        now,
+        tmdbConfig,
+        deadline: new Date(Date.now() - 1),
+      });
+      expect(expired.deadlineReached).toBe(true);
+      expect(expired.movie).toMatchObject({ cursorAdvanced: false, deadlineReached: true });
+      expect(expired.movie.lastSyncedDate).toBe("2026-11-27");
+      expect(idle.httpRequests).toEqual([]);
+
+      // The deadline passes while the first item is being fetched: that item is finished, the
+      // second is left for the next run.
+      const realNow = Date.now();
+      let details = 0;
+      const outbound = createTmdbOutbound(() => {
+        details += 1;
+        vi.spyOn(Date, "now").mockReturnValue(realNow + 120_000);
+      });
+      try {
+        const partial = await runTmdbDailySync(testDb.writeDb, outbound, {
+          now,
+          tmdbConfig,
+          deadline: new Date(realNow + 60_000),
+        });
+        expect(partial.deadlineReached).toBe(true);
+        expect(partial.transientErrors).toEqual([]);
+        expect(partial.movie.cursorAdvanced).toBe(false);
+        // No TV is tracked, so the TV half is a no-op with or without time left.
+        expect(partial.tv.mode).toBe("noop_no_tracked_media");
+        expect(details).toBe(1);
+      } finally {
+        vi.restoreAllMocks();
+      }
+      // The item in flight at the deadline (movie:200) was written; movie:100 was never fetched.
+      expect(await readMovie(testDb, staleId)).toEqual({ title: "新标题", updated_at: now });
+      expect(outbound.httpRequests.some((r) => r.url.includes("/movie/100"))).toBe(false);
+
+      const resumed = await runTmdbDailySync(testDb.writeDb, createTmdbOutbound(), {
+        now,
+        tmdbConfig,
+      });
+      expect(resumed.deadlineReached).toBe(false);
+      expect(resumed.movie.cursorAdvanced).toBe(true);
+      expect(resumed.movie.lastSyncedDate).toBe("2026-11-28");
+      expect((await readMovie(testDb, currentId)).updated_at).toEqual(staleUpdatedAt);
+      expect((await readMovie(testDb, staleId)).title).toBe("新标题");
+    });
+
+    test("the job handler retries instead of completing when its time runs out", async () => {
+      const testDb = await createTestDb();
+      handles.push(testDb);
+      await seedTwoChangedMovies(testDb);
+      const handler = createTmdbSyncJobHandler({ tmdbConfig, maxDurationMs: 0 });
+
+      const outcome = await handler({
+        db: testDb.writeDb,
+        outbound: createTmdbOutbound(),
+        job: {
+          id: "00000000-0000-0000-0000-000000000156",
+          jobType: "tmdb_sync",
+          leaseGeneration: 1,
+          payload: { syncDate: "2026-11-28" },
+          leaseExpiresAt: null,
+        },
+        now: new Date("2026-11-28T00:01:00.000Z"),
+      });
+
+      expect(outcome).toEqual({
+        status: "retry",
+        errorMessage: "tmdb_sync stopped at its deadline",
+      });
+    });
   });
 });
