@@ -76,6 +76,8 @@ export interface ApiDeps {
   onBackgroundTaskError?: (error: unknown) => void;
   readKeyLimiter?: RateLimitBinding;
   readIpLimiter?: RateLimitBinding;
+  /** Extra per-IP limit on auth POSTs (sign-in, sign-up, verification email), on top of the read limit. */
+  authIpLimiter?: RateLimitBinding;
   readRateLimitRuntime?: ReadRateLimitRuntime;
   config: ApiConfig;
 }
@@ -297,9 +299,13 @@ export function createApiApp(deps: ApiDeps): ApiApp {
       (pathname === AUTH_BASE_PATH || pathname.startsWith(`${AUTH_BASE_PATH}/`)) &&
       (request.method === "GET" || request.method === "POST")
     ) {
-      if (request.method === "POST") {
+      // Better Auth's own limiter is off outside NODE_ENV=production and in-memory per request.
+      for (const ipLimiter of request.method === "POST"
+        ? [readRateLimit.ipLimiter, deps.authIpLimiter]
+        : []) {
+        if (!ipLimiter) continue;
         const decision = await checkReadRateLimit({
-          runtime: readRateLimit,
+          runtime: { ...readRateLimit, ipLimiter },
           headers: request.headers,
         });
         if (!decision.allowed) {

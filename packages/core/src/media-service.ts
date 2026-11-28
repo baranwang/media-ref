@@ -2212,14 +2212,36 @@ export async function approveChangeRequestInTransaction(
       .forUpdate()
       .executeTakeFirst();
 
-    normalizedSegments =
+    const confirmedSegments =
       existingAssociation?.status === "confirmed"
-        ? mergeApprovedSegments(
-            await loadSegments(trx, existingAssociation.id),
-            requestedSegments,
-            media.seasons,
-          )
-        : requestedSegments;
+        ? await loadSegments(trx, existingAssociation.id)
+        : null;
+    normalizedSegments = confirmedSegments
+      ? mergeApprovedSegments(confirmedSegments, requestedSegments, media.seasons)
+      : requestedSegments;
+    // An open-ended segment's end comes from a season's episode count: the evidence check uses the
+    // fresh catalog's, the merge the stored ones. An automatic approval drops another season's
+    // segment only when explicit positions overlap, never because the two counts disagree.
+    if (input.enforceUnlockedCheck && confirmedSegments && requestedSegments.length > 0) {
+      const explicitRange = (seg: NormalizedSegment): [number, number] => [
+        seg.targetEpisodeStart,
+        seg.targetEpisodeStart + (seg.episodeEnd ?? seg.episodeStart) - seg.episodeStart,
+      ];
+      const claimed = requestedSegments.filter((seg) => !seg.nonLinear).map(explicitRange);
+      const requestedSeasons = new Set(requestedSegments.map((seg) => seg.season));
+      const uncertain = confirmedSegments.filter((seg) => {
+        if (requestedSeasons.has(seg.season) || normalizedSegments.includes(seg)) return false;
+        const [start, end] = explicitRange(seg);
+        return claimed.every(([a, b]) => end < a || b < start);
+      });
+      if (uncertain.length > 0) {
+        throw new MediaServiceError(
+          "SEGMENT_OVERLAP",
+          409,
+          `Approval would drop season ${uncertain.map((seg) => seg.season).join(", ")} on positions only its episode count claims`,
+        );
+      }
+    }
 
     replacedAssociation =
       effectiveReplacesAssociationId &&

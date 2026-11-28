@@ -539,6 +539,149 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     expect(await resolve(2, 3)).not.toMatchObject({ kind: "mapped" });
   });
 
+  test("An automatic approval never drops another season when stored and catalog seasons disagree", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-27T10:00:00.000Z");
+    const baseStub = createConflictTestStub();
+    const outbound = createFakeOutboundClient({
+      fetchExternal: (request) =>
+        request.kind === "catalog" &&
+        request.namespace === "tmdb" &&
+        request.url.includes("/tv/95479")
+          ? jsonResponse(request.url, {
+              id: 95479,
+              name: "咒术回战",
+              original_name: "呪術廻戦",
+              first_air_date: "2020-10-03",
+              seasons: [
+                { season_number: 1, episode_count: 24, air_date: "2020-10-03" },
+                { season_number: 2, episode_count: 12, air_date: "2023-07-06" },
+              ],
+              external_ids: { imdb_id: "tt12343534", tvdb_id: 377543 },
+            })
+          : baseStub(request),
+    });
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupUser(app, outbound, "drift-user@example.com");
+    const reviewer = await setupUser(app, outbound, "drift-rev@example.com");
+    await testDb.writeDb
+      .updateTable("user")
+      .set({ role: "reviewer" })
+      .where("id", "=", reviewer.userId)
+      .execute();
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: {
+        tmdb: { accessToken: "test-tmdb-token" },
+        enableDailyTmdbSync: false,
+        jobTypes: [EVIDENCE_CHECK_JOB_TYPE],
+      },
+      now: () => t0,
+    });
+
+    // Lands a change request on ss34430 (24 entries) through the gate, approving it if it stops at review.
+    const land = async (
+      segments: Array<{
+        season: number;
+        episodeStart: number;
+        episodeEnd: number;
+        targetEpisodeStart: number;
+        nonLinear?: boolean;
+      }>,
+    ) => {
+      const created = await createRpcClients(app, {
+        apiKey: user.submitKey,
+      }).changeRequest.createChangeRequest({
+        target: mediaRef("tmdb:tv:95479"),
+        namespace: "bilibili",
+        nativeId: "ss34430",
+        variantDescription: "原声",
+        segments: segments.map((s) => toProtoSegmentInput({ ...s, baseline: "tmdb" })),
+      });
+      const crId = created.changeRequest!.id;
+      await worker.scheduled(createScheduledController(t0));
+      await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+      const state = await getChangeRequestStateRpc(app, { cookie: reviewer.cookie }, crId);
+      if (state.status === "needs_review") {
+        await approveInCore({ db: testDb.writeDb, outbound }, { id: crId, reason: "test" });
+      } else {
+        expect(state.status).toBe("approved");
+      }
+      return state.status;
+    };
+    const resolve = async (season: number, episode: number) =>
+      resolveEpisode((await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479")).document, {
+        namespace: "bilibili",
+        season,
+        episode,
+      });
+
+    await land([{ season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1 }]);
+    // Stored data drifts from the catalog: season 1 runs open-ended from its episode 13, and the
+    // stored season 1 has 25 episodes. The catalog (24) puts it on positions 1–12, the stored
+    // seasons on 1–13, where season 2 starts.
+    await testDb.writeDb
+      .updateTable("segments")
+      .set({ episode_start: 13, episode_end: null })
+      .execute();
+    await testDb.writeDb
+      .updateTable("media")
+      .set({
+        seasons: JSON.stringify([
+          { season: 1, episodeCount: 25, airYear: 2020 },
+          { season: 2, episodeCount: 12, airYear: 2023 },
+        ]),
+      })
+      .execute();
+
+    const created = await createRpcClients(app, {
+      apiKey: user.submitKey,
+    }).changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: [
+        toProtoSegmentInput({
+          season: 2,
+          episodeStart: 1,
+          episodeEnd: 12,
+          targetEpisodeStart: 13,
+          baseline: "tmdb",
+        }),
+      ],
+    });
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+    // The review agent's automatic approval refuses to drop season 1 on count-derived positions.
+    await expect(
+      approveInCore(
+        { db: testDb.writeDb, outbound },
+        { id: created.changeRequest!.id, reason: "test" },
+      ),
+    ).rejects.toThrow(/positions only its episode count claims/);
+    expect(await resolve(1, 15)).toMatchObject({ kind: "mapped", targetEpisode: 3 });
+  });
+
   test("Matrix (new=PASS, old=FAIL) via replacesAssociationId: auto-delists old collection, activates new one, preserves histories, and still rejects accidental overlap without replacesAssociationId", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

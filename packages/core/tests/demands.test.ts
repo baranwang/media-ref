@@ -164,6 +164,76 @@ describe("external-key demand merge", () => {
     },
   );
 
+  test("keeps the merged demand's change requests linked to the new media demand", async () => {
+    const handle = await createTestDb();
+    try {
+      const db = handle.writeDb;
+      const media = await db
+        .insertInto("media")
+        .values({ type: "movie", title: "Linked merge", baseline: "douban" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const source = await db
+        .insertInto("demands")
+        .values({ external_key: "douban:1292000", namespace_group: "platform", status: "leased" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("user")
+        .values({
+          id: "submitter",
+          name: "Submitter",
+          email: "s@example.test",
+          emailVerified: true,
+        })
+        .execute();
+      const cr = await db
+        .insertInto("change_requests")
+        .values({
+          status: "needs_review",
+          submitter_user_id: "submitter",
+          submitter_key_id: null,
+          task_id: null,
+          demand_id: source.id,
+          media_id: null,
+          target_external_key: "douban:1292000",
+          namespace: "iqiyi",
+          raw_native_id: "a_1",
+          native_id: "a_1",
+          variant_id: null,
+          variant_description: null,
+          segments: JSON.stringify([]),
+          evidence: null,
+          conflict_reason: null,
+          decision_reason: null,
+          reviewer_user_id: null,
+          reviewed_at: null,
+          applied_association_id: null,
+          applied_revision_id: null,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+
+      const result = await mergeExternalKeyDemandsIntoMedia(db, {
+        mediaId: media.id,
+        externalKeys: ["douban:1292000"],
+        mediaType: "movie",
+      });
+      expect(result.demands).toHaveLength(1);
+      const linked = await db
+        .selectFrom("change_requests")
+        .select("demand_id")
+        .where("id", "=", cr.id)
+        .executeTakeFirstOrThrow();
+      expect(linked.demand_id).toBe(result.demands[0]!.id);
+      expect(
+        await db.selectFrom("demands").select("id").where("id", "=", source.id).execute(),
+      ).toEqual([]);
+    } finally {
+      await handle.cleanup();
+    }
+  });
+
   test("the scheduler recovers a media demand merged before lease normalization", async () => {
     const handle = await createTestDb();
     try {

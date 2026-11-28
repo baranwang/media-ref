@@ -226,6 +226,7 @@ export {
   computeNotFoundBackoffSeconds,
   createExplorationJobHandler,
   createTmdbDailyExportsJobHandler,
+  releaseDemandAfterFailedExploration,
   DEFAULT_EXPLORATION_BATCH_SIZE,
   DEFAULT_EXPLORATION_DAILY_BUDGET,
   DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET,

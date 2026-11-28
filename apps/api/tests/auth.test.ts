@@ -3,7 +3,7 @@ import { createFakeOutboundClient } from "@media-ref/core";
 import { createTestDb, type TestDbHandle } from "@media-ref/db/testing";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import worker from "../src/index.ts";
-import { createApiApp } from "../src/lib.ts";
+import { createApiApp, createInMemoryRateLimiter } from "../src/lib.ts";
 import {
   createRpcClients,
   expectRpcError,
@@ -123,6 +123,31 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
     expect(limited.status).toBe(429);
     expect(limited.headers.get("retry-after")).toBe("60");
     expect((await signIn("192.0.2.2")).status).toBe(401);
+  });
+
+  test("applies the separate auth IP limit to auth POSTs only", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound: createFakeOutboundClient(),
+      authIpLimiter: createInMemoryRateLimiter({ limit: 1, periodSeconds: 60 }),
+      config: { baseUrl: TEST_BASE_URL, authSecret: TEST_AUTH_SECRET },
+    });
+    const auth = (path: string, method: "GET" | "POST") =>
+      app.fetch(
+        new Request(`${TEST_BASE_URL}/api/auth/${path}`, {
+          method,
+          headers: { "content-type": "application/json", "cf-connecting-ip": "192.0.2.9" },
+          ...(method === "POST"
+            ? { body: JSON.stringify({ email: "visitor@example.test", password: "nope-nope" }) }
+            : {}),
+        }),
+      );
+    expect((await auth("sign-in/email", "POST")).status).toBe(401);
+    expect((await auth("sign-in/email", "POST")).status).toBe(429);
+    expect((await auth("get-session", "GET")).status).toBe(200);
   });
 
   test("signs in with email + password, authenticates subsequent requests, and invalidates session on sign out", async () => {

@@ -133,6 +133,11 @@ describe("packages/db migrations", () => {
         direction: "Up",
         status: "Success",
       },
+      {
+        migrationName: "0023_tvdb_movie_ids",
+        direction: "Up",
+        status: "Success",
+      },
     ]);
 
     const row = await testDb.readDb
@@ -1243,6 +1248,45 @@ describe("packages/db migrations", () => {
       .returning("restored_from_revision_id")
       .executeTakeFirstOrThrow();
     expect(delisted.restored_from_revision_id).toBeNull();
+  });
+
+  test("0023 prefixes bare TVDB ids of movies and leaves series and taken ids alone", async () => {
+    const handle = await createTestDb({ migrate: false });
+    handles.push(handle);
+    const db = handle.writeDb;
+    const migrator = new Migrator({ db, provider: staticMigrationProvider });
+    expect((await migrator.migrateTo("0022_association_listed_platforms")).error).toBeUndefined();
+
+    const media = await db
+      .insertInto("media")
+      .values([
+        { type: "movie", title: "Movie" },
+        { type: "tv", title: "Series" },
+        { type: "movie", title: "Duplicate movie" },
+        { type: "movie", title: "Owner of movie:7" },
+      ])
+      .returning("id")
+      .execute();
+    const tvdb = (index: number, nativeId: string) => ({
+      media_id: media[index]!.id,
+      namespace: "tvdb" as const,
+      native_id: nativeId,
+      status: "confirmed" as const,
+      is_external_id: true,
+    });
+    await db
+      .insertInto("associations")
+      .values([tvdb(0, "169"), tvdb(1, "170"), tvdb(2, "7"), tvdb(3, "movie:7")])
+      .execute();
+
+    expect((await migrator.migrateTo("0023_tvdb_movie_ids")).error).toBeUndefined();
+    const rows = await db
+      .selectFrom("associations")
+      .select(["media_id", "native_id"])
+      .where("namespace", "=", "tvdb")
+      .execute();
+    const byMedia = new Map(rows.map((row) => [row.media_id, row.native_id]));
+    expect(media.map((m) => byMedia.get(m.id))).toEqual(["movie:169", "170", "7", "movie:7"]);
   });
 
   test("createTestDb provisions an already-migrated ephemeral database by default", async () => {

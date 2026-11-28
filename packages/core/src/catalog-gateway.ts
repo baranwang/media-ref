@@ -183,10 +183,11 @@ function normalizeImdbId(raw: unknown): string | null {
   return str.toLowerCase();
 }
 
-function normalizeTvdbId(raw: unknown): string | null {
+/** TVDB numbers movies and series separately: a movie is stored as `movie:<id>`, a series bare. */
+function normalizeTvdbId(raw: unknown, type: MediaType): string | null {
   const num = parsePositiveInt(raw);
   if (num !== null) {
-    return String(num);
+    return type === "movie" ? `movie:${num}` : String(num);
   }
   const str = nonEmptyString(raw);
   if (!str) {
@@ -494,7 +495,7 @@ function buildCatalogTargetFromAssociationAdapter(
     sources.push("imdb");
   }
 
-  const tvdbId = normalizeTvdbId(info.externalIds?.tvdb);
+  const tvdbId = normalizeTvdbId(info.externalIds?.tvdb, type);
   if (tvdbId) {
     externalIds.tvdb = tvdbId;
     evidenceExternalIds.tvdb = tvdbId;
@@ -793,7 +794,7 @@ async function fetchImdbTargetSnapshot(
 
   const extBlock = (data.externalIds ?? data.external_ids) as Record<string, unknown> | undefined;
   if (extBlock && typeof extBlock === "object" && !Array.isArray(extBlock)) {
-    const tvdbId = normalizeTvdbId(extBlock.tvdb ?? extBlock.tvdb_id);
+    const tvdbId = normalizeTvdbId(extBlock.tvdb ?? extBlock.tvdb_id, type);
     if (tvdbId) {
       externalIds.tvdb = tvdbId;
       evidenceExternalIds.tvdb = tvdbId;
@@ -976,7 +977,7 @@ async function fetchTraktTargetSnapshot(
       evidenceExternalIds.tmdb = tmdbVal;
       sources.push("tmdb");
     }
-    const tvdbVal = normalizeTvdbId(ids.tvdb);
+    const tvdbVal = normalizeTvdbId(ids.tvdb, inferredType);
     if (tvdbVal) {
       externalIds.tvdb = tvdbVal;
       evidenceExternalIds.tvdb = tvdbVal;

@@ -541,12 +541,17 @@ async function syncSingleMediaType(
       : null;
   let nextBackfillCursor: string | null = prevBackfillCursor;
   let traktBackfillCount = 0;
+  // Items whose refresh failed last run: retried with this run's changes, so one item that keeps
+  // failing never holds the cursor back for everything else.
+  const retryTmdbIds = Array.isArray(existingMetadata.retryTmdbIds)
+    ? existingMetadata.retryTmdbIds.filter((id): id is string => typeof id === "string")
+    : [];
 
   let candidates = parsedTracked;
   if (mode === "changes") {
     try {
       const changes = await gateway.fetchChanges(mediaType, { startDate, endDate });
-      const changedIdSet = new Set(changes.changedIds);
+      const changedIdSet = new Set([...changes.changedIds, ...retryTmdbIds]);
       const changedCandidates = parsedTracked.filter((entry) => changedIdSet.has(entry.tmdbId));
       let backfillCandidates: typeof parsedTracked = [];
       if (traktBackfillEnabled) {
@@ -596,7 +601,7 @@ async function syncSingleMediaType(
   let refreshedCount = 0;
   let missingCount = 0;
   let flaggedSegmentCount = 0;
-  let typeHadTransientError = false;
+  const failedTmdbIds: string[] = [];
 
   for (let offset = 0; offset < candidates.length; offset += fullRefreshBatchSize) {
     const batch = candidates.slice(offset, offset + fullRefreshBatchSize);
@@ -616,7 +621,7 @@ async function syncSingleMediaType(
         if (error instanceof TmdbGatewayError && error.code === "TMDB_NOT_FOUND") {
           isNotFound = true;
         } else {
-          typeHadTransientError = true;
+          failedTmdbIds.push(item.tmdbId);
           transientErrors.push({
             mediaType,
             mediaId: item.mediaId,
@@ -871,39 +876,34 @@ async function syncSingleMediaType(
     }
   }
 
-  let cursorAdvanced = false;
-  let lastSyncedDate = existingCursor?.last_synced_date ?? null;
-
-  if (!typeHadTransientError) {
-    const targetDate = maxDateString(existingCursor?.last_synced_date ?? null, today);
-    lastSyncedDate = await upsertSyncState(
-      db,
-      syncKey,
-      targetDate,
-      {
-        mode,
-        startDate,
-        endDate,
-        gapDays,
-        trackedCount: parsedTracked.length,
-        candidateCount: candidates.length,
-        refreshedCount,
-        missingCount,
-        flaggedSegmentCount,
-        ...(traktBackfillEnabled
-          ? {
-              traktBackfillCount,
-              traktBackfillAfterMediaId: mode === "full_refresh" ? null : nextBackfillCursor,
-            }
-          : prevBackfillCursor !== null
-            ? { traktBackfillAfterMediaId: prevBackfillCursor }
-            : {}),
-        lastRunAt: now.toISOString(),
-      },
-      now,
-    );
-    cursorAdvanced = true;
-  }
+  const targetDate = maxDateString(existingCursor?.last_synced_date ?? null, today);
+  const lastSyncedDate = await upsertSyncState(
+    db,
+    syncKey,
+    targetDate,
+    {
+      mode,
+      startDate,
+      endDate,
+      gapDays,
+      trackedCount: parsedTracked.length,
+      candidateCount: candidates.length,
+      refreshedCount,
+      missingCount,
+      flaggedSegmentCount,
+      ...(failedTmdbIds.length > 0 ? { retryTmdbIds: [...new Set(failedTmdbIds)] } : {}),
+      ...(traktBackfillEnabled
+        ? {
+            traktBackfillCount,
+            traktBackfillAfterMediaId: mode === "full_refresh" ? null : nextBackfillCursor,
+          }
+        : prevBackfillCursor !== null
+          ? { traktBackfillAfterMediaId: prevBackfillCursor }
+          : {}),
+      lastRunAt: now.toISOString(),
+    },
+    now,
+  );
 
   return {
     mediaType,
@@ -917,7 +917,7 @@ async function syncSingleMediaType(
     refreshedCount,
     missingCount,
     flaggedSegmentCount,
-    cursorAdvanced,
+    cursorAdvanced: true,
     lastSyncedDate,
   };
 }

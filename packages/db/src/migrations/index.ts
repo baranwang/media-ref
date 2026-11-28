@@ -21,6 +21,7 @@ import * as m0019ChangeRequestComments from "./0019_change_request_comments.ts";
 import * as m0020BackgroundJobLookupIndexes from "./0020_background_job_lookup_indexes.ts";
 import * as m0021ReviewProvenance from "./0021_review_provenance.ts";
 import * as m0022AssociationListedPlatforms from "./0022_association_listed_platforms.ts";
+import * as m0023TvdbMovieIds from "./0023_tvdb_movie_ids.ts";
 
 export const migrations: Record<string, Migration> = {
   "0001_initial": m0001Initial,
@@ -45,6 +46,7 @@ export const migrations: Record<string, Migration> = {
   "0020_background_job_lookup_indexes": m0020BackgroundJobLookupIndexes,
   "0021_review_provenance": m0021ReviewProvenance,
   "0022_association_listed_platforms": m0022AssociationListedPlatforms,
+  "0023_tvdb_movie_ids": m0023TvdbMovieIds,
 };
 
 export const staticMigrationProvider: MigrationProvider = {

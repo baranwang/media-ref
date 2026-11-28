@@ -18,6 +18,31 @@ describe("TmdbGateway", () => {
     expect(parseTmdbNativeId("95479")).toBeNull();
   });
 
+  test("stores a movie's TVDB id as movie:<id>, since a bare TVDB id names a series", async () => {
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request): ExternalHttpResponse {
+        if (request.namespace === "tmdb" && request.url.includes("/movie/603")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            url: request.url,
+            body: JSON.stringify({
+              id: 603,
+              title: "黑客帝国",
+              original_title: "The Matrix",
+              release_date: "1999-03-31",
+              external_ids: { imdb_id: "tt0133093", tvdb_id: 169 },
+            }),
+          };
+        }
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+    const gateway = createTmdbGateway(outbound, { apiKey: "test-api-key" });
+    const result = await gateway.fetchMediaSnapshotAndExternalIds("movie", "603");
+    expect(result?.externalIds.tvdb).toBe("movie:169");
+  });
+
   test("falls back to separate /external_ids endpoint when append_to_response is omitted and handles Trakt failure gracefully", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request): ExternalHttpResponse {

@@ -232,7 +232,9 @@ function extractExternalIdsBlock(
   }
   const record = raw as Record<string, unknown>;
   const imdb = nonEmptyString(record.imdb_id);
-  const tvdb = parsePositiveIdString(record.tvdb_id);
+  // TVDB numbers movies and series separately; a bare id means a series (see catalog-gateway).
+  const rawTvdb = parsePositiveIdString(record.tvdb_id);
+  const tvdb = rawTvdb && tmdbType === "movie" ? `movie:${rawTvdb}` : rawTvdb;
 
   let trakt: string | null = null;
   const rawTraktId = parsePositiveIdString(record.trakt_id);

@@ -23,6 +23,7 @@ import {
   EXPLORATION_JOB_TYPE,
   failJobWithFencing,
   getJobById,
+  releaseDemandAfterFailedExploration,
   INVALIDATION_RECHECK_JOB_TYPE,
   releaseLeaseOnDispatchFailure,
   rescheduleJobWithFencing,
@@ -193,6 +194,27 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
     // tmdb_sync has no session budget and may use the whole invocation. A shorter lease lets cron
     // claim a second copy while the first still runs, and fencing then drops the first's result.
     [TMDB_SYNC_JOB_TYPE]: Math.max(leaseDurationMs, INVOCATION_WALL_TIME_MS + 5 * 60_000),
+  };
+  // A job that failed for good: an exploration job also releases its demand with a backoff.
+  const failJob = async (
+    job: { id: string; jobType: string; leaseGeneration: number; payload: Record<string, unknown> },
+    errorMessage: string,
+    now: Date,
+  ) => {
+    const result = await failJobWithFencing(deps.db, {
+      jobId: job.id,
+      leaseGeneration: job.leaseGeneration,
+      errorMessage,
+      now,
+    });
+    if (result.applied && job.jobType === EXPLORATION_JOB_TYPE) {
+      await releaseDemandAfterFailedExploration(deps.db, {
+        payload: job.payload,
+        now,
+        config: deps.config?.exploration,
+      });
+    }
+    return result;
   };
   const dispatchFailureRetryDelayMs = deps.config?.dispatchFailureRetryDelayMs ?? 0;
   const defaultRetryDelayMs = deps.config?.defaultRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
@@ -440,6 +462,12 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           continue;
         }
 
+        const jobRef = {
+          id: body.jobId,
+          jobType: body.jobType,
+          leaseGeneration: body.leaseGeneration,
+          payload: currentJob.payload,
+        };
         try {
           const outcome = await handler({
             db: deps.db,
@@ -475,12 +503,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
           if (outcome.status === "retry") {
             if (currentJob.attempts >= currentJob.maxAttempts) {
-              const failResult = await failJobWithFencing(deps.db, {
-                jobId: body.jobId,
-                leaseGeneration: body.leaseGeneration,
-                errorMessage: outcome.errorMessage,
-                now: commitNow,
-              });
+              const failResult = await failJob(jobRef, outcome.errorMessage, commitNow);
               if (failResult.applied) {
                 summary.failed += 1;
               } else {
@@ -507,12 +530,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
             continue;
           }
 
-          const failResult = await failJobWithFencing(deps.db, {
-            jobId: body.jobId,
-            leaseGeneration: body.leaseGeneration,
-            errorMessage: outcome.errorMessage,
-            now: commitNow,
-          });
+          const failResult = await failJob(jobRef, outcome.errorMessage, commitNow);
           if (failResult.applied) {
             summary.failed += 1;
           } else {
@@ -526,12 +544,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
           try {
             if (currentJob.attempts >= currentJob.maxAttempts) {
-              const failResult = await failJobWithFencing(deps.db, {
-                jobId: body.jobId,
-                leaseGeneration: body.leaseGeneration,
-                errorMessage,
-                now: errorNow,
-              });
+              const failResult = await failJob(jobRef, errorMessage, errorNow);
               if (failResult.applied) {
                 summary.failed += 1;
               } else {

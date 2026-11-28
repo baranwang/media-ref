@@ -562,11 +562,14 @@ export async function mergeExternalKeyDemandsIntoMedia(
   const now = input.now ?? new Date();
 
   return runInTransaction(dbWrite, async (trx) => {
+    // Deleted only after their change requests are re-linked: `change_requests.demand_id` is
+    // ON DELETE SET NULL, and a request in review with no demand lets the sweep reopen it.
     const deletedRows = await trx
-      .deleteFrom("demands")
+      .selectFrom("demands")
+      .selectAll()
       .where("media_id", "is", null)
       .where("external_key", "in", normalizedKeys)
-      .returningAll()
+      .forUpdate()
       .execute();
 
     if (deletedRows.length === 0) {
@@ -594,6 +597,8 @@ export async function mergeExternalKeyDemandsIntoMedia(
 
     const tvSeasons = regularTvSeasons ?? [];
     const aggregated = new Map<string, MediaDemandUpsertPayload>();
+    // Where each source demand's change requests move: its first target demand.
+    const relinkKeyBySourceId = new Map<string, string>();
 
     for (const row of deletedRows) {
       let targetSeasons: Array<number | null>;
@@ -615,6 +620,7 @@ export async function mergeExternalKeyDemandsIntoMedia(
 
       for (const targetSeason of targetSeasons) {
         const key = `${row.namespace_group}\0${targetSeason ?? "null"}`;
+        if (!relinkKeyBySourceId.has(row.id)) relinkKeyBySourceId.set(row.id, key);
         const existing = aggregated.get(key);
         if (!existing) {
           aggregated.set(key, {
@@ -663,9 +669,28 @@ export async function mergeExternalKeyDemandsIntoMedia(
     });
 
     const demands: DemandRecord[] = [];
+    const demandIdByKey = new Map<string, string>();
     for (const payload of sortedPayloads) {
-      demands.push(await upsertMediaDemandRow(trx, payload, now));
+      const demand = await upsertMediaDemandRow(trx, payload, now);
+      demands.push(demand);
+      demandIdByKey.set(`${payload.namespaceGroup}\0${payload.season ?? "null"}`, demand.id);
     }
+
+    for (const row of deletedRows) {
+      await trx
+        .updateTable("change_requests")
+        .set({ demand_id: demandIdByKey.get(relinkKeyBySourceId.get(row.id)!)!, updated_at: now })
+        .where("demand_id", "=", row.id)
+        .execute();
+    }
+    await trx
+      .deleteFrom("demands")
+      .where(
+        "id",
+        "in",
+        deletedRows.map((row) => row.id),
+      )
+      .execute();
 
     return {
       mergedSourceCount: deletedRows.length,
