@@ -24,7 +24,7 @@ import {
   type CatalogEvidence,
   type EvidenceGateStep2Evaluator,
 } from "./evidence-gate.ts";
-import { fetchSegmentEpisodeEvidence } from "./season-coverage.ts";
+import { fetchSegmentEpisodeEvidence, withUnairedSeasons } from "./season-coverage.ts";
 import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
 import {
   approveChangeRequestInTransaction,
@@ -424,15 +424,30 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
       replacesAssociationId,
     });
 
-    catalogEvidence = await fetchSegmentEpisodeEvidence(
+    const tmdbGateway =
       options.catalogConfig?.tmdbGateway ??
-        options.tmdbGateway ??
-        createTmdbGateway(ctx.outbound, options.catalogConfig?.tmdb ?? options.tmdbConfig),
+      options.tmdbGateway ??
+      createTmdbGateway(ctx.outbound, options.catalogConfig?.tmdb ?? options.tmdbConfig);
+    catalogEvidence = await fetchSegmentEpisodeEvidence(
+      tmdbGateway,
       catalogResult.target.evidence,
       collectionResult.status === "found"
         ? [changeRequest, ...conflictingAssociations]
         : conflictingAssociations,
     );
+    // An empty collection fits only a season that has not premiered yet; existing associations
+    // re-gated below may be such empty collections too.
+    if (
+      conflictingAssociations.length > 0 ||
+      (collectionResult.status === "found" && collectionResult.info.featureEpisodeCount === 0)
+    ) {
+      catalogEvidence = await withUnairedSeasons(
+        tmdbGateway,
+        catalogEvidence,
+        [changeRequest, ...conflictingAssociations].flatMap((m) => m.segments),
+        ctx.now,
+      );
+    }
 
     if (conflictingAssociations.length > 0) {
       const conflictResolution = await evaluateEvidenceCheckConflict({
@@ -644,6 +659,9 @@ export function createEvidenceCheckJobHandler(options: EvidenceCheckJobOptions =
         year: catalogEvidence.year,
         seasons: catalogEvidence.seasons,
         externalIds: catalogEvidence.externalIds,
+        ...(catalogEvidence.unairedSeasons
+          ? { unairedSeasons: [...catalogEvidence.unairedSeasons] }
+          : {}),
       },
       collection: {
         namespace: collectionResult.info.namespace,

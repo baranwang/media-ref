@@ -1239,7 +1239,8 @@ describe("Evidence Gate Step 2", () => {
       episodeEnd: 12,
       targetEpisodeStart: 1,
       featureEpisodeCount: 13,
-      conflicts: ["episode_count_mismatch", "segment_episode_count_mismatch"],
+      // With segments the count is checked against them (Step 2), not as identity (Step 1).
+      conflicts: ["segment_episode_count_mismatch"],
     },
   ])(
     "checks a mixed submission's linear span 1..$episodeEnd at position $targetEpisodeStart against $featureEpisodeCount episodes",
@@ -1638,5 +1639,74 @@ describe("Evidence Gate rules from the needs_review queue", () => {
     });
     expect(wrongYear.decision).toBe("needs_review");
     expect(wrongYear.step2?.conflicts.map((c) => c.code)).toContain("segment_year_mismatch");
+  });
+});
+
+describe("Evidence Gate: episode count is a parameter of the mapping", () => {
+  // 古乐风华录 on Tencent the day before its premiere: right title, year and type, no episodes yet.
+  const openSeason1 = [
+    {
+      season: 1,
+      episodeStart: 1,
+      episodeEnd: null,
+      targetEpisodeStart: 1,
+      baseline: "tmdb" as const,
+      nonLinear: false,
+      needsReview: false,
+    },
+  ];
+  const empty = makeBilibiliCollection({ featureEpisodeCount: 0, featureEpisodes: [] });
+
+  test("an empty collection passes for an open-ended season that has not premiered", () => {
+    const gate = evaluateEvidenceGate({
+      catalog: makeTvCatalog({ unairedSeasons: [1] }),
+      collection: empty,
+      segments: openSeason1,
+    });
+    expect(gate.step1.fieldChecks.episodeCount).toBe("skipped");
+    expect(gate.conflicts).toEqual([]);
+    expect(gate.decision).toBe("pass");
+  });
+
+  test("an empty collection of an aired season goes to review as a count mismatch", () => {
+    const gate = evaluateEvidenceGate({
+      catalog: makeTvCatalog(),
+      collection: empty,
+      segments: openSeason1,
+    });
+    expect(gate.decision).toBe("needs_review");
+    expect(gate.conflicts.map((c) => c.code)).toEqual(["segment_episode_count_mismatch"]);
+  });
+
+  test("a finite range claims positions an empty collection does not hold, even before the premiere", () => {
+    const gate = evaluateEvidenceGate({
+      catalog: makeTvCatalog({ unairedSeasons: [1] }),
+      collection: empty,
+      segments: [{ ...openSeason1[0]!, episodeEnd: 24 }],
+    });
+    expect(gate.conflicts.map((c) => c.code)).toEqual(["segment_episode_count_mismatch"]);
+  });
+
+  test("an unknown count (null) never passes, premiered or not", () => {
+    const gate = evaluateEvidenceGate({
+      catalog: makeTvCatalog({ unairedSeasons: [1] }),
+      collection: makeBilibiliCollection({ featureEpisodeCount: null, featureEpisodes: [] }),
+      segments: openSeason1,
+    });
+    expect(gate.decision).toBe("needs_review");
+    expect(gate.conflicts.map((c) => c.code)).toEqual(["segment_episode_count_missing"]);
+  });
+
+  test("a short collection passes on an open end without a Step 1 count check", () => {
+    const gate = evaluateEvidenceGate({
+      catalog: makeTvCatalog(),
+      collection: makeBilibiliCollection({
+        featureEpisodeCount: 10,
+        featureEpisodes: Array.from({ length: 10 }, (_, i) => ({ index: i + 1 })),
+      }),
+      segments: openSeason1,
+    });
+    expect(gate.step1.fieldChecks.episodeCount).toBe("skipped");
+    expect(gate.decision).toBe("pass");
   });
 });

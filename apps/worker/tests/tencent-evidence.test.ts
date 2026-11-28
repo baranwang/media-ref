@@ -186,6 +186,26 @@ function createTencentAndTmdbStub() {
           },
         });
       }
+      // 古乐风华录: 40 episodes, premiering 2026-11-29.
+      if (request.url.includes("/tv/290001/season/1")) {
+        return jsonResponse(request.url, {
+          episodes: Array.from({ length: 40 }, (_, i) => ({
+            episode_number: i + 1,
+            name: `第${i + 1}集`,
+            air_date: i < 2 ? "2026-11-29" : "2026-12-15",
+          })),
+        });
+      }
+      if (request.url.includes("/tv/290001")) {
+        return jsonResponse(request.url, {
+          id: 290001,
+          name: "古乐风华录",
+          original_name: "古乐风华录",
+          first_air_date: "2026-11-29",
+          seasons: [{ season_number: 1, episode_count: 40, air_date: "2026-11-29" }],
+          external_ids: {},
+        });
+      }
       if (request.url.includes("/tv/78879")) {
         return jsonResponse(request.url, {
           id: 78879,
@@ -334,6 +354,28 @@ function createTencentAndTmdbStub() {
               { vid: "tr_only_1", cid, title: "1", is_trailer: "1" },
               { vid: "egg_only_1", cid, title: "彩蛋1", is_trailer: "0" },
             ]),
+          );
+        }
+      }
+
+      // Before the premiere: the cover is online, its list holds only a trailer.
+      if (cid === "mzc002001plkc0p") {
+        if (pageId === "detail_page_introduction") {
+          return jsonResponse(
+            request.url,
+            makeTencentIntroPayload({
+              title: "古乐风华录",
+              year: "2026",
+              type: "2",
+              type_name: "电视剧",
+              episode_all: "40",
+            }),
+          );
+        }
+        if (pageId === "vsite_episode_list") {
+          return jsonResponse(
+            request.url,
+            makeTencentEpisodePagePayload([{ vid: "glfh_tr1", cid, title: "1", is_trailer: "1" }]),
           );
         }
       }
@@ -666,7 +708,7 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     });
     expect(await getChangeRequestStateRpc(app, { apiKey: user.readKey }, noEpsId)).toMatchObject({
       status: "needs_review",
-      conflictReason: "episode_count_missing",
+      conflictReason: "segment_episode_count_mismatch",
     });
     expect(await getChangeRequestStateRpc(app, { apiKey: user.readKey }, notFoundId)).toMatchObject(
       {
@@ -683,6 +725,67 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
         )
       ).status,
     ).toBe(404);
+  });
+
+  test("approves an empty cover the day before its season premieres, mapped open-ended", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const outbound = createFakeOutboundClient({ fetchExternal: createTencentAndTmdbStub() });
+    const t0 = new Date("2026-11-28T08:54:00.000Z");
+    const app = createApiApp({
+      dbRead: testDb.readDb,
+      dbWrite: testDb.writeDb,
+      outbound,
+      config: {
+        baseUrl: TEST_BASE_URL,
+        authSecret: TEST_AUTH_SECRET,
+        now: () => t0,
+        tmdb: { accessToken: "test-tmdb-token" },
+      },
+    });
+    const user = await setupVerifiedUserAndKeys(app, outbound, "tencent-premiere@example.com");
+    const submitRpc = createRpcClients(app, { apiKey: user.submitKey });
+    const openId = (
+      await submitRpc.changeRequest.createChangeRequest({
+        target: mediaRef({ tmdb: { type: "tv", id: 290001 } }),
+        namespace: "tencent",
+        nativeId: "mzc002001plkc0p",
+        variantDescription: "国语原声",
+        segments: [
+          toProtoSegmentInput({
+            season: 1,
+            episodeStart: 1,
+            episodeEnd: null,
+            targetEpisodeStart: 1,
+            baseline: "tmdb",
+          }),
+        ],
+      })
+    ).changeRequest!.id;
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      config: { tmdb: { accessToken: "test-tmdb-token" } },
+      now: () => t0,
+    });
+    await worker.scheduled(createScheduledController(t0));
+    expect(emitted).toHaveLength(1);
+    expect((await worker.queue(createQueueBatch(emitted, t0).batch)).completed).toBe(1);
+
+    const open = (await getChangeRequestStateRpc(app, { apiKey: user.readKey }, openId)) as {
+      status: string;
+      evidence: { catalog?: { unairedSeasons?: number[] } } | null;
+    };
+    expect(open.status).toBe("approved");
+    expect(open.evidence?.catalog?.unairedSeasons).toEqual([1]);
   });
 
   test("retries transient Tencent RPC errors while keeping change request in pending_evidence until recovery", async () => {

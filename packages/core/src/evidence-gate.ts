@@ -27,6 +27,11 @@ export interface CatalogEvidence {
    * segment starts partway through; segment year checks fall back to the season premiere year.
    */
   episodeAirYears?: Readonly<Record<number, Readonly<Record<number, number | null>>>>;
+  /**
+   * Seasons that had not premiered when the check ran (set by the job that knows the time): an
+   * open-ended segment of one may map a collection with no episodes yet.
+   */
+  unairedSeasons?: readonly number[];
   /** Optional explicit episode count for single-season catalogs (e.g., Douban/Bangumi) or movies. */
   episodeCount?: number | null;
   /**
@@ -742,70 +747,6 @@ function collectCatalogCandidateYears(
   return years;
 }
 
-interface LinearSegmentEpisodeRange {
-  hasOpenEnded: boolean;
-  minEpisodes: number;
-  maxEpisodes: number;
-}
-
-function computeLinearSegmentEpisodeRange(
-  catalog: CatalogEvidence,
-  segments: readonly NormalizedSegment[],
-): LinearSegmentEpisodeRange | null {
-  if (segments.length === 0) {
-    return null;
-  }
-
-  const seasonMap = new Map<number, SeasonSnapshot>();
-  for (const season of catalog.seasons) {
-    seasonMap.set(season.season, season);
-  }
-
-  const sorted = [...segments].toSorted((a, b) =>
-    a.season !== b.season ? a.season - b.season : a.episodeStart - b.episodeStart,
-  );
-
-  let hasOpenEnded = false;
-  let minEpisodes = 0;
-  let maxEpisodes = 0;
-
-  for (let i = 0; i < sorted.length; i += 1) {
-    const seg = sorted[i]!;
-    const isLast = i === sorted.length - 1;
-    const seasonSnapshot = seasonMap.get(seg.season);
-    if (
-      !seasonSnapshot ||
-      !Number.isInteger(seasonSnapshot.episodeCount) ||
-      seasonSnapshot.episodeCount <= 0
-    ) {
-      return null;
-    }
-
-    if (seg.episodeStart > seasonSnapshot.episodeCount) {
-      return null;
-    }
-    if (seg.episodeEnd !== null && seg.episodeEnd > seasonSnapshot.episodeCount) {
-      return null;
-    }
-
-    const effectiveEnd = seg.episodeEnd ?? seasonSnapshot.episodeCount;
-    const span = effectiveEnd - seg.episodeStart + 1;
-    if (span <= 0) {
-      return null;
-    }
-
-    maxEpisodes += span;
-    if (seg.episodeEnd === null) {
-      hasOpenEnded = true;
-      minEpisodes += isLast ? 1 : span;
-    } else {
-      minEpisodes += span;
-    }
-  }
-
-  return { hasOpenEnded, minEpisodes, maxEpisodes };
-}
-
 function collectCatalogCandidateEpisodeCounts(catalog: CatalogEvidence): Set<number> {
   const counts = new Set<number>();
 
@@ -915,7 +856,7 @@ export function evaluateEvidenceGateStep1(
     };
   }
 
-  // No shared IDs fetched on both sides: ALL FOUR fields must match.
+  // No shared IDs fetched on both sides: every checked field must match (episode count only without segments).
   const conflicts: EvidenceGateConflict[] = [];
 
   // 1. mediaType
@@ -1029,31 +970,18 @@ export function evaluateEvidenceGateStep1(
     }
   }
 
-  // 4. episodeCount
+  // 4. episodeCount. With segments it is a parameter of the mapping (how far it reaches), which
+  // Step 2 checks against the segments; it says nothing about which title the collection is.
   let episodeCountStatus: Step1FieldCheckStatus;
-  const linearSegments = segments.filter((s) => !s.nonLinear);
-
-  if (catalog.mediaType === "tv" && segments.length > 0 && linearSegments.length === 0) {
+  if (catalog.mediaType === "tv" && segments.length > 0) {
     episodeCountStatus = "skipped";
   } else {
     const catalogEpisodeCounts = collectCatalogCandidateEpisodeCounts(catalog);
-    const segmentRange =
-      catalog.mediaType === "tv" ? computeLinearSegmentEpisodeRange(catalog, linearSegments) : null;
-
-    const matchesSegmentRange =
-      segmentRange !== null &&
-      collection.featureEpisodeCount !== null &&
-      Number.isInteger(collection.featureEpisodeCount) &&
-      (segmentRange.hasOpenEnded
-        ? collection.featureEpisodeCount >= segmentRange.minEpisodes &&
-          collection.featureEpisodeCount <= segmentRange.maxEpisodes
-        : collection.featureEpisodeCount === segmentRange.maxEpisodes);
-
     if (
       collection.featureEpisodeCount === null ||
       !Number.isInteger(collection.featureEpisodeCount) ||
       collection.featureEpisodeCount <= 0 ||
-      (catalogEpisodeCounts.size === 0 && segmentRange === null)
+      catalogEpisodeCounts.size === 0
     ) {
       episodeCountStatus = "missing";
       conflicts.push({
@@ -1064,7 +992,7 @@ export function evaluateEvidenceGateStep1(
         catalogValue: [...catalogEpisodeCounts],
         collectionValue: collection.featureEpisodeCount,
       });
-    } else if (!catalogEpisodeCounts.has(collection.featureEpisodeCount) && !matchesSegmentRange) {
+    } else if (!catalogEpisodeCounts.has(collection.featureEpisodeCount)) {
       episodeCountStatus = "mismatch";
       conflicts.push({
         step: 1,
@@ -1342,12 +1270,13 @@ export function evaluateEvidenceGateStep2(
     };
   }
 
-  // 4. Linear segment checks: featureEpisodeCount & targetEpisodeStart alignment
+  // 4. Linear segment checks: featureEpisodeCount & targetEpisodeStart alignment. 0 is a count (an
+  // empty collection); null is unknown (e.g. a chaptered cid) and never approves.
   const featureEpisodeCount = context.collection.featureEpisodeCount;
   if (
     featureEpisodeCount === null ||
     !Number.isInteger(featureEpisodeCount) ||
-    featureEpisodeCount <= 0
+    featureEpisodeCount < 0
   ) {
     conflicts.push({
       step: 2,
@@ -1420,7 +1349,9 @@ export function evaluateEvidenceGateStep2(
     totalMaxCovered += maxSpan;
     if (seg.episodeEnd === null) {
       hasOpenEnded = true;
-      totalMinCovered += isLast ? 1 : maxSpan;
+      // An open end covers what the platform has so far: none of a season not yet premiered.
+      const unaired = context.catalog.unairedSeasons?.includes(seg.season) ?? false;
+      totalMinCovered += isLast ? (unaired ? 0 : 1) : maxSpan;
     } else {
       totalMinCovered += maxSpan;
     }

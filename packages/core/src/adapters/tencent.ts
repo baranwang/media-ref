@@ -694,10 +694,12 @@ export const tencentAdapter: Tier3Adapter<"tencent"> = {
     pages.reverse();
     let fetchedPages = 0;
     let chaptered = false;
+    let listedItems = 0;
     while (pages.length) {
       const { context, module } = pages.pop()!;
       if (module) {
         const items = extractModuleItemParams(module);
+        listedItems += items.length;
         // A position within a season chapter; sub-category chapters label items "正片" instead.
         chaptered ||= items.some((params) =>
           NUMERIC_EPISODE_LABEL_PATTERN.test(nonEmptyString(params.episode_on_chapter) ?? ""),
@@ -731,7 +733,8 @@ export const tencentAdapter: Tier3Adapter<"tencent"> = {
         year,
         mediaType,
         // A chaptered cid lists only its first chapter here, so this count is not the whole cid's.
-        featureEpisodeCount: broadcast.length > 0 && !chaptered ? broadcast.length : null,
+        // A list of only trailers (before the premiere) counts 0; an empty or unreadable list is unknown.
+        featureEpisodeCount: chaptered || listedItems === 0 ? null : broadcast.length,
         featureEpisodes: broadcast,
       },
     };

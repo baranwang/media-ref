@@ -137,10 +137,11 @@ const POSITION_GAP_CONFLICT_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /** Why the segments' platform positions don't fit the collection: empty, past its end, or overlapping. */
-function positionMisfit(
+export function positionMisfit(
   segments: readonly NormalizedSegment[],
   collection: CollectionInfo,
   seasons: CatalogEvidence["seasons"],
+  lastAired: SessionFetches["lastAired"] = {},
 ): string | null {
   const count = (season: number) => seasons.find((s) => s.season === season)?.episodeCount ?? null;
   // An open end runs to the collection's end (a season still airing), at most to the season's end.
@@ -155,8 +156,15 @@ function positionMisfit(
       return nonLinearMisfit;
     }
   }
+  // An open end whose episodes have not aired yet (before the premiere), on a collection with
+  // nothing from its first position on, holds no position yet. Otherwise it runs as above.
+  const notAired = (s: NormalizedSegment) =>
+    !s.nonLinear &&
+    s.episodeEnd === null &&
+    (lastAired[s.season] ?? Infinity) < s.episodeStart &&
+    available < s.targetEpisodeStart;
   const ended = segments
-    .filter((s) => !s.nonLinear)
+    .filter((s) => !s.nonLinear && !notAired(s))
     .map((s) => ({
       ...s,
       episodeEnd:
@@ -170,11 +178,13 @@ function positionMisfit(
   if (misfit) {
     return misfit;
   }
-  const ranges = ended
-    .map(
+  const ranges = [
+    ...ended.map(
       (s) => [s.targetEpisodeStart, s.targetEpisodeStart + s.episodeEnd - s.episodeStart] as const,
-    )
-    .sort((a, b) => a[0] - b[0]);
+    ),
+    // Its first episode will take its first position.
+    ...segments.filter(notAired).map((s) => [s.targetEpisodeStart, s.targetEpisodeStart] as const),
+  ].sort((a, b) => a[0] - b[0]);
   return ranges.some((r, i) => i > 0 && r[0] <= ranges[i - 1]![1])
     ? "segments overlap on platform positions"
     : null;
@@ -554,6 +564,7 @@ function buildSystemPrompt(
     "   Platform publication dates and intermediate installments do not verify a whole season. Check the final broadcast installment or its distinctive subtitle; use a finite range for a partial collection.",
     "   For variety shows or collections covering a complete season whose episode count diverges from TMDB because broadcast parts (第N期上/下) and extras/prologues are grouped differently (e.g. 20 broadcast parts covering the whole run while TMDB lists 47 with extras), do NOT truncate episodeEnd to a shorter linear prefix like 1..20; approve or correct with { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.",
     "   A season still airing (get_catalog_season reports stillAiring) is mapped open-ended: episodeEnd: null covers the episodes aired so far and grows with the season. A collection that reaches stillAiring.lastAiredEpisode covers that season: do not reject it for holding fewer positions than episodeCount, and do not cut episodeEnd to the aired count.",
+    "   stillAiring.lastAiredEpisode 0 means the season has not premiered. A collection whose title, year and type match, with no episodes yet, covers it with that open end: approve it when the identity holds. A missing or short episode count is then expected, not a conflict that makes the mapping wrong.",
     "5. Long lists come in windows of 80. When a result has episodesTruncated, fetch the rest with get_collection fromPosition and get_catalog_season fromEpisode before judging positions you have not seen; request all the windows you need in one turn.",
     mode === "approved"
       ? "6. If you cannot confirm the mapping is wrong, keep it and say what you found."
@@ -1832,7 +1843,10 @@ function approvalBlocker(
       collection,
       cr.segments,
     );
-  return coverage?.code ?? positionMisfit(cr.segments, collection, catalog?.seasons ?? []);
+  return (
+    coverage?.code ??
+    positionMisfit(cr.segments, collection, catalog?.seasons ?? [], fetched.lastAired)
+  );
 }
 
 /**
@@ -1937,7 +1951,7 @@ async function correctionBlocker(
     variantDescription: cr.variantDescription,
     step1,
   });
-  const misfit = positionMisfit(segments, collection, catalog.seasons);
+  const misfit = positionMisfit(segments, collection, catalog.seasons, fetched.lastAired);
   const blocking = step2.conflicts.filter(
     (c) =>
       !(misfit === null && POSITION_GAP_CONFLICT_CODES.has(c.code)) &&

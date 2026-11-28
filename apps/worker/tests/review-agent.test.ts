@@ -796,7 +796,7 @@ describe("review agent (#75)", () => {
         ],
         true,
       ),
-      fallback: "no_reason_for: episode_count_mismatch",
+      fallback: "no_reason_for: target_episode_start_mismatch",
     },
     {
       name: "a model that stops without a conclusion",
@@ -1785,6 +1785,61 @@ describe("review agent: reject with correction (#76)", () => {
     expect((await ctx.changeRequest(id)).evidence).toMatchObject({
       reviewAgent: { verdict: "reject_with_correction", correction: openEnded, fallback: null },
     });
+  });
+
+  test("an open end on a season not yet premiered can be approved over an empty collection", async () => {
+    // Every TMDB season 8 episode is scheduled ahead; the platform cover is online with none yet.
+    const unaired: typeof httpStub = (request) => {
+      const response = httpStub(request);
+      if (!/\/tv\/70001\/season\/8/.test(request.url)) return response;
+      const body = JSON.parse(response.body) as { episodes: Array<Record<string, unknown>> };
+      for (const ep of body.episodes) ep.air_date = "2099-01-01";
+      return { ...response, body: JSON.stringify(body) };
+    };
+    const empty = createAdapterRegistry([
+      {
+        ...bilibiliAdapter,
+        async fetchCollection(id, outbound) {
+          const result = await bilibiliAdapter.fetchCollection(id, outbound);
+          return result.status === "found"
+            ? {
+                ...result,
+                // A platform title the gate does not match, so the review agent decides.
+                info: {
+                  ...result.info,
+                  title: "妻子的浪漫旅行 新季",
+                  featureEpisodes: [],
+                  featureEpisodeCount: 0,
+                },
+              }
+            : result;
+        },
+      },
+    ]);
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss77777" }],
+          ["get_catalog_season", { season: 8 }],
+        ]);
+      }
+      return reply(turn, [["approve", { reasons: reasonsFor(request) }]]);
+    };
+    const ctx = track(await setup(model, {}, empty, {}, unaired));
+    const id = await submitAsHuman(ctx, 8, [
+      { season: 8, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, baseline: "tmdb" },
+    ]);
+
+    await ctx.drain();
+
+    const catalogReply = ctx.outbound.modelRequests[1]!.messages.filter((m) => m.role === "tool")
+      .map((m) => JSON.parse(m.content) as Record<string, unknown>)
+      .find((r) => r.season === 8);
+    expect(catalogReply).toMatchObject({ stillAiring: { lastAiredEpisode: 0 } });
+    const cr = await ctx.changeRequest(id);
+    expect(cr.evidence).toMatchObject({ reviewAgent: { verdict: "approve", fallback: null } });
+    expect(cr.status).toBe("approved");
   });
 
   test("without a reason for it, the submission's own title or year conflict still blocks the correction", async () => {

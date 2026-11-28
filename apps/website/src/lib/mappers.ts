@@ -483,6 +483,28 @@ const FIELD_LABELS: Record<string, string> = {
   episodeCount: "集数对得上",
 };
 
+const MISSING_FIELD_LABELS: Record<string, string> = {
+  mediaType: "类型没法比对",
+  year: "年份没法比对",
+  title: "片名没法比对",
+  episodeCount: "集数没法比对",
+};
+
+const STEP2_CONFLICT_LABELS: Record<string, string> = {
+  segment_season_not_found: "资料站没有这一季",
+  segment_episode_out_of_range: "集数超出这一季的范围",
+  segment_year_missing: "缺少这一季的首播年份",
+  segment_year_mismatch: "这一季的首播年份和平台对不上",
+  segment_episode_count_missing: "平台没有可逐集对位的分集",
+  segment_season_episode_count_missing: "资料站还没有这一季的集数",
+  segment_episode_count_mismatch: "平台集数和提交的集数范围对不上",
+  target_episode_start_mismatch: "各段在平台上的起始位置不连续",
+  season_finale_unverified: "没能确认平台有这一季的最后一集",
+  partial_segment_spans_full_season: "平台合集比提交的集数范围更完整",
+  partial_segment_outside_prefix: "平台合集超出提交的集数范围",
+  non_original_default_variant: "非原版不能设为默认版本",
+};
+
 function checksFromEvidence(id: string, evidence: Json | null): AutoCheckItem[] {
   const gate = asJson(evidence?.gate);
   const step1 = asJson(gate?.step1);
@@ -502,12 +524,17 @@ function checksFromEvidence(id: string, evidence: Json | null): AutoCheckItem[] 
     if (status === "skipped" || status === undefined) continue;
     checks.push({
       id: `${id}-${field}`,
-      title: status === "matched" ? label : label.replace("对得上", "对不上"),
+      title:
+        status === "matched"
+          ? label
+          : status === "missing"
+            ? (MISSING_FIELD_LABELS[field] ?? label)
+            : label.replace("对得上", "对不上"),
       detail:
         status === "matched"
           ? "自动核对通过"
           : status === "missing"
-            ? "平台页面没有这项信息，需要人工确认"
+            ? "有一边缺这项信息，交给审核 agent 核实"
             : "平台页面和资料站不一致",
       status: status === "matched" ? "passed" : status === "missing" ? "needs_confirm" : "failed",
     });
@@ -517,11 +544,11 @@ function checksFromEvidence(id: string, evidence: Json | null): AutoCheckItem[] 
   step2Conflicts.forEach((raw, index) => {
     const conflict = asJson(raw);
     if (!conflict) return;
+    const code = typeof conflict.code === "string" ? conflict.code : "";
     checks.push({
       id: `${id}-step2-${index}`,
-      title: "集数范围需要确认",
-      detail:
-        typeof conflict.message === "string" ? conflict.message : "提交的集数范围和平台页面不一致",
+      title: STEP2_CONFLICT_LABELS[code] ?? "提交的集数范围和平台页面不一致",
+      detail: "交给审核 agent 核实",
       status: "needs_confirm",
     });
   });
@@ -752,6 +779,7 @@ export function targetKeyOf(ref: proto.MediaRef | undefined): string {
 export function conflictTagFor(reason: string | null): string | null {
   if (!reason) return null;
   if (reason.includes("overlap")) return "和已有记录重叠";
+  if (reason.endsWith("episode_count_missing")) return "缺少集数";
   if (reason.includes("episode")) return "集数对不上";
   if (reason.includes("year")) return "年份对不上";
   if (reason.includes("title")) return "片名对不上";

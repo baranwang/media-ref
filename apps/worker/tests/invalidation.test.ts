@@ -972,10 +972,26 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
 
     let currentTime = new Date("2026-11-23T18:00:00.000Z");
     let contentChanged = false;
+    let shrunk = false;
 
     const outbound = createFakeOutboundClient({
       fetchExternal: createDefaultTmdbAndBilibiliHandler(
         (request) => {
+          // The same title, cut down to 6 of the 24 positions its segments claim.
+          if (shrunk && request.url.includes("season_id=34430")) {
+            return jsonResponse(request.url, {
+              code: 0,
+              message: "success",
+              result: {
+                season_id: 34430,
+                title: "咒术回战",
+                jp_title: "呪術廻戦",
+                type: 1,
+                publish: { pub_time: "2020-10-03 01:25:00" },
+                episodes: makeBilibiliEpisodes(6),
+              },
+            });
+          }
           if (contentChanged && request.url.includes("season_id=34430")) {
             return jsonResponse(request.url, {
               code: 0,
@@ -1056,9 +1072,10 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
     expect(revisionId).toBeTruthy();
 
     const reviewerRpc = createRpcClients(app, { cookie: reviewer.cookie });
-    async function recheck(content: "matching" | "mismatched") {
+    async function recheck(content: "matching" | "mismatched" | "shrunk") {
       currentTime = new Date(currentTime.getTime() + 60 * 60 * 1000);
       contentChanged = content === "mismatched";
+      shrunk = content === "shrunk";
       const report = await reviewerRpc.association.reportInvalidation({
         associationId: created.associationId,
       });
@@ -1066,7 +1083,7 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       const cycle = await runWorkerCycle(worker, dispatched, currentTime);
       expect(cycle.messages.map((message) => message.jobId)).toEqual([report.jobId]);
       expect(cycle.queue.completed).toBe(1);
-      if (content === "mismatched") {
+      if (content !== "matching") {
         const job = await testDb.readDb
           .selectFrom("background_jobs")
           .select("result")
@@ -1097,6 +1114,22 @@ describe("Invalidation reports, re-check, and confirmed delisting (#20)", () => 
       now: () => currentTime,
     };
   }
+
+  test("a recheck flags a collection that lost the positions its segments claim, though the title still matches", async () => {
+    const { testDb, created, recheck } = await setupContentRecheck();
+    await recheck("shrunk");
+    const job = await testDb.readDb
+      .selectFrom("background_jobs")
+      .select("result")
+      .where("job_type", "=", "invalidation_recheck")
+      .orderBy("created_at", "desc")
+      .executeTakeFirstOrThrow();
+    expect(job.result).toMatchObject({
+      associationId: created.associationId,
+      outcome: "content_mismatch",
+      conflicts: ["segment_episode_count_mismatch"],
+    });
+  });
 
   test("a passing recheck of the same revision resolves its content mismatch and restores only the unflagged season", async () => {
     const { testDb, created, revisionId, reviewerRpc, recheck, now } = await setupContentRecheck();

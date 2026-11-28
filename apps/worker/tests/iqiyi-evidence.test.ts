@@ -596,7 +596,7 @@ describe("iQIYI adapter end-to-end evidence pipeline (#14)", () => {
       noEpsCr.changeRequest!.id,
     );
     expect(noEpsInspect.status).toBe("needs_review");
-    expect(noEpsInspect.conflictReason).toBe("episode_count_missing");
+    expect(noEpsInspect.conflictReason).toBe("segment_episode_count_missing");
 
     // Neither change request appears in default MediaService.GetMedia
     expect(

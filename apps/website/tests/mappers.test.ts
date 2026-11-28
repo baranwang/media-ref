@@ -67,7 +67,7 @@ test("auto-check list shows Step 1 and Step 2 conflicts together when Step 1 fai
 
   expect(changeRequestFromProto(cr).checks).toMatchObject([
     { id: "cr1-title", title: "片名对不上", status: "failed" },
-    { id: "cr1-step2-0", detail: "Season 9 not found", status: "needs_confirm" },
+    { id: "cr1-step2-0", title: "资料站没有这一季", status: "needs_confirm" },
   ]);
 });
 
