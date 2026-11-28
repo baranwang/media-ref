@@ -29,7 +29,7 @@ export const docsLlms = llms(docsSource, {
   renderPage: async (page) =>
     `# ${page.data.title} (${DOCS_SITE_URL}${page.url})
 
-${page.data.description ? `> ${page.data.description}\n\n` : ""}${await renderPlaceholder(await page.data.getText("processed"), placeholders)}`,
+${page.data.description ? `> ${page.data.description}\n\n` : ""}${(await renderPlaceholder(await page.data.getText("processed"), placeholders)).replace(/^# .*\n+/, "")}`,
 });
 
 export const DOCS_LLMS_TXT = "/docs/llms.txt";

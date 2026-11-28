@@ -4,7 +4,8 @@
   "bump-minor-pre-major": true,
   "packages": {
     "packages/client": {
-      "component": "client"
+      "component": "client",
+      "exclude-paths": ["packages/client/src/gen/mediaref/internal"]
     }
   }
 }
