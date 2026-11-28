@@ -469,6 +469,42 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect(after.metadata).not.toHaveProperty("fullRefreshAfterMediaId");
   });
 
+  test("a full refresh over several days keeps earlier pages' failures and resumes from its first day", async () => {
+    const { db, tmdb, run, cursor } = await setupTrackedMovies(handles, 3);
+    await db
+      .insertInto("sync_state")
+      .values({ sync_key: "tmdb_changes_movie", last_synced_date: "2026-10-01", metadata: "{}" })
+      .execute();
+
+    // Day 1: the first page's two movies fail.
+    for (const id of ["1", "2", "3"]) tmdb.failing.add(id);
+    const first = await run("2026-11-10T04:00:00Z", { fullRefreshPageSize: 2 });
+    expect(first.movie).toMatchObject({ mode: "full_refresh", cursorAdvanced: false });
+    const failed = [...tmdb.fetched].sort();
+    expect(failed).toHaveLength(2);
+    expect((await cursor()).metadata).toMatchObject({ fullRefreshStartedOn: "2026-11-10" });
+
+    // Day 3: the last page succeeds. The failures stay listed, and the date resumes from day 1.
+    tmdb.failing.clear();
+    const last = await run("2026-11-12T04:00:00Z", { fullRefreshPageSize: 2 });
+    expect(last.movie).toMatchObject({ mode: "full_refresh", cursorAdvanced: true });
+    const afterRefresh = await cursor();
+    expect(afterRefresh.last_synced_date).toBe("2026-11-10");
+    expect(afterRefresh.metadata).not.toHaveProperty("fullRefreshStartedOn");
+    expect(
+      [...((afterRefresh.metadata as { retryTmdbIds?: string[] }).retryTmdbIds ?? [])].sort(),
+    ).toEqual(failed);
+
+    // The next run asks for changes since day 1 and retries the earlier failures.
+    tmdb.fetched.length = 0;
+    const next = await run("2026-11-12T05:00:00Z");
+    expect(next.movie).toMatchObject({ mode: "changes", startDate: "2026-11-10" });
+    expect(tmdb.fetched.sort()).toEqual(failed);
+    const after = await cursor();
+    expect(after.last_synced_date).toBe("2026-11-12");
+    expect(after.metadata).not.toHaveProperty("retryTmdbIds");
+  });
+
   test("catches up missed days (<=14d via /changes, >14d via full refresh) and leaves cursor unadvanced on transient 5xx", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

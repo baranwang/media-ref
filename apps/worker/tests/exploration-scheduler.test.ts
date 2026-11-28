@@ -459,6 +459,68 @@ describe("Exploration scheduler (#28)", () => {
     expect(demand).toMatchObject({ status: "open", nextEligibleAt: "2026-11-23T11:00:00.000Z" });
   });
 
+  test("a job that fails for good after binding an external-key demand releases the media demand it leased", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+
+    const t0 = new Date("2026-11-23T10:00:00.000Z");
+    await seedTmdbExportIds(testDb.writeDb, [{ mediaType: "tv", tmdbId: "95479" }], "2026-11-23");
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        if (request.namespace === "tmdb" && request.url.includes("/tv/95479")) {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              id: 95479,
+              name: "咒术回战",
+              first_air_date: "2020-10-03",
+              seasons: [{ season_number: 1, episode_count: 24, air_date: "2020-10-03" }],
+            }),
+            url: request.url,
+          };
+        }
+        throw new Error(`Unexpected outbound URL: ${request.url}`);
+      },
+    });
+    await recordDemandForRead(testDb.writeDb, {
+      rawKey: "tmdb:tv:95479",
+      queryResult: { kind: "not_found", key: "tmdb:tv:95479" },
+      namespaceGroup: "platform",
+      now: t0,
+    });
+
+    const emitted: JobQueueMessage[] = [];
+    const worker = createBackgroundWorker({
+      db: testDb.writeDb,
+      outbound,
+      queue: {
+        async send(message) {
+          emitted.push(message);
+        },
+      },
+      adapterRegistry: createTier3PlatformRegistry(),
+      explorationExecutor: async () => {
+        throw new Error("model gateway down");
+      },
+      config: {
+        enableDailyTmdbSync: false,
+        exploration: { dailyBudget: 10, jobMaxAttempts: 1 },
+      },
+      now: () => t0,
+    });
+
+    await worker.scheduled(createScheduledController(t0));
+    expect((await worker.queue(createQueueBatch(emitted, t0).batch)).failed).toBe(1);
+
+    // The external-key demand became a media demand mid-run; that one is released, not left leased.
+    expect(await listDemands(testDb.readDb, { externalKey: "tmdb:tv:95479" })).toEqual([]);
+    const [media] = await testDb.readDb.selectFrom("media").select("id").execute();
+    expect(await listDemands(testDb.readDb, { mediaId: media!.id })).toMatchObject([
+      { status: "open", nextEligibleAt: "2026-11-23T11:00:00.000Z", leaseExpiresAt: null },
+    ]);
+  });
+
   test("lazily creates media and merges demands only when exploration starts for an unseen valid TMDB key", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

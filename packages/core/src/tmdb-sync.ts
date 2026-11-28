@@ -562,6 +562,12 @@ async function syncSingleMediaType(
       ? existingMetadata.fullRefreshAfterMediaId
       : null;
   let nextFullRefreshCursor: string | null = null;
+  // The day the first page ran: after the last page the cursor resumes from it, so changes to
+  // media refreshed on an earlier page are still caught up.
+  const fullRefreshStartedOn =
+    prevFullRefreshCursor && typeof existingMetadata.fullRefreshStartedOn === "string"
+      ? existingMetadata.fullRefreshStartedOn
+      : today;
 
   let candidates = parsedTracked;
   if (mode === "full_refresh") {
@@ -902,8 +908,21 @@ async function syncSingleMediaType(
 
   const cursorAdvanced = nextFullRefreshCursor === null;
   const targetDate = cursorAdvanced
-    ? maxDateString(existingCursor?.last_synced_date ?? null, today)
+    ? maxDateString(
+        existingCursor?.last_synced_date ?? null,
+        mode === "full_refresh" ? fullRefreshStartedOn : today,
+      )
     : existingCursor!.last_synced_date;
+  // Earlier failures stay listed until a run actually retries them (a later full-refresh page
+  // does not), plus this run's failures.
+  const attemptedIds = new Set(candidates.map((entry) => entry.tmdbId));
+  const trackedIds = new Set(parsedTracked.map((entry) => entry.tmdbId));
+  const nextRetryTmdbIds = [
+    ...new Set([
+      ...retryTmdbIds.filter((id) => trackedIds.has(id) && !attemptedIds.has(id)),
+      ...failedTmdbIds,
+    ]),
+  ];
   const lastSyncedDate = await upsertSyncState(
     db,
     syncKey,
@@ -918,8 +937,10 @@ async function syncSingleMediaType(
       refreshedCount,
       missingCount,
       flaggedSegmentCount,
-      ...(failedTmdbIds.length > 0 ? { retryTmdbIds: [...new Set(failedTmdbIds)] } : {}),
-      ...(nextFullRefreshCursor !== null ? { fullRefreshAfterMediaId: nextFullRefreshCursor } : {}),
+      ...(nextRetryTmdbIds.length > 0 ? { retryTmdbIds: nextRetryTmdbIds } : {}),
+      ...(nextFullRefreshCursor !== null
+        ? { fullRefreshAfterMediaId: nextFullRefreshCursor, fullRefreshStartedOn }
+        : {}),
       ...(traktBackfillEnabled
         ? {
             traktBackfillCount,

@@ -216,7 +216,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
   };
   // A job that failed for good: an exploration job also releases its demand with a backoff.
   const failJob = async (
-    job: { id: string; jobType: string; leaseGeneration: number; payload: Record<string, unknown> },
+    job: { id: string; jobType: string; leaseGeneration: number },
     errorMessage: string,
     now: Date,
   ) => {
@@ -227,8 +227,10 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       now,
     });
     if (result.applied && job.jobType === EXPLORATION_JOB_TYPE) {
+      // The stored payload, not the delivered one: a run that bound an external-key demand to its
+      // media rewrote it to name the media demand it leased instead.
       await releaseDemandAfterFailedExploration(deps.db, {
-        payload: job.payload,
+        payload: result.job.payload,
         now,
         config: explorationConfig,
       });
@@ -484,7 +486,6 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           id: body.jobId,
           jobType: body.jobType,
           leaseGeneration: body.leaseGeneration,
-          payload: currentJob.payload,
         };
         try {
           const outcome = await handler({
