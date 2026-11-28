@@ -12,7 +12,6 @@ import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as ApiKeysRouteImport } from "./routes/api-keys";
 import { Route as ExplorationRouteImport } from "./routes/exploration";
-import { Route as LlmsFullDottxtRouteImport } from "./routes/llms-full[.]txt";
 import { Route as LlmsDottxtRouteImport } from "./routes/llms[.]txt";
 import { Route as LoginRouteImport } from "./routes/login";
 import { Route as ReviewRouteImport } from "./routes/review";
@@ -44,11 +43,6 @@ const ApiKeysRoute = ApiKeysRouteImport.update({
 const ExplorationRoute = ExplorationRouteImport.update({
   id: "/exploration",
   path: "/exploration",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const LlmsFullDottxtRoute = LlmsFullDottxtRouteImport.update({
-  id: "/llms-full.txt",
-  path: "/llms-full.txt",
   getParentRoute: () => rootRouteImport,
 } as any);
 const LlmsDottxtRoute = LlmsDottxtRouteImport.update({
@@ -141,7 +135,6 @@ export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
-  "/llms-full.txt": typeof LlmsFullDottxtRoute;
   "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
@@ -164,7 +157,6 @@ export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
-  "/llms-full.txt": typeof LlmsFullDottxtRoute;
   "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
@@ -188,7 +180,6 @@ export interface FileRoutesById {
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
-  "/llms-full.txt": typeof LlmsFullDottxtRoute;
   "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
@@ -213,7 +204,6 @@ export interface FileRouteTypes {
     | "/"
     | "/api-keys"
     | "/exploration"
-    | "/llms-full.txt"
     | "/llms.txt"
     | "/login"
     | "/review"
@@ -236,7 +226,6 @@ export interface FileRouteTypes {
     | "/"
     | "/api-keys"
     | "/exploration"
-    | "/llms-full.txt"
     | "/llms.txt"
     | "/login"
     | "/review"
@@ -259,7 +248,6 @@ export interface FileRouteTypes {
     | "/"
     | "/api-keys"
     | "/exploration"
-    | "/llms-full.txt"
     | "/llms.txt"
     | "/login"
     | "/review"
@@ -283,7 +271,6 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   ApiKeysRoute: typeof ApiKeysRoute;
   ExplorationRoute: typeof ExplorationRoute;
-  LlmsFullDottxtRoute: typeof LlmsFullDottxtRoute;
   LlmsDottxtRoute: typeof LlmsDottxtRoute;
   LoginRoute: typeof LoginRoute;
   ReviewRoute: typeof ReviewRoute;
@@ -324,13 +311,6 @@ declare module "@tanstack/react-router" {
       path: "/exploration";
       fullPath: "/exploration";
       preLoaderRoute: typeof ExplorationRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/llms-full.txt": {
-      id: "/llms-full.txt";
-      path: "/llms-full.txt";
-      fullPath: "/llms-full.txt";
-      preLoaderRoute: typeof LlmsFullDottxtRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/llms.txt": {
@@ -459,7 +439,6 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ApiKeysRoute: ApiKeysRoute,
   ExplorationRoute: ExplorationRoute,
-  LlmsFullDottxtRoute: LlmsFullDottxtRoute,
   LlmsDottxtRoute: LlmsDottxtRoute,
   LoginRoute: LoginRoute,
   ReviewRoute: ReviewRoute,

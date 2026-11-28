@@ -23,7 +23,10 @@ export const Route = createFileRoute("/docs/$")({
     styles: [{ children: codeThemeCss }],
     // Agents reading the HTML find the Markdown of the page here.
     links: loaderData
-      ? [{ rel: "alternate", type: "text/markdown", href: `${loaderData.url}.md` }]
+      ? [
+          { rel: "alternate", type: "text/markdown", href: `${loaderData.url}.md` },
+          { rel: "describedby", href: "/docs/llms.txt" },
+        ]
       : [],
     meta: loaderData
       ? [
