@@ -87,5 +87,15 @@
         "period": 60,
       },
     },
+    {
+      // Auth POSTs (sign-in, sign-up, verification email) per visitor IP: password guessing and
+      // mail bombing. Better Auth's own limiter is not on in Workers.
+      "name": "RATE_LIMITER_AUTH_IP",
+      "namespace_id": "1003",
+      "simple": {
+        "limit": 10,
+        "period": 60,
+      },
+    },
   ],
 }

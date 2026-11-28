@@ -52,6 +52,11 @@ export const TMDB_CHANGES_MAX_WINDOW_DAYS = 14;
 export const DEFAULT_TMDB_FULL_REFRESH_BATCH_SIZE = 50;
 // Below the 15-minute queue invocation wall clock, leaving room for the item in flight and the commit.
 export const DEFAULT_TMDB_SYNC_MAX_DURATION_MS = 12 * 60_000;
+/**
+ * Media one full-refresh run refreshes per type. Each costs a TMDB fetch and a transaction (about
+ * 250 ms), so two pages stay well inside the 15-minute invocation; the next cron tick runs the next.
+ */
+export const DEFAULT_TMDB_FULL_REFRESH_PAGE_SIZE = 500;
 
 export const REVIEW_ALERT_TYPES = {
   AGENT_EXTERNAL_ID_CONFLICT: "agent_external_id_conflict",
@@ -105,6 +110,7 @@ export interface RunTmdbDailySyncOptions {
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   fullRefreshBatchSize?: number;
+  fullRefreshPageSize?: number;
   maxChangesWindowDays?: number;
   backfillMissingTrakt?: boolean;
   /** No new item starts after this; unfinished types keep their cursor and run again next time. */
@@ -133,6 +139,7 @@ export interface CreateTmdbSyncJobHandlerOptions {
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   fullRefreshBatchSize?: number;
+  fullRefreshPageSize?: number;
   maxChangesWindowDays?: number;
   backfillMissingTrakt?: boolean;
   maxDurationMs?: number;
@@ -539,6 +546,7 @@ async function syncSingleMediaType(
   today: string,
   now: Date,
   fullRefreshBatchSize: number,
+  fullRefreshPageSize: number,
   maxChangesWindowDays: number,
   traktBackfillEnabled: boolean,
   transientErrors: TmdbSyncTransientError[],
@@ -645,6 +653,25 @@ async function syncSingleMediaType(
       : null;
   let nextBackfillCursor: string | null = prevBackfillCursor;
   let traktBackfillCount = 0;
+  // Items whose refresh failed last run: retried with this run's changes, so one item that keeps
+  // failing never holds the cursor back for everything else.
+  const retryTmdbIds = Array.isArray(existingMetadata.retryTmdbIds)
+    ? existingMetadata.retryTmdbIds.filter((id): id is string => typeof id === "string")
+    : [];
+
+  // A full refresh runs one page of media (by id) per run and keeps its place in the metadata; the
+  // date cursor advances only after the last page.
+  const prevFullRefreshCursor =
+    mode === "full_refresh" && typeof existingMetadata.fullRefreshAfterMediaId === "string"
+      ? existingMetadata.fullRefreshAfterMediaId
+      : null;
+  let nextFullRefreshCursor: string | null = null;
+  // The day the first page ran: after the last page the cursor resumes from it, so changes to
+  // media refreshed on an earlier page are still caught up.
+  const fullRefreshStartedOn =
+    prevFullRefreshCursor && typeof existingMetadata.fullRefreshStartedOn === "string"
+      ? existingMetadata.fullRefreshStartedOn
+      : today;
 
   const unfinished = (deadlineReached: boolean): TmdbMediaTypeSyncSummary => ({
     mediaType,
@@ -667,10 +694,18 @@ async function syncSingleMediaType(
   }
 
   let candidates = parsedTracked;
-  if (mode === "changes") {
+  if (mode === "full_refresh") {
+    const remaining = prevFullRefreshCursor
+      ? parsedTracked.filter((entry) => entry.mediaId > prevFullRefreshCursor)
+      : parsedTracked;
+    candidates = remaining.slice(0, fullRefreshPageSize);
+    if (remaining.length > candidates.length) {
+      nextFullRefreshCursor = candidates.at(-1)!.mediaId;
+    }
+  } else {
     try {
       const changes = await gateway.fetchChanges(mediaType, { startDate, endDate });
-      const changedIdSet = new Set(changes.changedIds);
+      const changedIdSet = new Set([...changes.changedIds, ...retryTmdbIds]);
       const changedCandidates = parsedTracked.filter((entry) => changedIdSet.has(entry.tmdbId));
       let backfillCandidates: typeof parsedTracked = [];
       if (traktBackfillEnabled) {
@@ -706,8 +741,10 @@ async function syncSingleMediaType(
   let refreshedCount = 0;
   let missingCount = 0;
   let flaggedSegmentCount = 0;
-  let typeHadTransientError = false;
+  const failedTmdbIds: string[] = [];
   let deadlineReached = false;
+  // Candidates are processed in order; the ones past this index were left for the next run.
+  let attemptedCount = 0;
 
   batches: for (let offset = 0; offset < candidates.length; offset += fullRefreshBatchSize) {
     const batch = candidates.slice(offset, offset + fullRefreshBatchSize);
@@ -725,6 +762,7 @@ async function syncSingleMediaType(
         deadlineReached = true;
         break batches;
       }
+      attemptedCount += 1;
       let fetched = null;
       let isNotFound = false;
 
@@ -739,7 +777,7 @@ async function syncSingleMediaType(
         if (error instanceof TmdbGatewayError && error.code === "TMDB_NOT_FOUND") {
           isNotFound = true;
         } else {
-          typeHadTransientError = true;
+          failedTmdbIds.push(item.tmdbId);
           transientErrors.push({
             mediaType,
             mediaId: item.mediaId,
@@ -1002,39 +1040,71 @@ async function syncSingleMediaType(
     }
   }
 
-  let cursorAdvanced = false;
-  let lastSyncedDate = existingCursor?.last_synced_date ?? null;
-
-  if (!typeHadTransientError && !deadlineReached) {
-    const targetDate = maxDateString(existingCursor?.last_synced_date ?? null, today);
-    lastSyncedDate = await upsertSyncState(
-      db,
-      syncKey,
-      targetDate,
-      {
-        mode,
-        startDate,
-        endDate,
-        gapDays,
-        trackedCount: parsedTracked.length,
-        candidateCount: candidates.length,
-        refreshedCount,
-        missingCount,
-        flaggedSegmentCount,
-        ...(traktBackfillEnabled
-          ? {
-              traktBackfillCount,
-              traktBackfillAfterMediaId: mode === "full_refresh" ? null : nextBackfillCursor,
-            }
-          : prevBackfillCursor !== null
-            ? { traktBackfillAfterMediaId: prevBackfillCursor }
-            : {}),
-        lastRunAt: now.toISOString(),
-      },
-      now,
-    );
-    cursorAdvanced = true;
+  const attempted = candidates.slice(0, attemptedCount);
+  const leftOver = candidates.slice(attemptedCount);
+  if (deadlineReached) {
+    if (attempted.length === 0) {
+      return unfinished(true);
+    }
+    // Resume where this run stopped: the next full-refresh page starts after the last item done,
+    // and the Trakt backfill rotation only moves past backfill items actually processed.
+    if (mode === "full_refresh") {
+      nextFullRefreshCursor = attempted.at(-1)!.mediaId;
+    }
+    nextBackfillCursor =
+      attempted.filter((entry) => entry.backfillOnly).at(-1)?.mediaId ?? prevBackfillCursor;
   }
+  const cursorAdvanced = nextFullRefreshCursor === null;
+  const targetDate = cursorAdvanced
+    ? maxDateString(
+        existingCursor?.last_synced_date ?? null,
+        mode === "full_refresh" ? fullRefreshStartedOn : today,
+      )
+    : existingCursor!.last_synced_date;
+  // Earlier failures stay listed until a run actually retries them (a later full-refresh page
+  // does not), plus this run's failures.
+  const attemptedIds = new Set(attempted.map((entry) => entry.tmdbId));
+  const trackedIds = new Set(parsedTracked.map((entry) => entry.tmdbId));
+  const nextRetryTmdbIds = [
+    ...new Set([
+      ...retryTmdbIds.filter((id) => trackedIds.has(id) && !attemptedIds.has(id)),
+      ...failedTmdbIds,
+      // Changed items the deadline cut off are retried like failures; a full refresh resumes by page.
+      ...(mode === "changes"
+        ? leftOver.filter((entry) => !entry.backfillOnly).map((entry) => entry.tmdbId)
+        : []),
+    ]),
+  ];
+  const lastSyncedDate = await upsertSyncState(
+    db,
+    syncKey,
+    targetDate,
+    {
+      mode,
+      startDate,
+      endDate,
+      gapDays,
+      trackedCount: parsedTracked.length,
+      candidateCount: candidates.length,
+      refreshedCount,
+      missingCount,
+      flaggedSegmentCount,
+      ...(nextRetryTmdbIds.length > 0 ? { retryTmdbIds: nextRetryTmdbIds } : {}),
+      ...(nextFullRefreshCursor !== null
+        ? { fullRefreshAfterMediaId: nextFullRefreshCursor, fullRefreshStartedOn }
+        : {}),
+      ...(traktBackfillEnabled
+        ? {
+            traktBackfillCount,
+            traktBackfillAfterMediaId: mode === "full_refresh" ? null : nextBackfillCursor,
+          }
+        : prevBackfillCursor !== null
+          ? { traktBackfillAfterMediaId: prevBackfillCursor }
+          : {}),
+      lastRunAt: now.toISOString(),
+    },
+    now,
+  );
 
   return {
     mediaType,
@@ -1069,6 +1139,10 @@ export async function runTmdbDailySync(
     1,
     options.maxChangesWindowDays ?? TMDB_CHANGES_MAX_WINDOW_DAYS,
   );
+  const fullRefreshPageSize = Math.max(
+    1,
+    options.fullRefreshPageSize ?? DEFAULT_TMDB_FULL_REFRESH_PAGE_SIZE,
+  );
   const gateway = options.tmdbGateway ?? createTmdbGateway(outbound, options.tmdbConfig);
   const traktBackfillEnabled =
     options.backfillMissingTrakt ?? isTraktSyncEnabled(options.tmdbConfig);
@@ -1081,6 +1155,7 @@ export async function runTmdbDailySync(
     today,
     now,
     fullRefreshBatchSize,
+    fullRefreshPageSize,
     maxChangesWindowDays,
     traktBackfillEnabled,
     transientErrors,
@@ -1094,6 +1169,7 @@ export async function runTmdbDailySync(
     today,
     now,
     fullRefreshBatchSize,
+    fullRefreshPageSize,
     maxChangesWindowDays,
     traktBackfillEnabled,
     transientErrors,
@@ -1203,6 +1279,7 @@ export function createTmdbSyncJobHandler(
       tmdbConfig: options.tmdbConfig,
       tmdbGateway: options.tmdbGateway,
       fullRefreshBatchSize: options.fullRefreshBatchSize,
+      fullRefreshPageSize: options.fullRefreshPageSize,
       maxChangesWindowDays: options.maxChangesWindowDays,
       backfillMissingTrakt: options.backfillMissingTrakt,
       // Stop on our own before the platform kills the invocation; a kill loses the retry outcome.

@@ -496,7 +496,8 @@ export const mgtvAdapter: Tier2Adapter<"mgtv"> = {
       }
       const nextList = Array.isArray(nextPage.data.list) ? nextPage.data.list : null;
       if (!nextList || nextList.length === 0) {
-        break;
+        // An empty page before the reported last one truncates the list; a count from it is wrong.
+        return { status: "transient_error", reason: "episode_list_page_empty" };
       }
       collectPageItems(nextList);
     }

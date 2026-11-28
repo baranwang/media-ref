@@ -9,13 +9,15 @@ import type { ExternalHttpRequest, ExternalHttpResponse, OutboundClient } from "
  * Douban request in this isolate waits for its slot, and a 400/403/429 is retried once.
  * shortcut: per-isolate config and pacing; a shared limiter (Durable Object) if isolates collide.
  */
+// Douban's public mini program apikey. frodo and the v2 IMDb lookup both accept it.
+const DOUBAN_PUBLIC_API_KEY = "0ac44ae016490db2204ce0a042db2916";
+
 export const DOUBAN_API: {
   apiKey: string | undefined;
   minIntervalMs: number;
   retryDelayMs: number;
 } = {
-  // The mini program's public frodo apiKey, base64 only to keep it out of plain-text searches.
-  apiKey: atob("MGFjNDRhZTAxNjQ5MGRiMjIwNGNlMGEwNDJkYjI5MTY="),
+  apiKey: DOUBAN_PUBLIC_API_KEY,
   minIntervalMs: 1200,
   retryDelayMs: 3000,
 };
@@ -79,9 +81,9 @@ export function fetchDoubanFrodo(
 }
 
 // frodo search needs a login after ~18 queries, so IMDb lookups use the older v2 endpoint. It
-// rejects the frodo key and the mini program referer, so it keeps its own public key and a mobile UA.
+// rejects the mini program referer, so it sends a mobile UA, and always the public key: tests and
+// config may point `DOUBAN_API.apiKey` elsewhere.
 const DOUBAN_IMDB_API = "https://api.douban.com/v2/movie/imdb";
-const DOUBAN_IMDB_LOOKUP_KEY = "0ac44ae016490db2204ce0a042db2916";
 const MOBILE_UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
@@ -97,7 +99,7 @@ export function fetchDoubanImdbLookup(
     url: `${DOUBAN_IMDB_API}/${encodeURIComponent(imdbId)}`,
     method: "POST",
     headers: { "content-type": "application/json", "user-agent": MOBILE_UA },
-    body: JSON.stringify({ apikey: DOUBAN_IMDB_LOOKUP_KEY }),
+    body: JSON.stringify({ apikey: DOUBAN_PUBLIC_API_KEY }),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
 }

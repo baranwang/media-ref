@@ -37,7 +37,10 @@ import {
 } from "./demands.ts";
 
 export { computeNotFoundBackoffSeconds, DEFAULT_NOT_FOUND_BACKOFF_SECONDS } from "./demands.ts";
-import { findReusableMediaForPrefetchedCatalogInTx } from "./duplicate-merge-policy.ts";
+import {
+  findReusableMediaForPrefetchedCatalogInTx,
+  resolveCanonicalMediaIdInTx,
+} from "./duplicate-merge-policy.ts";
 import {
   enqueueJob,
   enqueueSeedEvidenceCheckForAssociation,
@@ -1179,25 +1182,6 @@ export async function verifyExternalKeyInCatalog(
   };
 }
 
-async function resolveCanonicalMediaId(db: DbExecutor, mediaId: string): Promise<string | null> {
-  let currentId = mediaId;
-  for (let hop = 0; hop < 10; hop += 1) {
-    const row = await db
-      .selectFrom("media")
-      .select(["id", "merged_into_media_id"])
-      .where("id", "=", currentId)
-      .executeTakeFirst();
-    if (!row) {
-      return null;
-    }
-    if (!row.merged_into_media_id || row.merged_into_media_id === row.id) {
-      return row.id;
-    }
-    currentId = row.merged_into_media_id;
-  }
-  return null;
-}
-
 async function findExistingMediaIdByExternalKey(
   db: DbExecutor,
   externalKey: string,
@@ -1218,7 +1202,7 @@ async function findExistingMediaIdByExternalKey(
       .$if(db.isTransaction, (qb) => qb.forShare())
       .executeTakeFirst();
     if (ext) {
-      return resolveCanonicalMediaId(db, ext.media_id);
+      return resolveCanonicalMediaIdInTx(db, ext.media_id);
     }
   }
 
@@ -1235,7 +1219,7 @@ async function findExistingMediaIdByExternalKey(
       .$if(db.isTransaction, (qb) => qb.forShare())
       .execute();
     for (const assoc of assocs) {
-      const canonical = await resolveCanonicalMediaId(db, assoc.media_id);
+      const canonical = await resolveCanonicalMediaIdInTx(db, assoc.media_id);
       if (canonical) {
         return canonical;
       }
@@ -1249,7 +1233,7 @@ async function loadExplorationTargetMedia(
   db: DbExecutor,
   mediaId: string,
 ): Promise<ExplorationTargetMedia | null> {
-  const canonicalId = await resolveCanonicalMediaId(db, mediaId);
+  const canonicalId = await resolveCanonicalMediaIdInTx(db, mediaId);
   if (!canonicalId) {
     return null;
   }
@@ -1292,6 +1276,50 @@ async function loadExplorationTargetMedia(
       ...(row.locked ? { locked: true } : {}),
     })),
   };
+}
+
+/** Puts the demand a job leased back to `open` after `delayMs`, fenced by its lease generation. */
+async function releaseLeasedDemand(
+  db: DbExecutor,
+  payload: Pick<ExplorationJobPayload, "demandId" | "demandLeaseGeneration">,
+  now: Date,
+  delayMs: number,
+): Promise<void> {
+  await db
+    .updateTable("demands")
+    .set({
+      status: "open",
+      next_eligible_at: new Date(now.getTime() + delayMs),
+      lease_expires_at: null,
+      updated_at: now,
+    })
+    .where("id", "=", payload.demandId)
+    .where("status", "=", "leased")
+    .where("lease_generation", "=", payload.demandLeaseGeneration)
+    .execute();
+}
+
+/**
+ * Called by the worker after an exploration job failed for good. Without it the demand stays
+ * `leased` until its lease expires, and the scheduler re-leases it (charging the daily budget)
+ * every lease period for as long as the failure repeats.
+ */
+export async function releaseDemandAfterFailedExploration(
+  db: Db,
+  input: {
+    payload: Record<string, unknown>;
+    now: Date;
+    config?: Partial<ExplorationSchedulerConfig>;
+  },
+): Promise<void> {
+  const payload = parseExplorationJobPayload(input.payload);
+  if (!payload) {
+    return;
+  }
+  const delayMs =
+    resolveExplorationSchedulerConfig(input.config).transientRetryDelayMs ??
+    DEFAULT_EXPLORATION_TRANSIENT_RETRY_DELAY_MS;
+  await releaseLeasedDemand(db, payload, input.now, delayMs);
 }
 
 function parseExplorationJobPayload(raw: Record<string, unknown>): ExplorationJobPayload | null {
@@ -1486,12 +1514,22 @@ export function createExplorationJobHandler(
         });
 
         if (verification.status === "transient_error") {
+          // Release the demand with a backoff. A job retry would keep it `leased` until the lease
+          // expired, and every re-lease charges the daily budget again while the outage lasts.
+          const delayMs = Math.max(
+            config.transientRetryDelayMs ?? DEFAULT_EXPLORATION_TRANSIENT_RETRY_DELAY_MS,
+            verification.retryAfterMs ?? 0,
+          );
           return {
-            status: "retry",
-            errorMessage: verification.reason,
-            ...(verification.retryAfterMs !== undefined
-              ? { delayMs: verification.retryAfterMs }
-              : {}),
+            status: "completed",
+            result: {
+              demandId: activeDemandId,
+              status: "transient_error",
+              reason: verification.reason,
+            },
+            async onCommit(trx) {
+              await releaseLeasedDemand(trx, payload, ctx.now, delayMs);
+            },
           };
         }
 
@@ -1943,7 +1981,7 @@ export function createExplorationJobHandler(
         }
 
         const canonicalMediaId =
-          (await resolveCanonicalMediaId(trx, targetMedia.id)) ?? targetMedia.id;
+          (await resolveCanonicalMediaIdInTx(trx, targetMedia.id)) ?? targetMedia.id;
 
         // Write platform_checks ONLY for genuinely searched & confirmed not_found platforms
         for (const outcome of outcomes) {
@@ -1951,49 +1989,43 @@ export function createExplorationJobHandler(
             continue;
           }
 
+          // Upsert: two demands of one media (season 1 and 2) can finish together, and a
+          // select-then-insert would hit the unique key and roll the whole commit back.
           const existingCheck = await trx
             .selectFrom("platform_checks")
-            .select(["id", "attempt_count"])
+            .select("attempt_count")
             .where("media_id", "=", canonicalMediaId)
             .where("platform", "=", outcome.namespace)
             .forUpdate()
             .executeTakeFirst();
-
-          if (existingCheck) {
-            const nextAttempt = existingCheck.attempt_count + 1;
-            const backoffSec = computeNotFoundBackoffSeconds(
-              nextAttempt,
-              config.notFoundBackoffSeconds,
-            );
-            const nextRetryAt = new Date(ctx.now.getTime() + backoffSec * 1000);
-            await trx
-              .updateTable("platform_checks")
-              .set({
+          const nextAttempt = (existingCheck?.attempt_count ?? 0) + 1;
+          const backoffSec = computeNotFoundBackoffSeconds(
+            nextAttempt,
+            config.notFoundBackoffSeconds,
+          );
+          const nextRetryAt = new Date(ctx.now.getTime() + backoffSec * 1000);
+          await trx
+            .insertInto("platform_checks")
+            .values({
+              media_id: canonicalMediaId,
+              platform: outcome.namespace,
+              status: "not_found",
+              checked_at: ctx.now,
+              attempt_count: nextAttempt,
+              next_retry_at: nextRetryAt,
+              created_at: ctx.now,
+              updated_at: ctx.now,
+            })
+            .onConflict((oc) =>
+              oc.columns(["media_id", "platform"]).doUpdateSet({
                 status: "not_found",
                 checked_at: ctx.now,
-                attempt_count: nextAttempt,
+                attempt_count: sql<number>`platform_checks.attempt_count + 1`,
                 next_retry_at: nextRetryAt,
                 updated_at: ctx.now,
-              })
-              .where("id", "=", existingCheck.id)
-              .execute();
-          } else {
-            const backoffSec = computeNotFoundBackoffSeconds(1, config.notFoundBackoffSeconds);
-            const nextRetryAt = new Date(ctx.now.getTime() + backoffSec * 1000);
-            await trx
-              .insertInto("platform_checks")
-              .values({
-                media_id: canonicalMediaId,
-                platform: outcome.namespace,
-                status: "not_found",
-                checked_at: ctx.now,
-                attempt_count: 1,
-                next_retry_at: nextRetryAt,
-                created_at: ctx.now,
-                updated_at: ctx.now,
-              })
-              .execute();
-          }
+              }),
+            )
+            .execute();
         }
 
         if (

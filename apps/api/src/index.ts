@@ -69,6 +69,7 @@ export async function handleWorkerRequest(
       console.error("API background task failed:", error);
     },
     readRateLimitRuntime,
+    authIpLimiter: env.RATE_LIMITER_AUTH_IP,
     config: {
       baseUrl: env.API_BASE_URL,
       authSecret: env.AUTH_SECRET,

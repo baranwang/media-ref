@@ -23,7 +23,7 @@ import {
 import { evaluateEvidenceGateStep1, type CatalogEvidence } from "./evidence-gate.ts";
 import { enqueueJob, type JobExecutionOutcome, type JobHandler } from "./jobs.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
-import { extractCollectionDisplay, isUuid } from "./media-service.ts";
+import { extractCollectionDisplay, isUuid, resolveCanonicalMediaById } from "./media-service.ts";
 
 export const INVALIDATION_RECHECK_JOB_TYPE = "invalidation_recheck";
 export const DEFAULT_ANONYMOUS_INVALIDATION_THRESHOLD = 3;
@@ -411,45 +411,7 @@ export async function loadCatalogEvidenceForMedia(
   db: Db,
   initialMediaId: string,
 ): Promise<CatalogEvidence | null> {
-  let currentId = initialMediaId;
-  let mediaRow: {
-    id: string;
-    type: "movie" | "tv";
-    baseline: CatalogNamespace | null;
-    title: string;
-    original_title: string | null;
-    year: number | null;
-    seasons: SeasonSnapshotRow[];
-    merged_into_media_id: string | null;
-  } | null = null;
-
-  for (let hop = 0; hop < 10; hop += 1) {
-    const row = await db
-      .selectFrom("media")
-      .select([
-        "id",
-        "type",
-        "baseline",
-        "title",
-        "original_title",
-        "year",
-        "seasons",
-        "merged_into_media_id",
-      ])
-      .where("id", "=", currentId)
-      .executeTakeFirst();
-
-    if (!row) {
-      return null;
-    }
-
-    if (!row.merged_into_media_id || row.merged_into_media_id === row.id) {
-      mediaRow = row;
-      break;
-    }
-    currentId = row.merged_into_media_id;
-  }
-
+  const mediaRow = await resolveCanonicalMediaById(db, initialMediaId);
   if (!mediaRow) {
     return null;
   }

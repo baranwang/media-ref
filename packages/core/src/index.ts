@@ -110,7 +110,6 @@ export {
   claimDueJobs,
   startLeasedJob,
   completeJobWithFencing,
-  createDefaultJobHandlers,
   enqueueJob,
   failJobWithFencing,
   getJobById,
@@ -226,6 +225,7 @@ export {
   computeNotFoundBackoffSeconds,
   createExplorationJobHandler,
   createTmdbDailyExportsJobHandler,
+  releaseDemandAfterFailedExploration,
   DEFAULT_EXPLORATION_BATCH_SIZE,
   DEFAULT_EXPLORATION_DAILY_BUDGET,
   DEFAULT_EXPLORATION_DAILY_TOKEN_BUDGET,
@@ -295,7 +295,6 @@ export {
   isUuid,
   listChangeRequests,
   MediaServiceError,
-  readMediaDocument,
   rejectChangeRequest,
   TIER1_MANUAL_REVIEW_REASON,
   type ApproveChangeRequestInput,
@@ -308,7 +307,6 @@ export {
   type ListChangeRequestsOptions,
   type ListChangeRequestsResult,
   type MediaServiceErrorCode,
-  type ReadMediaDocumentResult,
   type RejectChangeRequestInput,
 } from "./media-service.ts";
 export {
