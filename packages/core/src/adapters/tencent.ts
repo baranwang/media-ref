@@ -369,6 +369,17 @@ function isFeatureEpisodeItem(
   return titleIsNumeric || outputIsNumeric || isBroadcast;
 }
 
+/** A trailer or extra by its own marking, not merely an item the feature filter could not read. */
+function isRecognizedExtraItem(params: Record<string, unknown>, collectionTitle: string): boolean {
+  if (params.is_trailer === "1" || params.is_trailer === 1) return true;
+  return [params.title, params.c_title_output].some((raw) => {
+    const label = nonEmptyString(raw);
+    return (
+      label !== null && BONUS_OR_TRAILER_LABEL_PATTERN.test(label.replaceAll(collectionTitle, ""))
+    );
+  });
+}
+
 function appendFilteredFeatureEpisodes(
   rawItems: readonly Record<string, unknown>[],
   mediaType: MediaType | null,
@@ -694,12 +705,19 @@ export const tencentAdapter: Tier3Adapter<"tencent"> = {
     pages.reverse();
     let fetchedPages = 0;
     let chaptered = false;
+    // Items neither feature episodes nor marked trailers/extras: the list was not fully read.
+    let unclassifiedItems = 0;
     let listedItems = 0;
     while (pages.length) {
       const { context, module } = pages.pop()!;
       if (module) {
         const items = extractModuleItemParams(module);
         listedItems += items.length;
+        unclassifiedItems += items.filter(
+          (params) =>
+            !isFeatureEpisodeItem(params, mediaType, title) &&
+            !isRecognizedExtraItem(params, title),
+        ).length;
         // A position within a season chapter; sub-category chapters label items "正片" instead.
         chaptered ||= items.some((params) =>
           NUMERIC_EPISODE_LABEL_PATTERN.test(nonEmptyString(params.episode_on_chapter) ?? ""),
@@ -733,8 +751,12 @@ export const tencentAdapter: Tier3Adapter<"tencent"> = {
         year,
         mediaType,
         // A chaptered cid lists only its first chapter here, so this count is not the whole cid's.
-        // A list of only trailers (before the premiere) counts 0; an empty or unreadable list is unknown.
-        featureEpisodeCount: chaptered || listedItems === 0 ? null : broadcast.length,
+        // A list of only marked trailers/extras (before the premiere) counts 0; an empty list, or one
+        // with items it could not classify, is unknown.
+        featureEpisodeCount:
+          chaptered || (broadcast.length === 0 && (listedItems === 0 || unclassifiedItems > 0))
+            ? null
+            : broadcast.length,
         featureEpisodes: broadcast,
       },
     };

@@ -786,6 +786,26 @@ describe("Tencent Video adapter end-to-end evidence flow (#13)", () => {
     };
     expect(open.status).toBe("approved");
     expect(open.evidence?.catalog?.unairedSeasons).toEqual([1]);
+
+    // A report the same day rechecks it under the same rule: still empty, still not premiered.
+    const association = await testDb.readDb
+      .selectFrom("associations")
+      .select("id")
+      .where("native_id", "=", "mzc002001plkc0p")
+      .executeTakeFirstOrThrow();
+    const report = await createRpcClients(app, {
+      cookie: user.cookie,
+    }).association.reportInvalidation({ associationId: association.id });
+    expect(report.jobId).toBeTruthy();
+    emitted.length = 0;
+    await worker.scheduled(createScheduledController(t0));
+    expect((await worker.queue(createQueueBatch(emitted, t0).batch)).completed).toBe(1);
+    const recheck = await testDb.readDb
+      .selectFrom("background_jobs")
+      .select("result")
+      .where("id", "=", report.jobId!)
+      .executeTakeFirstOrThrow();
+    expect(recheck.result).toMatchObject({ outcome: "still_valid" });
   });
 
   test("retries transient Tencent RPC errors while keeping change request in pending_evidence until recovery", async () => {
