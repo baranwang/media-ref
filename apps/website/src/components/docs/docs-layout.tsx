@@ -4,7 +4,6 @@ import { Link, useLocation } from "@tanstack/react-router";
 import { AnchorProvider, TOCItem, type TOCItemType } from "fumadocs-core/toc";
 import { useEffect, useRef, type ReactNode } from "react";
 import { TopNav } from "#/components/top-nav";
-import { WebMCP } from "./webmcp";
 
 interface NavItem {
   label: string;
@@ -167,7 +166,6 @@ export function DocsLayout({ toc, children }: { toc: TOCItemType[]; children: Re
   return (
     <div className="min-h-screen bg-background text-foreground">
       <TopNav />
-      <WebMCP />
       <AnchorProvider toc={sections} single>
         <div className="container flex items-start gap-12">
           <Rail className="hidden w-50 lg:block">

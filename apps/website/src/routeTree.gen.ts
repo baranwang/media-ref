@@ -18,8 +18,6 @@ import { Route as ReviewRouteImport } from "./routes/review";
 import { Route as SignupRouteImport } from "./routes/signup";
 import { Route as VerifyEmailRouteImport } from "./routes/verify-email";
 import { Route as WantedRouteImport } from "./routes/wanted";
-import { Route as ApiMcpRouteImport } from "./routes/api.mcp";
-import { Route as ApiSearchRouteImport } from "./routes/api.search";
 import { Route as ChangeRequestsIndexRouteImport } from "./routes/change-requests.index";
 import { Route as ChangeRequestsIdRouteImport } from "./routes/change-requests.$id";
 import { Route as DiscoverCatalogRouteImport } from "./routes/discover.$catalog";
@@ -73,16 +71,6 @@ const VerifyEmailRoute = VerifyEmailRouteImport.update({
 const WantedRoute = WantedRouteImport.update({
   id: "/wanted",
   path: "/wanted",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const ApiMcpRoute = ApiMcpRouteImport.update({
-  id: "/api/mcp",
-  path: "/api/mcp",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const ApiSearchRoute = ApiSearchRouteImport.update({
-  id: "/api/search",
-  path: "/api/search",
   getParentRoute: () => rootRouteImport,
 } as any);
 const ChangeRequestsIndexRoute = ChangeRequestsIndexRouteImport.update({
@@ -141,8 +129,6 @@ export interface FileRoutesByFullPath {
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
   "/wanted": typeof WantedRoute;
-  "/api/mcp": typeof ApiMcpRoute;
-  "/api/search": typeof ApiSearchRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/docs/$": typeof DocsSplatRoute;
@@ -163,8 +149,6 @@ export interface FileRoutesByTo {
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
   "/wanted": typeof WantedRoute;
-  "/api/mcp": typeof ApiMcpRoute;
-  "/api/search": typeof ApiSearchRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/docs/$": typeof DocsSplatRoute;
@@ -186,8 +170,6 @@ export interface FileRoutesById {
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
   "/wanted": typeof WantedRoute;
-  "/api/mcp": typeof ApiMcpRoute;
-  "/api/search": typeof ApiSearchRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/docs/$": typeof DocsSplatRoute;
@@ -210,8 +192,6 @@ export interface FileRouteTypes {
     | "/signup"
     | "/verify-email"
     | "/wanted"
-    | "/api/mcp"
-    | "/api/search"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/docs/$"
@@ -232,8 +212,6 @@ export interface FileRouteTypes {
     | "/signup"
     | "/verify-email"
     | "/wanted"
-    | "/api/mcp"
-    | "/api/search"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/docs/$"
@@ -254,8 +232,6 @@ export interface FileRouteTypes {
     | "/signup"
     | "/verify-email"
     | "/wanted"
-    | "/api/mcp"
-    | "/api/search"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/docs/$"
@@ -277,8 +253,6 @@ export interface RootRouteChildren {
   SignupRoute: typeof SignupRoute;
   VerifyEmailRoute: typeof VerifyEmailRoute;
   WantedRoute: typeof WantedRoute;
-  ApiMcpRoute: typeof ApiMcpRoute;
-  ApiSearchRoute: typeof ApiSearchRoute;
   ChangeRequestsIdRoute: typeof ChangeRequestsIdRoute;
   DiscoverCatalogRoute: typeof DiscoverCatalogRoute;
   DocsSplatRoute: typeof DocsSplatRoute;
@@ -353,20 +327,6 @@ declare module "@tanstack/react-router" {
       path: "/wanted";
       fullPath: "/wanted";
       preLoaderRoute: typeof WantedRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/api/mcp": {
-      id: "/api/mcp";
-      path: "/api/mcp";
-      fullPath: "/api/mcp";
-      preLoaderRoute: typeof ApiMcpRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/api/search": {
-      id: "/api/search";
-      path: "/api/search";
-      fullPath: "/api/search";
-      preLoaderRoute: typeof ApiSearchRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/change-requests/": {
@@ -445,8 +405,6 @@ const rootRouteChildren: RootRouteChildren = {
   SignupRoute: SignupRoute,
   VerifyEmailRoute: VerifyEmailRoute,
   WantedRoute: WantedRoute,
-  ApiMcpRoute: ApiMcpRoute,
-  ApiSearchRoute: ApiSearchRoute,
   ChangeRequestsIdRoute: ChangeRequestsIdRoute,
   DiscoverCatalogRoute: DiscoverCatalogRoute,
   DocsSplatRoute: DocsSplatRoute,

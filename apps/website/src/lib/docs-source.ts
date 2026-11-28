@@ -46,8 +46,6 @@ const docs = defineDocs({
     // Highlight code blocks at build time with TanStack Highlight instead of Fumadocs' Shiki.
     mdxOptions: applyMdxPreset({
       rehypeCodeOptions: false,
-      // Search indexes the text inside our components, not their JSX source.
-      remarkStructureOptions: { filterElement: () => false },
       rehypePlugins: (plugins) => [
         [
           rehypeHighlightCodeBlocks,
