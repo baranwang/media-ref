@@ -12,7 +12,6 @@ import {
   RiFileCopyLine,
   RiGithubFill,
   RiMarkdownLine,
-  RiSparkling2Line,
 } from "@remixicon/react";
 import { useState, type ComponentType } from "react";
 import { DOCS_SITE_URL } from "#/lib/docs-source";
@@ -42,7 +41,8 @@ function lobeIcon(name: string): ComponentType {
 
 const OpenAIIcon = lobeIcon("openai");
 const ClaudeIcon = lobeIcon("claude");
-const CursorIcon = lobeIcon("cursor");
+const GeminiIcon = lobeIcon("gemini");
+const GrokIcon = lobeIcon("grok");
 
 /** Copy the page as Markdown, or open it in an AI app. */
 export function PageActions({ url, path }: { url: string; path: string }) {
@@ -80,15 +80,14 @@ export function PageActions({ url, path }: { url: string; path: string }) {
       href: `https://claude.ai/new?${new URLSearchParams({ q: prompt })}`,
     },
     {
-      label: "用 Scira AI 打开",
-      // Not in lobe-icons.
-      icon: RiSparkling2Line,
-      href: `https://scira.ai/?${new URLSearchParams({ q: prompt })}`,
+      label: "用 Gemini 打开",
+      icon: GeminiIcon,
+      href: `https://gemini.google.com/app?${new URLSearchParams({ prompt })}`,
     },
     {
-      label: "用 Cursor 打开",
-      icon: CursorIcon,
-      href: `https://cursor.com/link/prompt?${new URLSearchParams({ text: prompt })}`,
+      label: "用 Grok 打开",
+      icon: GrokIcon,
+      href: `https://grok.com/?${new URLSearchParams({ q: prompt })}`,
     },
   ];
 
