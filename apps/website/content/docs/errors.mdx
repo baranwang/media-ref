@@ -52,20 +52,15 @@ description: 出错时同时给 HTTP 状态码、Connect 错误码和业务错�
 
 ## HTTP 状态码和 Connect 错误码 [#status]
 
-| HTTP  | Connect 错误码        | 什么情况                                         | 要不要重试          |
-| ----- | --------------------- | ------------------------------------------------ | ------------------- |
-| `400` | `invalid_argument`    | 参数写得不对                                     | 改了再发            |
-| `400` | `failed_precondition` | 数据的状态不允许，比如报告一条已经下架的对应关系 | 改了再发            |
-| `401` | `unauthenticated`     | 没带密钥，或密钥不能用                           | 换密钥              |
-| `403` | `permission_denied`   | 密钥没有这个权限                                 | 换密钥或开权限      |
-| `404` | `not_found`           | 要的东西不存在                                   | 不用                |
-| `429` | `resource_exhausted`  | 超出限流                                         | 按 `Retry-After` 等 |
-| `503` | `unavailable`         | 依赖的平台或目录站一时没响应                     | 稍等再试            |
-
-<Hint>
-  TypeScript SDK 的 `MediaRefApiError.status` 会把 `failed_precondition` 记成 409，判断时请以 `code`
-  为准。
-</Hint>
+| HTTP  | Connect 错误码       | 什么情况                                                             | 要不要重试          |
+| ----- | -------------------- | -------------------------------------------------------------------- | ------------------- |
+| `400` | `invalid_argument`   | 参数写得不对                                                         | 改了再发            |
+| `409` | `aborted`            | 和现有数据冲突，比如报告一条已经下架的对应关系、重复提交同一张变更单 | 先查现状再决定      |
+| `401` | `unauthenticated`    | 没带密钥，或密钥不能用                                               | 换密钥              |
+| `403` | `permission_denied`  | 密钥没有这个权限                                                     | 换密钥或开权限      |
+| `404` | `not_found`          | 要的东西不存在                                                       | 不用                |
+| `429` | `resource_exhausted` | 超出限流                                                             | 按 `Retry-After` 等 |
+| `503` | `unavailable`        | 依赖的平台或目录站一时没响应                                         | 稍等再试            |
 
 ## 常见业务错误码 [#codes]
 

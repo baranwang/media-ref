@@ -1,5 +1,6 @@
 import { create, type JsonObject, type MessageInitShape } from "@bufbuild/protobuf";
 import { Code, ConnectError } from "@connectrpc/connect";
+import { codeToHttpStatus } from "@connectrpc/connect/protocol-connect";
 import {
   ApiKeyAction as ProtoApiKeyAction,
   AssociationSchema,
@@ -103,7 +104,8 @@ export function httpStatusToConnectCode(status: number): Code {
     case 404:
       return Code.NotFound;
     case 409:
-      return Code.FailedPrecondition;
+      // Connect sends Aborted as HTTP 409 (FailedPrecondition would go out as 400).
+      return Code.Aborted;
     case 429:
       return Code.ResourceExhausted;
     case 501:
@@ -118,35 +120,8 @@ export function httpStatusToConnectCode(status: number): Code {
   }
 }
 
-export function connectCodeToHttpStatus(code: Code): number {
-  switch (code) {
-    case Code.InvalidArgument:
-    case Code.OutOfRange:
-      return 400;
-    case Code.Unauthenticated:
-      return 401;
-    case Code.PermissionDenied:
-      return 403;
-    case Code.NotFound:
-      return 404;
-    case Code.AlreadyExists:
-    case Code.FailedPrecondition:
-    case Code.Aborted:
-      return 409;
-    case Code.ResourceExhausted:
-      return 429;
-    case Code.Canceled:
-      return 499;
-    case Code.Unimplemented:
-      return 501;
-    case Code.Unavailable:
-      return 503;
-    case Code.DeadlineExceeded:
-      return 504;
-    default:
-      return 500;
-  }
-}
+/** The HTTP status Connect sends for a code, so `status` always matches what went over the wire. */
+export const connectCodeToHttpStatus: (code: Code) => number = codeToHttpStatus;
 
 function connectCodeToFallbackErrorCode(code: Code): string {
   switch (code) {

@@ -1,7 +1,8 @@
+import { ScrollArea } from "@media-ref/ui/components/scroll-area";
 import { cn } from "@media-ref/ui/lib/utils";
 import { Link, useLocation } from "@tanstack/react-router";
 import { AnchorProvider, TOCItem, type TOCItemType } from "fumadocs-core/toc";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { TopNav } from "#/components/top-nav";
 
 interface NavItem {
@@ -102,8 +103,13 @@ function SidebarItem({ item, pathname }: { item: NavItem; pathname: string }) {
 
 function Sidebar() {
   const { pathname } = useLocation();
+  const navRef = useRef<HTMLElement>(null);
+  // The sidebar scrolls on its own; keep the current page's entry in view.
+  useEffect(() => {
+    navRef.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: "nearest" });
+  }, [pathname]);
   return (
-    <nav aria-label="文档导航" className="flex flex-col gap-6">
+    <nav ref={navRef} aria-label="文档导航" className="flex flex-col gap-6">
       {NAV.map((group) => (
         <div key={group.title} className="flex flex-col gap-1">
           <p className="pb-1 pl-2.5 text-xs font-medium text-muted-foreground">{group.title}</p>
@@ -142,6 +148,18 @@ function OnThisPage({ toc }: { toc: TOCItemType[] }) {
   );
 }
 
+/** A side column pinned under the top nav that scrolls on its own. */
+function Rail({ className, children }: { className: string; children: ReactNode }) {
+  return (
+    <aside className={cn("sticky top-14 h-[calc(100svh-var(--spacing)*14)] shrink-0", className)}>
+      {/* ScrollArea sets an inline position: relative, so the aside does the sticking. */}
+      <ScrollArea className="h-full">
+        <div className="py-12">{children}</div>
+      </ScrollArea>
+    </aside>
+  );
+}
+
 export function DocsLayout({ toc, children }: { toc: TOCItemType[]; children: ReactNode }) {
   // Only top-level sections go in the TOC; the design lists one entry per H2.
   const sections = toc.filter((item) => item.depth === 2);
@@ -149,14 +167,14 @@ export function DocsLayout({ toc, children }: { toc: TOCItemType[]; children: Re
     <div className="min-h-screen bg-background text-foreground">
       <TopNav />
       <AnchorProvider toc={sections} single>
-        <div className="container flex items-start gap-12 pt-12 pb-24">
-          <aside className="hidden w-50 shrink-0 lg:block">
+        <div className="container flex items-start gap-12">
+          <Rail className="hidden w-50 lg:block">
             <Sidebar />
-          </aside>
-          <main className="min-w-0 flex-1">{children}</main>
-          <aside className="sticky top-26 hidden w-46 shrink-0 xl:block">
+          </Rail>
+          <main className="min-w-0 flex-1 pt-12 pb-24">{children}</main>
+          <Rail className="hidden w-46 xl:block">
             <OnThisPage toc={sections} />
-          </aside>
+          </Rail>
         </div>
       </AnchorProvider>
     </div>

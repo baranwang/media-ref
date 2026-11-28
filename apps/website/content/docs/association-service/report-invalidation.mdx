@@ -43,8 +43,8 @@ description: 报告一条对应关系失效了，比如平台页面下架或者�
 | `400` | `INVALID_REASON`               | `reason` 超过 500 个字          |
 | `401` | `UNAUTHORIZED`                 | 没带密钥                        |
 | `404` | `ASSOCIATION_NOT_FOUND`        | 没有这条对应关系                |
-| `400` | `ASSOCIATION_ALREADY_DELISTED` | 这条对应关系已经下架了          |
-| `400` | `ASSOCIATION_NOT_CONFIRMED`    | 还没确认的对应关系不能报        |
+| `409` | `ASSOCIATION_ALREADY_DELISTED` | 这条对应关系已经下架了          |
+| `409` | `ASSOCIATION_NOT_CONFIRMED`    | 还没确认的对应关系不能报        |
 | `429` | `INVALIDATION_LIMIT_REACHED`   | 今天的 20 次已经用完            |
 
 ## 代码示例 [#example]
