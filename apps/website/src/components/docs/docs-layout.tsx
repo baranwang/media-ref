@@ -73,6 +73,7 @@ const NAV: NavGroup[] = [
       { label: "TypeScript SDK", page: "typescript-sdk" },
       { label: "从 proto 生成客户端", page: "proto" },
       { label: "直接调用 HTTP", page: "http" },
+      { label: "MCP", page: "mcp" },
     ],
   },
   { title: "其他", items: [{ label: "更新日志", page: "changelog" }] },

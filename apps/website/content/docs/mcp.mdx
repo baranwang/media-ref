@@ -1,0 +1,99 @@
+---
+title: MCP
+breadcrumb: 文档 / 接入方式
+badges: ["给 AI agent 用"]
+description: 把公开 API 当成 MCP 工具交给 AI agent。每个工具就是一个接口，参数和返回跟直接调用 HTTP 一样。
+---
+
+## 服务地址 [#endpoint]
+
+<Endpoint method="POST" url="https://api.mediaref.org/mcp" />
+
+MCP 服务走 Streamable HTTP，不保存会话。每个请求都要带 API 密钥，写法和调用接口一样：`Authorization: Bearer <密钥>`，或 `X-API-Key: <密钥>`。不带密钥会直接返回 401。
+
+## 配置客户端 [#config]
+
+<CodeTabs items={["mcpServers JSON", "Claude Code"]}>
+
+```json
+{
+  "mcpServers": {
+    "mediaref": {
+      "url": "https://api.mediaref.org/mcp",
+      "headers": {
+        "Authorization": "Bearer <你的 API 密钥>"
+      }
+    }
+  }
+}
+```
+
+```bash
+claude mcp add --transport http mediaref https://api.mediaref.org/mcp \
+  --header "Authorization: Bearer $MEDIAREF_API_KEY"
+```
+
+</CodeTabs>
+
+<Hint>
+  现在只能用请求头带密钥。之后会支持 MCP 的 OAuth
+  登录，到时候客户端可以直接跳转授权，不用手动填密钥。
+</Hint>
+
+## 工具从哪来 [#tools]
+
+工具不是另外写的：公开的 `mediaref.v1` 里每个接口就是一个工具，名字是接口名的下划线写法，比如 `GetMedia` 对应 `get_media`。接口有增减，工具跟着变。
+
+| 工具                           | 对应接口                                                                         | 只读 |
+| ------------------------------ | -------------------------------------------------------------------------------- | ---- |
+| `get_media`                    | [GetMedia](/docs/media-service/get-media)                                        | 是   |
+| `batch_get_media`              | [BatchGetMedia](/docs/media-service/batch-get-media)                             | 否   |
+| `search`                       | [Search](/docs/browse-service/search)                                            | 是   |
+| `get_catalog_detail`           | [GetCatalogDetail](/docs/browse-service/get-catalog-detail)                      | 是   |
+| `list_trending`                | BrowseService.ListTrending                                                       | 是   |
+| `list_demands`                 | BrowseService.ListDemands                                                        | 是   |
+| `list_exploration_activity`    | BrowseService.ListExplorationActivity                                            | 是   |
+| `report_invalidation`          | [ReportInvalidation](/docs/association-service/report-invalidation)              | 否   |
+| `list_association_revisions`   | [ListAssociationRevisions](/docs/association-service/list-association-revisions) | 是   |
+| `create_change_request`        | [CreateChangeRequest](/docs/change-request-service/create-change-request)        | 否   |
+| `get_change_request`           | [GetChangeRequest](/docs/change-request-service/get-change-request)              | 是   |
+| `list_change_request_comments` | ChangeRequestService.ListChangeRequestComments                                   | 是   |
+| `get_current_api_key`          | [GetCurrentApiKey](/docs/api-key-service/get-current-api-key)                    | 是   |
+
+「只读」照搬接口在 proto 里的标注，客户端可以据此决定调用前要不要问你。`batch_get_media` 不改数据，只是 proto 里没标只读。
+
+## 参数和返回 [#json]
+
+工具的参数就是接口的请求，返回就是接口的响应，都按 proto3 的 JSON 写法，和[直接调用 HTTP](/docs/http#json) 完全一样：字段名小驼峰，枚举写完整名字，多选一的字段只写一个。每个工具的参数结构由 proto 生成，客户端在工具列表里就能看到。
+
+<CodeBlock title="get_media 的参数">
+
+```json
+{
+  "ref": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+  "season": 1,
+  "namespaceGroup": "NAMESPACE_GROUP_PLATFORM"
+}
+```
+
+</CodeBlock>
+
+## 权限、限流和出错 [#auth]
+
+MCP 只做转发：每次工具调用都按对应接口处理，用的是同一把密钥、同样的权限和同样的限流，没有另外的额度。
+
+- 读接口要密钥有 `read` 权限；`report_invalidation` 要 `report`；`create_change_request` 要 `submit`，见[鉴权与限流](/docs/auth)。
+- 每次工具调用算一次接口请求，计入密钥和 IP 的读取限额。
+- 出错时工具返回错误结果，内容是 JSON：`error` 是业务错误码，另有 `status`、`message`，被限流时还有 `retryAfterSeconds`。错误码的意思见[错误处理](/docs/errors)。
+
+<CodeBlock title="出错时的工具结果">
+
+```json
+{
+  "error": "INSUFFICIENT_PERMISSIONS",
+  "status": 403,
+  "message": "API key does not have required permission"
+}
+```
+
+</CodeBlock>
