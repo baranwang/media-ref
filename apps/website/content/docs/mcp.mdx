@@ -9,9 +9,36 @@ description: 把公开 API 当成 MCP 工具交给 AI agent。每个工具就是
 
 <Endpoint method="POST" url="https://api.mediaref.org/mcp" />
 
-MCP 服务走 Streamable HTTP，不保存会话。每个请求都要带 API 密钥，写法和调用接口一样：`Authorization: Bearer <密钥>`，或 `X-API-Key: <密钥>`。不带密钥会直接返回 401。
+MCP 服务走 Streamable HTTP，不保存会话。每个请求都要带凭证，有两种：
+
+- **OAuth 登录**：支持 MCP 授权的客户端只要填地址，第一次连接时会打开浏览器让你登录、授权，之后自己拿令牌、自己续期。见[登录授权](#oauth)。
+- **API 密钥**：写法和调用接口一样，`Authorization: Bearer <密钥>` 或 `X-API-Key: <密钥>`。
+
+不带凭证，或者凭证无效、过期，都会返回 401。
 
 ## 配置客户端 [#config]
+
+支持 OAuth 的客户端只填地址：
+
+<CodeTabs items={["mcpServers JSON", "Claude Code"]}>
+
+```json
+{
+  "mcpServers": {
+    "mediaref": {
+      "url": "https://api.mediaref.org/mcp"
+    }
+  }
+}
+```
+
+```bash
+claude mcp add --transport http mediaref https://api.mediaref.org/mcp
+```
+
+</CodeTabs>
+
+客户端不支持 OAuth，或者你更想用密钥时，在请求头里带上：
 
 <CodeTabs items={["mcpServers JSON", "Claude Code"]}>
 
@@ -35,9 +62,28 @@ claude mcp add --transport http mediaref https://api.mediaref.org/mcp \
 
 </CodeTabs>
 
+## 登录授权 [#oauth]
+
+第一次连接时，客户端会打开浏览器：
+
+1. 没登录的话先登录 MediaRef。
+2. 授权页列出客户端的名字、授权后跳回的地址和要的权限。跳回地址在你本机（`127.0.0.1`、`localhost`）时，只有你刚在这台电脑上发起登录才点「允许」。
+3. 点「允许」后回到客户端，连接就建好了。
+
+授权要求邮箱已验证，和创建 API 密钥一样。
+
+**授权就是一把 API 密钥。** 每次授权会在你的[API 密钥](/api-keys)列表里多出一把「MCP: 客户端名」，90 天后过期。它的权限、限流和用量统计跟你自己建的密钥完全一样；想撤销授权，删掉这把密钥就行。
+
+- 默认权限是 `read` 和 `report`。客户端在登录时请求 `submit` 范围，才能调用 `create_change_request`。
+- 客户端拿到的访问令牌一小时过期，它会用刷新令牌自己续期。刷新令牌每次续期都会换新，旧的不能再用。
+- 访问令牌只能用在 `/mcp`。直接调用 HTTP 接口要用 API 密钥。
+
 <Hint>
-  现在只能用请求头带密钥。之后会支持 MCP 的 OAuth
-  登录，到时候客户端可以直接跳转授权，不用手动填密钥。
+  给 MCP 客户端开发者：401 响应的 `WWW-Authenticate` 带 `resource_metadata`，指向
+  `https://api.mediaref.org/.well-known/oauth-protected-resource/mcp`；授权服务器元数据在
+  `https://api.mediaref.org/.well-known/oauth-authorization-server`。支持客户端元数据文档（`client_id`
+  为 https 地址）和动态注册，只接受公开客户端和 PKCE `S256`，授权响应带 `iss`。范围有
+  `read`、`report`、`submit`。
 </Hint>
 
 ## 工具从哪来 [#tools]
@@ -80,7 +126,7 @@ claude mcp add --transport http mediaref https://api.mediaref.org/mcp \
 
 ## 权限、限流和出错 [#auth]
 
-MCP 只做转发：每次工具调用都按对应接口处理，用的是同一把密钥、同样的权限和同样的限流，没有另外的额度。
+MCP 只做转发：每次工具调用都按对应接口处理，用的是同一把密钥（OAuth 登录时是授权生成的那把）、同样的权限和同样的限流，没有另外的额度。
 
 - 读接口要密钥有 `read` 权限；`report_invalidation` 要 `report`；`create_change_request` 要 `submit`，见[鉴权与限流](/docs/auth)。
 - 每次工具调用算一次接口请求，计入密钥和 IP 的读取限额。
