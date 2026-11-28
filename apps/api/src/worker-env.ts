@@ -9,6 +9,7 @@ export interface ApiWorkerEnv {
   EMAIL_FROM?: string;
   AUTH_SECRET?: string;
   API_BASE_URL?: string;
+  WEBSITE_URL?: string;
   COOKIE_DOMAIN?: string;
   TRUSTED_ORIGINS?: string;
   GITHUB_CLIENT_ID?: string;

@@ -29,6 +29,8 @@ import { associationServiceImpl } from "./associations.ts";
 import { browseServiceImpl } from "./browse.ts";
 import {
   AUTH_BASE_PATH,
+  DEFAULT_API_BASE_URL,
+  DEFAULT_WEBSITE_URL,
   createAuth,
   isAllowedCorsOrigin,
   type AuthConfig,
@@ -37,6 +39,12 @@ import {
 import { changeRequestServiceImpl, contributorServiceImpl } from "./change-requests.ts";
 import { kApiRequestRuntime, limitRpcByIp, type ApiRequestRuntime } from "./context.ts";
 import { handleMcpRequest, MCP_PATH } from "./mcp.ts";
+import {
+  handleMcpOAuthRequest,
+  PROTECTED_RESOURCE_METADATA_PATH,
+  resolveMcpAccessToken,
+  type McpOAuthDeps,
+} from "./mcp-oauth.ts";
 import { mediaServiceImpl } from "./media.ts";
 import {
   checkReadRateLimit,
@@ -51,6 +59,8 @@ import type { UsageReader, UsageRecorder } from "./usage.ts";
 
 export interface ApiConfig extends AuthConfig {
   now?: () => Date;
+  /** Website origin; MCP OAuth sends signed-out users to its `/login`. */
+  websiteUrl?: string;
   catalog?: CatalogGatewayConfig;
   tmdb?: TmdbGatewayConfig;
   rateLimits?: RateLimitConfig;
@@ -266,17 +276,66 @@ export function createApiApp(deps: ApiDeps): ApiApp {
     onBackgroundTaskError: deps.onBackgroundTaskError,
   };
 
+  const issuer = new URL(deps.config.baseUrl ?? DEFAULT_API_BASE_URL).origin;
+  // Tokens are sealed with the auth secret; without one there is no MCP OAuth.
+  const mcpOAuth: McpOAuthDeps | null = deps.config.authSecret
+    ? {
+        issuer,
+        websiteUrl: new URL(deps.config.websiteUrl ?? DEFAULT_WEBSITE_URL).origin,
+        secret: deps.config.authSecret,
+        dbWrite: deps.dbWrite,
+        outbound: deps.outbound,
+        getAuth,
+        now,
+      }
+    : null;
+
+  /** Better Auth's own limiter is off outside NODE_ENV=production and in-memory per request. */
+  const limitAuthPost = async (request: Request): Promise<Response | null> => {
+    for (const ipLimiter of [readRateLimit.ipLimiter, deps.authIpLimiter]) {
+      if (!ipLimiter) continue;
+      const decision = await checkReadRateLimit({
+        runtime: { ...readRateLimit, ipLimiter },
+        headers: request.headers,
+      });
+      if (!decision.allowed) {
+        return applyCorsHeaders(
+          request,
+          Response.json(
+            { code: "RATE_LIMITED", message: decision.message },
+            {
+              status: 429,
+              headers: { "Retry-After": String(decision.retryAfterSeconds) },
+            },
+          ),
+          deps.config,
+        );
+      }
+    }
+    return null;
+  };
+
   const handle = async (
     request: Request,
     ctx: ExecutionContext | undefined,
     internal: boolean,
+    fromMcp = false,
   ): Promise<Response> => {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+
+    if (mcpOAuth && !internal && !fromMcp) {
+      const limited =
+        request.method === "POST" && pathname.startsWith("/oauth/")
+          ? await limitAuthPost(request)
+          : null;
+      const res = limited ?? (await handleMcpOAuthRequest(request, mcpOAuth));
+      if (res) return res;
+    }
+
     if (request.method === "OPTIONS") {
       return buildPreflightResponse(request, deps.config);
     }
-
-    const url = new URL(request.url);
-    const pathname = url.pathname;
 
     if (pathname === "/health" && request.method === "GET") {
       try {
@@ -303,36 +362,19 @@ export function createApiApp(deps: ApiDeps): ApiApp {
       (pathname === AUTH_BASE_PATH || pathname.startsWith(`${AUTH_BASE_PATH}/`)) &&
       (request.method === "GET" || request.method === "POST")
     ) {
-      // Better Auth's own limiter is off outside NODE_ENV=production and in-memory per request.
-      for (const ipLimiter of request.method === "POST"
-        ? [readRateLimit.ipLimiter, deps.authIpLimiter]
-        : []) {
-        if (!ipLimiter) continue;
-        const decision = await checkReadRateLimit({
-          runtime: { ...readRateLimit, ipLimiter },
-          headers: request.headers,
-        });
-        if (!decision.allowed) {
-          return applyCorsHeaders(
-            request,
-            Response.json(
-              { code: "RATE_LIMITED", message: decision.message },
-              {
-                status: 429,
-                headers: { "Retry-After": String(decision.retryAfterSeconds) },
-              },
-            ),
-            deps.config,
-          );
-        }
-      }
+      const limited = request.method === "POST" ? await limitAuthPost(request) : null;
+      if (limited) return limited;
       const authRes = await getAuth().handler(request);
       return applyCorsHeaders(request, authRes, deps.config);
     }
 
-    // Public only: MCP tools call the public RPCs below with the caller's API key.
-    if (pathname === MCP_PATH && !internal) {
-      const res = await handleMcpRequest(request, (rpcRequest) => handle(rpcRequest, ctx, false));
+    // Public only: MCP tools call the public RPCs below with the caller's API key or token.
+    if (pathname === MCP_PATH && !internal && !fromMcp) {
+      const res = await handleMcpRequest(
+        request,
+        (rpcRequest) => handle(rpcRequest, ctx, false, true),
+        `${issuer}${PROTECTED_RESOURCE_METADATA_PATH}${MCP_PATH}`,
+      );
       return applyCorsHeaders(request, res, deps.config);
     }
 
@@ -342,6 +384,9 @@ export function createApiApp(deps: ApiDeps): ApiApp {
         ...baseRuntime,
         internal,
         executionCtx: ctx,
+        ...(fromMcp && mcpOAuth
+          ? { resolveMcpAccessToken: (token: string) => resolveMcpAccessToken(mcpOAuth, token) }
+          : {}),
       };
       const uReq = universalServerRequestFromFetch(request, {});
       uReq.contextValues = createContextValues().set(kApiRequestRuntime, runtime);

@@ -223,18 +223,22 @@ describe("MCP server at /mcp", () => {
     expect(unknownField).toMatchObject({ isError: true, data: { error: "INVALID_ARGUMENT" } });
   });
 
-  test("rejects requests without a key and tool calls with an invalid key", async () => {
+  test("rejects requests without a key or with an invalid key at the HTTP layer", async () => {
     const { app } = await setup();
 
     const missing = await mcp(app, "tools/list", {});
     expect(missing.status).toBe(401);
     expect(missing.body.code).toBe("API_KEY_REQUIRED");
 
-    const invalid = await callTool(app, "mr_not-a-real-key", "get_media", { ref: JJK });
-    expect(invalid).toMatchObject({
-      isError: true,
-      data: { error: "INVALID_API_KEY", status: 401 },
-    });
+    // 401 rather than a tool error, so an MCP client knows to sign in again.
+    const invalid = await mcp(
+      app,
+      "tools/call",
+      { name: "get_media", arguments: { ref: JJK } },
+      { authorization: "Bearer mr_not-a-real-key" },
+    );
+    expect(invalid.status).toBe(401);
+    expect(invalid.body.code).toBe("INVALID_API_KEY");
   });
 
   test("denies create_change_request to a key without submit permission", async () => {

@@ -26,6 +26,7 @@
   ],
   "vars": {
     "API_BASE_URL": "https://api.mediaref.org",
+    "WEBSITE_URL": "https://mediaref.org",
     "COOKIE_DOMAIN": "mediaref.org",
     "TRUSTED_ORIGINS": "https://mediaref.org,https://www.mediaref.org",
     "EMAIL_FROM": "noreply@mediaref.org",

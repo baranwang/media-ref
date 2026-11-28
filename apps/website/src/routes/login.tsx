@@ -15,6 +15,7 @@ import { useState } from "react";
 import { AuthLayout } from "#/components/auth-layout";
 import { NamespaceLogo } from "#/components/brand-logos";
 import {
+  getApiBaseUrl,
   requestSocialSignInUrl,
   resolveOAuthErrorMessage,
   type SocialOAuthProvider,
@@ -23,17 +24,34 @@ import { useAppStore } from "#/lib/app-store";
 
 interface LoginSearch {
   error?: 1 | string;
+  redirect?: string;
+}
+
+/** Only the API's MCP authorization page may be a post-login destination (no open redirect). */
+function parseMcpAuthorizeRedirect(value: unknown): string | undefined {
+  const apiBaseUrl = getApiBaseUrl();
+  if (typeof value !== "string" || !apiBaseUrl) return undefined;
+  try {
+    const url = new URL(value);
+    return url.origin === new URL(apiBaseUrl).origin && url.pathname === "/oauth/authorize"
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export const Route = createFileRoute("/login")({
   validateSearch: (search: Record<string, unknown>): LoginSearch => {
+    const redirect = parseMcpAuthorizeRedirect(search.redirect);
+    const result: LoginSearch = redirect ? { redirect } : {};
     if (search.error === 1 || search.error === "1") {
-      return { error: 1 };
+      return { ...result, error: 1 };
     }
     if (typeof search.error === "string" && search.error.trim().length > 0) {
-      return { error: search.error.trim() };
+      return { ...result, error: search.error.trim() };
     }
-    return {};
+    return result;
   },
   component: LoginPage,
 });
@@ -63,6 +81,10 @@ function LoginPage() {
         setErrorMessage(result.error ?? "邮箱或密码不对");
         return;
       }
+      if (search.redirect) {
+        window.location.assign(search.redirect);
+        return;
+      }
       void navigate({ to: "/" });
     },
   });
@@ -74,7 +96,7 @@ function LoginPage() {
 
     setOauthLoading(provider);
     const result = await requestSocialSignInUrl(provider, {
-      callbackURL: `${window.location.origin}/`,
+      callbackURL: search.redirect ?? `${window.location.origin}/`,
       errorCallbackURL: `${window.location.origin}/login`,
     });
     if (!result.ok) {

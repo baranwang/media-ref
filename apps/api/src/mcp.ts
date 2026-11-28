@@ -6,7 +6,7 @@ import {
   type JsonValue,
 } from "@bufbuild/protobuf";
 import { MethodOptions_IdempotencyLevel } from "@bufbuild/protobuf/wkt";
-import { ConnectError } from "@connectrpc/connect";
+import { ConnectError, createClient, type Transport } from "@connectrpc/connect";
 import { createMediaRefTransport, extractConnectErrorInfo, proto } from "@media-ref/client";
 import { createMcpHandler, McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { extractApiKeyFromHeaders } from "./api-keys.ts";
@@ -87,15 +87,11 @@ function toolError(code: string, status: number, message: string, extra: object 
 }
 
 /**
- * One MCP server per HTTP request whose tools forward to the public RPCs. `fetch` sends each
- * RPC through the API Worker's own router, so the caller's API key gets the same auth,
- * permission and rate-limit checks as a direct RPC call.
+ * One MCP server per HTTP request whose tools forward to the public RPCs. `transport` sends each
+ * RPC through the API Worker's own router, so the caller's API key or access token gets the same
+ * auth, permission and rate-limit checks as a direct RPC call.
  */
-function createServer(
-  apiKey: string,
-  fetch: (input: string, init?: RequestInit) => Promise<Response>,
-): McpServer {
-  const transport = createMediaRefTransport({ apiKey, fetch, baseUrl: "https://mcp.internal" });
+function createServer(transport: Transport): McpServer {
   const server = new McpServer(
     { name: "mediaref", version: "1.0.0" },
     { instructions: SERVER_INSTRUCTIONS },
@@ -136,19 +132,28 @@ function createServer(
 /**
  * Serves `/mcp`. `dispatch` hands a public RPC request to the API Worker's router; the MCP
  * caller's IP is copied onto it so per-IP read limits count MCP tool calls too.
+ * `resourceMetadataUrl` goes in the 401 challenge so MCP clients can find the OAuth server.
  */
 export async function handleMcpRequest(
   request: Request,
   dispatch: (request: Request) => Promise<Response>,
+  resourceMetadataUrl: string,
 ): Promise<Response> {
+  const unauthorized = (code: string, message: string, error?: string) =>
+    Response.json(
+      { code, message },
+      {
+        status: 401,
+        headers: {
+          "www-authenticate": `Bearer resource_metadata="${resourceMetadataUrl}", scope="read report"${error ? `, error="${error}"` : ""}`,
+        },
+      },
+    );
   const apiKey = extractApiKeyFromHeaders(request.headers);
   if (!apiKey) {
-    return Response.json(
-      {
-        code: "API_KEY_REQUIRED",
-        message: "API key is required (Authorization: Bearer <key> or X-API-Key)",
-      },
-      { status: 401 },
+    return unauthorized(
+      "API_KEY_REQUIRED",
+      "API key or OAuth access token is required (Authorization: Bearer <token> or X-API-Key)",
     );
   }
   const ip = request.headers.get("cf-connecting-ip");
@@ -158,5 +163,15 @@ export async function handleMcpRequest(
     // connect-web asks for redirect "error", which workerd's Request rejects; nothing redirects here.
     return dispatch(new Request(input, { ...init, headers, redirect: "manual" }));
   };
-  return createMcpHandler(() => createServer(apiKey, fetch)).fetch(request);
+  const transport = createMediaRefTransport({ apiKey, fetch, baseUrl: "https://mcp.internal" });
+
+  // An expired or revoked credential fails here, at the HTTP layer, so the client signs in again.
+  try {
+    await createClient(proto.ApiKeyService, transport).getCurrentApiKey({});
+  } catch (error) {
+    if (!(error instanceof ConnectError)) throw error;
+    const { code, status, message } = extractConnectErrorInfo(error);
+    if (status === 401) return unauthorized(code, message, "invalid_token");
+  }
+  return createMcpHandler(() => createServer(transport)).fetch(request);
 }

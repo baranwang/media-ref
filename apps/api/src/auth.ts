@@ -6,6 +6,7 @@ import { buildOAuthAuthOptions, type OAuthConfig } from "./oauth.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
 export const DEFAULT_API_BASE_URL = "https://api.mediaref.org";
+export const DEFAULT_WEBSITE_URL = "https://mediaref.org";
 export const DEFAULT_EMAIL_FROM = "noreply@mediaref.org";
 
 export interface AuthConfig {
@@ -41,7 +42,7 @@ export interface AuthenticatedSession {
   user: AuthenticatedUser;
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")

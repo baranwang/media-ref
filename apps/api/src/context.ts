@@ -32,6 +32,7 @@ import {
   type VerifiedApiKey,
 } from "./api-keys.ts";
 import { getAuthenticatedSession, type AuthenticatedSession, type AuthInstance } from "./auth.ts";
+import { MCP_ACCESS_TOKEN_PREFIX } from "./mcp-oauth.ts";
 import { checkReadRateLimit, type ReadRateLimitRuntime } from "./rate-limit.ts";
 import type { UsageReader, UsageRecorder } from "./usage.ts";
 
@@ -54,6 +55,11 @@ export interface ApiRequestRuntime {
   getAuth: () => AuthInstance;
   /** True only for requests that arrived through the `InternalApi` service-binding entrypoint. */
   internal?: boolean;
+  /**
+   * Set only on RPCs that `/mcp` forwards, the audience of MCP OAuth access tokens: resolves a
+   * token to its grant key id, or null.
+   */
+  resolveMcpAccessToken?: (token: string) => Promise<string | null>;
   executionCtx?: ExecutionContext;
   onBackgroundTask?: (promise: Promise<unknown>) => void;
   onBackgroundTaskError?: (error: unknown) => void;
@@ -104,10 +110,22 @@ export async function requireApiKeyAuth(
     });
   }
 
+  // An MCP access token is checked as the grant key it names: same principal, same checks.
+  const keyId = rawKey.startsWith(MCP_ACCESS_TOKEN_PREFIX)
+    ? ((await runtime.resolveMcpAccessToken?.(rawKey)) ?? null)
+    : undefined;
+  if (keyId === null) {
+    throw createDomainConnectError({
+      status: 401,
+      code: "INVALID_API_KEY",
+      message: "Invalid or expired access token",
+    });
+  }
+
   const db = options.db === "read" ? runtime.dbRead : runtime.dbWrite;
   const result = await verifyApiKey({
     db,
-    rawKey,
+    ...(keyId === undefined ? { rawKey } : { keyId }),
     requiredPermission: options.permission,
     now: runtime.now(),
   });

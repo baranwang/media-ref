@@ -144,12 +144,12 @@ function isKeyNotFoundError(error: unknown): boolean {
   );
 }
 
-export interface VerifyApiKeyInput {
+/** `keyId` looks the key up by id, for MCP OAuth access tokens that name their grant key. */
+export type VerifyApiKeyInput = {
   db: Db;
-  rawKey: string;
   requiredPermission?: ApiKeyAction;
   now?: Date;
-}
+} & ({ rawKey: string } | { keyId: string });
 
 export type VerifyApiKeyFailureCode =
   | "API_KEY_REQUIRED"
@@ -200,8 +200,8 @@ export function extractApiKeyFromHeaders(headers: Headers): string | null {
  * Performs a single read-only SELECT and never writes usage counters or timestamps.
  */
 export async function verifyApiKey(input: VerifyApiKeyInput): Promise<VerifyApiKeyResult> {
-  const rawKey = input.rawKey.trim();
-  if (rawKey.length === 0) {
+  const rawKey = "rawKey" in input ? input.rawKey.trim() : null;
+  if (rawKey === "") {
     return {
       ok: false,
       status: 401,
@@ -210,7 +210,6 @@ export async function verifyApiKey(input: VerifyApiKeyInput): Promise<VerifyApiK
     };
   }
 
-  const hashedKey = await hashApiKey(rawKey);
   const now = input.now ?? new Date();
 
   const row = await input.db
@@ -228,7 +227,11 @@ export async function verifyApiKey(input: VerifyApiKeyInput): Promise<VerifyApiK
       "user.emailVerified",
       "user.role",
     ])
-    .where("apikey.key", "=", hashedKey)
+    .where(
+      "keyId" in input ? "apikey.id" : "apikey.key",
+      "=",
+      "keyId" in input ? input.keyId : await hashApiKey(rawKey!),
+    )
     .where("apikey.configId", "=", DEFAULT_API_KEY_CONFIG_ID)
     .executeTakeFirst();
 
