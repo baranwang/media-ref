@@ -27,6 +27,7 @@ const REGISTERED_CLIENT_PREFIX = "mrc_";
 const ROW_PREFIX = "mcp-oauth:";
 const CODE_ROW_PREFIX = `${ROW_PREFIX}code:`;
 const REFRESH_ROW_PREFIX = `${ROW_PREFIX}refresh:`;
+const USED_REFRESH_ROW_PREFIX = `${ROW_PREFIX}used:`;
 
 const ACCESS_TOKEN_TTL_SECONDS = 3600;
 const GRANT_TTL_SECONDS = 90 * 86_400;
@@ -273,7 +274,8 @@ async function resolveClient(deps: McpOAuthDeps, clientId: string): Promise<OAut
       namespace: "mcp-client",
       url: clientId,
       headers: { accept: "application/json" },
-      redirect: "error",
+      // workerd rejects "error"; a 3xx fails the status check below.
+      redirect: "manual",
       timeoutMs: 5000,
     });
     if (res.status !== 200 || res.body.length > 5120) return null;
@@ -389,12 +391,9 @@ async function authorize(request: Request, deps: McpOAuthDeps): Promise<Response
   }
 
   const state = params.get("state");
+  // Anyone can register any https redirect URI, so nothing redirects before the user clicks.
   const fail = (error: string, description: string) =>
-    redirectWith(
-      redirectUri,
-      { error, error_description: description, state, iss: deps.issuer },
-      302,
-    );
+    page(400, "授权请求无效", `<p>${escapeHtml(`${error}: ${description}`)}</p>`);
   if (params.get("response_type") !== "code") {
     return fail("unsupported_response_type", "Only response_type=code is supported");
   }
@@ -465,16 +464,25 @@ async function decide(request: Request, deps: McpOAuthDeps): Promise<Response> {
 
   const code = randomToken();
   const { s: state, ...approval } = consent;
+  await putRow(
+    deps,
+    CODE_ROW_PREFIX + (await hashApiKey(code)),
+    JSON.stringify(approval satisfies Approval),
+    CODE_TTL_SECONDS,
+  );
+  return redirectWith(consent.u, { code, state, iss: deps.issuer }, 303);
+}
+
+async function putRow(deps: McpOAuthDeps, identifier: string, value: string, ttlSeconds: number) {
   await deps.dbWrite
     .insertInto("verification")
     .values({
       id: crypto.randomUUID(),
-      identifier: CODE_ROW_PREFIX + (await hashApiKey(code)),
-      value: JSON.stringify(approval satisfies Approval),
-      expiresAt: new Date(deps.now().getTime() + CODE_TTL_SECONDS * 1000),
+      identifier,
+      value,
+      expiresAt: new Date(deps.now().getTime() + ttlSeconds * 1000),
     })
     .execute();
-  return redirectWith(consent.u, { code, state, iss: deps.issuer }, 303);
 }
 
 /** Codes and refresh tokens are single-use: the row is deleted as it is read. */
@@ -499,20 +507,19 @@ async function issueTokens(deps: McpOAuthDeps, grant: Grant): Promise<Response> 
       exp: nowSeconds(deps) + ACCESS_TOKEN_TTL_SECONDS,
     }));
   const refreshToken = randomToken();
+  await putRow(
+    deps,
+    REFRESH_ROW_PREFIX + (await hashApiKey(refreshToken)),
+    JSON.stringify(grant),
+    GRANT_TTL_SECONDS,
+  );
+  // Housekeeping only: a failed sweep must not fail the grant.
   await deps.dbWrite
     .deleteFrom("verification")
     .where("identifier", "like", `${ROW_PREFIX}%`)
     .where("expiresAt", "<=", now)
-    .execute();
-  await deps.dbWrite
-    .insertInto("verification")
-    .values({
-      id: crypto.randomUUID(),
-      identifier: REFRESH_ROW_PREFIX + (await hashApiKey(refreshToken)),
-      value: JSON.stringify(grant),
-      expiresAt: new Date(now.getTime() + GRANT_TTL_SECONDS * 1000),
-    })
-    .execute();
+    .execute()
+    .catch(() => undefined);
   return json(200, {
     access_token: accessToken,
     token_type: "Bearer",
@@ -554,10 +561,36 @@ async function token(request: Request, deps: McpOAuthDeps): Promise<Response> {
           expiresIn: GRANT_TTL_SECONDS,
         },
       });
-      return issueTokens(deps, { k: created.id, c: clientId, sc: approval.sc });
+      try {
+        return await issueTokens(deps, { k: created.id, c: clientId, sc: approval.sc });
+      } catch (error) {
+        // No token names the key and the code is spent: don't leave it in the user's list.
+        await deps.dbWrite
+          .deleteFrom("apikey")
+          .where("id", "=", created.id)
+          .execute()
+          .catch(() => undefined);
+        throw error;
+      }
     }
     case "refresh_token": {
-      const grant = await takeOnce<Grant>(deps, REFRESH_ROW_PREFIX, form.get("refresh_token"));
+      const refreshToken = form.get("refresh_token");
+      const grant = await takeOnce<Grant>(deps, REFRESH_ROW_PREFIX, refreshToken);
+      if (refreshToken) {
+        const usedId = USED_REFRESH_ROW_PREFIX + (await hashApiKey(refreshToken));
+        if (grant) {
+          // Remember the spent token: if it comes back, a copy of it is out there.
+          await putRow(deps, usedId, grant.k, GRANT_TTL_SECONDS);
+        } else {
+          // Reuse of a rotated token ends the whole grant (RFC 9700 §4.14.2).
+          const used = await deps.dbWrite
+            .selectFrom("verification")
+            .select("value")
+            .where("identifier", "=", usedId)
+            .executeTakeFirst();
+          if (used) await deps.dbWrite.deleteFrom("apikey").where("id", "=", used.value).execute();
+        }
+      }
       // A deleted, disabled or expired grant key ends the grant.
       const key =
         grant && (await verifyApiKey({ db: deps.dbWrite, keyId: grant.k, now: deps.now() }));

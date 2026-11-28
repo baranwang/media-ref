@@ -97,7 +97,8 @@ function LoginPage() {
     setOauthLoading(provider);
     const result = await requestSocialSignInUrl(provider, {
       callbackURL: search.redirect ?? `${window.location.origin}/`,
-      errorCallbackURL: `${window.location.origin}/login`,
+      // Keep the MCP authorization going if the social sign-in fails and the user retries.
+      errorCallbackURL: `${window.location.origin}/login${search.redirect ? `?redirect=${encodeURIComponent(search.redirect)}` : ""}`,
     });
     if (!result.ok) {
       setOauthError(result.error);

@@ -276,12 +276,13 @@ export function createApiApp(deps: ApiDeps): ApiApp {
     onBackgroundTaskError: deps.onBackgroundTaskError,
   };
 
-  const issuer = new URL(deps.config.baseUrl ?? DEFAULT_API_BASE_URL).origin;
+  // `||`: a blank API_BASE_URL / WEBSITE_URL falls back too, instead of throwing on every request.
+  const issuer = new URL(deps.config.baseUrl || DEFAULT_API_BASE_URL).origin;
   // Tokens are sealed with the auth secret; without one there is no MCP OAuth.
   const mcpOAuth: McpOAuthDeps | null = deps.config.authSecret
     ? {
         issuer,
-        websiteUrl: new URL(deps.config.websiteUrl ?? DEFAULT_WEBSITE_URL).origin,
+        websiteUrl: new URL(deps.config.websiteUrl || DEFAULT_WEBSITE_URL).origin,
         secret: deps.config.authSecret,
         dbWrite: deps.dbWrite,
         outbound: deps.outbound,
@@ -320,6 +321,7 @@ export function createApiApp(deps: ApiDeps): ApiApp {
     ctx: ExecutionContext | undefined,
     internal: boolean,
     fromMcp = false,
+    skipIpLimit = false,
   ): Promise<Response> => {
     const url = new URL(request.url);
     const pathname = url.pathname;
@@ -370,11 +372,14 @@ export function createApiApp(deps: ApiDeps): ApiApp {
 
     // Public only: MCP tools call the public RPCs below with the caller's API key or token.
     if (pathname === MCP_PATH && !internal && !fromMcp) {
-      const res = await handleMcpRequest(
-        request,
-        (rpcRequest) => handle(rpcRequest, ctx, false, true),
-        `${issuer}${PROTECTED_RESOURCE_METADATA_PATH}${MCP_PATH}`,
-      );
+      const res = await handleMcpRequest(request, {
+        dispatch: (rpcRequest) => handle(rpcRequest, ctx, false, true),
+        dispatchCredentialCheck: (rpcRequest) => handle(rpcRequest, ctx, false, true, true),
+        resourceMetadataUrl: `${issuer}${PROTECTED_RESOURCE_METADATA_PATH}${MCP_PATH}`,
+        ...(mcpOAuth
+          ? { resolveAccessToken: (token: string) => resolveMcpAccessToken(mcpOAuth, token) }
+          : {}),
+      });
       return applyCorsHeaders(request, res, deps.config);
     }
 
@@ -384,6 +389,7 @@ export function createApiApp(deps: ApiDeps): ApiApp {
         ...baseRuntime,
         internal,
         executionCtx: ctx,
+        skipIpLimit,
         ...(fromMcp && mcpOAuth
           ? { resolveMcpAccessToken: (token: string) => resolveMcpAccessToken(mcpOAuth, token) }
           : {}),

@@ -60,6 +60,8 @@ export interface ApiRequestRuntime {
    * token to its grant key id, or null.
    */
   resolveMcpAccessToken?: (token: string) => Promise<string | null>;
+  /** Set only on `/mcp`'s credential check, so a tool call isn't charged to the IP limit twice. */
+  skipIpLimit?: boolean;
   executionCtx?: ExecutionContext;
   onBackgroundTask?: (promise: Promise<unknown>) => void;
   onBackgroundTaskError?: (error: unknown) => void;
@@ -151,6 +153,7 @@ async function enforceRateLimit(input: Parameters<typeof checkReadRateLimit>[0])
 export const limitRpcByIp: Interceptor = (next) => async (req) => {
   const runtime = req.contextValues.get(kApiRequestRuntime);
   if (!runtime) throw new ConnectError("API request runtime is not bound", Code.Internal);
+  if (runtime.skipIpLimit) return next(req);
   await enforceRateLimit({ runtime: runtime.readRateLimit, headers: req.header });
   return next(req);
 };

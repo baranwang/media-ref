@@ -19,7 +19,13 @@ type App = ReturnType<typeof createApiApp>;
 
 let nextId = 1;
 
-async function mcp(app: App, token: string | null, method: string, params: unknown = {}) {
+async function mcp(
+  app: App,
+  token: string | null,
+  method: string,
+  params: unknown = {},
+  ip = IP["cf-connecting-ip"],
+) {
   const res = await app.fetch(
     new Request(RESOURCE, {
       method: "POST",
@@ -27,7 +33,7 @@ async function mcp(app: App, token: string | null, method: string, params: unkno
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
         "mcp-protocol-version": "2025-06-18",
-        ...IP,
+        "cf-connecting-ip": ip,
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params }),
@@ -42,8 +48,8 @@ async function mcp(app: App, token: string | null, method: string, params: unkno
   };
 }
 
-async function callTool(app: App, token: string, name: string, args: object = {}) {
-  const { status, body } = await mcp(app, token, "tools/call", { name, arguments: args });
+async function callTool(app: App, token: string, name: string, args: object = {}, ip?: string) {
+  const { status, body } = await mcp(app, token, "tools/call", { name, arguments: args }, ip);
   expect(status).toBe(200);
   const result = body.result as { isError?: boolean; content: { text: string }[] };
   return { isError: result.isError === true, data: JSON.parse(result.content[0]!.text) };
@@ -141,17 +147,23 @@ describe("MCP OAuth", () => {
     while (handles.length > 0) await handles.pop()?.cleanup();
   });
 
-  async function setup(options: { readKeyLimit?: number; cimd?: object; verify?: boolean } = {}) {
+  async function setup(
+    options: { readKeyLimit?: number; readIpLimit?: number; cimd?: object; verify?: boolean } = {},
+  ) {
     const testDb = await createTestDb();
     handles.push(testDb);
     const clock = { now: new Date() };
     const outbound = createFakeOutboundClient({
-      fetchExternal: (request: ExternalHttpRequest) => ({
-        status: request.url === CIMD_URL && options.cimd ? 200 : 404,
-        headers: { "content-type": "application/json" },
-        url: request.url,
-        body: JSON.stringify(options.cimd ?? {}),
-      }),
+      fetchExternal: (request: ExternalHttpRequest) => {
+        // As workerd's fetch does.
+        if (request.redirect === "error") throw new TypeError("Invalid redirect value: error");
+        return {
+          status: request.url === CIMD_URL && options.cimd ? 200 : 404,
+          headers: { "content-type": "application/json" },
+          url: request.url,
+          body: JSON.stringify(options.cimd ?? {}),
+        };
+      },
     });
     const app = createApiApp({
       dbRead: testDb.readDb,
@@ -162,7 +174,10 @@ describe("MCP OAuth", () => {
         limit: options.readKeyLimit ?? 100,
         periodSeconds: 60,
       }),
-      readIpLimiter: createInMemoryRateLimiter({ limit: 100, periodSeconds: 60 }),
+      readIpLimiter: createInMemoryRateLimiter({
+        limit: options.readIpLimit ?? 100,
+        periodSeconds: 60,
+      }),
       config: {
         baseUrl: TEST_BASE_URL,
         authSecret: TEST_AUTH_SECRET,
@@ -325,13 +340,47 @@ describe("MCP OAuth", () => {
         headers: { cookie },
       }),
     );
-    expect(noPkce.status).toBe(302);
-    expect(new URL(noPkce.headers.get("location")!).searchParams.get("error")).toBe(
-      "invalid_request",
-    );
+    // Before the user has clicked anything, errors stay on our page: no open redirect.
+    expect(noPkce.status).toBe(400);
+    expect(noPkce.headers.get("location")).toBeNull();
+    expect(await noPkce.text()).toContain("invalid_request");
   });
 
-  test("refresh rotates; an expired token gets a 401; deleting the grant key revokes it", async () => {
+  test("reusing a rotated refresh token revokes the whole grant", async () => {
+    const { app, cookie } = await setup();
+    const clientId = await register(app);
+    const first = await signIn(app, clientId, cookie);
+    const refresh = { grant_type: "refresh_token", client_id: clientId };
+
+    const second = await tokenRequest(app, { ...refresh, refresh_token: first.refresh_token });
+    expect(second.status).toBe(200);
+    // R1 again: someone else holds a copy, so R2 and every access token die with the grant key.
+    expect(
+      await tokenRequest(app, { ...refresh, refresh_token: first.refresh_token }),
+    ).toMatchObject({ status: 400, body: { error: "invalid_grant" } });
+    expect(
+      await tokenRequest(app, { ...refresh, refresh_token: second.body.refresh_token }),
+    ).toMatchObject({ status: 400, body: { error: "invalid_grant" } });
+    const revoked = await mcp(app, second.body.access_token, "tools/list");
+    expect(revoked.status).toBe(401);
+    expect(revoked.challenge).toContain('error="invalid_token"');
+    expect((await createRpcClients(app, { cookie }).account.listApiKeys({})).apiKeys).toEqual([]);
+  });
+
+  test("each tool call takes one unit of the IP read limit", async () => {
+    const { app, cookie } = await setup({ readIpLimit: 3 });
+    const { access_token: token } = await signIn(app, await register(app), cookie);
+
+    // A fresh IP: the sign-in POSTs above count against the same limiter.
+    for (let i = 0; i < 3; i++) {
+      const call = await callTool(app, token, "get_current_api_key", {}, "198.51.100.4");
+      expect(call.isError).toBe(false);
+    }
+    const fourth = await callTool(app, token, "get_current_api_key", {}, "198.51.100.4");
+    expect(fourth.data).toMatchObject({ error: "RATE_LIMITED" });
+  });
+
+  test("refresh renews an expired token; deleting the grant key revokes it", async () => {
     const { app, clock, cookie } = await setup();
     const clientId = await register(app);
     const first = await signIn(app, clientId, cookie);
@@ -345,10 +394,6 @@ describe("MCP OAuth", () => {
     const second = await tokenRequest(app, { ...refresh, refresh_token: first.refresh_token });
     expect(second.status).toBe(200);
     expect((await mcp(app, second.body.access_token, "tools/list")).status).toBe(200);
-    // The old refresh token was spent.
-    expect(
-      await tokenRequest(app, { ...refresh, refresh_token: first.refresh_token }),
-    ).toMatchObject({ status: 400, body: { error: "invalid_grant" } });
 
     const account = createRpcClients(app, { cookie }).account;
     const [grantKey] = (await account.listApiKeys({})).apiKeys;
