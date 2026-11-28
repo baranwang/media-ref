@@ -103,12 +103,11 @@ const DocsChar123Char125DotmdRoute = DocsChar123Char125DotmdRouteImport.update({
   path: "/docs/{$}.md",
   getParentRoute: () => rootRouteImport,
 } as any);
-const DocsChar123Char125DottxtRoute =
-  DocsChar123Char125DottxtRouteImport.update({
-    id: "/docs/{$}.txt",
-    path: "/docs/{$}.txt",
-    getParentRoute: () => rootRouteImport,
-  } as any);
+const DocsChar123Char125DottxtRoute = DocsChar123Char125DottxtRouteImport.update({
+  id: "/docs/{$}.txt",
+  path: "/docs/{$}.txt",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const ImgDoubanRoute = ImgDoubanRouteImport.update({
   id: "/img/douban",
   path: "/img/douban",
