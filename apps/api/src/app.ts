@@ -97,7 +97,7 @@ export interface ApiApp {
 export const INTERNAL_VISITOR_IP_HEADER = "x-media-ref-visitor-ip";
 
 const CORS_ALLOW_HEADERS =
-  "Content-Type, Authorization, X-API-Key, Connect-Protocol-Version, Connect-Timeout-Ms, X-Grpc-Web, X-User-Agent";
+  "Content-Type, Authorization, X-API-Key, Connect-Protocol-Version, Connect-Timeout-Ms, X-Grpc-Web, X-User-Agent, MCP-Protocol-Version";
 const CORS_EXPOSE_HEADERS = "Retry-After, Grpc-Status, Grpc-Message, Grpc-Status-Details-Bin";
 const CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 
