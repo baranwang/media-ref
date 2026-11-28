@@ -6,6 +6,7 @@ description: 公开 API 和 TypeScript SDK（@media-ref/client）的变化。
 
 ## 2026-11-28 [#2026-11-28]
 
+- 新增 MCP 服务 `https://api.mediaref.org/mcp`：公开接口直接作为 MCP 工具给 AI agent 用，见 [MCP](/docs/mcp)。
 - 开发者文档上线。
 - `GetCurrentApiKey` 归入公开的 `ApiKeyService`。网站自己用的账号、贡献者和审核接口移到 `mediaref.internal.v1`，不再属于公开 API。
 - 和现有数据冲突的错误（比如 `DUPLICATE_CHANGE_REQUEST`、`NO_CHANGE`、`ASSOCIATION_ALREADY_DELISTED`）实际返回 HTTP 409，Connect 错误码从 `failed_precondition` 改为 `aborted`。按业务错误码判断的程序不受影响。

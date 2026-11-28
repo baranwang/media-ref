@@ -16,6 +16,7 @@
     "typescript-sdk",
     "proto",
     "http",
+    "mcp",
     "---其他---",
     "changelog"
   ]
