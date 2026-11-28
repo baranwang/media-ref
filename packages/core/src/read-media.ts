@@ -3,7 +3,6 @@ import {
   PLATFORM_NAMESPACES,
   formatExternalKey,
   isPlatformNamespace,
-  parseExternalKey,
   type Association,
   type BaselineSource,
   type ExternalIdNamespace,
@@ -21,6 +20,7 @@ import type {
   StoredSegmentJson,
   ExternalIdNamespaceRow,
 } from "@media-ref/db";
+import { parseStoredExternalKey } from "./external-ids.ts";
 import { isAssociationNamespace, isUuid } from "./media-service.ts";
 
 export const MAX_BATCH_MEDIA_KEYS = 100;
@@ -172,7 +172,7 @@ function parseLookupKey(raw: string): ParsedLookupKey | null {
     return null;
   }
 
-  const parsed = parseExternalKey(trimmed);
+  const parsed = parseStoredExternalKey(trimmed);
   if (!parsed) {
     return null;
   }

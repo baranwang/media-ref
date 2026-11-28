@@ -13,6 +13,8 @@ import {
   type Tier3Adapter,
 } from "./types.ts";
 
+const CST_OFFSET_MS = 8 * 60 * 60 * 1000;
+
 /**
  * Youku platform adapter (Tier 1, Tier 2 & Tier 3).
  *
@@ -139,7 +141,8 @@ function parseAirDate(raw: unknown): string | null {
   }
   if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
     const ms = raw > 1e12 ? raw : raw * 1000;
-    const date = new Date(ms);
+    // Air dates are China Standard Time dates.
+    const date = new Date(ms + CST_OFFSET_MS);
     return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
   }
   return null;

@@ -374,7 +374,7 @@ function toChangeRequestRecord(row: Selectable<ChangeRequestsTable>): ChangeRequ
 
 type DbExecutor = Db | Transaction<Database>;
 
-interface ResolvedMediaRow {
+export interface ResolvedMediaRow {
   id: string;
   type: "movie" | "tv";
   baseline: BaselineSource | null;
@@ -385,37 +385,30 @@ interface ResolvedMediaRow {
   merged_into_media_id: string | null;
 }
 
-async function resolveCanonicalMediaById(
+/** The media a merge redirect chain ends at, as a row; null on a missing row or a cycle. */
+export async function resolveCanonicalMediaById(
   db: DbExecutor,
   mediaId: string,
 ): Promise<ResolvedMediaRow | null> {
-  let currentId = mediaId;
-  for (let hop = 0; hop < 10; hop++) {
-    const row = await db
-      .selectFrom("media")
-      .select([
-        "id",
-        "type",
-        "baseline",
-        "title",
-        "original_title",
-        "year",
-        "seasons",
-        "merged_into_media_id",
-      ])
-      .where("id", "=", currentId)
-      .executeTakeFirst();
-
-    if (!row) {
-      return null;
-    }
-
-    if (!row.merged_into_media_id || row.merged_into_media_id === row.id) {
-      return row;
-    }
-    currentId = row.merged_into_media_id;
+  const canonicalId = await resolveCanonicalMediaIdInTx(db, mediaId);
+  if (!canonicalId) {
+    return null;
   }
-  return null;
+  const row = await db
+    .selectFrom("media")
+    .select([
+      "id",
+      "type",
+      "baseline",
+      "title",
+      "original_title",
+      "year",
+      "seasons",
+      "merged_into_media_id",
+    ])
+    .where("id", "=", canonicalId)
+    .executeTakeFirst();
+  return row ?? null;
 }
 
 type ParsedTargetKey =

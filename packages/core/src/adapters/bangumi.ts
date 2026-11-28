@@ -232,6 +232,10 @@ function buildOrdinalEpisodes(count: number): FeatureEpisode[] {
   return episodes;
 }
 
+const BANGUMI_EPISODES_PAGE_SIZE = 100;
+// shortcut: stops after 30 pages (3000 episodes), when a longer series appears, raise or stream.
+const BANGUMI_EPISODES_MAX_PAGES = 30;
+
 async function fetchBangumiMainEpisodes(
   subjectId: string,
   outbound: OutboundClient,
@@ -241,67 +245,81 @@ async function fetchBangumiMainEpisodes(
   | { ok: true; total: number | null; episodes: FeatureEpisode[] }
   | { ok: false; transientReason: string }
 > {
-  const url = `${apiBaseUrl}/episodes?subject_id=${encodeURIComponent(subjectId)}&type=0&limit=100&offset=0`;
-  let response: ExternalHttpResponse;
-  try {
-    response = await outbound.fetchExternal({
-      kind: "catalog",
-      namespace: "bangumi",
-      url,
-      method: "GET",
-      headers: BANGUMI_API_HEADERS,
-      timeoutMs,
-    });
-  } catch (error) {
-    return {
-      ok: false,
-      transientReason: error instanceof Error ? error.message : "bangumi_episodes_request_failed",
-    };
-  }
-
-  if (response.status === 404) {
-    return { ok: true, total: null, episodes: [] };
-  }
-
-  if (response.status < 200 || response.status >= 300) {
-    return { ok: false, transientReason: `http_${response.status}` };
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(response.body);
-  } catch {
-    return { ok: false, transientReason: "invalid_json" };
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { ok: false, transientReason: "unexpected_payload" };
-  }
-
-  const record = parsed as Record<string, unknown>;
-  const rawData = Array.isArray(record.data) ? record.data : [];
   const episodes: FeatureEpisode[] = [];
+  let reportedTotal: number | null = null;
 
-  for (const item of rawData) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      continue;
+  // The episode list is paged; the count and the episodes must describe the same list.
+  for (let page = 0; page < BANGUMI_EPISODES_MAX_PAGES; page += 1) {
+    const offset = page * BANGUMI_EPISODES_PAGE_SIZE;
+    const url = `${apiBaseUrl}/episodes?subject_id=${encodeURIComponent(subjectId)}&type=0&limit=${BANGUMI_EPISODES_PAGE_SIZE}&offset=${offset}`;
+    let response: ExternalHttpResponse;
+    try {
+      response = await outbound.fetchExternal({
+        kind: "catalog",
+        namespace: "bangumi",
+        url,
+        method: "GET",
+        headers: BANGUMI_API_HEADERS,
+        timeoutMs,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        transientReason: error instanceof Error ? error.message : "bangumi_episodes_request_failed",
+      };
     }
-    const ep = item as Record<string, unknown>;
-    if (ep.type !== undefined && ep.type !== 0) {
-      continue;
+
+    if (response.status === 404 && page === 0) {
+      return { ok: true, total: null, episodes: [] };
     }
-    const epId = parsePositiveInt(ep.id);
-    const epTitle = nonEmptyString(ep.name_cn) ?? nonEmptyString(ep.name);
-    const airDate = nonEmptyString(ep.airdate);
-    episodes.push({
-      index: episodes.length + 1,
-      ...(epId !== null ? { nativeEpisodeId: String(epId) } : {}),
-      ...(epTitle ? { title: epTitle } : {}),
-      ...(airDate ? { airDate } : {}),
-    });
+
+    if (response.status < 200 || response.status >= 300) {
+      return { ok: false, transientReason: `http_${response.status}` };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response.body);
+    } catch {
+      return { ok: false, transientReason: "invalid_json" };
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: false, transientReason: "unexpected_payload" };
+    }
+
+    const record = parsed as Record<string, unknown>;
+    const rawData = Array.isArray(record.data) ? record.data : [];
+
+    for (const item of rawData) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        continue;
+      }
+      const ep = item as Record<string, unknown>;
+      if (ep.type !== undefined && ep.type !== 0) {
+        continue;
+      }
+      const epId = parsePositiveInt(ep.id);
+      const epTitle = nonEmptyString(ep.name_cn) ?? nonEmptyString(ep.name);
+      const airDate = nonEmptyString(ep.airdate);
+      episodes.push({
+        index: episodes.length + 1,
+        ...(epId !== null ? { nativeEpisodeId: String(epId) } : {}),
+        ...(epTitle ? { title: epTitle } : {}),
+        ...(airDate ? { airDate } : {}),
+      });
+    }
+
+    reportedTotal = parsePositiveInt(record.total) ?? reportedTotal;
+    if (
+      rawData.length < BANGUMI_EPISODES_PAGE_SIZE ||
+      reportedTotal === null ||
+      offset + BANGUMI_EPISODES_PAGE_SIZE >= reportedTotal
+    ) {
+      break;
+    }
   }
 
-  const reportedTotal = parsePositiveInt(record.total);
   const count =
     reportedTotal !== null
       ? Math.max(reportedTotal, episodes.length)

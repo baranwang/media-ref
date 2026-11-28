@@ -29,6 +29,7 @@ import {
   type EvidenceGateResult,
   type EvidenceGateStep2Evaluator,
 } from "./evidence-gate.ts";
+import { resolveCanonicalMediaIdInTx } from "./duplicate-merge-policy.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import { isUuid, type ChangeRequestRecord } from "./media-service.ts";
 import type { OutboundClient } from "./outbound.ts";
@@ -36,7 +37,6 @@ import { parseTmdbNativeId } from "./tmdb.ts";
 import { REVIEW_ALERT_TYPES } from "./tmdb-sync.ts";
 
 const EXTERNAL_ID_NAMESPACE_SET: ReadonlySet<string> = new Set(EXTERNAL_ID_NAMESPACES);
-const MAX_MERGE_HOPS = 10;
 
 export const CONFLICT_REASONS = {
   LOCKED_ASSOCIATION_CHALLENGED: "locked_association_challenged",
@@ -274,27 +274,6 @@ function toExternalIdRecord(row: Selectable<AssociationsTable>): ExternalIdRecor
   };
 }
 
-async function resolveCanonicalMediaId(db: DbExecutor, mediaId: string): Promise<string | null> {
-  let currentId = mediaId;
-  for (let hop = 0; hop < MAX_MERGE_HOPS; hop += 1) {
-    const row = await db
-      .selectFrom("media")
-      .select(["id", "merged_into_media_id"])
-      .where("id", "=", currentId)
-      .executeTakeFirst();
-
-    if (!row) {
-      return null;
-    }
-
-    if (!row.merged_into_media_id || row.merged_into_media_id === row.id) {
-      return row.id;
-    }
-    currentId = row.merged_into_media_id;
-  }
-  return null;
-}
-
 export async function listAssociationRevisions(
   db: Db,
   associationId: string,
@@ -513,7 +492,7 @@ export async function overrideMediaExternalId(
 
   try {
     return await dbWrite.transaction().execute(async (trx) => {
-      const canonicalMediaId = await resolveCanonicalMediaId(trx, trimmedMediaId);
+      const canonicalMediaId = await resolveCanonicalMediaIdInTx(trx, trimmedMediaId);
       if (!canonicalMediaId) {
         throw new ConflictResolutionError(
           "MEDIA_NOT_FOUND",
@@ -628,7 +607,7 @@ export async function setMediaExternalIdLock(
   const namespace: ExternalIdNamespace = rawNamespace;
   const now = input.now ?? new Date();
 
-  const canonicalMediaId = await resolveCanonicalMediaId(dbWrite, trimmedMediaId);
+  const canonicalMediaId = await resolveCanonicalMediaIdInTx(dbWrite, trimmedMediaId);
   if (!canonicalMediaId) {
     throw new ConflictResolutionError("MEDIA_NOT_FOUND", 404, `Media not found: ${trimmedMediaId}`);
   }
@@ -739,16 +718,16 @@ async function resolveMediaIdForChangeRequest(
   targetExternalKey: string,
 ): Promise<string | null> {
   if (mediaId) {
-    return resolveCanonicalMediaId(db, mediaId);
+    return resolveCanonicalMediaIdInTx(db, mediaId);
   }
 
   const trimmed = targetExternalKey.trim();
   if (isUuid(trimmed)) {
-    return resolveCanonicalMediaId(db, trimmed);
+    return resolveCanonicalMediaIdInTx(db, trimmed);
   }
   if (trimmed.startsWith("media:")) {
     const candidate = trimmed.slice("media:".length);
-    return isUuid(candidate) ? resolveCanonicalMediaId(db, candidate) : null;
+    return isUuid(candidate) ? resolveCanonicalMediaIdInTx(db, candidate) : null;
   }
 
   const parsed = parseExternalKey(trimmed);
@@ -772,7 +751,7 @@ async function resolveMediaIdForChangeRequest(
       .where("namespace", "=", ns)
       .where("native_id", "=", nativeId)
       .executeTakeFirst();
-    return ext ? resolveCanonicalMediaId(db, ext.media_id) : null;
+    return ext ? resolveCanonicalMediaIdInTx(db, ext.media_id) : null;
   }
 
   return null;

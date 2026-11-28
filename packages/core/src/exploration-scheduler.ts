@@ -37,7 +37,10 @@ import {
 } from "./demands.ts";
 
 export { computeNotFoundBackoffSeconds, DEFAULT_NOT_FOUND_BACKOFF_SECONDS } from "./demands.ts";
-import { findReusableMediaForPrefetchedCatalogInTx } from "./duplicate-merge-policy.ts";
+import {
+  findReusableMediaForPrefetchedCatalogInTx,
+  resolveCanonicalMediaIdInTx,
+} from "./duplicate-merge-policy.ts";
 import {
   enqueueJob,
   enqueueSeedEvidenceCheckForAssociation,
@@ -1179,25 +1182,6 @@ export async function verifyExternalKeyInCatalog(
   };
 }
 
-async function resolveCanonicalMediaId(db: DbExecutor, mediaId: string): Promise<string | null> {
-  let currentId = mediaId;
-  for (let hop = 0; hop < 10; hop += 1) {
-    const row = await db
-      .selectFrom("media")
-      .select(["id", "merged_into_media_id"])
-      .where("id", "=", currentId)
-      .executeTakeFirst();
-    if (!row) {
-      return null;
-    }
-    if (!row.merged_into_media_id || row.merged_into_media_id === row.id) {
-      return row.id;
-    }
-    currentId = row.merged_into_media_id;
-  }
-  return null;
-}
-
 async function findExistingMediaIdByExternalKey(
   db: DbExecutor,
   externalKey: string,
@@ -1218,7 +1202,7 @@ async function findExistingMediaIdByExternalKey(
       .$if(db.isTransaction, (qb) => qb.forShare())
       .executeTakeFirst();
     if (ext) {
-      return resolveCanonicalMediaId(db, ext.media_id);
+      return resolveCanonicalMediaIdInTx(db, ext.media_id);
     }
   }
 
@@ -1235,7 +1219,7 @@ async function findExistingMediaIdByExternalKey(
       .$if(db.isTransaction, (qb) => qb.forShare())
       .execute();
     for (const assoc of assocs) {
-      const canonical = await resolveCanonicalMediaId(db, assoc.media_id);
+      const canonical = await resolveCanonicalMediaIdInTx(db, assoc.media_id);
       if (canonical) {
         return canonical;
       }
@@ -1249,7 +1233,7 @@ async function loadExplorationTargetMedia(
   db: DbExecutor,
   mediaId: string,
 ): Promise<ExplorationTargetMedia | null> {
-  const canonicalId = await resolveCanonicalMediaId(db, mediaId);
+  const canonicalId = await resolveCanonicalMediaIdInTx(db, mediaId);
   if (!canonicalId) {
     return null;
   }
@@ -1997,7 +1981,7 @@ export function createExplorationJobHandler(
         }
 
         const canonicalMediaId =
-          (await resolveCanonicalMediaId(trx, targetMedia.id)) ?? targetMedia.id;
+          (await resolveCanonicalMediaIdInTx(trx, targetMedia.id)) ?? targetMedia.id;
 
         // Write platform_checks ONLY for genuinely searched & confirmed not_found platforms
         for (const outcome of outcomes) {

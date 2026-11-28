@@ -741,7 +741,12 @@ async function fetchVarietySelectorEpisodes(
 
   let rows: unknown = group.videos;
   if (typeof rows === "string") {
-    const groupPage = await fetchIqiyiJson(rows, outbound);
+    // The response names the next page's URL; only follow it to iQIYI over HTTPS.
+    const next = URL.parse(rows);
+    if (!next || next.protocol !== "https:" || !/(^|\.)iqiyi\.com$/i.test(next.hostname)) {
+      return { status: "transient_error", reason: "unexpected_episode_page_url" };
+    }
+    const groupPage = await fetchIqiyiJson(next.toString(), outbound);
     if (!groupPage.ok) {
       return { status: "transient_error", reason: groupPage.reason };
     }

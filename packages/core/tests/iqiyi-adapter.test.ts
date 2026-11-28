@@ -1420,6 +1420,64 @@ describe("iQIYI Tier 3 search (#30)", () => {
     expect(signed!.get("sign")).toMatch(/^[0-9A-F]{32}$/);
   });
 
+  test("variety: a source-selector page URL off iQIYI is not fetched", async () => {
+    const albumId = "2657274641350501";
+    const outbound = createFakeOutboundClient({
+      fetchExternal(request) {
+        const url = new URL(request.url);
+        if (request.url === `https://pcw-api.iqiyi.com/album/album/baseinfo/${albumId}`) {
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: {
+              albumId: Number(albumId),
+              name: "新说唱2025",
+              channelId: 6,
+              firstVideo: { tvId: 1920084229702900, period: "2025-06-07" },
+            },
+          });
+        }
+        if (url.pathname === "/albums/album/avlistinfo") {
+          return jsonResponse(request.url, {
+            code: "A00000",
+            data: { epsodelist: [{ tvId: 8572445604693100, contentType: 28, name: "发布会" }] },
+          });
+        }
+        if (url.pathname === "/prelw/tvg/v2/lw/base_info") {
+          return jsonResponse(request.url, {
+            status_code: 0,
+            data: {
+              template: {
+                tabs: [
+                  {
+                    blocks: [
+                      {
+                        bk_id: "source_selector_bk",
+                        data: {
+                          data: [
+                            { entity_id: 4016143587352901, videos: "https://mesh.if.iqiyi.com/x" },
+                            {
+                              entity_id: Number(albumId),
+                              videos: "https://evil.example/page",
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${request.url}`);
+      },
+    });
+
+    const result = await iqiyiAdapter.fetchCollection(albumId, outbound);
+    expect(result.status).toBe("transient_error");
+    expect(outbound.httpRequests.some((r) => r.url.includes("evil.example"))).toBe(false);
+  });
+
   test("user uploads (RUGC, with an uploader id) are not collections", async () => {
     const outbound = createFakeOutboundClient({
       fetchExternal(request) {

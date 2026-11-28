@@ -110,7 +110,6 @@ export {
   claimDueJobs,
   startLeasedJob,
   completeJobWithFencing,
-  createDefaultJobHandlers,
   enqueueJob,
   failJobWithFencing,
   getJobById,

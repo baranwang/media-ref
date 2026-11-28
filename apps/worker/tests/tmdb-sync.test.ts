@@ -442,6 +442,81 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect(after.metadata).not.toHaveProperty("retryTmdbIds");
   });
 
+  test("a full refresh runs one page per run and advances the date only after the last page", async () => {
+    const testDb = await createTestDb();
+    handles.push(testDb);
+    const db = testDb.writeDb;
+    for (const tmdbId of ["1", "2", "3"]) {
+      const media = await db
+        .insertInto("media")
+        .values({ type: "movie", title: `Movie ${tmdbId}`, baseline: "tmdb" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await db
+        .insertInto("associations")
+        .values({
+          media_id: media.id,
+          namespace: "tmdb",
+          native_id: `movie:${tmdbId}`,
+          status: "confirmed",
+          is_external_id: true,
+        })
+        .execute();
+    }
+    await db
+      .insertInto("sync_state")
+      .values({ sync_key: "tmdb_changes_movie", last_synced_date: "2026-10-01", metadata: "{}" })
+      .execute();
+
+    const fetched: string[] = [];
+    const outbound = createFakeOutboundClient({
+      fetchExternal({ url }) {
+        const path = new URL(url).pathname;
+        const match = path.match(/^\/3\/movie\/(\d+)$/);
+        if (!match) throw new Error(`Unexpected URL ${url}`);
+        fetched.push(match[1]!);
+        const body = {
+          id: Number(match[1]),
+          title: `Title ${match[1]}`,
+          release_date: "2020-01-01",
+        };
+        return { url, status: 200, headers: {}, body: JSON.stringify(body) };
+      },
+    });
+    const run = () =>
+      runTmdbDailySync(db, outbound, {
+        now: new Date("2026-11-12T04:00:00Z"),
+        tmdbConfig: { accessToken: "test" },
+        fullRefreshPageSize: 2,
+      });
+    const cursor = () =>
+      db
+        .selectFrom("sync_state")
+        .select(["last_synced_date", "metadata"])
+        .where("sync_key", "=", "tmdb_changes_movie")
+        .executeTakeFirstOrThrow();
+
+    const first = await run();
+    expect(first.movie).toMatchObject({
+      mode: "full_refresh",
+      candidateCount: 2,
+      cursorAdvanced: false,
+    });
+    expect((await cursor()).last_synced_date).toBe("2026-10-01");
+    expect((await cursor()).metadata).toHaveProperty("fullRefreshAfterMediaId");
+
+    const second = await run();
+    expect(second.movie).toMatchObject({
+      mode: "full_refresh",
+      candidateCount: 1,
+      cursorAdvanced: true,
+    });
+    expect(fetched.sort()).toEqual(["1", "2", "3"]);
+    const after = await cursor();
+    expect(after.last_synced_date).toBe("2026-11-12");
+    expect(after.metadata).not.toHaveProperty("fullRefreshAfterMediaId");
+  });
+
   test("catches up missed days (<=14d via /changes, >14d via full refresh) and leaves cursor unadvanced on transient 5xx", async () => {
     const testDb = await createTestDb();
     handles.push(testDb);

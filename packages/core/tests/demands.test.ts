@@ -57,6 +57,37 @@ describe("catalog-group demand", () => {
       }),
     ).toEqual([]);
   });
+
+  test("a TMDB segment association does not cover it: only Douban or Bangumi do", () => {
+    const queryResult = readResult([{ namespace: "tmdb", nativeId: "movie:550" }]);
+    const [doc] = (
+      queryResult as unknown as { items: Array<{ document: { associations: unknown[] } }> }
+    ).items;
+    doc!.document.associations = [
+      { namespace: "tmdb", nativeId: "movie:550", status: "confirmed", segments: [] },
+    ];
+    expect(
+      computeDemandTargetsForRead({
+        rawKey: "tmdb:movie:550",
+        queryResult,
+        namespaceGroup: "catalog",
+      }),
+    ).toEqual([
+      { kind: "media", mediaId: "m1", season: null, namespaceGroup: "catalog", delta: 1 },
+    ]);
+  });
+});
+
+describe("external-key demand keys", () => {
+  test("an upper-case IMDb read records demand under the stored lower-case key", () => {
+    expect(
+      computeDemandTargetsForRead({
+        rawKey: "imdb:TT0903747",
+        queryResult: { kind: "not_found", key: "imdb:TT0903747" },
+        namespaceGroup: "platform",
+      }),
+    ).toMatchObject([{ kind: "external_key", externalKey: "imdb:tt0903747" }]);
+  });
 });
 
 describe("platform coverage with a Douban subject (#130)", () => {

@@ -13,10 +13,12 @@ import {
   createExplorationJobHandler,
   createInvalidationRecheckJobHandler,
   createReviewAgentJobHandler,
+  DEFAULT_REVIEW_AGENT_MAX_DURATION_MS,
   createSeedEvidenceCheckJobHandler,
   createTmdbDailyExportsJobHandler,
   createTmdbSyncJobHandler,
   resolveExplorationAgentConfig,
+  resolveExplorationSchedulerConfig,
   enqueueTmdbDailyExportsIfDue,
   enqueueTmdbDailySyncIfDue,
   EVIDENCE_CHECK_JOB_TYPE,
@@ -194,6 +196,23 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
     // tmdb_sync has no session budget and may use the whole invocation. A shorter lease lets cron
     // claim a second copy while the first still runs, and fencing then drops the first's result.
     [TMDB_SYNC_JOB_TYPE]: Math.max(leaseDurationMs, INVOCATION_WALL_TIME_MS + 5 * 60_000),
+    // A review refuses to start with less than its session budget left (see review-agent.ts).
+    [REVIEW_AGENT_JOB_TYPE]: Math.max(
+      leaseDurationMs,
+      (deps.config?.reviewAgent?.maxDurationMs ?? DEFAULT_REVIEW_AGENT_MAX_DURATION_MS) +
+        5 * 60_000,
+    ),
+  };
+  // Session jobs restart their lease on delivery, so queue delay does not eat the session budget.
+  const leasedOnDelivery = new Set<string>([EXPLORATION_JOB_TYPE, REVIEW_AGENT_JOB_TYPE]);
+  // A demand must outlive its job's dispatch lease plus its execution lease; otherwise the
+  // scheduler supersedes a session that is still running and throws its result away.
+  const explorationConfig = {
+    ...deps.config?.exploration,
+    leaseDurationMs: Math.max(
+      resolveExplorationSchedulerConfig(deps.config?.exploration).leaseDurationMs,
+      2 * leaseDurationMsByType[EXPLORATION_JOB_TYPE] + 60_000,
+    ),
   };
   // A job that failed for good: an exploration job also releases its demand with a backoff.
   const failJob = async (
@@ -211,7 +230,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       await releaseDemandAfterFailedExploration(deps.db, {
         payload: job.payload,
         now,
-        config: deps.config?.exploration,
+        config: explorationConfig,
       });
     }
     return result;
@@ -248,7 +267,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
       catalogConfig: deps.config?.catalog,
       tmdbConfig: deps.config?.tmdb,
       tmdbGateway: deps.tmdbGateway,
-      config: deps.config?.exploration,
+      config: explorationConfig,
       executor:
         deps.explorationExecutor ??
         createExplorationAgentExecutor({
@@ -303,7 +322,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
         await runScheduledStep("exploration_schedule_failed", EXPLORATION_JOB_TYPE, () =>
           scheduleExplorationJobs(deps.db, {
             now,
-            config: deps.config?.exploration,
+            config: explorationConfig,
             adapterRegistry: deps.adapterRegistry,
           }),
         );
@@ -346,7 +365,7 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
           jobType: job.jobType,
           leaseGeneration: job.leaseGeneration,
           payload: job.payload,
-          ...(job.jobType === EXPLORATION_JOB_TYPE && job.leaseExpiresAt
+          ...(leasedOnDelivery.has(job.jobType) && job.leaseExpiresAt
             ? { dispatchLeaseExpiresAt: job.leaseExpiresAt.toISOString() }
             : {}),
         };
@@ -412,15 +431,14 @@ export function createBackgroundWorker(deps: BackgroundWorkerDeps): BackgroundWo
 
         let currentJob;
         try {
-          currentJob =
-            body.jobType === EXPLORATION_JOB_TYPE
-              ? await startLeasedJob(
-                  deps.db,
-                  body,
-                  resolveNow(deps.now),
-                  leaseDurationMsByType[EXPLORATION_JOB_TYPE],
-                )
-              : await getJobById(deps.db, body.jobId);
+          currentJob = leasedOnDelivery.has(body.jobType)
+            ? await startLeasedJob(
+                deps.db,
+                body,
+                resolveNow(deps.now),
+                leaseDurationMsByType[body.jobType as keyof typeof leaseDurationMsByType],
+              )
+            : await getJobById(deps.db, body.jobId);
         } catch (error) {
           logJobError("job_read_failed", body.jobId, body.jobType, error);
           summary.retriedInQueue += 1;

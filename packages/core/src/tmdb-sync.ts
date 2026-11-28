@@ -49,6 +49,11 @@ export const TMDB_SYNC_KEY_MOVIE = "tmdb_changes_movie";
 export const TMDB_SYNC_KEY_TV = "tmdb_changes_tv";
 export const TMDB_CHANGES_MAX_WINDOW_DAYS = 14;
 export const DEFAULT_TMDB_FULL_REFRESH_BATCH_SIZE = 50;
+/**
+ * Media one full-refresh run refreshes per type. Each costs a TMDB fetch and a transaction (about
+ * 250 ms), so two pages stay well inside the 15-minute invocation; the next cron tick runs the next.
+ */
+export const DEFAULT_TMDB_FULL_REFRESH_PAGE_SIZE = 500;
 
 export const REVIEW_ALERT_TYPES = {
   AGENT_EXTERNAL_ID_CONFLICT: "agent_external_id_conflict",
@@ -99,6 +104,7 @@ export interface RunTmdbDailySyncOptions {
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   fullRefreshBatchSize?: number;
+  fullRefreshPageSize?: number;
   maxChangesWindowDays?: number;
   backfillMissingTrakt?: boolean;
 }
@@ -125,6 +131,7 @@ export interface CreateTmdbSyncJobHandlerOptions {
   tmdbConfig?: TmdbGatewayConfig;
   tmdbGateway?: TmdbGateway;
   fullRefreshBatchSize?: number;
+  fullRefreshPageSize?: number;
   maxChangesWindowDays?: number;
   backfillMissingTrakt?: boolean;
 }
@@ -437,6 +444,7 @@ async function syncSingleMediaType(
   today: string,
   now: Date,
   fullRefreshBatchSize: number,
+  fullRefreshPageSize: number,
   maxChangesWindowDays: number,
   traktBackfillEnabled: boolean,
   transientErrors: TmdbSyncTransientError[],
@@ -547,8 +555,24 @@ async function syncSingleMediaType(
     ? existingMetadata.retryTmdbIds.filter((id): id is string => typeof id === "string")
     : [];
 
+  // A full refresh runs one page of media (by id) per run and keeps its place in the metadata; the
+  // date cursor advances only after the last page.
+  const prevFullRefreshCursor =
+    mode === "full_refresh" && typeof existingMetadata.fullRefreshAfterMediaId === "string"
+      ? existingMetadata.fullRefreshAfterMediaId
+      : null;
+  let nextFullRefreshCursor: string | null = null;
+
   let candidates = parsedTracked;
-  if (mode === "changes") {
+  if (mode === "full_refresh") {
+    const remaining = prevFullRefreshCursor
+      ? parsedTracked.filter((entry) => entry.mediaId > prevFullRefreshCursor)
+      : parsedTracked;
+    candidates = remaining.slice(0, fullRefreshPageSize);
+    if (remaining.length > candidates.length) {
+      nextFullRefreshCursor = candidates.at(-1)!.mediaId;
+    }
+  } else {
     try {
       const changes = await gateway.fetchChanges(mediaType, { startDate, endDate });
       const changedIdSet = new Set([...changes.changedIds, ...retryTmdbIds]);
@@ -876,7 +900,10 @@ async function syncSingleMediaType(
     }
   }
 
-  const targetDate = maxDateString(existingCursor?.last_synced_date ?? null, today);
+  const cursorAdvanced = nextFullRefreshCursor === null;
+  const targetDate = cursorAdvanced
+    ? maxDateString(existingCursor?.last_synced_date ?? null, today)
+    : existingCursor!.last_synced_date;
   const lastSyncedDate = await upsertSyncState(
     db,
     syncKey,
@@ -892,6 +919,7 @@ async function syncSingleMediaType(
       missingCount,
       flaggedSegmentCount,
       ...(failedTmdbIds.length > 0 ? { retryTmdbIds: [...new Set(failedTmdbIds)] } : {}),
+      ...(nextFullRefreshCursor !== null ? { fullRefreshAfterMediaId: nextFullRefreshCursor } : {}),
       ...(traktBackfillEnabled
         ? {
             traktBackfillCount,
@@ -917,7 +945,7 @@ async function syncSingleMediaType(
     refreshedCount,
     missingCount,
     flaggedSegmentCount,
-    cursorAdvanced: true,
+    cursorAdvanced,
     lastSyncedDate,
   };
 }
@@ -937,6 +965,10 @@ export async function runTmdbDailySync(
     1,
     options.maxChangesWindowDays ?? TMDB_CHANGES_MAX_WINDOW_DAYS,
   );
+  const fullRefreshPageSize = Math.max(
+    1,
+    options.fullRefreshPageSize ?? DEFAULT_TMDB_FULL_REFRESH_PAGE_SIZE,
+  );
   const gateway = options.tmdbGateway ?? createTmdbGateway(outbound, options.tmdbConfig);
   const traktBackfillEnabled =
     options.backfillMissingTrakt ?? isTraktSyncEnabled(options.tmdbConfig);
@@ -949,6 +981,7 @@ export async function runTmdbDailySync(
     today,
     now,
     fullRefreshBatchSize,
+    fullRefreshPageSize,
     maxChangesWindowDays,
     traktBackfillEnabled,
     transientErrors,
@@ -961,6 +994,7 @@ export async function runTmdbDailySync(
     today,
     now,
     fullRefreshBatchSize,
+    fullRefreshPageSize,
     maxChangesWindowDays,
     traktBackfillEnabled,
     transientErrors,
@@ -1068,6 +1102,7 @@ export function createTmdbSyncJobHandler(
       tmdbConfig: options.tmdbConfig,
       tmdbGateway: options.tmdbGateway,
       fullRefreshBatchSize: options.fullRefreshBatchSize,
+      fullRefreshPageSize: options.fullRefreshPageSize,
       maxChangesWindowDays: options.maxChangesWindowDays,
       backfillMissingTrakt: options.backfillMissingTrakt,
     });

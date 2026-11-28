@@ -555,6 +555,8 @@ describe("Exploration scheduler (#28)", () => {
     expect(readResult.kind).toBe("ok");
     const readByImdb = await queryMediaByKey(testDb.readDb, "imdb:tt12343534");
     expect(readByImdb.kind).toBe("ok");
+    // IMDb ids are stored lower-case; an upper-case read still finds the media.
+    expect((await queryMediaByKey(testDb.readDb, "imdb:TT12343534")).kind).toBe("ok");
 
     // External-key demand was merged into media-scoped season demands: S1 backs off without a change request, S2 stays eligible
     const extDemands = await listDemands(testDb.readDb, { externalKey: "tmdb:tv:95479" });
@@ -1116,9 +1118,10 @@ describe("Exploration scheduler (#28)", () => {
     const gen1Msg = emitted[0]!;
     expect(gen1Msg.payload.demandLeaseGeneration).toBe(1);
 
-    // Expire demand lease (15m + 1s) -> scheduler supersedes gen1 job and re-claims at demandLeaseGeneration 2
+    // Expire demand lease (twice the 10m job lease + 1m, + 1s) -> scheduler supersedes gen1 job and
+    // re-claims at demandLeaseGeneration 2
     emitted.length = 0;
-    now = new Date(t0.getTime() + 15 * 60_000 + 1_000);
+    now = new Date(t0.getTime() + 21 * 60_000 + 1_000);
     await worker.scheduled(createScheduledController(now));
     expect(emitted).toHaveLength(1);
     const gen2Msg = emitted[0]!;
