@@ -54,7 +54,7 @@ function DocsContent() {
 
   return (
     <DocsLayout toc={toc}>
-      <header className="flex flex-col gap-2">
+      <header className="flex flex-col gap-2 border-b border-border pb-6">
         <p className="text-xs text-muted-foreground">{breadcrumb}</p>
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-bold tracking-tight text-foreground">{title}</h1>
@@ -68,7 +68,7 @@ function DocsContent() {
         <PageActions url={page.url} path={page.path} />
       </header>
       {/* Prose size and colour live here so <p> inside Hint/Callout/cards inherits theirs. */}
-      <div className="mt-2 flex flex-col gap-4 text-sm leading-6 text-muted-foreground">
+      <div className="mt-6 flex flex-col gap-4 text-sm leading-6 text-muted-foreground">
         <Body components={docsMdxComponents} />
       </div>
     </DocsLayout>

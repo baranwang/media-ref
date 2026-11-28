@@ -192,7 +192,7 @@ export const docsMdxComponents = {
   h2: ({ className, ...props }: ComponentProps<"h2">) => (
     <h2
       className={cn(
-        "mt-8 flex scroll-mt-20 items-center gap-3 text-lg font-bold tracking-tight text-foreground",
+        "mt-8 flex scroll-mt-20 items-center gap-3 text-lg font-bold tracking-tight text-foreground first:mt-0",
         className,
       )}
       {...props}

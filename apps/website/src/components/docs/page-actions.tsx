@@ -9,19 +9,40 @@ import {
 import {
   RiArrowDownSLine,
   RiCheckLine,
-  RiClaudeFill,
-  RiCursorFill,
   RiFileCopyLine,
   RiGithubFill,
   RiMarkdownLine,
-  RiOpenaiFill,
   RiSparkling2Line,
 } from "@remixicon/react";
-import { useState } from "react";
+import { useState, type ComponentType } from "react";
 import { DOCS_SITE_URL } from "#/lib/docs-source";
 
 const REPO_CONTENT_URL =
   "https://github.com/baranwang/media-ref/blob/main/apps/website/content/docs";
+
+const LOBE_ICONS = "https://fastly.jsdelivr.net/npm/@lobehub/icons-static-svg@1.106.0/icons";
+
+/** A lobe-icons logo drawn in the current text color (the SVGs are single-color). */
+function lobeIcon(name: string): ComponentType {
+  return function LobeIcon() {
+    return (
+      <span
+        aria-hidden
+        className="size-3.5 shrink-0 bg-current"
+        style={{
+          maskImage: `url(${LOBE_ICONS}/${name}.svg)`,
+          maskSize: "contain",
+          maskRepeat: "no-repeat",
+          maskPosition: "center",
+        }}
+      />
+    );
+  };
+}
+
+const OpenAIIcon = lobeIcon("openai");
+const ClaudeIcon = lobeIcon("claude");
+const CursorIcon = lobeIcon("cursor");
 
 /** Copy the page as Markdown, or open it in an AI app. */
 export function PageActions({ url, path }: { url: string; path: string }) {
@@ -50,22 +71,23 @@ export function PageActions({ url, path }: { url: string; path: string }) {
   const apps = [
     {
       label: "用 ChatGPT 打开",
-      icon: RiOpenaiFill,
+      icon: OpenAIIcon,
       href: `https://chatgpt.com/?${new URLSearchParams({ prompt, hints: "search" })}`,
     },
     {
       label: "用 Claude 打开",
-      icon: RiClaudeFill,
+      icon: ClaudeIcon,
       href: `https://claude.ai/new?${new URLSearchParams({ q: prompt })}`,
     },
     {
       label: "用 Scira AI 打开",
+      // Not in lobe-icons.
       icon: RiSparkling2Line,
       href: `https://scira.ai/?${new URLSearchParams({ q: prompt })}`,
     },
     {
       label: "用 Cursor 打开",
-      icon: RiCursorFill,
+      icon: CursorIcon,
       href: `https://cursor.com/link/prompt?${new URLSearchParams({ text: prompt })}`,
     },
   ];
