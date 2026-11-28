@@ -14,7 +14,6 @@ import {
   type BaselineSource,
   type ChangeRequestStatus,
   type ExternalIdNamespace,
-  type MediaDocument,
   type NormalizedSegment,
   type SegmentInput,
   type SegmentValidationError,
@@ -67,7 +66,6 @@ import { MAX_LEAD_VARIANT_DESCRIPTION_LENGTH } from "./leads.ts";
 import { acquireAdvisoryLock, ADVISORY_LOCK_CLASSES } from "./locks.ts";
 import type { OutboundClient } from "./outbound.ts";
 import { enforceSubmissionQuotaInTx, type SubmissionQuotaConfig } from "./quota.ts";
-import { queryMediaByKey, type MediaQueryItem } from "./read-media.ts";
 import { type TmdbGateway, type TmdbGatewayConfig, type TmdbMediaFetchResult } from "./tmdb.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -234,16 +232,6 @@ export interface RejectChangeRequestInput {
   reason?: string | null;
   allowedStatuses?: readonly ChangeRequestStatus[];
 }
-
-export type ReadMediaDocumentResult =
-  | {
-      kind: "ok";
-      document: MediaDocument;
-      matchedAssociationId: string | null;
-      items: MediaQueryItem[];
-    }
-  | { kind: "not_found" }
-  | { kind: "invalid_key"; message: string };
 
 export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
@@ -2980,26 +2968,5 @@ export async function revokeChangeRequestInTx(
   return {
     changeRequest: toChangeRequestRecord(updated),
     deletedSeasons: [...new Set(snapshot.map((seg) => seg.season))],
-  };
-}
-
-export async function readMediaDocument(
-  dbRead: Db,
-  rawKey: string,
-): Promise<ReadMediaDocumentResult> {
-  const result = await queryMediaByKey(dbRead, rawKey, { includeUnconfirmed: false });
-  if (result.kind === "invalid_key") {
-    return { kind: "invalid_key", message: result.message };
-  }
-  if (result.kind === "not_found" || result.items.length === 0) {
-    return { kind: "not_found" };
-  }
-
-  const primary = result.items[0]!;
-  return {
-    kind: "ok",
-    document: primary.document,
-    matchedAssociationId: primary.matchedAssociationId,
-    items: result.items,
   };
 }

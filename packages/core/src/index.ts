@@ -295,7 +295,6 @@ export {
   isUuid,
   listChangeRequests,
   MediaServiceError,
-  readMediaDocument,
   rejectChangeRequest,
   TIER1_MANUAL_REVIEW_REASON,
   type ApproveChangeRequestInput,
@@ -308,7 +307,6 @@ export {
   type ListChangeRequestsOptions,
   type ListChangeRequestsResult,
   type MediaServiceErrorCode,
-  type ReadMediaDocumentResult,
   type RejectChangeRequestInput,
 } from "./media-service.ts";
 export {

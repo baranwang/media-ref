@@ -1,6 +1,6 @@
 import type { MediaType, Namespace, PlatformNamespace } from "@media-ref/client";
 import type { ExternalHttpResponse, OutboundClient } from "../outbound.ts";
-import { DOUBAN_FRODO_BASE_URL, fetchDoubanFrodo } from "./douban-api.ts";
+import { fetchDoubanFrodo } from "./douban-api.ts";
 import {
   InvalidNativeIdError,
   type CollectionEvidenceResult,
@@ -15,8 +15,6 @@ const DOUBAN_MOBILE_HOSTS = new Set(["m.douban.com"]);
 const DOUBAN_DESKTOP_PATH_PATTERN = /^\/subject\/([1-9]\d*)\/?$/;
 const DOUBAN_MOBILE_PATH_PATTERN = /^\/(?:movie\/)?subject\/([1-9]\d*)\/?$/;
 const IMDB_ID_PATTERN = /\b(tt\d+)\b/i;
-
-export const DEFAULT_DOUBAN_API_BASE_URL = DOUBAN_FRODO_BASE_URL;
 
 export interface DoubanFetchOptions {
   apiBaseUrl?: string;
