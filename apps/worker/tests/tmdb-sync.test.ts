@@ -167,6 +167,66 @@ async function readMedia(
   }
 }
 
+/**
+ * `count` tracked movies (TMDB movie:1..count) and a fake TMDB that lists `tmdb.changed` as the
+ * day's movie changes, answers 500 for ids in `tmdb.failing`, and records every movie it serves.
+ */
+async function setupTrackedMovies(handles: TestDbHandle[], count: number) {
+  const testDb = await createTestDb();
+  handles.push(testDb);
+  const db = testDb.writeDb;
+  for (let id = 1; id <= count; id += 1) {
+    const media = await db
+      .insertInto("media")
+      .values({ type: "movie", title: `Movie ${id}`, baseline: "tmdb" })
+      .returning("id")
+      .executeTakeFirstOrThrow();
+    await db
+      .insertInto("associations")
+      .values({
+        media_id: media.id,
+        namespace: "tmdb",
+        native_id: `movie:${id}`,
+        status: "confirmed",
+        is_external_id: true,
+      })
+      .execute();
+  }
+
+  const tmdb = { changed: [] as number[], failing: new Set<string>(), fetched: [] as string[] };
+  const outbound = createFakeOutboundClient({
+    fetchExternal({ url }) {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/changes")) {
+        const ids = path === "/3/movie/changes" ? tmdb.changed : [];
+        const body = { page: 1, total_pages: 1, results: ids.map((id) => ({ id })) };
+        return { url, status: 200, headers: {}, body: JSON.stringify(body) };
+      }
+      const id = path.match(/^\/3\/movie\/(\d+)$/)?.[1];
+      if (!id) throw new Error(`Unexpected URL ${url}`);
+      tmdb.fetched.push(id);
+      if (tmdb.failing.has(id)) {
+        return { url, status: 500, headers: {}, body: "boom" };
+      }
+      const body = { id: Number(id), title: `Title ${id}`, release_date: "2020-01-01" };
+      return { url, status: 200, headers: {}, body: JSON.stringify(body) };
+    },
+  });
+  const run = (iso: string, options: { fullRefreshPageSize?: number } = {}) =>
+    runTmdbDailySync(db, outbound, {
+      now: new Date(iso),
+      tmdbConfig: { accessToken: "test" },
+      ...options,
+    });
+  const cursor = () =>
+    db
+      .selectFrom("sync_state")
+      .select(["last_synced_date", "metadata"])
+      .where("sync_key", "=", "tmdb_changes_movie")
+      .executeTakeFirstOrThrow();
+  return { db, tmdb, run, cursor };
+}
+
 describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
   const handles: TestDbHandle[] = [];
 
@@ -355,73 +415,11 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
   });
 
   test("one item that keeps failing does not hold the cursor back; it is retried on later runs", async () => {
-    const testDb = await createTestDb();
-    handles.push(testDb);
-    const db = testDb.writeDb;
-    for (const [title, tmdbId] of [
-      ["Healthy", "movie:1"],
-      ["Broken", "movie:2"],
-    ] as const) {
-      const media = await db
-        .insertInto("media")
-        .values({ type: "movie", title, baseline: "tmdb" })
-        .returning("id")
-        .executeTakeFirstOrThrow();
-      await db
-        .insertInto("associations")
-        .values({
-          media_id: media.id,
-          namespace: "tmdb",
-          native_id: tmdbId,
-          status: "confirmed",
-          is_external_id: true,
-        })
-        .execute();
-    }
-
-    let brokenFails = true;
-    const changedIds: Record<string, number[]> = {};
-    const fetched: string[] = [];
-    const outbound = createFakeOutboundClient({
-      fetchExternal({ url }) {
-        const path = new URL(url).pathname;
-        if (path.endsWith("/changes")) {
-          const results = (changedIds[path] ?? []).map((id) => ({ id }));
-          return {
-            url,
-            status: 200,
-            headers: {},
-            body: JSON.stringify({ page: 1, total_pages: 1, results }),
-          };
-        }
-        const match = path.match(/^\/3\/movie\/(\d+)$/);
-        if (match) {
-          fetched.push(match[1]!);
-          if (match[1] === "2" && brokenFails) {
-            return { url, status: 500, headers: {}, body: "boom" };
-          }
-          const body = {
-            id: Number(match[1]),
-            title: `Title ${match[1]}`,
-            release_date: "2020-01-01",
-          };
-          return { url, status: 200, headers: {}, body: JSON.stringify(body) };
-        }
-        throw new Error(`Unexpected URL ${url}`);
-      },
-    });
-    const run = (iso: string) =>
-      runTmdbDailySync(db, outbound, { now: new Date(iso), tmdbConfig: { accessToken: "test" } });
-    const cursor = async () =>
-      await db
-        .selectFrom("sync_state")
-        .select(["last_synced_date", "metadata"])
-        .where("sync_key", "=", "tmdb_changes_movie")
-        .executeTakeFirstOrThrow();
+    const { tmdb, run, cursor } = await setupTrackedMovies(handles, 2);
 
     await run("2026-11-10T04:00:00Z");
-    changedIds["/3/movie/changes"] = [1, 2];
-    fetched.length = 0;
+    tmdb.changed = [1, 2];
+    tmdb.failing.add("2");
     const day2 = await run("2026-11-11T04:00:00Z");
     expect(day2.transientErrors).toHaveLength(1);
     expect(day2.movie).toMatchObject({ cursorAdvanced: true, refreshedCount: 1 });
@@ -431,72 +429,26 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     });
 
     // Day 3: neither item changed, but the failed one is retried, succeeds and leaves the list.
-    changedIds["/3/movie/changes"] = [];
-    brokenFails = false;
-    fetched.length = 0;
+    tmdb.changed = [];
+    tmdb.failing.clear();
+    tmdb.fetched.length = 0;
     const day3 = await run("2026-11-12T04:00:00Z");
     expect(day3.transientErrors).toEqual([]);
-    expect(fetched).toEqual(["2"]);
+    expect(tmdb.fetched).toEqual(["2"]);
     const after = await cursor();
     expect(after.last_synced_date).toBe("2026-11-12");
     expect(after.metadata).not.toHaveProperty("retryTmdbIds");
   });
 
   test("a full refresh runs one page per run and advances the date only after the last page", async () => {
-    const testDb = await createTestDb();
-    handles.push(testDb);
-    const db = testDb.writeDb;
-    for (const tmdbId of ["1", "2", "3"]) {
-      const media = await db
-        .insertInto("media")
-        .values({ type: "movie", title: `Movie ${tmdbId}`, baseline: "tmdb" })
-        .returning("id")
-        .executeTakeFirstOrThrow();
-      await db
-        .insertInto("associations")
-        .values({
-          media_id: media.id,
-          namespace: "tmdb",
-          native_id: `movie:${tmdbId}`,
-          status: "confirmed",
-          is_external_id: true,
-        })
-        .execute();
-    }
+    const { db, tmdb, run, cursor } = await setupTrackedMovies(handles, 3);
     await db
       .insertInto("sync_state")
       .values({ sync_key: "tmdb_changes_movie", last_synced_date: "2026-10-01", metadata: "{}" })
       .execute();
+    const now = "2026-11-12T04:00:00Z";
 
-    const fetched: string[] = [];
-    const outbound = createFakeOutboundClient({
-      fetchExternal({ url }) {
-        const path = new URL(url).pathname;
-        const match = path.match(/^\/3\/movie\/(\d+)$/);
-        if (!match) throw new Error(`Unexpected URL ${url}`);
-        fetched.push(match[1]!);
-        const body = {
-          id: Number(match[1]),
-          title: `Title ${match[1]}`,
-          release_date: "2020-01-01",
-        };
-        return { url, status: 200, headers: {}, body: JSON.stringify(body) };
-      },
-    });
-    const run = () =>
-      runTmdbDailySync(db, outbound, {
-        now: new Date("2026-11-12T04:00:00Z"),
-        tmdbConfig: { accessToken: "test" },
-        fullRefreshPageSize: 2,
-      });
-    const cursor = () =>
-      db
-        .selectFrom("sync_state")
-        .select(["last_synced_date", "metadata"])
-        .where("sync_key", "=", "tmdb_changes_movie")
-        .executeTakeFirstOrThrow();
-
-    const first = await run();
+    const first = await run(now, { fullRefreshPageSize: 2 });
     expect(first.movie).toMatchObject({
       mode: "full_refresh",
       candidateCount: 2,
@@ -505,13 +457,13 @@ describe("Daily TMDB sync, media merge, and baseline switch (#21)", () => {
     expect((await cursor()).last_synced_date).toBe("2026-10-01");
     expect((await cursor()).metadata).toHaveProperty("fullRefreshAfterMediaId");
 
-    const second = await run();
+    const second = await run(now, { fullRefreshPageSize: 2 });
     expect(second.movie).toMatchObject({
       mode: "full_refresh",
       candidateCount: 1,
       cursorAdvanced: true,
     });
-    expect(fetched.sort()).toEqual(["1", "2", "3"]);
+    expect(tmdb.fetched.sort()).toEqual(["1", "2", "3"]);
     const after = await cursor();
     expect(after.last_synced_date).toBe("2026-11-12");
     expect(after.metadata).not.toHaveProperty("fullRefreshAfterMediaId");

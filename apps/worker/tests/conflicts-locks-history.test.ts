@@ -276,6 +276,109 @@ async function seedConfirmedAssociation(
   };
 }
 
+type SeasonSegment = {
+  season: number;
+  episodeStart: number;
+  episodeEnd: number;
+  targetEpisodeStart: number;
+  nonLinear?: boolean;
+};
+
+/** Jujutsu Kaisen (TMDB tv:95479, S1 24 + S2 12) and a user, reviewer and gate-only worker. */
+async function setupSeasonCollection(handles: TestDbHandle[]) {
+  const testDb = await createTestDb();
+  handles.push(testDb);
+
+  const t0 = new Date("2026-11-27T10:00:00.000Z");
+  const baseStub = createConflictTestStub();
+  const outbound = createFakeOutboundClient({
+    fetchExternal: (request) =>
+      request.kind === "catalog" &&
+      request.namespace === "tmdb" &&
+      request.url.includes("/tv/95479")
+        ? jsonResponse(request.url, {
+            id: 95479,
+            name: "咒术回战",
+            original_name: "呪術廻戦",
+            first_air_date: "2020-10-03",
+            seasons: [
+              { season_number: 1, episode_count: 24, air_date: "2020-10-03" },
+              { season_number: 2, episode_count: 12, air_date: "2023-07-06" },
+            ],
+            external_ids: { imdb_id: "tt12343534", tvdb_id: 377543 },
+          })
+        : baseStub(request),
+  });
+  const app = createApiApp({
+    dbRead: testDb.readDb,
+    dbWrite: testDb.writeDb,
+    outbound,
+    config: {
+      baseUrl: TEST_BASE_URL,
+      authSecret: TEST_AUTH_SECRET,
+      now: () => t0,
+      tmdb: { accessToken: "test-tmdb-token" },
+    },
+  });
+  const user = await setupUser(app, outbound, "season-user@example.com");
+  const reviewer = await setupUser(app, outbound, "season-rev@example.com");
+  await testDb.writeDb
+    .updateTable("user")
+    .set({ role: "reviewer" })
+    .where("id", "=", reviewer.userId)
+    .execute();
+  const emitted: JobQueueMessage[] = [];
+  const worker = createBackgroundWorker({
+    db: testDb.writeDb,
+    outbound,
+    queue: {
+      async send(message) {
+        emitted.push(message);
+      },
+    },
+    config: {
+      tmdb: { accessToken: "test-tmdb-token" },
+      enableDailyTmdbSync: false,
+      jobTypes: [EVIDENCE_CHECK_JOB_TYPE],
+    },
+    now: () => t0,
+  });
+
+  // Submits a change request on ss34430 (24 entries) and runs it through the gate.
+  const submit = async (segments: SeasonSegment[]) => {
+    const created = await createRpcClients(app, {
+      apiKey: user.submitKey,
+    }).changeRequest.createChangeRequest({
+      target: mediaRef("tmdb:tv:95479"),
+      namespace: "bilibili",
+      nativeId: "ss34430",
+      variantDescription: "原声",
+      segments: segments.map((s) => toProtoSegmentInput({ ...s, baseline: "tmdb" })),
+    });
+    await worker.scheduled(createScheduledController(t0));
+    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+    return created.changeRequest!.id;
+  };
+  // Lands a change request through the gate, approving it if it stops at review.
+  const land = async (segments: SeasonSegment[]) => {
+    const crId = await submit(segments);
+    const state = await getChangeRequestStateRpc(app, { cookie: reviewer.cookie }, crId);
+    if (state.status === "needs_review") {
+      await approveInCore({ db: testDb.writeDb, outbound }, { id: crId, reason: "test" });
+    } else {
+      expect(state.status).toBe("approved");
+    }
+    return state.status;
+  };
+  const resolve = async (season: number, episode: number) =>
+    resolveEpisode((await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479")).document, {
+      namespace: "bilibili",
+      season,
+      episode,
+    });
+  return { testDb, outbound, submit, land, resolve };
+}
+
 describe("Conflict resolution 4-way matrix, timeouts, locks, and revision history (#12)", () => {
   const handles: TestDbHandle[] = [];
 
@@ -413,100 +516,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
   });
 
   test("Approving another season on an already-mapped collection keeps the seasons it does not speak for", async () => {
-    const testDb = await createTestDb();
-    handles.push(testDb);
-
-    const t0 = new Date("2026-11-27T10:00:00.000Z");
-    const baseStub = createConflictTestStub();
-    const outbound = createFakeOutboundClient({
-      fetchExternal: (request) =>
-        request.kind === "catalog" &&
-        request.namespace === "tmdb" &&
-        request.url.includes("/tv/95479")
-          ? jsonResponse(request.url, {
-              id: 95479,
-              name: "咒术回战",
-              original_name: "呪術廻戦",
-              first_air_date: "2020-10-03",
-              seasons: [
-                { season_number: 1, episode_count: 24, air_date: "2020-10-03" },
-                { season_number: 2, episode_count: 12, air_date: "2023-07-06" },
-              ],
-              external_ids: { imdb_id: "tt12343534", tvdb_id: 377543 },
-            })
-          : baseStub(request),
-    });
-    const app = createApiApp({
-      dbRead: testDb.readDb,
-      dbWrite: testDb.writeDb,
-      outbound,
-      config: {
-        baseUrl: TEST_BASE_URL,
-        authSecret: TEST_AUTH_SECRET,
-        now: () => t0,
-        tmdb: { accessToken: "test-tmdb-token" },
-      },
-    });
-    const user = await setupUser(app, outbound, "merge-user@example.com");
-    const reviewer = await setupUser(app, outbound, "merge-rev@example.com");
-    await testDb.writeDb
-      .updateTable("user")
-      .set({ role: "reviewer" })
-      .where("id", "=", reviewer.userId)
-      .execute();
-    const emitted: JobQueueMessage[] = [];
-    const worker = createBackgroundWorker({
-      db: testDb.writeDb,
-      outbound,
-      queue: {
-        async send(message) {
-          emitted.push(message);
-        },
-      },
-      config: {
-        tmdb: { accessToken: "test-tmdb-token" },
-        enableDailyTmdbSync: false,
-        jobTypes: [EVIDENCE_CHECK_JOB_TYPE],
-      },
-      now: () => t0,
-    });
-
-    // Lands a change request on ss34430 (24 entries) through the gate, approving it if it stops at review.
-    const land = async (
-      segments: Array<{
-        season: number;
-        episodeStart: number;
-        episodeEnd: number;
-        targetEpisodeStart: number;
-        nonLinear?: boolean;
-      }>,
-    ) => {
-      const created = await createRpcClients(app, {
-        apiKey: user.submitKey,
-      }).changeRequest.createChangeRequest({
-        target: mediaRef("tmdb:tv:95479"),
-        namespace: "bilibili",
-        nativeId: "ss34430",
-        variantDescription: "原声",
-        segments: segments.map((s) => toProtoSegmentInput({ ...s, baseline: "tmdb" })),
-      });
-      const crId = created.changeRequest!.id;
-      await worker.scheduled(createScheduledController(t0));
-      await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
-      const state = await getChangeRequestStateRpc(app, { cookie: reviewer.cookie }, crId);
-      if (state.status === "needs_review") {
-        await approveInCore({ db: testDb.writeDb, outbound }, { id: crId, reason: "test" });
-      } else {
-        expect(state.status).toBe("approved");
-      }
-      return state.status;
-    };
-    const resolve = async (season: number, episode: number) =>
-      resolveEpisode((await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479")).document, {
-        namespace: "bilibili",
-        season,
-        episode,
-      });
+    const { land, resolve } = await setupSeasonCollection(handles);
 
     // Season 1 on positions 1–12, then season 2 on positions 13–24 of the same collection.
     await land([{ season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1 }]);
@@ -540,101 +550,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
   });
 
   test("An automatic approval never drops another season when stored and catalog seasons disagree", async () => {
-    const testDb = await createTestDb();
-    handles.push(testDb);
-
-    const t0 = new Date("2026-11-27T10:00:00.000Z");
-    const baseStub = createConflictTestStub();
-    const outbound = createFakeOutboundClient({
-      fetchExternal: (request) =>
-        request.kind === "catalog" &&
-        request.namespace === "tmdb" &&
-        request.url.includes("/tv/95479")
-          ? jsonResponse(request.url, {
-              id: 95479,
-              name: "咒术回战",
-              original_name: "呪術廻戦",
-              first_air_date: "2020-10-03",
-              seasons: [
-                { season_number: 1, episode_count: 24, air_date: "2020-10-03" },
-                { season_number: 2, episode_count: 12, air_date: "2023-07-06" },
-              ],
-              external_ids: { imdb_id: "tt12343534", tvdb_id: 377543 },
-            })
-          : baseStub(request),
-    });
-    const app = createApiApp({
-      dbRead: testDb.readDb,
-      dbWrite: testDb.writeDb,
-      outbound,
-      config: {
-        baseUrl: TEST_BASE_URL,
-        authSecret: TEST_AUTH_SECRET,
-        now: () => t0,
-        tmdb: { accessToken: "test-tmdb-token" },
-      },
-    });
-    const user = await setupUser(app, outbound, "drift-user@example.com");
-    const reviewer = await setupUser(app, outbound, "drift-rev@example.com");
-    await testDb.writeDb
-      .updateTable("user")
-      .set({ role: "reviewer" })
-      .where("id", "=", reviewer.userId)
-      .execute();
-    const emitted: JobQueueMessage[] = [];
-    const worker = createBackgroundWorker({
-      db: testDb.writeDb,
-      outbound,
-      queue: {
-        async send(message) {
-          emitted.push(message);
-        },
-      },
-      config: {
-        tmdb: { accessToken: "test-tmdb-token" },
-        enableDailyTmdbSync: false,
-        jobTypes: [EVIDENCE_CHECK_JOB_TYPE],
-      },
-      now: () => t0,
-    });
-
-    // Lands a change request on ss34430 (24 entries) through the gate, approving it if it stops at review.
-    const land = async (
-      segments: Array<{
-        season: number;
-        episodeStart: number;
-        episodeEnd: number;
-        targetEpisodeStart: number;
-        nonLinear?: boolean;
-      }>,
-    ) => {
-      const created = await createRpcClients(app, {
-        apiKey: user.submitKey,
-      }).changeRequest.createChangeRequest({
-        target: mediaRef("tmdb:tv:95479"),
-        namespace: "bilibili",
-        nativeId: "ss34430",
-        variantDescription: "原声",
-        segments: segments.map((s) => toProtoSegmentInput({ ...s, baseline: "tmdb" })),
-      });
-      const crId = created.changeRequest!.id;
-      await worker.scheduled(createScheduledController(t0));
-      await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
-      const state = await getChangeRequestStateRpc(app, { cookie: reviewer.cookie }, crId);
-      if (state.status === "needs_review") {
-        await approveInCore({ db: testDb.writeDb, outbound }, { id: crId, reason: "test" });
-      } else {
-        expect(state.status).toBe("approved");
-      }
-      return state.status;
-    };
-    const resolve = async (season: number, episode: number) =>
-      resolveEpisode((await getMediaDocumentRpc(app, user.readKey, "tmdb:tv:95479")).document, {
-        namespace: "bilibili",
-        season,
-        episode,
-      });
-
+    const { testDb, outbound, submit, land, resolve } = await setupSeasonCollection(handles);
     await land([{ season: 1, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 1 }]);
     // Stored data drifts from the catalog: season 1 runs open-ended from its episode 13, and the
     // stored season 1 has 25 episodes. The catalog (24) puts it on positions 1–12, the stored
@@ -653,31 +569,12 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
       })
       .execute();
 
-    const created = await createRpcClients(app, {
-      apiKey: user.submitKey,
-    }).changeRequest.createChangeRequest({
-      target: mediaRef("tmdb:tv:95479"),
-      namespace: "bilibili",
-      nativeId: "ss34430",
-      variantDescription: "原声",
-      segments: [
-        toProtoSegmentInput({
-          season: 2,
-          episodeStart: 1,
-          episodeEnd: 12,
-          targetEpisodeStart: 13,
-          baseline: "tmdb",
-        }),
-      ],
-    });
-    await worker.scheduled(createScheduledController(t0));
-    await worker.queue(createQueueBatch(emitted.splice(0, emitted.length), t0).batch);
+    const crId = await submit([
+      { season: 2, episodeStart: 1, episodeEnd: 12, targetEpisodeStart: 13 },
+    ]);
     // The review agent's automatic approval refuses to drop season 1 on count-derived positions.
     await expect(
-      approveInCore(
-        { db: testDb.writeDb, outbound },
-        { id: created.changeRequest!.id, reason: "test" },
-      ),
+      approveInCore({ db: testDb.writeDb, outbound }, { id: crId, reason: "test" }),
     ).rejects.toThrow(/positions only its episode count claims/);
     expect(await resolve(1, 15)).toMatchObject({ kind: "mapped", targetEpisode: 3 });
   });
