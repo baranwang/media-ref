@@ -6,3 +6,9 @@ plugins:
     opt:
       - target=ts
       - import_extension=.ts
+  # Proto comments as a lookup table for the MCP server's tool descriptions.
+  - local: ["node", "scripts/protoc-gen-proto-docs.ts"]
+    out: apps/api/src/gen
+    strategy: all
+    opt:
+      - target=ts

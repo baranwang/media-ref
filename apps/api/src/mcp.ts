@@ -14,6 +14,7 @@ import { ConnectError } from "@connectrpc/connect";
 import { createMediaRefTransport, extractConnectErrorInfo, proto } from "@media-ref/client";
 import { createMcpHandler, McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { extractApiKeyFromHeaders } from "./api-keys.ts";
+import { PROTO_DOCS } from "./gen/proto-docs.ts";
 
 export const MCP_PATH = "/mcp";
 
@@ -62,10 +63,26 @@ function scalarSchema(scalar: ScalarType): JsonSchema {
   }
 }
 
-const enumSchema = (desc: DescEnum): JsonSchema => ({
-  type: "string",
-  enum: desc.values.map((value) => value.name),
-});
+function enumSchema(desc: DescEnum): JsonSchema {
+  const documented = desc.values
+    .map((value) => [value.name, PROTO_DOCS[`${desc.typeName}.${value.name}`]] as const)
+    .filter(([, doc]) => doc);
+  return {
+    type: "string",
+    enum: desc.values.map((value) => value.name),
+    ...(documented.length > 0
+      ? { description: documented.map(([name, doc]) => `${name}: ${doc}`).join(" ") }
+      : {}),
+  };
+}
+
+/** The proto comment on a field, else on its message or enum type. */
+function fieldDoc(field: DescField): string | undefined {
+  const type = field.message ?? field.enum;
+  return (
+    PROTO_DOCS[`${field.parent.typeName}.${field.name}`] ?? (type && PROTO_DOCS[type.typeName])
+  );
+}
 
 function fieldSchema(field: DescField, path: readonly string[]): JsonSchema {
   const element = (kind: "scalar" | "enum" | "message"): JsonSchema =>
@@ -74,21 +91,18 @@ function fieldSchema(field: DescField, path: readonly string[]): JsonSchema {
       : kind === "enum"
         ? enumSchema(field.enum!)
         : messageSchema(field.message!, path);
-  switch (field.fieldKind) {
-    case "list":
-      return { type: "array", items: element(field.listKind) };
-    case "map":
-      return { type: "object", additionalProperties: element(field.mapKind) };
-    default: {
-      const schema = element(field.fieldKind);
-      return field.oneof
-        ? {
-            ...schema,
-            description: `Set only one of: ${field.oneof.fields.map((f) => f.jsonName).join(", ")}`,
-          }
-        : schema;
-    }
-  }
+  const schema =
+    field.fieldKind === "list"
+      ? { type: "array", items: element(field.listKind) }
+      : field.fieldKind === "map"
+        ? { type: "object", additionalProperties: element(field.mapKind) }
+        : element(field.fieldKind);
+  const description = [
+    fieldDoc(field),
+    schema.description,
+    field.oneof && `Set only one of: ${field.oneof.fields.map((f) => f.jsonName).join(", ")}.`,
+  ].filter(Boolean);
+  return description.length > 0 ? { ...schema, description: description.join(" ") } : schema;
 }
 
 /** Every unary RPC of the public package. `mediaref.internal.v1` lives in another module. */
@@ -101,7 +115,9 @@ const PUBLIC_METHODS = (Object.values(proto) as unknown[])
     return {
       method,
       name: method.name.replace(/(?<!^)([A-Z])/g, "_$1").toLowerCase(),
-      description: `${method.parent.typeName}/${method.name}. Arguments: ${method.input.typeName} as protobuf JSON. Result: ${method.output.typeName}.`,
+      description:
+        PROTO_DOCS[`${method.parent.typeName}.${method.name}`] ??
+        `${method.parent.typeName}/${method.name}`,
       readOnly: method.idempotency === MethodOptions_IdempotencyLevel.NO_SIDE_EFFECTS,
       // Arguments pass through untouched; fromJson in the handler is the strict check.
       inputSchema: {

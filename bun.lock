@@ -6,7 +6,9 @@
       "name": "media-ref",
       "devDependencies": {
         "@bufbuild/buf": "catalog:",
+        "@bufbuild/protobuf": "catalog:",
         "@bufbuild/protoc-gen-es": "catalog:",
+        "@bufbuild/protoplugin": "catalog:",
         "vite": "catalog:",
         "vite-plus": "catalog:",
       },
@@ -153,6 +155,7 @@
     "@bufbuild/buf": "^1.75.0",
     "@bufbuild/protobuf": "^2.17.0",
     "@bufbuild/protoc-gen-es": "^2.17.0",
+    "@bufbuild/protoplugin": "^2.17.0",
     "@cloudflare/workers-types": "^5.20261124.1",
     "@connectrpc/connect": "^2.3.0",
     "@connectrpc/connect-web": "^2.3.0",

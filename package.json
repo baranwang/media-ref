@@ -14,12 +14,14 @@
     "db:down": "vp run @media-ref/db#down",
     "db:migrate": "vp run @media-ref/db#migrate",
     "proto:lint": "buf lint",
-    "proto:gen": "buf generate && vp fmt packages/client/src/gen",
+    "proto:gen": "buf generate && vp fmt packages/client/src/gen apps/api/src/gen",
     "prepare": "vp config"
   },
   "devDependencies": {
     "@bufbuild/buf": "catalog:",
+    "@bufbuild/protobuf": "catalog:",
     "@bufbuild/protoc-gen-es": "catalog:",
+    "@bufbuild/protoplugin": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:"
   },
@@ -40,6 +42,7 @@
     "@bufbuild/buf": "^1.75.0",
     "@bufbuild/protobuf": "^2.17.0",
     "@bufbuild/protoc-gen-es": "^2.17.0",
+    "@bufbuild/protoplugin": "^2.17.0",
     "@cloudflare/workers-types": "^5.20261124.1",
     "@connectrpc/connect": "^2.3.0",
     "@connectrpc/connect-web": "^2.3.0",

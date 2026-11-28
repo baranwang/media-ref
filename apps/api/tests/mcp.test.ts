@@ -175,6 +175,7 @@ describe("MCP server at /mcp", () => {
     const list = await mcp(app, "tools/list", {}, headers);
     const tools = list.body.result.tools as {
       name: string;
+      description: string;
       inputSchema: { properties: Record<string, any> };
       annotations: { readOnlyHint: boolean };
     }[];
@@ -183,11 +184,14 @@ describe("MCP server at /mcp", () => {
     // Schemas and hints come from the proto descriptors.
     const getMedia = tools.find((tool) => tool.name === "get_media")!;
     expect(getMedia.annotations.readOnlyHint).toBe(true);
+    // Descriptions are the proto comments.
+    expect(getMedia.description).toMatch(/^Look up one movie or TV show by any id/);
+    expect(getMedia.inputSchema.properties.ref.description).toMatch(/^The title to look up/);
     expect(getMedia.inputSchema.properties.namespaceGroup.enum).toContain(
       "NAMESPACE_GROUP_PLATFORM",
     );
     expect(getMedia.inputSchema.properties.ref.properties.tmdb.description).toMatch(
-      /^Set only one of: mediaId, tmdb, imdb/,
+      /Set only one of: mediaId, tmdb, imdb/,
     );
     const create = tools.find((tool) => tool.name === "create_change_request")!;
     expect(create.annotations.readOnlyHint).toBe(false);

@@ -4,50 +4,85 @@ package mediaref.v1;
 
 import "mediaref/v1/types.proto";
 
+// One version of an association, written each time a change to it took effect.
 message AssociationRevision {
   string id = 1;
   string association_id = 2;
+  // 1 for the first version, counting up.
   int32 revision_number = 3;
+  // The change request that produced this version; look it up with GetChangeRequest.
   optional string change_request_id = 4;
   optional string variant_id = 5;
+  // Status of the association in this version.
   AssociationStatus status = 6;
+  // Episode mapping in this version.
   repeated Segment segments = 7;
+  // Who made the change (a user, or a system agent such as the review agent).
   optional string actor_user_id = 8;
+  // Who submitted the change request.
   optional string submitter_user_id = 9;
+  // Who decided the change request (the review agent when the evidence gate did not).
   optional string reviewer_user_id = 10;
+  // Why the change was made.
   optional string reason = 11;
+  // ISO 8601.
   string created_at = 12;
 }
 
 message ReportInvalidationRequest {
+  // The association to report: `associations[].id` from GetMedia. Only confirmed associations
+  // can be reported.
   string association_id = 1;
+  // What is wrong, in a sentence (page gone, wrong content, episodes off). At most 500 characters.
   optional string reason = 2;
 }
 
 message ReportInvalidationResponse {
   string report_id = 1;
+  // This key already reported this association in the current round; it was not counted again.
   bool deduplicated = 2;
+  // Enough accounts reported it; a recheck has been queued.
   bool triggered = 3;
+  // The recheck job, when one was triggered.
   optional string job_id = 4;
+  // Accounts that reported it in the current round.
   int32 report_count = 5;
+  // Accounts needed to trigger a recheck.
   int32 threshold = 6;
 }
 
 message ListAssociationRevisionsRequest {
+  // `associations[].id` from GetMedia.
   string association_id = 1;
+  // Oldest first by default (ASC); DESC for newest first.
   SortOrder order = 2;
+  // Page size, 1 to 100. Default 50.
   optional int32 limit = 3;
+  // Versions to skip. Default 0.
   optional int32 offset = 4;
 }
 
 message ListAssociationRevisionsResponse {
+  // The association as it is now.
   AssociationSummary association = 1;
+  // This page of versions.
   repeated AssociationRevision revisions = 2;
+  // Number of versions in all, for paging.
   int32 total = 3;
 }
 
+// Report broken associations and read their history.
 service AssociationService {
+  // Report that a confirmed association no longer holds: the platform page is gone, plays
+  // something else, or its episodes do not line up. Reports from enough different accounts
+  // trigger an automatic recheck; a report never changes data by itself. Needs report permission
+  // (every key has it); an account can report 20 times per UTC day. Errors: INVALID_ASSOCIATION_ID,
+  // INVALID_REASON, ASSOCIATION_NOT_FOUND, ASSOCIATION_ALREADY_DELISTED,
+  // ASSOCIATION_NOT_CONFIRMED, INVALIDATION_LIMIT_REACHED.
   rpc ReportInvalidation(ReportInvalidationRequest) returns (ReportInvalidationResponse);
+  // The version history of one association: each version's status and episode mapping, and the
+  // change request that made it. Needs read permission. Errors: INVALID_ASSOCIATION_ID,
+  // INVALID_ORDER, INVALID_PAGINATION, ASSOCIATION_NOT_FOUND.
   rpc ListAssociationRevisions(ListAssociationRevisionsRequest) returns (ListAssociationRevisionsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
