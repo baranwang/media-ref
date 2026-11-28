@@ -16,7 +16,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./proto": "./src/proto.ts",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./internal": "./src/internal.ts"
   },
   "publishConfig": {
     "exports": {

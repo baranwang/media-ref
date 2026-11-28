@@ -11,6 +11,7 @@ import {
   type PlatformNamespace,
   type proto,
 } from "@media-ref/client";
+import type * as internalProto from "@media-ref/client/internal";
 import { formatDateTime } from "./format";
 import type {
   ApiKeyItem,
@@ -802,7 +803,7 @@ const ALERT_LABELS: Record<
   },
 };
 
-export function reviewAlertFromProto(alert: proto.ReviewAlert): ReviewAlertItem {
+export function reviewAlertFromProto(alert: internalProto.ReviewAlert): ReviewAlertItem {
   const details = asJson(alert.details) ?? {};
   const label = ALERT_LABELS[alert.alertType] ?? {
     badge: "需要处理",
@@ -834,7 +835,7 @@ export function reviewAlertFromProto(alert: proto.ReviewAlert): ReviewAlertItem 
 // ---------- API keys ----------
 
 export function apiKeyFromProto(
-  key: proto.ApiKeySummary,
+  key: internalProto.ApiKeySummary,
   lastUsed: Map<string, string>,
 ): ApiKeyItem {
   return {

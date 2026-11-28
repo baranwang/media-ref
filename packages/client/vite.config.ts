@@ -11,6 +11,9 @@ export default defineConfig({
     },
     exports: {
       devExports: true,
+      // Website-only RPCs stay inside the workspace: never in dist or the published exports.
+      customExports: (exports, { isPublish }) =>
+        isPublish ? exports : { ...exports, "./internal": "./src/internal.ts" },
     },
   },
 });

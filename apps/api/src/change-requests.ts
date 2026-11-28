@@ -6,6 +6,7 @@ import {
   proto,
   type SegmentInput,
 } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import {
   createChangeRequest,
   createChangeRequestComment,
@@ -129,6 +130,31 @@ export const changeRequestServiceImpl: ServiceImpl<typeof proto.ChangeRequestSer
     });
   },
 
+  async listChangeRequestComments(req, ctx) {
+    await resolveChangeRequestReaderAuth(ctx);
+    const runtime = getRuntime(ctx);
+    const comments = await listChangeRequestComments(runtime.dbWrite, req.changeRequestId.trim());
+    return create(proto.ListChangeRequestCommentsResponseSchema, {
+      comments: comments.map((c) => create(proto.ChangeRequestCommentSchema, c)),
+    });
+  },
+};
+
+export const contributorServiceImpl: ServiceImpl<typeof internalProto.ContributorService> = {
+  async listMyChangeRequests(req, ctx) {
+    const session = await requireSessionAuth(ctx);
+    const runtime = getRuntime(ctx);
+    const listed = await listChangeRequests(runtime.dbWrite, {
+      submitterUserId: session.user.id,
+      limit: req.limit,
+      offset: req.offset,
+    });
+    return create(internalProto.ListMyChangeRequestsResponseSchema, {
+      changeRequests: listed.changeRequests.map(toProtoChangeRequest),
+      total: listed.total,
+    });
+  },
+
   async createChangeRequestComment(req, ctx) {
     // People comment; API callers submit and report instead (ADR 0003 amendment 2).
     if (extractApiKeyFromHeaders(ctx.requestHeader) !== null) {
@@ -147,34 +173,11 @@ export const changeRequestServiceImpl: ServiceImpl<typeof proto.ChangeRequestSer
         content: req.content,
         now: runtime.hasCustomClock ? runtime.now() : undefined,
       });
-      return create(proto.CreateChangeRequestCommentResponseSchema, {
+      return create(internalProto.CreateChangeRequestCommentResponseSchema, {
         comment: create(proto.ChangeRequestCommentSchema, comment),
       });
     } catch (error) {
       rethrowDomainError(error);
     }
-  },
-
-  async listChangeRequestComments(req, ctx) {
-    await resolveChangeRequestReaderAuth(ctx);
-    const runtime = getRuntime(ctx);
-    const comments = await listChangeRequestComments(runtime.dbWrite, req.changeRequestId.trim());
-    return create(proto.ListChangeRequestCommentsResponseSchema, {
-      comments: comments.map((c) => create(proto.ChangeRequestCommentSchema, c)),
-    });
-  },
-
-  async listMyChangeRequests(req, ctx) {
-    const session = await requireSessionAuth(ctx);
-    const runtime = getRuntime(ctx);
-    const listed = await listChangeRequests(runtime.dbWrite, {
-      submitterUserId: session.user.id,
-      limit: req.limit,
-      offset: req.offset,
-    });
-    return create(proto.ListMyChangeRequestsResponseSchema, {
-      changeRequests: listed.changeRequests.map(toProtoChangeRequest),
-      total: listed.total,
-    });
   },
 };

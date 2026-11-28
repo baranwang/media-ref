@@ -124,7 +124,7 @@ Pass `{ autoChunk: false }` if you want arrays larger than 100 entries to throw 
 
 ### Direct ConnectRPC / Protobuf Usage
 
-For advanced callers (e.g. Browse, ChangeRequest, Association, Account, or Reviewer services), `@media-ref/client` exports both the transport helper and all generated Protobuf-ES v2 schemas under `@media-ref/client/proto` (and as `proto` on the root entrypoint):
+For advanced callers (e.g. Browse, ChangeRequest, Association, or ApiKey services), `@media-ref/client` exports both the transport helper and all public generated Protobuf-ES v2 schemas under `@media-ref/client/proto` (and as `proto` on the root entrypoint):
 
 ```ts
 import { createClient } from "@connectrpc/connect";
@@ -211,7 +211,7 @@ const formatted = formatExternalKey({ namespace: "bilibili", nativeId: "ss45574"
 ## Exports
 
 - **ConnectRPC Client**: `createMediaRefClient`, `createMediaRefTransport`, `MediaRefApiError`, `DEFAULT_BASE_URL`, `MAX_BATCH_MEDIA_KEYS`, and request/response types (`MediaRefClient`, `MediaRefClientOptions`, `MediaRefTransportOptions`, `FetchLike`, `MediaLookupKey`, `GetMediaOptions`, `GetMediaResponse`, `MediaQueryItem`, `GetMediaBatchOptions`, `BatchMediaItemErrorCode`, `BatchMediaItemResult`, `BatchMediaResponse`, `ResolveFromKeyResult`, `NotFoundResolutionResult`, `MediaRefApiErrorOptions`).
-- **Generated Protobuf Schemas & Mappers**: `proto` namespace (and `@media-ref/client/proto` subpath), service descriptors (`MediaService`, `BrowseService`, `ChangeRequestService`, `AssociationService`, `AccountService`, `ReviewerService`), `ErrorInfoDetailSchema`, structured `MediaRef` helpers (`toProtoMediaRef`, `toProtoMediaRefFromKey`, `toProtoMediaRefFromInput`, `fromProtoMediaRef`, `parseMediaRefFromKey`, `formatMediaRefKey`), and bidirectional mappers (`toProtoMediaDocument`, `fromProtoMediaDocument`, `toProtoSegmentInput`, `fromProtoSegmentInput`, `createDomainConnectError`, `extractConnectErrorInfo`, etc.).
+- **Generated Protobuf Schemas & Mappers**: `proto` namespace (and `@media-ref/client/proto` subpath), service descriptors (`MediaService`, `BrowseService`, `ChangeRequestService`, `AssociationService`, `ApiKeyService`), `ErrorInfoDetailSchema`, structured `MediaRef` helpers (`toProtoMediaRef`, `toProtoMediaRefFromKey`, `toProtoMediaRefFromInput`, `fromProtoMediaRef`, `parseMediaRefFromKey`, `formatMediaRefKey`), and bidirectional mappers (`toProtoMediaDocument`, `fromProtoMediaDocument`, `toProtoSegmentInput`, `fromProtoSegmentInput`, `createDomainConnectError`, `extractConnectErrorInfo`, etc.).
 - **Episode Resolution**: `resolveEpisode` and result/query types (`ResolveEpisodeQuery`, `ResolveEpisodeResult`, `MappedEpisodeResult`, `CollectionOnlyResult`, `UnmappedEpisodeResult`).
 - **Segment Validation**: `normalizeSegment`, `normalizeSegments`, `validateSegment`, `validateVariantSegments`, `validateSharedCollectionSegments`.
 - **Domain Types & Helpers**: `MediaRef`, `TmdbRef`, `TvdbRef`, `TraktRef`, `PlatformRef`, `Media`, `MediaSnapshot`, `SeasonSnapshot`, `MediaDocument`, `Variant`, `Association`, `Segment`, `SegmentInput`, `ExternalId`, `ExternalKey`, `PLATFORM_NAMESPACES`, `CATALOG_NAMESPACES`, `BASELINE_PRIORITY`, `getNamespaceGroup`, `parseExternalKey`, `formatExternalKey`.

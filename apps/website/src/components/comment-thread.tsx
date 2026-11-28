@@ -31,7 +31,7 @@ export function CommentComposer({ changeRequestId }: { changeRequestId: string }
   const [note, setNote] = useState("");
   const send = useMutation({
     mutationFn: (shortcut?: "approve" | "reject") =>
-      browserClients().changeRequest.createChangeRequestComment({
+      browserClients().contributor.createChangeRequestComment({
         changeRequestId,
         content: commentContent(note, shortcut),
       }),

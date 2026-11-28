@@ -10,18 +10,17 @@ import {
   fromProtoMediaDocument,
   fromProtoMediaQueryItem,
   fromProtoMediaRef,
-  fromProtoReviewAlertStatus,
   fromProtoSegment,
   proto,
   toProtoChangeRequestStatus,
   toProtoMediaRefFromInput,
-  toProtoReviewAlertStatus,
   toProtoSegmentInput,
   type ExtractedConnectErrorInfo,
   type MediaDocument,
   type MediaRef,
   type SegmentInput,
 } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import type { createFakeOutboundClient, EmailMessage } from "@media-ref/core";
 import { expect } from "vite-plus/test";
 
@@ -101,8 +100,10 @@ export function createRpcClients(
     media: createClient(proto.MediaService, transport),
     changeRequest: createClient(proto.ChangeRequestService, transport),
     association: createClient(proto.AssociationService, transport),
-    account: createClient(proto.AccountService, transport),
-    reviewer: createClient(proto.ReviewerService, transport),
+    apiKey: createClient(proto.ApiKeyService, transport),
+    account: createClient(internalProto.AccountService, transport),
+    contributor: createClient(internalProto.ContributorService, transport),
+    reviewer: createClient(internalProto.ReviewerService, transport),
   };
 }
 
@@ -243,11 +244,10 @@ export {
   fromProtoMediaDocument,
   fromProtoMediaQueryItem,
   fromProtoMediaRef,
-  fromProtoReviewAlertStatus,
   fromProtoSegment,
   proto,
   toProtoChangeRequestStatus,
-  toProtoReviewAlertStatus,
   toProtoSegmentInput,
 };
 export type { MediaRef, SegmentInput };
+export { fromProtoReviewAlertStatus, toProtoReviewAlertStatus } from "@media-ref/client/internal";

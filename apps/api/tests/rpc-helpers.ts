@@ -8,6 +8,7 @@ import {
   type ExtractedConnectErrorInfo,
   type MediaRef,
 } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import {
   approveChangeRequestInTransaction,
   ensureReviewAgentUser,
@@ -117,8 +118,10 @@ export function createRpcClients(
     media: createClient(proto.MediaService, transport),
     changeRequest: createClient(proto.ChangeRequestService, transport),
     association: createClient(proto.AssociationService, transport),
-    account: createClient(proto.AccountService, transport),
-    reviewer: createClient(proto.ReviewerService, transport),
+    apiKey: createClient(proto.ApiKeyService, transport),
+    account: createClient(internalProto.AccountService, transport),
+    contributor: createClient(internalProto.ContributorService, transport),
+    reviewer: createClient(internalProto.ReviewerService, transport),
     browse: createClient(proto.BrowseService, transport),
   };
 }
@@ -236,10 +239,10 @@ export async function approveWithReviewChecks(
 export async function approveInCore(
   deps: Parameters<typeof approveWithReviewChecks>[0],
   input: Parameters<typeof approveWithReviewChecks>[1],
-): Promise<proto.ApproveChangeRequestResponse> {
+): Promise<internalProto.ApproveChangeRequestResponse> {
   try {
     const result = await approveWithReviewChecks(deps, input);
-    return create(proto.ApproveChangeRequestResponseSchema, {
+    return create(internalProto.ApproveChangeRequestResponseSchema, {
       changeRequest: toProtoChangeRequest(result.changeRequest),
       mediaId: result.mediaId,
       associationId: result.associationId,

@@ -1,5 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { createDomainConnectError, proto, toProtoApiKeyAction } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import type { Db } from "@media-ref/db";
 import type { ServiceImpl } from "@connectrpc/connect";
 import {
@@ -305,20 +306,7 @@ export async function verifyApiKey(input: VerifyApiKeyInput): Promise<VerifyApiK
   };
 }
 
-export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
-  async getCurrentUser(_req, ctx) {
-    const session = await requireSessionAuth(ctx);
-    return create(proto.GetCurrentUserResponseSchema, {
-      user: create(proto.UserSchema, {
-        id: session.user.id,
-        email: session.user.email,
-        name: session.user.name,
-        emailVerified: session.user.emailVerified,
-        role: session.user.role,
-      }),
-    });
-  },
-
+export const apiKeyServiceImpl: ServiceImpl<typeof proto.ApiKeyService> = {
   async getCurrentApiKey(_req, ctx) {
     const verified = await requireApiKeyAuth(ctx, { db: "read", permission: "read" });
     const expiresAt = toIsoDate(verified.expiresAt);
@@ -335,6 +323,21 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
       emailVerified: verified.emailVerified,
       role: verified.role,
       ...(expiresAt !== null ? { expiresAt } : {}),
+    });
+  },
+};
+
+export const accountServiceImpl: ServiceImpl<typeof internalProto.AccountService> = {
+  async getCurrentUser(_req, ctx) {
+    const session = await requireSessionAuth(ctx);
+    return create(internalProto.GetCurrentUserResponseSchema, {
+      user: create(internalProto.UserSchema, {
+        id: session.user.id,
+        email: session.user.email,
+        name: session.user.name,
+        emailVerified: session.user.emailVerified,
+        role: session.user.role,
+      }),
     });
   },
 
@@ -358,7 +361,10 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
     let canSubmitFromScopes: boolean | undefined;
     if (req.scopes.length > 0) {
       for (const scope of req.scopes) {
-        if (scope !== proto.ApiKeyScope.READ_REPORT && scope !== proto.ApiKeyScope.SUBMIT) {
+        if (
+          scope !== internalProto.ApiKeyScope.READ_REPORT &&
+          scope !== internalProto.ApiKeyScope.SUBMIT
+        ) {
           throw createDomainConnectError({
             status: 400,
             code: "INVALID_PERMISSIONS",
@@ -366,7 +372,7 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
           });
         }
       }
-      canSubmitFromScopes = req.scopes.includes(proto.ApiKeyScope.SUBMIT);
+      canSubmitFromScopes = req.scopes.includes(internalProto.ApiKeyScope.SUBMIT);
     }
 
     if (
@@ -412,7 +418,7 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
     });
 
     const summary = toApiKeySummary(created);
-    return create(proto.CreateApiKeyResponseSchema, {
+    return create(internalProto.CreateApiKeyResponseSchema, {
       apiKey: toProtoApiKeySummary(summary),
       key: created.key,
     });
@@ -426,7 +432,7 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
     });
 
     const apiKeys = listed.apiKeys.map((item) => toProtoApiKeySummary(toApiKeySummary(item)));
-    return create(proto.ListApiKeysResponseSchema, {
+    return create(internalProto.ListApiKeysResponseSchema, {
       apiKeys,
       total: listed.total,
     });
@@ -486,7 +492,7 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
       },
     });
 
-    return create(proto.UpdateApiKeyResponseSchema, {
+    return create(internalProto.UpdateApiKeyResponseSchema, {
       apiKey: toProtoApiKeySummary(toApiKeySummary(updated)),
     });
   },
@@ -503,9 +509,9 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
       days,
       now: runtime.now(),
     });
-    return create(proto.GetApiUsageResponseSchema, {
-      days: usage.days.map((day) => create(proto.ApiUsageDaySchema, day)),
-      lastUsed: usage.lastUsed.map((entry) => create(proto.ApiKeyLastUsedSchema, entry)),
+    return create(internalProto.GetApiUsageResponseSchema, {
+      days: usage.days.map((day) => create(internalProto.ApiUsageDaySchema, day)),
+      lastUsed: usage.lastUsed.map((entry) => create(internalProto.ApiKeyLastUsedSchema, entry)),
     });
   },
 
@@ -537,7 +543,7 @@ export const accountServiceImpl: ServiceImpl<typeof proto.AccountService> = {
       throw error;
     }
 
-    return create(proto.DeleteApiKeyResponseSchema, {
+    return create(internalProto.DeleteApiKeyResponseSchema, {
       success: true,
       id: keyId,
     });

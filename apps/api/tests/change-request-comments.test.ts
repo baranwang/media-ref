@@ -72,7 +72,7 @@ test("a signed-in user's comment is public on the change request and queues its 
   const id = await changeRequest("approved");
   const rpc = createRpcClients(app, { cookie: user.cookie });
 
-  const created = await rpc.changeRequest.createChangeRequestComment({
+  const created = await rpc.contributor.createChangeRequestComment({
     changeRequestId: id,
     content: "  这个合集其实是第二季  ",
   });
@@ -105,7 +105,7 @@ test("a comment while evidence is still being collected waits for the review: no
   const { app, user, changeRequest, reviewJobs } = await setup();
   const id = await changeRequest("pending_evidence");
 
-  await createRpcClients(app, { cookie: user.cookie }).changeRequest.createChangeRequestComment({
+  await createRpcClients(app, { cookie: user.cookie }).contributor.createChangeRequestComment({
     changeRequestId: id,
     content: "通过：分段对得上",
   });
@@ -119,7 +119,7 @@ test("only signed-in users comment: not anonymously, not with an API key", async
   const key = await issueApiKeyRpc(app, user.cookie, { name: "submit", canSubmit: true });
 
   const anonymous = await expectRpcError(
-    createRpcClients(app).changeRequest.createChangeRequestComment({
+    createRpcClients(app).contributor.createChangeRequestComment({
       changeRequestId: id,
       content: "通过",
     }),
@@ -128,7 +128,7 @@ test("only signed-in users comment: not anonymously, not with an API key", async
     createRpcClients(app, {
       apiKey: key.key,
       cookie: user.cookie,
-    }).changeRequest.createChangeRequestComment({ changeRequestId: id, content: "通过" }),
+    }).contributor.createChangeRequestComment({ changeRequestId: id, content: "通过" }),
   );
 
   expect(anonymous.status).toBe(401);
@@ -140,7 +140,7 @@ test("comment content is trimmed, required and length-limited; the change reques
   const id = await changeRequest("needs_review");
   const rpc = createRpcClients(app, { cookie: user.cookie });
   const comment = (changeRequestId: string, content: string) =>
-    expectRpcError(rpc.changeRequest.createChangeRequestComment({ changeRequestId, content }));
+    expectRpcError(rpc.contributor.createChangeRequestComment({ changeRequestId, content }));
 
   expect(await comment(id, "   ")).toMatchObject({ status: 400, code: "INVALID_COMMENT" });
   expect(await comment(id, "长".repeat(1001))).toMatchObject({
@@ -151,7 +151,7 @@ test("comment content is trimmed, required and length-limited; the change reques
     status: 404,
     code: "CHANGE_REQUEST_NOT_FOUND",
   });
-  await rpc.changeRequest.createChangeRequestComment({
+  await rpc.contributor.createChangeRequestComment({
     changeRequestId: id,
     content: "长".repeat(1000),
   });
@@ -163,10 +163,10 @@ test("each user has a daily comment cap", async () => {
   const rpc = createRpcClients(app, { cookie: user.cookie });
 
   for (let i = 0; i < 20; i += 1) {
-    await rpc.changeRequest.createChangeRequestComment({ changeRequestId: id, content: `第 ${i}` });
+    await rpc.contributor.createChangeRequestComment({ changeRequestId: id, content: `第 ${i}` });
   }
   const over = await expectRpcError(
-    rpc.changeRequest.createChangeRequestComment({ changeRequestId: id, content: "再一条" }),
+    rpc.contributor.createChangeRequestComment({ changeRequestId: id, content: "再一条" }),
   );
 
   expect(over).toMatchObject({ status: 429, code: "COMMENT_LIMIT_REACHED" });

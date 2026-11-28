@@ -1,9 +1,15 @@
 syntax = "proto3";
 
-package mediaref.v1;
+package mediaref.internal.v1;
 
 import "google/protobuf/struct.proto";
 import "mediaref/v1/types.proto";
+
+enum ReviewAlertStatus {
+  REVIEW_ALERT_STATUS_UNSPECIFIED = 0;
+  REVIEW_ALERT_STATUS_OPEN = 1;
+  REVIEW_ALERT_STATUS_RESOLVED = 2;
+}
 
 message ExternalIdRecord {
   string id = 1;
@@ -33,7 +39,7 @@ message NeedsReviewSegment {
   string association_id = 2;
   string media_id = 3;
   string media_title = 4;
-  MediaType media_type = 5;
+  mediaref.v1.MediaType media_type = 5;
   optional string media_baseline = 6;
   string namespace = 7;
   string native_id = 8;
@@ -56,7 +62,7 @@ message UpdatedUserRole {
 }
 
 message ListChangeRequestsRequest {
-  ChangeRequestStatus status = 1;
+  mediaref.v1.ChangeRequestStatus status = 1;
   optional int32 limit = 2;
   optional int32 offset = 3;
   // Only change requests decided by this reviewer, latest decision first.
@@ -64,7 +70,7 @@ message ListChangeRequestsRequest {
 }
 
 message ListChangeRequestsResponse {
-  repeated ChangeRequest change_requests = 1;
+  repeated mediaref.v1.ChangeRequest change_requests = 1;
   int32 total = 2;
 }
 
@@ -74,7 +80,7 @@ message ApproveChangeRequestRequest {
 }
 
 message ApproveChangeRequestResponse {
-  ChangeRequest change_request = 1;
+  mediaref.v1.ChangeRequest change_request = 1;
   string media_id = 2;
   string association_id = 3;
   string revision_id = 4;
@@ -86,7 +92,7 @@ message RejectChangeRequestRequest {
 }
 
 message RejectChangeRequestResponse {
-  ChangeRequest change_request = 1;
+  mediaref.v1.ChangeRequest change_request = 1;
 }
 
 message SetAssociationLockRequest {
@@ -95,7 +101,7 @@ message SetAssociationLockRequest {
 }
 
 message SetAssociationLockResponse {
-  AssociationSummary association = 1;
+  mediaref.v1.AssociationSummary association = 1;
   string association_id = 2;
   bool locked = 3;
 }

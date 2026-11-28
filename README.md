@@ -7,7 +7,8 @@ Project principles are in [`CONSTITUTION.md`](./CONSTITUTION.md).
 
 ## Workspace Layout
 
-- `proto/mediaref/v1/`: Canonical Protobuf v3 API schemas (single source of truth for all business RPCs, including the structured `MediaRef` `oneof`, generated into `packages/client/src/gen` via Buf).
+- `proto/mediaref/v1/`: Canonical Protobuf v3 schemas for the public API (single source of truth, including the structured `MediaRef` `oneof`, generated into `packages/client/src/gen` via Buf).
+- `proto/mediaref/internal/v1/`: Website-only RPCs (session or reviewer auth). Generated alongside the public schemas but exposed only through the workspace-only `@media-ref/client/internal` entry, never packed or published.
 - `apps/api` (`@media-ref/api`): ConnectRPC Protobuf Cloudflare Worker (`api.mediaref.org`) built directly on Web Fetch API (`@connectrpc/connect` + Better Auth + Kysely).
 - `apps/worker` (`@media-ref/worker`): Background Cloudflare Worker (Queues & Cron) for evidence gate checks, exploration agent loops, and TMDB daily sync.
 - `apps/website` (`@media-ref/website`): TanStack Start SSR website for browsing media, following exploration and change requests, and managing API keys.
@@ -29,7 +30,7 @@ bun install
 
 ## Protobuf & ConnectRPC Codegen
 
-All business APIs are defined under [`proto/mediaref/v1/`](./proto/mediaref/v1/) (`MediaService`, `BrowseService`, `ChangeRequestService`, `AssociationService`, `AccountService`, `ReviewerService`) and served over ConnectRPC (binary Protobuf by default, with Connect JSON and gRPC-Web interoperability). Better Auth (`/api/auth/*`) and health probes (`/health`) remain standard HTTP/JSON.
+Public APIs are defined under [`proto/mediaref/v1/`](./proto/mediaref/v1/) (`MediaService`, `BrowseService`, `ChangeRequestService`, `AssociationService`, `ApiKeyService`); website-only APIs under [`proto/mediaref/internal/v1/`](./proto/mediaref/internal/v1/) (`AccountService`, `ContributorService`, `ReviewerService`). Both are served over ConnectRPC (binary Protobuf by default, with Connect JSON and gRPC-Web interoperability). Better Auth (`/api/auth/*`) and health probes (`/health`) remain standard HTTP/JSON.
 
 ```bash
 # Lint .proto schemas with Buf

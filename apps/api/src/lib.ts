@@ -1,5 +1,6 @@
 export {
   accountServiceImpl,
+  apiKeyServiceImpl,
   API_KEY_START_LENGTH,
   buildApiKeyPermissions,
   DEFAULT_API_KEY_CONFIG_ID,
@@ -36,7 +37,7 @@ export {
   type AuthenticatedUser,
   type AuthInstance,
 } from "./auth.ts";
-export { changeRequestServiceImpl } from "./change-requests.ts";
+export { changeRequestServiceImpl, contributorServiceImpl } from "./change-requests.ts";
 export {
   parseAnonymousInvalidationThresholdFromEnv,
   type ReportInvalidationResponse,

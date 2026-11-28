@@ -1,6 +1,7 @@
 import type { Message, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import { createApiApp } from "@media-ref/api/app";
 import { resolveEpisode } from "@media-ref/client";
+import * as internalProto from "@media-ref/client/internal";
 import {
   bilibiliAdapter,
   createAdapterRegistry,
@@ -26,7 +27,6 @@ import {
   getMediaDocumentRpc,
   issueApiKeyRpc,
   mediaRef,
-  proto,
   signUpAndVerifyUser,
   TEST_BASE_URL,
   toProtoSegmentInput,
@@ -1110,7 +1110,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
 
     // Reviewer alerts endpoint surfaces the open locked_association_challenged alert
     const alertsBody = await reviewerRpc.reviewer.listReviewAlerts({
-      status: proto.ReviewAlertStatus.OPEN,
+      status: internalProto.ReviewAlertStatus.OPEN,
       alertType: "locked_association_challenged",
     });
     expect(alertsBody.total).toBe(1);
@@ -1221,7 +1221,7 @@ describe("Conflict resolution 4-way matrix, timeouts, locks, and revision histor
     expect(sameCollectionState.conflictReason).toBe("locked_association_challenged");
 
     const allAlertsBody = await reviewerRpc.reviewer.listReviewAlerts({
-      status: proto.ReviewAlertStatus.OPEN,
+      status: internalProto.ReviewAlertStatus.OPEN,
       alertType: "locked_association_challenged",
     });
     expect(allAlertsBody.total).toBe(2);
