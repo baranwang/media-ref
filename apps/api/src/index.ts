@@ -72,6 +72,7 @@ export async function handleWorkerRequest(
     authIpLimiter: env.RATE_LIMITER_AUTH_IP,
     config: {
       baseUrl: env.API_BASE_URL,
+      websiteUrl: env.WEBSITE_URL,
       authSecret: env.AUTH_SECRET,
       cookieDomain: env.COOKIE_DOMAIN,
       emailFrom: env.EMAIL_FROM,
@@ -107,15 +108,28 @@ export async function handleWorkerRequest(
     },
   });
 
-  try {
-    return await (internal ? app.fetchInternal(request, ctx) : app.fetch(request, env, ctx));
-  } finally {
+  const closeDbAfter = (done: Promise<unknown>) =>
     ctx.waitUntil(
-      Promise.allSettled(backgroundTasks).finally(() =>
-        Promise.allSettled([dbRead.destroy(), dbWrite.destroy()]),
-      ),
+      done
+        .then(() => Promise.allSettled(backgroundTasks))
+        .finally(() => Promise.allSettled([dbRead.destroy(), dbWrite.destroy()])),
     );
+
+  let response: Response;
+  try {
+    response = await (internal ? app.fetchInternal(request, ctx) : app.fetch(request, env, ctx));
+  } catch (error) {
+    closeDbAfter(Promise.resolve());
+    throw error;
   }
+  if (!response.body || !response.headers.get("content-type")?.startsWith("text/event-stream")) {
+    closeDbAfter(Promise.resolve());
+    return response;
+  }
+  // An SSE body (MCP tool calls) still runs RPCs after this returns; keep the pools until it ends.
+  const { readable, writable } = new TransformStream();
+  closeDbAfter(response.body.pipeTo(writable).catch(() => undefined));
+  return new Response(readable, response);
 }
 
 const worker = {
