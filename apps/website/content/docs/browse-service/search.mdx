@@ -47,7 +47,7 @@ description: 用片名、目录站或平台的网址、或者 namespace:id 编�
 
 ## 代码示例 [#example]
 
-<CodeTabs items={["curl", "TypeScript", "Python"]}>
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
 
 ```bash
 curl https://api.mediaref.org/mediaref.v1.BrowseService/Search \
@@ -79,6 +79,15 @@ res = requests.post(
 res.raise_for_status()
 for card in res.json().get("items", []):
     print(card["title"], card["key"])
+```
+
+```go
+body := strings.NewReader(`{ "query": "咒术回战", "limit": 5 }`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.BrowseService/Search", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
 ```
 
 </CodeTabs>

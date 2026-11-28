@@ -36,7 +36,7 @@ description: 查发起这次请求的密钥：它属于谁、有哪些权限、�
 
 ## 代码示例 [#example]
 
-<CodeTabs items={["curl", "TypeScript", "Python"]}>
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
 
 ```bash
 curl https://api.mediaref.org/mediaref.v1.ApiKeyService/GetCurrentApiKey \
@@ -68,6 +68,15 @@ res = requests.post(
 res.raise_for_status()
 key = res.json()
 print(key["keyId"], key.get("canSubmit", False))
+```
+
+```go
+body := strings.NewReader(`{}`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.ApiKeyService/GetCurrentApiKey", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
 ```
 
 </CodeTabs>

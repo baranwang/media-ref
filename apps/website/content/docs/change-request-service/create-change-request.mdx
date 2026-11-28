@@ -67,7 +67,7 @@ description: 提交一条新的对应关系：这部作品在某个平台或目�
 
 ## 代码示例 [#example]
 
-<CodeTabs items={["curl", "TypeScript", "Python"]}>
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
 
 ```bash
 curl https://api.mediaref.org/mediaref.v1.ChangeRequestService/CreateChangeRequest \
@@ -135,6 +135,24 @@ res = requests.post(
 )
 res.raise_for_status()
 print(res.json()["changeRequest"]["id"])
+```
+
+```go
+body := strings.NewReader(`{
+  "target": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+  "namespace": "bilibili",
+  "nativeId": "ss45574",
+  "variantDescription": "中文字幕版",
+  "segments": [
+    { "explicit": { "season": 1, "episodeStart": 25, "episodeEnd": 47,
+                    "targetEpisodeStart": 1, "baseline": "tmdb" } }
+  ]
+}`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.ChangeRequestService/CreateChangeRequest", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
 ```
 
 </CodeTabs>

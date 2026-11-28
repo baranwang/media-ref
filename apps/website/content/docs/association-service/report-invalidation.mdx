@@ -49,7 +49,7 @@ description: 报告一条对应关系失效了，比如平台页面下架或者�
 
 ## 代码示例 [#example]
 
-<CodeTabs items={["curl", "TypeScript", "Python"]}>
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
 
 ```bash
 curl https://api.mediaref.org/mediaref.v1.AssociationService/ReportInvalidation \
@@ -83,6 +83,15 @@ res = requests.post(
 )
 res.raise_for_status()
 print(res.json())
+```
+
+```go
+body := strings.NewReader(`{ "associationId": "0193f2c5-1b2d-…", "reason": "页面已经下架" }`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.AssociationService/ReportInvalidation", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
 ```
 
 </CodeTabs>

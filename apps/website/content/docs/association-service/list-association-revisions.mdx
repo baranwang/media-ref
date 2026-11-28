@@ -52,7 +52,7 @@ description: 看一条对应关系的修改历史：每一版的状态、分集�
 
 ## 代码示例 [#example]
 
-<CodeTabs items={["curl", "TypeScript", "Python"]}>
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
 
 ```bash
 curl https://api.mediaref.org/mediaref.v1.AssociationService/ListAssociationRevisions \
@@ -87,6 +87,15 @@ res = requests.post(
 res.raise_for_status()
 for revision in res.json().get("revisions", []):
     print(revision["revisionNumber"], revision["status"])
+```
+
+```go
+body := strings.NewReader(`{ "associationId": "0193f2c5-1b2d-…", "order": "SORT_ORDER_DESC", "limit": 10 }`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.AssociationService/ListAssociationRevisions", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
 ```
 
 </CodeTabs>

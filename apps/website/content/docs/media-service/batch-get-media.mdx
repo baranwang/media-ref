@@ -40,7 +40,7 @@ description: 一次查最多 100 部作品。每个编号单独给结果，某�
 
 ## 代码示例 [#example]
 
-<CodeTabs items={["curl", "TypeScript", "Python"]} defaultValue="TypeScript">
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]} defaultValue="TypeScript">
 
 ```bash
 curl https://api.mediaref.org/mediaref.v1.MediaService/BatchGetMedia \
@@ -87,6 +87,20 @@ res = requests.post(
 res.raise_for_status()
 for result in res.json()["results"]:
     print(result.get("success") or result.get("error"))
+```
+
+```go
+body := strings.NewReader(`{
+  "refs": [
+    { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+    { "douban": "1292052" }
+  ]
+}`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.MediaService/BatchGetMedia", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
 ```
 
 </CodeTabs>

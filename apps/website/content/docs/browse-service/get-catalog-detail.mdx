@@ -43,7 +43,7 @@ description: 读一个目录站条目的详情：简介、类型、地区、演�
 
 ## 代码示例 [#example]
 
-<CodeTabs items={["curl", "TypeScript", "Python"]}>
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
 
 ```bash
 curl https://api.mediaref.org/mediaref.v1.BrowseService/GetCatalogDetail \
@@ -75,6 +75,15 @@ res = requests.post(
 res.raise_for_status()
 detail = res.json()["detail"]
 print(detail["card"]["title"], detail.get("seasons", []))
+```
+
+```go
+body := strings.NewReader(`{ "key": "tmdb:tv:95479" }`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.BrowseService/GetCatalogDetail", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
 ```
 
 </CodeTabs>
