@@ -19,6 +19,8 @@ export const file_mediaref_v1_browse: GenFile =
   );
 
 /**
+ * A title as a catalog lists it, whether or not MediaRef has it yet.
+ *
  * @generated from message mediaref.v1.CatalogCard
  */
 export type CatalogCard = Message<"mediaref.v1.CatalogCard"> & {
@@ -31,6 +33,8 @@ export type CatalogCard = Message<"mediaref.v1.CatalogCard"> & {
   key: string;
 
   /**
+   * The catalog the card comes from.
+   *
    * @generated from field: string namespace = 2;
    */
   namespace: string;
@@ -139,6 +143,8 @@ export const CatalogSeasonSchema: GenMessage<CatalogSeason> =
  */
 export type CatalogDetail = Message<"mediaref.v1.CatalogDetail"> & {
   /**
+   * Title, year, poster and so on, as in Search results.
+   *
    * @generated from field: mediaref.v1.CatalogCard card = 1;
    */
   card?: CatalogCard | undefined;
@@ -181,6 +187,8 @@ export type CatalogDetail = Message<"mediaref.v1.CatalogDetail"> & {
   yearEnd?: number | undefined;
 
   /**
+   * Episode count of each season.
+   *
    * @generated from field: repeated mediaref.v1.CatalogSeason seasons = 9;
    */
   seasons: CatalogSeason[];
@@ -211,6 +219,8 @@ export type ListTrendingRequest = Message<"mediaref.v1.ListTrendingRequest"> & {
   type: BrowseType;
 
   /**
+   * Default 18, at most 100.
+   *
    * @generated from field: optional int32 limit = 3;
    */
   limit?: number | undefined;
@@ -247,6 +257,9 @@ export const ListTrendingResponseSchema: GenMessage<ListTrendingResponse> =
  */
 export type GetCatalogDetailRequest = Message<"mediaref.v1.GetCatalogDetailRequest"> & {
   /**
+   * A catalog key such as "tmdb:tv:95479", "douban:1292052" or "bangumi:294993"; the `key` of a
+   * Search result works as is. TVDB, IMDb and Trakt keys are mapped to their TMDB entry first.
+   *
    * @generated from field: string key = 1;
    */
   key: string;
@@ -283,13 +296,15 @@ export const GetCatalogDetailResponseSchema: GenMessage<GetCatalogDetailResponse
  */
 export type SearchRequest = Message<"mediaref.v1.SearchRequest"> & {
   /**
-   * A title, a catalog/platform URL, or a "namespace:id" key.
+   * A title, a catalog/platform URL, or a "namespace:id" key. At most 200 characters.
    *
    * @generated from field: string query = 1;
    */
   query: string;
 
   /**
+   * Default 10, at most 100.
+   *
    * @generated from field: optional int32 limit = 2;
    */
   limit?: number | undefined;
@@ -329,6 +344,8 @@ export const SearchResponseSchema: GenMessage<SearchResponse> =
   messageDesc(file_mediaref_v1_browse, 9);
 
 /**
+ * A title (or season) people looked up that MediaRef has no platform page for yet.
+ *
  * @generated from message mediaref.v1.DemandEntry
  */
 export type DemandEntry = Message<"mediaref.v1.DemandEntry"> & {
@@ -338,6 +355,8 @@ export type DemandEntry = Message<"mediaref.v1.DemandEntry"> & {
   id: string;
 
   /**
+   * How many lookups asked for it.
+   *
    * @generated from field: int32 demand_count = 2;
    */
   demandCount: number;
@@ -348,6 +367,8 @@ export type DemandEntry = Message<"mediaref.v1.DemandEntry"> & {
   season?: number | undefined;
 
   /**
+   * ISO 8601.
+   *
    * @generated from field: string last_demanded_at = 4;
    */
   lastDemandedAt: string;
@@ -371,11 +392,15 @@ export const DemandEntrySchema: GenMessage<DemandEntry> =
  */
 export type ListDemandsRequest = Message<"mediaref.v1.ListDemandsRequest"> & {
   /**
+   * Default 20, at most 100.
+   *
    * @generated from field: optional int32 limit = 1;
    */
   limit?: number | undefined;
 
   /**
+   * Entries to skip. Default 0.
+   *
    * @generated from field: optional int32 offset = 2;
    */
   offset?: number | undefined;
@@ -551,6 +576,8 @@ export const ExplorationSummarySchema: GenMessage<ExplorationSummary> =
 export type ListExplorationActivityRequest =
   Message<"mediaref.v1.ListExplorationActivityRequest"> & {
     /**
+     * Default 20, at most 50.
+     *
      * @generated from field: optional int32 limit = 1;
      */
     limit?: number | undefined;
@@ -603,6 +630,8 @@ export type ListExplorationActivityResponse =
     last24h?: ExplorationSummary | undefined;
 
     /**
+     * Cursor for the next page; absent on the last page.
+     *
      * @generated from field: optional string next_before = 4;
      */
     nextBefore?: string | undefined;
@@ -680,10 +709,15 @@ export const ExplorationFilterSchema: GenEnum<ExplorationFilter> =
   enumDesc(file_mediaref_v1_browse, 1);
 
 /**
+ * Find titles and read catalog details, including titles MediaRef does not have yet.
+ *
  * @generated from service mediaref.v1.BrowseService
  */
 export const BrowseService: GenService<{
   /**
+   * Titles trending on a catalog (tmdb, douban, bangumi or trakt), each marked with whether it is
+   * in MediaRef and on which platforms. Needs read permission.
+   *
    * @generated from rpc mediaref.v1.BrowseService.ListTrending
    */
   listTrending: {
@@ -692,6 +726,10 @@ export const BrowseService: GenService<{
     output: typeof ListTrendingResponseSchema;
   };
   /**
+   * A catalog entry's details: overview, genres, regions, credits and the episode count of each
+   * season. Works for titles MediaRef does not have yet. Needs read permission. Errors:
+   * CATALOG_ENTRY_NOT_FOUND.
+   *
    * @generated from rpc mediaref.v1.BrowseService.GetCatalogDetail
    */
   getCatalogDetail: {
@@ -700,6 +738,10 @@ export const BrowseService: GenService<{
     output: typeof GetCatalogDetailResponseSchema;
   };
   /**
+   * Find titles by name, by catalog or platform URL, or by a "namespace:id" key. Names are matched
+   * in MediaRef first, then on catalogs. Each card has a catalog `key` for GetCatalogDetail, and a
+   * `media_id` when the title is already in MediaRef. Needs read permission. Errors: INVALID_QUERY.
+   *
    * @generated from rpc mediaref.v1.BrowseService.Search
    */
   search: {
@@ -708,6 +750,9 @@ export const BrowseService: GenService<{
     output: typeof SearchResponseSchema;
   };
   /**
+   * Titles people looked up that MediaRef has no platform page for yet, most wanted first. The
+   * exploration agent works through these. Needs read permission.
+   *
    * @generated from rpc mediaref.v1.BrowseService.ListDemands
    */
   listDemands: {
@@ -716,6 +761,9 @@ export const BrowseService: GenService<{
     output: typeof ListDemandsResponseSchema;
   };
   /**
+   * What the exploration agent is doing and has done: jobs running now, finished jobs with the
+   * outcome on each platform, and a 24-hour summary. Needs read permission.
+   *
    * @generated from rpc mediaref.v1.BrowseService.ListExplorationActivity
    */
   listExplorationActivity: {

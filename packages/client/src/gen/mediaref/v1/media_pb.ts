@@ -23,21 +23,33 @@ export const file_mediaref_v1_media: GenFile =
  */
 export type GetMediaRequest = Message<"mediaref.v1.GetMediaRequest"> & {
   /**
+   * The title to look up, by any one id it is known under: a catalog id (tmdb, imdb, tvdb,
+   * trakt, douban, bangumi), a platform page, or a MediaRef media id.
+   *
    * @generated from field: mediaref.v1.MediaRef ref = 1;
    */
   ref?: MediaRef | undefined;
 
   /**
+   * Also return associations MediaRef has not confirmed yet (seed data and pending change
+   * requests), marked `unconfirmed`.
+   *
    * @generated from field: bool include_unconfirmed = 2;
    */
   includeUnconfirmed: boolean;
 
   /**
+   * The season you are after. It does not filter the response; it tells the exploration agent
+   * what to look for when MediaRef lacks it.
+   *
    * @generated from field: optional int32 season = 3;
    */
   season?: number | undefined;
 
   /**
+   * Whether you are after video platforms or catalogs. Like `season`, it does not filter the
+   * response; it steers the exploration agent.
+   *
    * @generated from field: mediaref.v1.NamespaceGroup namespace_group = 4;
    */
   namespaceGroup: NamespaceGroup;
@@ -56,21 +68,30 @@ export const GetMediaRequestSchema: GenMessage<GetMediaRequest> =
  */
 export type GetMediaResponse = Message<"mediaref.v1.GetMediaResponse"> & {
   /**
+   * The ref you sent, echoed back.
+   *
    * @generated from field: mediaref.v1.MediaRef ref = 1;
    */
   ref?: MediaRef | undefined;
 
   /**
+   * The title's full record: external ids, variants, and every association with its segments.
+   *
    * @generated from field: mediaref.v1.MediaDocument document = 2;
    */
   document?: MediaDocument | undefined;
 
   /**
+   * When looking up by a platform page, the association that page matched.
+   *
    * @generated from field: optional string matched_association_id = 3;
    */
   matchedAssociationId?: string | undefined;
 
   /**
+   * One entry per title when the ref matches more than one (for example a platform collection
+   * holding two seasons that are separate titles).
+   *
    * @generated from field: repeated mediaref.v1.MediaQueryItem items = 4;
    */
   items: MediaQueryItem[];
@@ -89,21 +110,29 @@ export const GetMediaResponseSchema: GenMessage<GetMediaResponse> =
  */
 export type BatchGetMediaRequest = Message<"mediaref.v1.BatchGetMediaRequest"> & {
   /**
+   * 1 to 100 refs, written as in GetMedia.
+   *
    * @generated from field: repeated mediaref.v1.MediaRef refs = 1;
    */
   refs: MediaRef[];
 
   /**
+   * As in GetMedia.
+   *
    * @generated from field: bool include_unconfirmed = 2;
    */
   includeUnconfirmed: boolean;
 
   /**
+   * As in GetMedia: steers the exploration agent, does not filter.
+   *
    * @generated from field: optional int32 season = 3;
    */
   season?: number | undefined;
 
   /**
+   * As in GetMedia.
+   *
    * @generated from field: mediaref.v1.NamespaceGroup namespace_group = 4;
    */
   namespaceGroup: NamespaceGroup;
@@ -122,6 +151,8 @@ export const BatchGetMediaRequestSchema: GenMessage<BatchGetMediaRequest> =
  */
 export type BatchMediaItemSuccess = Message<"mediaref.v1.BatchMediaItemSuccess"> & {
   /**
+   * The matched titles, each with its full record.
+   *
    * @generated from field: repeated mediaref.v1.MediaQueryItem items = 1;
    */
   items: MediaQueryItem[];
@@ -140,6 +171,8 @@ export const BatchMediaItemSuccessSchema: GenMessage<BatchMediaItemSuccess> =
  */
 export type BatchMediaItemError = Message<"mediaref.v1.BatchMediaItemError"> & {
   /**
+   * "INVALID_KEY" (the ref is malformed) or "NOT_FOUND" (MediaRef has no such title yet).
+   *
    * @generated from field: string code = 1;
    */
   code: string;
@@ -163,6 +196,8 @@ export const BatchMediaItemErrorSchema: GenMessage<BatchMediaItemError> =
  */
 export type BatchMediaItemResult = Message<"mediaref.v1.BatchMediaItemResult"> & {
   /**
+   * The ref this result is for.
+   *
    * @generated from field: mediaref.v1.MediaRef ref = 1;
    */
   ref?: MediaRef | undefined;
@@ -201,6 +236,8 @@ export const BatchMediaItemResultSchema: GenMessage<BatchMediaItemResult> =
  */
 export type BatchGetMediaResponse = Message<"mediaref.v1.BatchGetMediaResponse"> & {
   /**
+   * One result per ref, in request order. A bad or unknown ref fails only its own result.
+   *
    * @generated from field: repeated mediaref.v1.BatchMediaItemResult results = 1;
    */
   results: BatchMediaItemResult[];
@@ -215,10 +252,16 @@ export const BatchGetMediaResponseSchema: GenMessage<BatchGetMediaResponse> =
   messageDesc(file_mediaref_v1_media, 6);
 
 /**
+ * Look up titles and where they play.
+ *
  * @generated from service mediaref.v1.MediaService
  */
 export const MediaService: GenService<{
   /**
+   * Look up one movie or TV show by any id it is known under, and get where it is on each video
+   * platform and catalog, down to which season and episode maps to which page and episode.
+   * Needs a key with read permission. Errors: INVALID_KEY, INVALID_QUERY, MEDIA_NOT_FOUND.
+   *
    * @generated from rpc mediaref.v1.MediaService.GetMedia
    */
   getMedia: {
@@ -227,6 +270,10 @@ export const MediaService: GenService<{
     output: typeof GetMediaResponseSchema;
   };
   /**
+   * GetMedia for up to 100 titles in one call. Each ref gets its own result; one bad or unknown
+   * ref does not fail the others. Read-only; needs a key with read permission. Errors for the
+   * whole call: BATCH_LIMIT_EXCEEDED, INVALID_QUERY.
+   *
    * @generated from rpc mediaref.v1.MediaService.BatchGetMedia
    */
   batchGetMedia: {

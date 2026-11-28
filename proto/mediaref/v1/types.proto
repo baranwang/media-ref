@@ -10,6 +10,8 @@ enum MediaType {
   MEDIA_TYPE_TV = 2;
 }
 
+// Video platforms (tencent, iqiyi, youku, bilibili, mgtv) or catalogs (tmdb, imdb, tvdb, trakt,
+// douban, bangumi).
 enum NamespaceGroup {
   NAMESPACE_GROUP_UNSPECIFIED = 0;
   NAMESPACE_GROUP_PLATFORM = 1;
@@ -18,29 +20,41 @@ enum NamespaceGroup {
 
 enum AssociationStatus {
   ASSOCIATION_STATUS_UNSPECIFIED = 0;
+  // Verified; in effect.
   ASSOCIATION_STATUS_CONFIRMED = 1;
+  // Imported from open data and not verified yet.
   ASSOCIATION_STATUS_SEED_UNCONFIRMED = 2;
+  // The page was taken down or no longer plays this title.
   ASSOCIATION_STATUS_DELISTED = 3;
 }
 
 enum ChangeRequestStatus {
   CHANGE_REQUEST_STATUS_UNSPECIFIED = 0;
+  // Being checked automatically against the platform and catalogs.
   CHANGE_REQUEST_STATUS_PENDING_EVIDENCE = 1;
+  // In effect.
   CHANGE_REQUEST_STATUS_APPROVED = 2;
+  // The automatic check was not sure; the review agent decides.
   CHANGE_REQUEST_STATUS_NEEDS_REVIEW = 3;
+  // Rejected; the reason is in `decision_reason`.
   CHANGE_REQUEST_STATUS_REJECTED = 4;
 }
 
 enum UnconfirmedAssociationSource {
   UNCONFIRMED_ASSOCIATION_SOURCE_UNSPECIFIED = 0;
+  // An unverified seed association.
   UNCONFIRMED_ASSOCIATION_SOURCE_SEED_UNCONFIRMED = 1;
+  // A change request still being decided.
   UNCONFIRMED_ASSOCIATION_SOURCE_CHANGE_REQUEST = 2;
 }
 
 enum PlatformStatus {
   PLATFORM_STATUS_UNSPECIFIED = 0;
+  // The title has a confirmed association on this platform.
   PLATFORM_STATUS_ASSOCIATED = 1;
+  // The exploration agent looked and found nothing (see `checked_at`).
   PLATFORM_STATUS_NOT_FOUND = 2;
+  // Nobody has looked yet.
   PLATFORM_STATUS_UNCHECKED = 3;
 }
 
@@ -58,11 +72,15 @@ enum SortOrder {
 
 enum ApiKeyAction {
   API_KEY_ACTION_UNSPECIFIED = 0;
+  // Read media, catalogs, revisions and change requests.
   API_KEY_ACTION_READ = 1;
+  // Report invalid associations.
   API_KEY_ACTION_REPORT = 2;
+  // Submit change requests.
   API_KEY_ACTION_SUBMIT = 3;
 }
 
+// A video platform, for PlatformRef.
 enum Platform {
   PLATFORM_UNSPECIFIED = 0;
   PLATFORM_TENCENT = 1;
@@ -73,6 +91,7 @@ enum Platform {
 }
 
 message TmdbRef {
+  // TMDB keeps movies and TV shows apart, so the type is required.
   MediaType type = 1;
   int32 id = 2;
 }
@@ -83,24 +102,33 @@ message TvdbRef {
 }
 
 message TraktRef {
+  // Trakt id or slug.
   string id = 1;
   MediaType type = 2;
 }
 
 message PlatformRef {
   Platform platform = 1;
+  // The page's id on the platform, e.g. "ss34430" on bilibili.
   string native_id = 2;
 }
 
+// Names one title by exactly one id it is known under.
 message MediaRef {
   oneof id {
+    // MediaRef's own media id (UUID).
     string media_id = 1;
+    // e.g. {"type": "MEDIA_TYPE_TV", "id": 95479}.
     TmdbRef tmdb = 2;
+    // e.g. "tt12343534".
     string imdb = 3;
     TvdbRef tvdb = 4;
     TraktRef trakt = 5;
+    // Douban subject id, e.g. "1292052".
     string douban = 6;
+    // Bangumi subject id, e.g. "294993".
     string bangumi = 7;
+    // A platform page; finds the title(s) that page is associated with.
     PlatformRef platform = 8;
   }
 }
@@ -114,11 +142,13 @@ message ExternalId {
 }
 
 message SeasonSnapshot {
+  // In the media's baseline numbering; 0 is specials.
   int32 season = 1;
   int32 episode_count = 2;
   optional int32 air_year = 3;
 }
 
+// Title and season structure, from the baseline catalog.
 message MediaSnapshot {
   string title = 1;
   optional string original_title = 2;
@@ -128,48 +158,73 @@ message MediaSnapshot {
 }
 
 message Media {
+  // MediaRef media id (UUID).
   string id = 1;
   MediaType type = 2;
+  // The catalog whose season and episode numbers the media uses, usually "tmdb".
   optional string baseline = 3;
   MediaSnapshot snapshot = 4;
 }
 
+// One presentation of a title on one platform, such as the original audio or a Mandarin dub.
+// Every platform association belongs to a variant.
 message Variant {
   string id = 1;
   optional string media_id = 2;
   string namespace = 3;
+  // Free text describing the variant, e.g. "原声" or "国语".
   string label = 4;
+  // Used when a lookup names no variant.
   bool is_default = 5;
   optional bool unconfirmed = 6;
 }
 
+// One run of episodes in an association: episodes `episode_start`..`episode_end` of `season`
+// (baseline numbering) are episodes `target_episode_start`.. on the page. An association without
+// segments covers the whole title.
 message Segment {
   int32 season = 1;
   int32 episode_start = 2;
+  // Absent for an open-ended run that continues to the end of the season.
   optional int32 episode_end = 3;
+  // Episode number on the page that `episode_start` maps to.
   int32 target_episode_start = 4;
+  // The catalog whose numbering `season` and episodes use, e.g. "tmdb".
   string baseline = 5;
+  // The page orders these episodes differently, so only the page as a whole is known.
   bool non_linear = 6;
+  // The mapping may be out of date (e.g. the catalog changed its seasons); trust only the page.
   bool needs_review = 7;
 }
 
+// The page holds one whole season, episode for episode.
 message WholeSeasonSegmentInput {
   int32 season = 1;
+  // The catalog whose numbering `season` uses: tmdb, tvdb, imdb, bangumi or douban.
   string baseline = 2;
+  // The page orders these episodes differently from the baseline.
   bool non_linear = 3;
+  // You are not sure the episode numbers line up; only the page as a whole is claimed.
   bool needs_review = 4;
 }
 
+// The page holds episodes `episode_start`..`episode_end` of `season`, starting at its own episode
+// `target_episode_start`.
 message ExplicitSegmentInput {
   int32 season = 1;
   int32 episode_start = 2;
+  // Omit for an open-ended run.
   optional int32 episode_end = 3;
   int32 target_episode_start = 4;
+  // The catalog whose numbering `season` and episodes use: tmdb, tvdb, imdb, bangumi or douban.
   string baseline = 5;
+  // The page orders these episodes differently from the baseline.
   bool non_linear = 6;
+  // You are not sure the episode numbers line up; only the page as a whole is claimed.
   bool needs_review = 7;
 }
 
+// Which episodes of the title a submitted page holds: a whole season, or an explicit run.
 message SegmentInput {
   oneof kind {
     WholeSeasonSegmentInput whole_season = 1;
@@ -179,35 +234,50 @@ message SegmentInput {
 
 message PlatformStatusEntry {
   PlatformStatus status = 1;
+  // When the exploration agent last looked (ISO 8601), for NOT_FOUND.
   optional string checked_at = 2;
 }
 
+// A platform page (or catalog entry) that belongs to a title, with which episodes it holds.
 message Association {
+  // Use it with ReportInvalidation and ListAssociationRevisions.
   string id = 1;
   optional string media_id = 2;
+  // The platform or catalog, e.g. "bilibili" or "douban".
   string namespace = 3;
+  // The page's id there, e.g. "ss34430".
   string native_id = 4;
+  // The variant (platforms only).
   optional string variant_id = 5;
   AssociationStatus status = 6;
+  // Which episodes the page holds; empty means the whole title.
   repeated Segment segments = 7;
+  // The episode mapping may be out of date.
   optional bool needs_review = 8;
   optional bool locked = 9;
+  // Not verified yet; returned only with `include_unconfirmed`.
   optional bool unconfirmed = 10;
   optional UnconfirmedAssociationSource unconfirmed_source = 11;
+  // For an unconfirmed association from a change request: that request and its status.
   optional string change_request_id = 12;
   optional ChangeRequestStatus change_request_status = 13;
   // Native title of the collection/entry (e.g. "进击的巨人 最终季 Part.2"), snapshotted from
   // evidence check or upstream sync. Display only; never reviewed.
   optional string title = 14;
+  // Episodes on the page, from the same snapshot.
   optional int32 episode_count = 15;
 }
 
+// Everything MediaRef knows about one title.
 message MediaDocument {
   Media media = 1;
   repeated ExternalId external_ids = 2;
   repeated Variant variants = 3;
+  // Every platform page and catalog entry of the title, with its episode mapping.
   repeated Association associations = 4;
+  // The associations a platform-page lookup matched.
   repeated string matched_association_ids = 5;
+  // Per video platform: associated, looked for and not found, or not checked yet.
   map<string, PlatformStatusEntry> platform_statuses = 6;
 }
 
@@ -216,14 +286,18 @@ message MediaQueryItem {
   optional string matched_association_id = 2;
 }
 
+// A proposed association and its decision.
 message ChangeRequest {
   string id = 1;
   ChangeRequestStatus status = 2;
   string submitter_user_id = 3;
   optional string submitter_key_id = 4;
+  // A person or an agent (such as the exploration agent).
   SubmitterType submitter_type = 5;
   optional string task_id = 6;
+  // The title it was matched to.
   optional string media_id = 7;
+  // The title as submitted.
   MediaRef target = 8;
   string namespace = 9;
   string raw_native_id = 10;
@@ -232,11 +306,15 @@ message ChangeRequest {
   optional string variant_description = 13;
   bool set_default_variant = 14;
   repeated Segment segments = 15;
+  // What the automatic check found on the platform and catalogs.
   optional google.protobuf.Struct evidence = 16;
+  // Why it conflicts with existing data, when it does.
   optional string conflict_reason = 17;
+  // Why it was approved or rejected.
   optional string decision_reason = 18;
   optional string reviewer_user_id = 19;
   optional string reviewed_at = 20;
+  // The association it created or changed, once approved.
   optional string applied_association_id = 21;
   optional string applied_revision_id = 22;
   optional string replaces_association_id = 23;
@@ -244,6 +322,7 @@ message ChangeRequest {
   string updated_at = 25;
 }
 
+// An association's current state, without its episode mapping.
 message AssociationSummary {
   string id = 1;
   string media_id = 2;
@@ -264,12 +343,15 @@ message SegmentValidationErrorDetail {
   optional int32 segment_index = 3;
 }
 
+// Attached to every MediaRef error.
 message ErrorInfoDetail {
+  // The business error code, e.g. MEDIA_NOT_FOUND or RATE_LIMITED.
   string error_code = 1;
   optional string scope = 2;
   optional int32 limit = 3;
   optional int32 used = 4;
   optional int32 window_seconds = 5;
+  // For rate limits: seconds to wait before retrying.
   optional int32 retry_after_seconds = 6;
   repeated SegmentValidationErrorDetail validation_errors = 7;
 }

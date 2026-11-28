@@ -5,6 +5,7 @@ package mediaref.v1;
 import "mediaref/v1/types.proto";
 
 message ApiKeyPermissions {
+  // What the key may do with media: read, report invalidations, submit change requests.
   repeated ApiKeyAction media = 1;
 }
 
@@ -12,19 +13,29 @@ message GetCurrentApiKeyRequest {}
 
 message GetCurrentApiKeyResponse {
   string key_id = 1;
+  // The account that owns the key.
   string user_id = 2;
+  // The name given when the key was created.
   optional string name = 3;
+  // The key's prefix and first characters, to tell keys apart.
   optional string prefix = 4;
   optional string start = 5;
   ApiKeyPermissions permissions = 6;
+  // The key can submit change requests (needs the submit permission and a verified email).
   bool can_submit = 7;
+  // The owner's email is verified; submitting needs it.
   bool email_verified = 8;
+  // The owner's role. It changes quotas, never what the evidence gate accepts.
   string role = 9;
+  // ISO 8601; absent when the key never expires.
   optional string expires_at = 10;
 }
 
 // The API key that signed the request.
 service ApiKeyService {
+  // Who owns the calling key, what it may do (read, report, submit) and when it expires. Use it to
+  // check a key before relying on it. Errors: API_KEY_REQUIRED, INVALID_API_KEY, API_KEY_EXPIRED,
+  // API_KEY_DISABLED.
   rpc GetCurrentApiKey(GetCurrentApiKeyRequest) returns (GetCurrentApiKeyResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
