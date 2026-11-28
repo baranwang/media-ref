@@ -1,0 +1,3186 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "API",
+    "description": "API documentation for API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/mediaref.v1.ApiKeyService/GetCurrentApiKey": {
+      "post": {
+        "tags": ["mediaref.v1.ApiKeyService"],
+        "summary": "GetCurrentApiKey",
+        "description": "Who owns the calling key, what it may do (read, report, submit) and when it expires. Use it to\n check a key before relying on it. Errors: API_KEY_REQUIRED, INVALID_API_KEY, API_KEY_EXPIRED,\n API_KEY_DISABLED.",
+        "operationId": "mediaref.v1.ApiKeyService.GetCurrentApiKey",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.GetCurrentApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.GetCurrentApiKeyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.AssociationService/ListAssociationRevisions": {
+      "post": {
+        "tags": ["mediaref.v1.AssociationService"],
+        "summary": "ListAssociationRevisions",
+        "description": "The version history of one association: each version's status and episode mapping, and the\n change request that made it. Needs read permission. Errors: INVALID_ASSOCIATION_ID,\n INVALID_ORDER, INVALID_PAGINATION, ASSOCIATION_NOT_FOUND.",
+        "operationId": "mediaref.v1.AssociationService.ListAssociationRevisions",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.ListAssociationRevisionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.ListAssociationRevisionsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.AssociationService/ReportInvalidation": {
+      "post": {
+        "tags": ["mediaref.v1.AssociationService"],
+        "summary": "ReportInvalidation",
+        "description": "Report that a confirmed association no longer holds: the platform page is gone, plays\n something else, or its episodes do not line up. Reports from enough different accounts\n trigger an automatic recheck; a report never changes data by itself. Needs report permission\n (every key has it); an account can report 20 times per UTC day. Errors: INVALID_ASSOCIATION_ID,\n INVALID_REASON, ASSOCIATION_NOT_FOUND, ASSOCIATION_ALREADY_DELISTED,\n ASSOCIATION_NOT_CONFIRMED, INVALIDATION_LIMIT_REACHED.",
+        "operationId": "mediaref.v1.AssociationService.ReportInvalidation",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.ReportInvalidationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.ReportInvalidationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.BrowseService/GetCatalogDetail": {
+      "post": {
+        "tags": ["mediaref.v1.BrowseService"],
+        "summary": "GetCatalogDetail",
+        "description": "A catalog entry's details: overview, genres, regions, credits and the episode count of each\n season. Works for titles MediaRef does not have yet. Needs read permission. Errors:\n CATALOG_ENTRY_NOT_FOUND.",
+        "operationId": "mediaref.v1.BrowseService.GetCatalogDetail",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.GetCatalogDetailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.GetCatalogDetailResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.BrowseService/ListDemands": {
+      "post": {
+        "tags": ["mediaref.v1.BrowseService"],
+        "summary": "ListDemands",
+        "description": "Titles people looked up that MediaRef has no platform page for yet, most wanted first. The\n exploration agent works through these. Needs read permission.",
+        "operationId": "mediaref.v1.BrowseService.ListDemands",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.ListDemandsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.ListDemandsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.BrowseService/ListExplorationActivity": {
+      "post": {
+        "tags": ["mediaref.v1.BrowseService"],
+        "summary": "ListExplorationActivity",
+        "description": "What the exploration agent is doing and has done: jobs running now, finished jobs with the\n outcome on each platform, and a 24-hour summary. Needs read permission.",
+        "operationId": "mediaref.v1.BrowseService.ListExplorationActivity",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.ListExplorationActivityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.ListExplorationActivityResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.BrowseService/ListTrending": {
+      "post": {
+        "tags": ["mediaref.v1.BrowseService"],
+        "summary": "ListTrending",
+        "description": "Titles trending on a catalog (tmdb, douban, bangumi or trakt), each marked with whether it is\n in MediaRef and on which platforms. Needs read permission.",
+        "operationId": "mediaref.v1.BrowseService.ListTrending",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.ListTrendingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.ListTrendingResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.BrowseService/Search": {
+      "post": {
+        "tags": ["mediaref.v1.BrowseService"],
+        "summary": "Search",
+        "description": "Find titles by name, by catalog or platform URL, or by a \"namespace:id\" key. Names are matched\n in MediaRef first, then on catalogs. Each card has a catalog `key` for GetCatalogDetail, and a\n `media_id` when the title is already in MediaRef. Needs read permission. Errors: INVALID_QUERY.",
+        "operationId": "mediaref.v1.BrowseService.Search",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.SearchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.ChangeRequestService/CreateChangeRequest": {
+      "post": {
+        "tags": ["mediaref.v1.ChangeRequestService"],
+        "summary": "CreateChangeRequest",
+        "description": "Propose that a platform page (or catalog entry) belongs to a title, with which episodes map\n where. It is evidence, not a decision: MediaRef opens the page, checks title, year and episodes,\n and approves or rejects it on its own; there is no human review. Needs submit permission and a\n verified email. Errors include INVALID_TARGET_KEY, INVALID_NAMESPACE, INVALID_NATIVE_ID,\n VARIANT_REQUIRED, INVALID_VARIANT, INVALID_SEGMENTS, SEGMENT_OVERLAP,\n SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE, INSUFFICIENT_PERMISSIONS, EMAIL_NOT_VERIFIED,\n DUPLICATE_CHANGE_REQUEST, NO_CHANGE, SUBMISSION_RATE_LIMITED, PLATFORM_UPSTREAM_ERROR.",
+        "operationId": "mediaref.v1.ChangeRequestService.CreateChangeRequest",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.CreateChangeRequestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.CreateChangeRequestResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.ChangeRequestService/GetChangeRequest": {
+      "post": {
+        "tags": ["mediaref.v1.ChangeRequestService"],
+        "summary": "GetChangeRequest",
+        "description": "A change request's status (being checked, waiting for the review agent, approved, rejected)\n and the reason. Needs read permission. Errors: INVALID_CHANGE_REQUEST_ID,\n CHANGE_REQUEST_NOT_FOUND.",
+        "operationId": "mediaref.v1.ChangeRequestService.GetChangeRequest",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.GetChangeRequestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.GetChangeRequestResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.ChangeRequestService/ListChangeRequestComments": {
+      "post": {
+        "tags": ["mediaref.v1.ChangeRequestService"],
+        "summary": "ListChangeRequestComments",
+        "description": "The comment thread on a change request: people's comments and the review agent's replies,\n oldest first. Needs read permission.",
+        "operationId": "mediaref.v1.ChangeRequestService.ListChangeRequestComments",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.ListChangeRequestCommentsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.ListChangeRequestCommentsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.MediaService/BatchGetMedia": {
+      "post": {
+        "tags": ["mediaref.v1.MediaService"],
+        "summary": "BatchGetMedia",
+        "description": "GetMedia for up to 100 titles in one call. Each ref gets its own result; one bad or unknown\n ref does not fail the others. Read-only; needs a key with read permission. Errors for the\n whole call: BATCH_LIMIT_EXCEEDED, INVALID_QUERY.",
+        "operationId": "mediaref.v1.MediaService.BatchGetMedia",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.BatchGetMediaRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.BatchGetMediaResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mediaref.v1.MediaService/GetMedia": {
+      "post": {
+        "tags": ["mediaref.v1.MediaService"],
+        "summary": "GetMedia",
+        "description": "Look up one movie or TV show by any id it is known under, and get where it is on each video\n platform and catalog, down to which season and episode maps to which page and episode.\n Needs a key with read permission. Errors: INVALID_KEY, INVALID_QUERY, MEDIA_NOT_FOUND.",
+        "operationId": "mediaref.v1.MediaService.GetMedia",
+        "parameters": [
+          {
+            "name": "Connect-Protocol-Version",
+            "in": "header",
+            "description": "Define the version of the Connect protocol",
+            "schema": {
+              "$ref": "#/components/schemas/connect-protocol-version"
+            },
+            "example": 1
+          },
+          {
+            "name": "Connect-Timeout-Ms",
+            "in": "header",
+            "description": "Define the timeout, in ms",
+            "schema": {
+              "$ref": "#/components/schemas/connect-timeout-header"
+            },
+            "example": 1000
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mediaref.v1.GetMediaRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/connect.error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/mediaref.v1.GetMediaResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "connect-protocol-version": {
+        "type": "number",
+        "examples": [1],
+        "title": "Connect-Protocol-Version",
+        "description": "Define the version of the Connect protocol",
+        "const": 1
+      },
+      "connect-timeout-header": {
+        "type": "number",
+        "examples": [1000],
+        "title": "Connect-Timeout-Ms",
+        "description": "Define the timeout, in ms"
+      },
+      "connect.error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "examples": ["not_found"],
+            "enum": [
+              "canceled",
+              "unknown",
+              "invalid_argument",
+              "deadline_exceeded",
+              "not_found",
+              "already_exists",
+              "permission_denied",
+              "resource_exhausted",
+              "failed_precondition",
+              "aborted",
+              "out_of_range",
+              "unimplemented",
+              "internal",
+              "unavailable",
+              "data_loss",
+              "unauthenticated"
+            ],
+            "description": "The status code, which should be an enum value of [google.rpc.Code][google.rpc.Code]."
+          },
+          "message": {
+            "type": "string",
+            "description": "A developer-facing error message, which should be in English. Any user-facing error message should be localized and sent in the [google.rpc.Status.details][google.rpc.Status.details] field, or localized by the client."
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/connect.error_details.Any"
+            },
+            "description": "A list of messages that carry the error details. There is no limit on the number of messages."
+          }
+        },
+        "title": "Connect Error",
+        "additionalProperties": true,
+        "description": "Error type returned by Connect: https://connectrpc.com/docs/go/errors/#http-representation"
+      },
+      "connect.error_details.Any": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "A URL that acts as a globally unique identifier for the type of the serialized message. For example: `type.googleapis.com/google.rpc.ErrorInfo`."
+          },
+          "value": {
+            "type": "string",
+            "format": "byte",
+            "description": "The Protobuf message, serialized as bytes and base64-encoded. The specific message type is identified by the `type` field."
+          },
+          "debug": {
+            "type": "object",
+            "title": "Debug",
+            "additionalProperties": true,
+            "description": "Deserialized error detail payload. The 'type' field indicates the schema. This field is for easier debugging and should not be relied upon for application logic."
+          }
+        },
+        "additionalProperties": true,
+        "description": "Contains an arbitrary serialized message along with a @type that describes the type of the serialized message, with an additional debug field for ConnectRPC error details."
+      },
+      "google.protobuf.ListValue": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/google.protobuf.Value"
+        },
+        "description": "A JSON array whose elements may be any JSON value."
+      },
+      "google.protobuf.NullValue": {
+        "type": "string",
+        "title": "NullValue",
+        "enum": ["NULL_VALUE"],
+        "description": "Represents a JSON `null`.\n\n `NullValue` is a sentinel, using an enum with only one value to represent\n the null value for the `Value` type union.\n\n A field of type `NullValue` with any value other than `0` is considered\n invalid. Most ProtoJSON serializers will emit a `Value` with a `null_value`\n set as a JSON `null` regardless of the integer value, and so will round trip\n to a `0` value."
+      },
+      "google.protobuf.Struct": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/google.protobuf.Value"
+        },
+        "description": "A JSON object whose property values may be any JSON value."
+      },
+      "google.protobuf.Value": {
+        "oneOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "array"
+          },
+          {
+            "type": "object",
+            "additionalProperties": true
+          }
+        ],
+        "description": "Any JSON value: `null`, number, string, boolean, array, or object."
+      },
+      "mediaref.v1.ApiKeyAction": {
+        "type": "string",
+        "title": "ApiKeyAction",
+        "enum": [
+          "API_KEY_ACTION_UNSPECIFIED",
+          "API_KEY_ACTION_READ",
+          "API_KEY_ACTION_REPORT",
+          "API_KEY_ACTION_SUBMIT"
+        ]
+      },
+      "mediaref.v1.ApiKeyPermissions": {
+        "type": "object",
+        "properties": {
+          "media": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.ApiKeyAction"
+            },
+            "title": "media",
+            "description": "What the key may do with media: read, report invalidations, submit change requests."
+          }
+        },
+        "title": "ApiKeyPermissions",
+        "additionalProperties": false
+      },
+      "mediaref.v1.Association": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id",
+            "description": "Use it with ReportInvalidation and ListAssociationRevisions."
+          },
+          "mediaId": {
+            "type": ["string", "null"],
+            "title": "media_id"
+          },
+          "namespace": {
+            "type": "string",
+            "title": "namespace",
+            "description": "The platform or catalog, e.g. \"bilibili\" or \"douban\"."
+          },
+          "nativeId": {
+            "type": "string",
+            "title": "native_id",
+            "description": "The page's id there, e.g. \"ss34430\"."
+          },
+          "variantId": {
+            "type": ["string", "null"],
+            "title": "variant_id",
+            "description": "The variant (platforms only)."
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.AssociationStatus"
+              }
+            ],
+            "title": "status"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.Segment"
+            },
+            "title": "segments",
+            "description": "Which episodes the page holds; empty means the whole title."
+          },
+          "needsReview": {
+            "type": ["boolean", "null"],
+            "title": "needs_review",
+            "description": "The episode mapping may be out of date."
+          },
+          "locked": {
+            "type": ["boolean", "null"],
+            "title": "locked"
+          },
+          "unconfirmed": {
+            "type": ["boolean", "null"],
+            "title": "unconfirmed",
+            "description": "Not verified yet; returned only with `include_unconfirmed`."
+          },
+          "unconfirmedSource": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.UnconfirmedAssociationSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "unconfirmed_source"
+          },
+          "changeRequestId": {
+            "type": ["string", "null"],
+            "title": "change_request_id",
+            "description": "For an unconfirmed association from a change request: that request and its status."
+          },
+          "changeRequestStatus": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.ChangeRequestStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "change_request_status"
+          },
+          "title": {
+            "type": ["string", "null"],
+            "title": "title",
+            "description": "Native title of the collection/entry (e.g. \"进击的巨人 最终季 Part.2\"), snapshotted from\n evidence check or upstream sync. Display only; never reviewed."
+          },
+          "episodeCount": {
+            "type": ["integer", "null"],
+            "title": "episode_count",
+            "format": "int32",
+            "description": "Episodes on the page, from the same snapshot."
+          }
+        },
+        "title": "Association",
+        "additionalProperties": false,
+        "description": "A platform page (or catalog entry) that belongs to a title, with which episodes it holds."
+      },
+      "mediaref.v1.AssociationRevision": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id"
+          },
+          "associationId": {
+            "type": "string",
+            "title": "association_id"
+          },
+          "revisionNumber": {
+            "type": "integer",
+            "title": "revision_number",
+            "format": "int32",
+            "description": "1 for the first version, counting up."
+          },
+          "changeRequestId": {
+            "type": ["string", "null"],
+            "title": "change_request_id",
+            "description": "The change request that produced this version; look it up with GetChangeRequest."
+          },
+          "variantId": {
+            "type": ["string", "null"],
+            "title": "variant_id"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.AssociationStatus"
+              }
+            ],
+            "title": "status",
+            "description": "Status of the association in this version."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.Segment"
+            },
+            "title": "segments",
+            "description": "Episode mapping in this version."
+          },
+          "actorUserId": {
+            "type": ["string", "null"],
+            "title": "actor_user_id",
+            "description": "Who made the change (a user, or a system agent such as the review agent)."
+          },
+          "submitterUserId": {
+            "type": ["string", "null"],
+            "title": "submitter_user_id",
+            "description": "Who submitted the change request."
+          },
+          "reviewerUserId": {
+            "type": ["string", "null"],
+            "title": "reviewer_user_id",
+            "description": "Who decided the change request (the review agent when the evidence gate did not)."
+          },
+          "reason": {
+            "type": ["string", "null"],
+            "title": "reason",
+            "description": "Why the change was made."
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "created_at",
+            "description": "ISO 8601."
+          }
+        },
+        "title": "AssociationRevision",
+        "additionalProperties": false,
+        "description": "One version of an association, written each time a change to it took effect."
+      },
+      "mediaref.v1.AssociationStatus": {
+        "type": "string",
+        "title": "AssociationStatus",
+        "enum": [
+          "ASSOCIATION_STATUS_UNSPECIFIED",
+          "ASSOCIATION_STATUS_CONFIRMED",
+          "ASSOCIATION_STATUS_SEED_UNCONFIRMED",
+          "ASSOCIATION_STATUS_DELISTED"
+        ]
+      },
+      "mediaref.v1.AssociationSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id"
+          },
+          "mediaId": {
+            "type": "string",
+            "title": "media_id"
+          },
+          "namespace": {
+            "type": "string",
+            "title": "namespace"
+          },
+          "nativeId": {
+            "type": "string",
+            "title": "native_id"
+          },
+          "variantId": {
+            "type": ["string", "null"],
+            "title": "variant_id"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.AssociationStatus"
+              }
+            ],
+            "title": "status"
+          },
+          "needsReview": {
+            "type": "boolean",
+            "title": "needs_review"
+          },
+          "locked": {
+            "type": "boolean",
+            "title": "locked"
+          },
+          "currentRevisionId": {
+            "type": ["string", "null"],
+            "title": "current_revision_id"
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "created_at"
+          },
+          "updatedAt": {
+            "type": "string",
+            "title": "updated_at"
+          }
+        },
+        "title": "AssociationSummary",
+        "additionalProperties": false,
+        "description": "An association's current state, without its episode mapping."
+      },
+      "mediaref.v1.BatchGetMediaRequest": {
+        "type": "object",
+        "properties": {
+          "refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.MediaRef"
+            },
+            "title": "refs",
+            "description": "1 to 100 refs, written as in GetMedia."
+          },
+          "includeUnconfirmed": {
+            "type": "boolean",
+            "title": "include_unconfirmed",
+            "description": "As in GetMedia."
+          },
+          "season": {
+            "type": ["integer", "null"],
+            "title": "season",
+            "format": "int32",
+            "description": "As in GetMedia: steers the exploration agent, does not filter."
+          },
+          "namespaceGroup": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.NamespaceGroup"
+              }
+            ],
+            "title": "namespace_group",
+            "description": "As in GetMedia."
+          }
+        },
+        "title": "BatchGetMediaRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.BatchGetMediaResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.BatchMediaItemResult"
+            },
+            "title": "results",
+            "description": "One result per ref, in request order. A bad or unknown ref fails only its own result."
+          }
+        },
+        "title": "BatchGetMediaResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.BatchMediaItemError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "code",
+            "description": "\"INVALID_KEY\" (the ref is malformed) or \"NOT_FOUND\" (MediaRef has no such title yet)."
+          },
+          "message": {
+            "type": "string",
+            "title": "message"
+          }
+        },
+        "title": "BatchMediaItemError",
+        "additionalProperties": false
+      },
+      "mediaref.v1.BatchMediaItemResult": {
+        "type": "object",
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/mediaref.v1.BatchMediaItemError"
+                  }
+                ],
+                "title": "error"
+              }
+            },
+            "title": "error"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "success": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/mediaref.v1.BatchMediaItemSuccess"
+                  }
+                ],
+                "title": "success"
+              }
+            },
+            "title": "success"
+          }
+        ],
+        "unevaluatedProperties": false,
+        "not": {
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "required": ["error"]
+                },
+                {
+                  "required": ["success"]
+                }
+              ]
+            },
+            {
+              "not": {
+                "oneOf": [
+                  {
+                    "required": ["error"]
+                  },
+                  {
+                    "required": ["success"]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "properties": {
+          "ref": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaRef"
+              }
+            ],
+            "title": "ref",
+            "description": "The ref this result is for."
+          }
+        },
+        "title": "BatchMediaItemResult"
+      },
+      "mediaref.v1.BatchMediaItemSuccess": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.MediaQueryItem"
+            },
+            "title": "items",
+            "description": "The matched titles, each with its full record."
+          }
+        },
+        "title": "BatchMediaItemSuccess",
+        "additionalProperties": false
+      },
+      "mediaref.v1.BrowseType": {
+        "type": "string",
+        "title": "BrowseType",
+        "enum": [
+          "BROWSE_TYPE_UNSPECIFIED",
+          "BROWSE_TYPE_MOVIE",
+          "BROWSE_TYPE_TV",
+          "BROWSE_TYPE_ANIME"
+        ]
+      },
+      "mediaref.v1.CatalogCard": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "key",
+            "description": "Catalog target key, usable as a change-request target: \"tmdb:tv:1429\", \"douban:123\",\n \"bangumi:456\", \"trakt:show:slug\"."
+          },
+          "namespace": {
+            "type": "string",
+            "title": "namespace",
+            "description": "The catalog the card comes from."
+          },
+          "type": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaType"
+              }
+            ],
+            "title": "type"
+          },
+          "isAnime": {
+            "type": "boolean",
+            "title": "is_anime"
+          },
+          "title": {
+            "type": "string",
+            "title": "title"
+          },
+          "originalTitle": {
+            "type": ["string", "null"],
+            "title": "original_title"
+          },
+          "year": {
+            "type": ["integer", "null"],
+            "title": "year",
+            "format": "int32"
+          },
+          "posterUrl": {
+            "type": ["string", "null"],
+            "title": "poster_url"
+          },
+          "mediaId": {
+            "type": ["string", "null"],
+            "title": "media_id",
+            "description": "Set when the title already exists in MediaRef."
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "title": "platforms",
+            "description": "Platform namespaces with a confirmed association (empty when not in MediaRef)."
+          }
+        },
+        "title": "CatalogCard",
+        "additionalProperties": false,
+        "description": "A title as a catalog lists it, whether or not MediaRef has it yet."
+      },
+      "mediaref.v1.CatalogCredit": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "title": "role"
+          },
+          "name": {
+            "type": "string",
+            "title": "name"
+          }
+        },
+        "title": "CatalogCredit",
+        "additionalProperties": false
+      },
+      "mediaref.v1.CatalogDetail": {
+        "type": "object",
+        "properties": {
+          "card": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.CatalogCard"
+              }
+            ],
+            "title": "card",
+            "description": "Title, year, poster and so on, as in Search results."
+          },
+          "backdropUrl": {
+            "type": ["string", "null"],
+            "title": "backdrop_url"
+          },
+          "overview": {
+            "type": ["string", "null"],
+            "title": "overview"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "title": "genres"
+          },
+          "regions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "title": "regions"
+          },
+          "credits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.CatalogCredit"
+            },
+            "title": "credits"
+          },
+          "status": {
+            "type": ["string", "null"],
+            "title": "status",
+            "description": "\"ongoing\" or \"ended\" when the catalog says so."
+          },
+          "yearEnd": {
+            "type": ["integer", "null"],
+            "title": "year_end",
+            "format": "int32"
+          },
+          "seasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.CatalogSeason"
+            },
+            "title": "seasons",
+            "description": "Episode count of each season."
+          }
+        },
+        "title": "CatalogDetail",
+        "additionalProperties": false
+      },
+      "mediaref.v1.CatalogSeason": {
+        "type": "object",
+        "properties": {
+          "season": {
+            "type": "integer",
+            "title": "season",
+            "format": "int32"
+          },
+          "episodeCount": {
+            "type": "integer",
+            "title": "episode_count",
+            "format": "int32"
+          }
+        },
+        "title": "CatalogSeason",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ChangeRequest": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.ChangeRequestStatus"
+              }
+            ],
+            "title": "status"
+          },
+          "submitterUserId": {
+            "type": "string",
+            "title": "submitter_user_id"
+          },
+          "submitterKeyId": {
+            "type": ["string", "null"],
+            "title": "submitter_key_id"
+          },
+          "submitterType": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.SubmitterType"
+              }
+            ],
+            "title": "submitter_type",
+            "description": "A person or an agent (such as the exploration agent)."
+          },
+          "taskId": {
+            "type": ["string", "null"],
+            "title": "task_id"
+          },
+          "mediaId": {
+            "type": ["string", "null"],
+            "title": "media_id",
+            "description": "The title it was matched to."
+          },
+          "target": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaRef"
+              }
+            ],
+            "title": "target",
+            "description": "The title as submitted."
+          },
+          "namespace": {
+            "type": "string",
+            "title": "namespace"
+          },
+          "rawNativeId": {
+            "type": "string",
+            "title": "raw_native_id"
+          },
+          "nativeId": {
+            "type": "string",
+            "title": "native_id"
+          },
+          "variantId": {
+            "type": ["string", "null"],
+            "title": "variant_id"
+          },
+          "variantDescription": {
+            "type": ["string", "null"],
+            "title": "variant_description"
+          },
+          "setDefaultVariant": {
+            "type": "boolean",
+            "title": "set_default_variant"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.Segment"
+            },
+            "title": "segments"
+          },
+          "evidence": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/google.protobuf.Struct"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "evidence",
+            "description": "What the automatic check found on the platform and catalogs."
+          },
+          "conflictReason": {
+            "type": ["string", "null"],
+            "title": "conflict_reason",
+            "description": "Why it conflicts with existing data, when it does."
+          },
+          "decisionReason": {
+            "type": ["string", "null"],
+            "title": "decision_reason",
+            "description": "Why it was approved or rejected."
+          },
+          "reviewerUserId": {
+            "type": ["string", "null"],
+            "title": "reviewer_user_id"
+          },
+          "reviewedAt": {
+            "type": ["string", "null"],
+            "title": "reviewed_at"
+          },
+          "appliedAssociationId": {
+            "type": ["string", "null"],
+            "title": "applied_association_id",
+            "description": "The association it created or changed, once approved."
+          },
+          "appliedRevisionId": {
+            "type": ["string", "null"],
+            "title": "applied_revision_id"
+          },
+          "replacesAssociationId": {
+            "type": ["string", "null"],
+            "title": "replaces_association_id"
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "created_at"
+          },
+          "updatedAt": {
+            "type": "string",
+            "title": "updated_at"
+          }
+        },
+        "title": "ChangeRequest",
+        "additionalProperties": false,
+        "description": "A proposed association and its decision."
+      },
+      "mediaref.v1.ChangeRequestComment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id"
+          },
+          "changeRequestId": {
+            "type": "string",
+            "title": "change_request_id"
+          },
+          "authorUserId": {
+            "type": "string",
+            "title": "author_user_id",
+            "description": "`system:review-agent` on the agent's replies."
+          },
+          "authorName": {
+            "type": "string",
+            "title": "author_name"
+          },
+          "content": {
+            "type": "string",
+            "title": "content"
+          },
+          "replyToIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "title": "reply_to_ids",
+            "description": "Comments an agent reply answers; empty on people's comments."
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "created_at"
+          }
+        },
+        "title": "ChangeRequestComment",
+        "additionalProperties": false,
+        "description": "A comment on a change request, or the review agent's reply to comments (ADR 0003 amendment 2)."
+      },
+      "mediaref.v1.ChangeRequestStatus": {
+        "type": "string",
+        "title": "ChangeRequestStatus",
+        "enum": [
+          "CHANGE_REQUEST_STATUS_UNSPECIFIED",
+          "CHANGE_REQUEST_STATUS_PENDING_EVIDENCE",
+          "CHANGE_REQUEST_STATUS_APPROVED",
+          "CHANGE_REQUEST_STATUS_NEEDS_REVIEW",
+          "CHANGE_REQUEST_STATUS_REJECTED"
+        ]
+      },
+      "mediaref.v1.CreateChangeRequestRequest": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaRef"
+              }
+            ],
+            "title": "target",
+            "description": "The title the page belongs to: `media_id` for a title already in MediaRef, otherwise a\n catalog id (tmdb, tvdb, imdb, bangumi, douban, trakt)."
+          },
+          "namespace": {
+            "type": "string",
+            "title": "namespace",
+            "description": "The platform or catalog of the page, e.g. \"bilibili\", \"tencent\", \"iqiyi\", \"youku\", \"mgtv\",\n \"douban\"."
+          },
+          "nativeId": {
+            "type": "string",
+            "title": "native_id",
+            "description": "The page's id on that platform (e.g. \"ss34430\" on bilibili). A page URL also works; it is\n turned into the canonical id."
+          },
+          "rawNativeId": {
+            "type": ["string", "null"],
+            "title": "raw_native_id",
+            "description": "The id or URL as you found it, kept for the record."
+          },
+          "variantId": {
+            "type": ["string", "null"],
+            "title": "variant_id",
+            "description": "An existing variant of this title on this platform to attach the page to. Platform pages need\n this or `variant_description`."
+          },
+          "variantDescription": {
+            "type": ["string", "null"],
+            "title": "variant_description",
+            "description": "Creates a new variant: one sentence on how it differs from the others (e.g. \"原声\", \"国语\")."
+          },
+          "setDefaultVariant": {
+            "type": "boolean",
+            "title": "set_default_variant",
+            "description": "Make the variant the platform's default for this title."
+          },
+          "taskId": {
+            "type": ["string", "null"],
+            "title": "task_id",
+            "description": "A UUID you choose. Sending the same `task_id` again returns the same change request."
+          },
+          "replacesAssociationId": {
+            "type": ["string", "null"],
+            "title": "replaces_association_id",
+            "description": "An existing association this one replaces."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.SegmentInput"
+            },
+            "title": "segments",
+            "description": "Which episodes of the title the page holds, at most 200. Empty means the page covers the\n whole title (e.g. a movie)."
+          }
+        },
+        "title": "CreateChangeRequestRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.CreateChangeRequestResponse": {
+        "type": "object",
+        "properties": {
+          "changeRequest": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.ChangeRequest"
+              }
+            ],
+            "title": "change_request",
+            "description": "The new change request, status PENDING_EVIDENCE. Poll GetChangeRequest for the decision."
+          }
+        },
+        "title": "CreateChangeRequestResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.DemandEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id"
+          },
+          "demandCount": {
+            "type": "integer",
+            "title": "demand_count",
+            "format": "int32",
+            "description": "How many lookups asked for it."
+          },
+          "season": {
+            "type": ["integer", "null"],
+            "title": "season",
+            "format": "int32"
+          },
+          "lastDemandedAt": {
+            "type": "string",
+            "title": "last_demanded_at",
+            "description": "ISO 8601."
+          },
+          "card": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.CatalogCard"
+              }
+            ],
+            "title": "card"
+          }
+        },
+        "title": "DemandEntry",
+        "additionalProperties": false,
+        "description": "A title (or season) people looked up that MediaRef has no platform page for yet."
+      },
+      "mediaref.v1.ExplicitSegmentInput": {
+        "type": "object",
+        "properties": {
+          "season": {
+            "type": "integer",
+            "title": "season",
+            "format": "int32"
+          },
+          "episodeStart": {
+            "type": "integer",
+            "title": "episode_start",
+            "format": "int32"
+          },
+          "episodeEnd": {
+            "type": ["integer", "null"],
+            "title": "episode_end",
+            "format": "int32",
+            "description": "Omit for an open-ended run."
+          },
+          "targetEpisodeStart": {
+            "type": "integer",
+            "title": "target_episode_start",
+            "format": "int32"
+          },
+          "baseline": {
+            "type": "string",
+            "title": "baseline",
+            "description": "The catalog whose numbering `season` and episodes use: tmdb, tvdb, imdb, bangumi or douban."
+          },
+          "nonLinear": {
+            "type": "boolean",
+            "title": "non_linear",
+            "description": "The page orders these episodes differently from the baseline."
+          },
+          "needsReview": {
+            "type": "boolean",
+            "title": "needs_review",
+            "description": "You are not sure the episode numbers line up; only the page as a whole is claimed."
+          }
+        },
+        "title": "ExplicitSegmentInput",
+        "additionalProperties": false,
+        "description": "The page holds episodes `episode_start`..`episode_end` of `season`, starting at its own episode\n `target_episode_start`."
+      },
+      "mediaref.v1.ExplorationActivity": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id"
+          },
+          "card": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.CatalogCard"
+              }
+            ],
+            "title": "card"
+          },
+          "season": {
+            "type": ["integer", "null"],
+            "title": "season",
+            "format": "int32"
+          },
+          "startedAt": {
+            "type": "string",
+            "title": "started_at"
+          },
+          "finishedAt": {
+            "type": ["string", "null"],
+            "title": "finished_at",
+            "description": "Unset while the job is running."
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.ExplorationPlatformResult"
+            },
+            "title": "platforms"
+          }
+        },
+        "title": "ExplorationActivity",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ExplorationFilter": {
+        "type": "string",
+        "title": "ExplorationFilter",
+        "enum": [
+          "EXPLORATION_FILTER_UNSPECIFIED",
+          "EXPLORATION_FILTER_FOUND",
+          "EXPLORATION_FILTER_NOT_FOUND"
+        ]
+      },
+      "mediaref.v1.ExplorationPlatformResult": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "title": "namespace"
+          },
+          "status": {
+            "type": "string",
+            "title": "status",
+            "description": "\"approved\" (in effect), \"covered\" (already confirmed before this job, or its rejected CR went\n live via another path), \"in_review\" (being checked or waiting for the review agent),\n \"rejected\", \"not_found\", \"retry\" (a source was down or time ran out; tried again later),\n \"searching\"."
+          },
+          "reason": {
+            "type": ["string", "null"],
+            "title": "reason",
+            "description": "Plain-language reason, at most 200 characters; internal codes are already translated."
+          },
+          "changeRequestId": {
+            "type": ["string", "null"],
+            "title": "change_request_id",
+            "description": "Set for \"approved\", \"in_review\", \"rejected\", and \"covered\" when produced by a change request;\n only submitters and reviewers can open it."
+          },
+          "liveChangeRequestId": {
+            "type": ["string", "null"],
+            "title": "live_change_request_id",
+            "description": "Set for \"covered\" when the initially rejected request is now live via another approved request."
+          }
+        },
+        "title": "ExplorationPlatformResult",
+        "additionalProperties": false,
+        "description": "What the exploration agent did on one namespace of one job."
+      },
+      "mediaref.v1.ExplorationSummary": {
+        "type": "object",
+        "properties": {
+          "explored": {
+            "type": "integer",
+            "title": "explored",
+            "format": "int32",
+            "description": "Media the agent finished looking at."
+          },
+          "found": {
+            "type": "integer",
+            "title": "found",
+            "format": "int32",
+            "description": "Of those, media with at least one platform found."
+          },
+          "approved": {
+            "type": "integer",
+            "title": "approved",
+            "format": "int32",
+            "description": "Platform pages found that are in effect."
+          },
+          "inReview": {
+            "type": "integer",
+            "title": "in_review",
+            "format": "int32",
+            "description": "Platform pages found that await the review agent."
+          }
+        },
+        "title": "ExplorationSummary",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ExternalId": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "title": "namespace"
+          },
+          "nativeId": {
+            "type": "string",
+            "title": "native_id"
+          },
+          "locked": {
+            "type": ["boolean", "null"],
+            "title": "locked"
+          }
+        },
+        "title": "ExternalId",
+        "additionalProperties": false,
+        "description": "Convenience view of the media's External IDs: the whole-media associations on authority\n catalogs (tmdb, imdb, tvdb, trakt). The same records also appear in MediaDocument.associations."
+      },
+      "mediaref.v1.GetCatalogDetailRequest": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "key",
+            "description": "A catalog key such as \"tmdb:tv:95479\", \"douban:1292052\" or \"bangumi:294993\"; the `key` of a\n Search result works as is. TVDB, IMDb and Trakt keys are mapped to their TMDB entry first."
+          }
+        },
+        "title": "GetCatalogDetailRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.GetCatalogDetailResponse": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.CatalogDetail"
+              }
+            ],
+            "title": "detail"
+          }
+        },
+        "title": "GetCatalogDetailResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.GetChangeRequestRequest": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id",
+            "description": "`change_request.id` from CreateChangeRequest. Any key can read any change request."
+          }
+        },
+        "title": "GetChangeRequestRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.GetChangeRequestResponse": {
+        "type": "object",
+        "properties": {
+          "changeRequest": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.ChangeRequest"
+              }
+            ],
+            "title": "change_request"
+          },
+          "liveChangeRequestId": {
+            "type": ["string", "null"],
+            "title": "live_change_request_id",
+            "description": "Another approved change request whose association for the same collection and media is live,\n when this one is not that request (e.g. it was rejected and exploration resubmitted it)."
+          }
+        },
+        "title": "GetChangeRequestResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.GetCurrentApiKeyRequest": {
+        "type": "object",
+        "title": "GetCurrentApiKeyRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.GetCurrentApiKeyResponse": {
+        "type": "object",
+        "properties": {
+          "keyId": {
+            "type": "string",
+            "title": "key_id"
+          },
+          "userId": {
+            "type": "string",
+            "title": "user_id",
+            "description": "The account that owns the key."
+          },
+          "name": {
+            "type": ["string", "null"],
+            "title": "name",
+            "description": "The name given when the key was created."
+          },
+          "prefix": {
+            "type": ["string", "null"],
+            "title": "prefix",
+            "description": "The key's prefix and first characters, to tell keys apart."
+          },
+          "start": {
+            "type": ["string", "null"],
+            "title": "start"
+          },
+          "permissions": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.ApiKeyPermissions"
+              }
+            ],
+            "title": "permissions"
+          },
+          "canSubmit": {
+            "type": "boolean",
+            "title": "can_submit",
+            "description": "The key can submit change requests (needs the submit permission and a verified email)."
+          },
+          "emailVerified": {
+            "type": "boolean",
+            "title": "email_verified",
+            "description": "The owner's email is verified; submitting needs it."
+          },
+          "role": {
+            "type": "string",
+            "title": "role",
+            "description": "The owner's role. It changes quotas, never what the evidence gate accepts."
+          },
+          "expiresAt": {
+            "type": ["string", "null"],
+            "title": "expires_at",
+            "description": "ISO 8601; absent when the key never expires."
+          }
+        },
+        "title": "GetCurrentApiKeyResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.GetMediaRequest": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaRef"
+              }
+            ],
+            "title": "ref",
+            "description": "The title to look up, by any one id it is known under: a catalog id (tmdb, imdb, tvdb,\n trakt, douban, bangumi), a platform page, or a MediaRef media id."
+          },
+          "includeUnconfirmed": {
+            "type": "boolean",
+            "title": "include_unconfirmed",
+            "description": "Also return associations MediaRef has not confirmed yet (seed data and pending change\n requests), marked `unconfirmed`."
+          },
+          "season": {
+            "type": ["integer", "null"],
+            "title": "season",
+            "format": "int32",
+            "description": "The season you are after. It does not filter the response; it tells the exploration agent\n what to look for when MediaRef lacks it."
+          },
+          "namespaceGroup": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.NamespaceGroup"
+              }
+            ],
+            "title": "namespace_group",
+            "description": "Whether you are after video platforms or catalogs. Like `season`, it does not filter the\n response; it steers the exploration agent."
+          }
+        },
+        "title": "GetMediaRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.GetMediaResponse": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaRef"
+              }
+            ],
+            "title": "ref",
+            "description": "The ref you sent, echoed back."
+          },
+          "document": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaDocument"
+              }
+            ],
+            "title": "document",
+            "description": "The title's full record: external ids, variants, and every association with its segments."
+          },
+          "matchedAssociationId": {
+            "type": ["string", "null"],
+            "title": "matched_association_id",
+            "description": "When looking up by a platform page, the association that page matched."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.MediaQueryItem"
+            },
+            "title": "items",
+            "description": "One entry per title when the ref matches more than one (for example a platform collection\n holding two seasons that are separate titles)."
+          }
+        },
+        "title": "GetMediaResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListAssociationRevisionsRequest": {
+        "type": "object",
+        "properties": {
+          "associationId": {
+            "type": "string",
+            "title": "association_id",
+            "description": "`associations[].id` from GetMedia."
+          },
+          "order": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.SortOrder"
+              }
+            ],
+            "title": "order",
+            "description": "Oldest first by default (ASC); DESC for newest first."
+          },
+          "limit": {
+            "type": ["integer", "null"],
+            "title": "limit",
+            "format": "int32",
+            "description": "Page size, 1 to 100. Default 50."
+          },
+          "offset": {
+            "type": ["integer", "null"],
+            "title": "offset",
+            "format": "int32",
+            "description": "Versions to skip. Default 0."
+          }
+        },
+        "title": "ListAssociationRevisionsRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListAssociationRevisionsResponse": {
+        "type": "object",
+        "properties": {
+          "association": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.AssociationSummary"
+              }
+            ],
+            "title": "association",
+            "description": "The association as it is now."
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.AssociationRevision"
+            },
+            "title": "revisions",
+            "description": "This page of versions."
+          },
+          "total": {
+            "type": "integer",
+            "title": "total",
+            "format": "int32",
+            "description": "Number of versions in all, for paging."
+          }
+        },
+        "title": "ListAssociationRevisionsResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListChangeRequestCommentsRequest": {
+        "type": "object",
+        "properties": {
+          "changeRequestId": {
+            "type": "string",
+            "title": "change_request_id"
+          }
+        },
+        "title": "ListChangeRequestCommentsRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListChangeRequestCommentsResponse": {
+        "type": "object",
+        "properties": {
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.ChangeRequestComment"
+            },
+            "title": "comments",
+            "description": "Oldest first: comments and the agent's replies as one thread."
+          }
+        },
+        "title": "ListChangeRequestCommentsResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListDemandsRequest": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": ["integer", "null"],
+            "title": "limit",
+            "format": "int32",
+            "description": "Default 20, at most 100."
+          },
+          "offset": {
+            "type": ["integer", "null"],
+            "title": "offset",
+            "format": "int32",
+            "description": "Entries to skip. Default 0."
+          }
+        },
+        "title": "ListDemandsRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListDemandsResponse": {
+        "type": "object",
+        "properties": {
+          "demands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.DemandEntry"
+            },
+            "title": "demands"
+          }
+        },
+        "title": "ListDemandsResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListExplorationActivityRequest": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": ["integer", "null"],
+            "title": "limit",
+            "format": "int32",
+            "description": "Default 20, at most 50."
+          },
+          "before": {
+            "type": ["string", "null"],
+            "title": "before",
+            "description": "Cursor: `next_before` of the previous page."
+          },
+          "filter": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.ExplorationFilter"
+              }
+            ],
+            "title": "filter"
+          }
+        },
+        "title": "ListExplorationActivityRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListExplorationActivityResponse": {
+        "type": "object",
+        "properties": {
+          "running": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.ExplorationActivity"
+            },
+            "title": "running",
+            "description": "Jobs running now (first page only)."
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.ExplorationActivity"
+            },
+            "title": "recent",
+            "description": "Finished jobs, newest first."
+          },
+          "last24h": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.ExplorationSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "last_24h",
+            "description": "The last 24 hours, by finish time (first page only)."
+          },
+          "nextBefore": {
+            "type": ["string", "null"],
+            "title": "next_before",
+            "description": "Cursor for the next page; absent on the last page."
+          }
+        },
+        "title": "ListExplorationActivityResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListTrendingRequest": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "title": "namespace",
+            "description": "\"tmdb\", \"douban\", \"bangumi\" or \"trakt\"."
+          },
+          "type": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.BrowseType"
+              }
+            ],
+            "title": "type"
+          },
+          "limit": {
+            "type": ["integer", "null"],
+            "title": "limit",
+            "format": "int32",
+            "description": "Default 18, at most 100."
+          }
+        },
+        "title": "ListTrendingRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ListTrendingResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.CatalogCard"
+            },
+            "title": "items"
+          }
+        },
+        "title": "ListTrendingResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.Media": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id",
+            "description": "MediaRef media id (UUID)."
+          },
+          "type": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaType"
+              }
+            ],
+            "title": "type"
+          },
+          "baseline": {
+            "type": ["string", "null"],
+            "title": "baseline",
+            "description": "The catalog whose season and episode numbers the media uses, usually \"tmdb\"."
+          },
+          "snapshot": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaSnapshot"
+              }
+            ],
+            "title": "snapshot"
+          }
+        },
+        "title": "Media",
+        "additionalProperties": false
+      },
+      "mediaref.v1.MediaDocument": {
+        "type": "object",
+        "properties": {
+          "media": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.Media"
+              }
+            ],
+            "title": "media"
+          },
+          "externalIds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.ExternalId"
+            },
+            "title": "external_ids"
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.Variant"
+            },
+            "title": "variants"
+          },
+          "associations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.Association"
+            },
+            "title": "associations",
+            "description": "Every platform page and catalog entry of the title, with its episode mapping."
+          },
+          "matchedAssociationIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "title": "matched_association_ids",
+            "description": "The associations a platform-page lookup matched."
+          },
+          "platformStatuses": {
+            "type": "object",
+            "title": "platform_statuses",
+            "additionalProperties": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/mediaref.v1.PlatformStatusEntry"
+                }
+              ],
+              "title": "value"
+            },
+            "description": "Per video platform: associated, looked for and not found, or not checked yet."
+          }
+        },
+        "title": "MediaDocument",
+        "additionalProperties": false,
+        "description": "Everything MediaRef knows about one title."
+      },
+      "mediaref.v1.MediaQueryItem": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaDocument"
+              }
+            ],
+            "title": "document"
+          },
+          "matchedAssociationId": {
+            "type": ["string", "null"],
+            "title": "matched_association_id"
+          }
+        },
+        "title": "MediaQueryItem",
+        "additionalProperties": false
+      },
+      "mediaref.v1.MediaRef": {
+        "type": "object",
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "bangumi": {
+                "type": "string",
+                "title": "bangumi",
+                "description": "Bangumi subject id, e.g. \"294993\"."
+              }
+            },
+            "title": "bangumi"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "douban": {
+                "type": "string",
+                "title": "douban",
+                "description": "Douban subject id, e.g. \"1292052\"."
+              }
+            },
+            "title": "douban"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "imdb": {
+                "type": "string",
+                "title": "imdb",
+                "description": "e.g. \"tt12343534\"."
+              }
+            },
+            "title": "imdb"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "mediaId": {
+                "type": "string",
+                "title": "media_id",
+                "description": "MediaRef's own media id (UUID)."
+              }
+            },
+            "title": "media_id"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "platform": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/mediaref.v1.PlatformRef"
+                  }
+                ],
+                "title": "platform",
+                "description": "A platform page; finds the title(s) that page is associated with."
+              }
+            },
+            "title": "platform"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "tmdb": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/mediaref.v1.TmdbRef"
+                  }
+                ],
+                "title": "tmdb",
+                "description": "e.g. {\"type\": \"MEDIA_TYPE_TV\", \"id\": 95479}."
+              }
+            },
+            "title": "tmdb"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "trakt": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/mediaref.v1.TraktRef"
+                  }
+                ],
+                "title": "trakt"
+              }
+            },
+            "title": "trakt"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "tvdb": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/mediaref.v1.TvdbRef"
+                  }
+                ],
+                "title": "tvdb"
+              }
+            },
+            "title": "tvdb"
+          }
+        ],
+        "unevaluatedProperties": false,
+        "not": {
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "required": ["bangumi"]
+                },
+                {
+                  "required": ["douban"]
+                },
+                {
+                  "required": ["imdb"]
+                },
+                {
+                  "required": ["mediaId"]
+                },
+                {
+                  "required": ["platform"]
+                },
+                {
+                  "required": ["tmdb"]
+                },
+                {
+                  "required": ["trakt"]
+                },
+                {
+                  "required": ["tvdb"]
+                }
+              ]
+            },
+            {
+              "not": {
+                "oneOf": [
+                  {
+                    "required": ["bangumi"]
+                  },
+                  {
+                    "required": ["douban"]
+                  },
+                  {
+                    "required": ["imdb"]
+                  },
+                  {
+                    "required": ["mediaId"]
+                  },
+                  {
+                    "required": ["platform"]
+                  },
+                  {
+                    "required": ["tmdb"]
+                  },
+                  {
+                    "required": ["trakt"]
+                  },
+                  {
+                    "required": ["tvdb"]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "title": "MediaRef",
+        "description": "Names one title by exactly one id it is known under."
+      },
+      "mediaref.v1.MediaSnapshot": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "title"
+          },
+          "originalTitle": {
+            "type": ["string", "null"],
+            "title": "original_title"
+          },
+          "year": {
+            "type": ["integer", "null"],
+            "title": "year",
+            "format": "int32"
+          },
+          "type": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaType"
+              }
+            ],
+            "title": "type"
+          },
+          "seasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.SeasonSnapshot"
+            },
+            "title": "seasons"
+          }
+        },
+        "title": "MediaSnapshot",
+        "additionalProperties": false,
+        "description": "Title and season structure, from the baseline catalog."
+      },
+      "mediaref.v1.MediaType": {
+        "type": "string",
+        "title": "MediaType",
+        "enum": ["MEDIA_TYPE_UNSPECIFIED", "MEDIA_TYPE_MOVIE", "MEDIA_TYPE_TV"]
+      },
+      "mediaref.v1.NamespaceGroup": {
+        "type": "string",
+        "title": "NamespaceGroup",
+        "enum": [
+          "NAMESPACE_GROUP_UNSPECIFIED",
+          "NAMESPACE_GROUP_PLATFORM",
+          "NAMESPACE_GROUP_CATALOG"
+        ],
+        "description": "Video platforms (tencent, iqiyi, youku, bilibili, mgtv) or catalogs (tmdb, imdb, tvdb, trakt,\n douban, bangumi)."
+      },
+      "mediaref.v1.Platform": {
+        "type": "string",
+        "title": "Platform",
+        "enum": [
+          "PLATFORM_UNSPECIFIED",
+          "PLATFORM_TENCENT",
+          "PLATFORM_IQIYI",
+          "PLATFORM_YOUKU",
+          "PLATFORM_BILIBILI",
+          "PLATFORM_MGTV"
+        ],
+        "description": "A video platform, for PlatformRef."
+      },
+      "mediaref.v1.PlatformRef": {
+        "type": "object",
+        "properties": {
+          "platform": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.Platform"
+              }
+            ],
+            "title": "platform"
+          },
+          "nativeId": {
+            "type": "string",
+            "title": "native_id",
+            "description": "The page's id on the platform, e.g. \"ss34430\" on bilibili."
+          }
+        },
+        "title": "PlatformRef",
+        "additionalProperties": false
+      },
+      "mediaref.v1.PlatformStatus": {
+        "type": "string",
+        "title": "PlatformStatus",
+        "enum": [
+          "PLATFORM_STATUS_UNSPECIFIED",
+          "PLATFORM_STATUS_ASSOCIATED",
+          "PLATFORM_STATUS_NOT_FOUND",
+          "PLATFORM_STATUS_UNCHECKED"
+        ]
+      },
+      "mediaref.v1.PlatformStatusEntry": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.PlatformStatus"
+              }
+            ],
+            "title": "status"
+          },
+          "checkedAt": {
+            "type": ["string", "null"],
+            "title": "checked_at",
+            "description": "When the exploration agent last looked (ISO 8601), for NOT_FOUND."
+          }
+        },
+        "title": "PlatformStatusEntry",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ReportInvalidationRequest": {
+        "type": "object",
+        "properties": {
+          "associationId": {
+            "type": "string",
+            "title": "association_id",
+            "description": "The association to report: `associations[].id` from GetMedia. Only confirmed associations\n can be reported."
+          },
+          "reason": {
+            "type": ["string", "null"],
+            "title": "reason",
+            "description": "What is wrong, in a sentence (page gone, wrong content, episodes off). At most 500 characters."
+          }
+        },
+        "title": "ReportInvalidationRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.ReportInvalidationResponse": {
+        "type": "object",
+        "properties": {
+          "reportId": {
+            "type": "string",
+            "title": "report_id"
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "title": "deduplicated",
+            "description": "This key already reported this association in the current round; it was not counted again."
+          },
+          "triggered": {
+            "type": "boolean",
+            "title": "triggered",
+            "description": "Enough accounts reported it; a recheck has been queued."
+          },
+          "jobId": {
+            "type": ["string", "null"],
+            "title": "job_id",
+            "description": "The recheck job, when one was triggered."
+          },
+          "reportCount": {
+            "type": "integer",
+            "title": "report_count",
+            "format": "int32",
+            "description": "Accounts that reported it in the current round."
+          },
+          "threshold": {
+            "type": "integer",
+            "title": "threshold",
+            "format": "int32",
+            "description": "Accounts needed to trigger a recheck."
+          }
+        },
+        "title": "ReportInvalidationResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.SearchRequest": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "query",
+            "description": "A title, a catalog/platform URL, or a \"namespace:id\" key. At most 200 characters."
+          },
+          "limit": {
+            "type": ["integer", "null"],
+            "title": "limit",
+            "format": "int32",
+            "description": "Default 10, at most 100."
+          }
+        },
+        "title": "SearchRequest",
+        "additionalProperties": false
+      },
+      "mediaref.v1.SearchResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/mediaref.v1.CatalogCard"
+            },
+            "title": "items"
+          },
+          "matchedAsLink": {
+            "type": "boolean",
+            "title": "matched_as_link",
+            "description": "True when the query was read as a URL/key rather than a title."
+          }
+        },
+        "title": "SearchResponse",
+        "additionalProperties": false
+      },
+      "mediaref.v1.SeasonSnapshot": {
+        "type": "object",
+        "properties": {
+          "season": {
+            "type": "integer",
+            "title": "season",
+            "format": "int32",
+            "description": "In the media's baseline numbering; 0 is specials."
+          },
+          "episodeCount": {
+            "type": "integer",
+            "title": "episode_count",
+            "format": "int32"
+          },
+          "airYear": {
+            "type": ["integer", "null"],
+            "title": "air_year",
+            "format": "int32"
+          }
+        },
+        "title": "SeasonSnapshot",
+        "additionalProperties": false
+      },
+      "mediaref.v1.Segment": {
+        "type": "object",
+        "properties": {
+          "season": {
+            "type": "integer",
+            "title": "season",
+            "format": "int32"
+          },
+          "episodeStart": {
+            "type": "integer",
+            "title": "episode_start",
+            "format": "int32"
+          },
+          "episodeEnd": {
+            "type": ["integer", "null"],
+            "title": "episode_end",
+            "format": "int32",
+            "description": "Absent for an open-ended run that continues to the end of the season."
+          },
+          "targetEpisodeStart": {
+            "type": "integer",
+            "title": "target_episode_start",
+            "format": "int32",
+            "description": "Episode number on the page that `episode_start` maps to."
+          },
+          "baseline": {
+            "type": "string",
+            "title": "baseline",
+            "description": "The catalog whose numbering `season` and episodes use, e.g. \"tmdb\"."
+          },
+          "nonLinear": {
+            "type": "boolean",
+            "title": "non_linear",
+            "description": "The page orders these episodes differently, so only the page as a whole is known."
+          },
+          "needsReview": {
+            "type": "boolean",
+            "title": "needs_review",
+            "description": "The mapping may be out of date (e.g. the catalog changed its seasons); trust only the page."
+          }
+        },
+        "title": "Segment",
+        "additionalProperties": false,
+        "description": "One run of episodes in an association: episodes `episode_start`..`episode_end` of `season`\n (baseline numbering) are episodes `target_episode_start`.. on the page. An association without\n segments covers the whole title."
+      },
+      "mediaref.v1.SegmentInput": {
+        "type": "object",
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "explicit": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/mediaref.v1.ExplicitSegmentInput"
+                  }
+                ],
+                "title": "explicit"
+              }
+            },
+            "title": "explicit"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "wholeSeason": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/mediaref.v1.WholeSeasonSegmentInput"
+                  }
+                ],
+                "title": "whole_season"
+              }
+            },
+            "title": "whole_season"
+          }
+        ],
+        "unevaluatedProperties": false,
+        "not": {
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "required": ["explicit"]
+                },
+                {
+                  "required": ["wholeSeason"]
+                }
+              ]
+            },
+            {
+              "not": {
+                "oneOf": [
+                  {
+                    "required": ["explicit"]
+                  },
+                  {
+                    "required": ["wholeSeason"]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "title": "SegmentInput",
+        "description": "Which episodes of the title a submitted page holds: a whole season, or an explicit run."
+      },
+      "mediaref.v1.SortOrder": {
+        "type": "string",
+        "title": "SortOrder",
+        "enum": ["SORT_ORDER_UNSPECIFIED", "SORT_ORDER_ASC", "SORT_ORDER_DESC"]
+      },
+      "mediaref.v1.SubmitterType": {
+        "type": "string",
+        "title": "SubmitterType",
+        "enum": ["SUBMITTER_TYPE_UNSPECIFIED", "SUBMITTER_TYPE_HUMAN", "SUBMITTER_TYPE_AGENT"]
+      },
+      "mediaref.v1.TmdbRef": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaType"
+              }
+            ],
+            "title": "type",
+            "description": "TMDB keeps movies and TV shows apart, so the type is required."
+          },
+          "id": {
+            "type": "integer",
+            "title": "id",
+            "format": "int32"
+          }
+        },
+        "title": "TmdbRef",
+        "additionalProperties": false
+      },
+      "mediaref.v1.TraktRef": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id",
+            "description": "Trakt id or slug."
+          },
+          "type": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaType"
+              }
+            ],
+            "title": "type"
+          }
+        },
+        "title": "TraktRef",
+        "additionalProperties": false
+      },
+      "mediaref.v1.TvdbRef": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "id",
+            "format": "int32"
+          },
+          "type": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/mediaref.v1.MediaType"
+              }
+            ],
+            "title": "type"
+          }
+        },
+        "title": "TvdbRef",
+        "additionalProperties": false
+      },
+      "mediaref.v1.UnconfirmedAssociationSource": {
+        "type": "string",
+        "title": "UnconfirmedAssociationSource",
+        "enum": [
+          "UNCONFIRMED_ASSOCIATION_SOURCE_UNSPECIFIED",
+          "UNCONFIRMED_ASSOCIATION_SOURCE_SEED_UNCONFIRMED",
+          "UNCONFIRMED_ASSOCIATION_SOURCE_CHANGE_REQUEST"
+        ]
+      },
+      "mediaref.v1.Variant": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "id"
+          },
+          "mediaId": {
+            "type": ["string", "null"],
+            "title": "media_id"
+          },
+          "namespace": {
+            "type": "string",
+            "title": "namespace"
+          },
+          "label": {
+            "type": "string",
+            "title": "label",
+            "description": "Free text describing the variant, e.g. \"原声\" or \"国语\"."
+          },
+          "isDefault": {
+            "type": "boolean",
+            "title": "is_default",
+            "description": "Used when a lookup names no variant."
+          },
+          "unconfirmed": {
+            "type": ["boolean", "null"],
+            "title": "unconfirmed"
+          }
+        },
+        "title": "Variant",
+        "additionalProperties": false,
+        "description": "One presentation of a title on one platform, such as the original audio or a Mandarin dub.\n Every platform association belongs to a variant."
+      },
+      "mediaref.v1.WholeSeasonSegmentInput": {
+        "type": "object",
+        "properties": {
+          "season": {
+            "type": "integer",
+            "title": "season",
+            "format": "int32"
+          },
+          "baseline": {
+            "type": "string",
+            "title": "baseline",
+            "description": "The catalog whose numbering `season` uses: tmdb, tvdb, imdb, bangumi or douban."
+          },
+          "nonLinear": {
+            "type": "boolean",
+            "title": "non_linear",
+            "description": "The page orders these episodes differently from the baseline."
+          },
+          "needsReview": {
+            "type": "boolean",
+            "title": "needs_review",
+            "description": "You are not sure the episode numbers line up; only the page as a whole is claimed."
+          }
+        },
+        "title": "WholeSeasonSegmentInput",
+        "additionalProperties": false,
+        "description": "The page holds one whole season, episode for episode."
+      }
+    }
+  },
+  "security": [],
+  "tags": [
+    {
+      "name": "mediaref.v1.ApiKeyService",
+      "description": "The API key that signed the request."
+    },
+    {
+      "name": "mediaref.v1.ChangeRequestService",
+      "description": "Propose associations and follow their decisions."
+    },
+    {
+      "name": "mediaref.v1.AssociationService",
+      "description": "Report broken associations and read their history."
+    },
+    {
+      "name": "mediaref.v1.BrowseService",
+      "description": "Find titles and read catalog details, including titles MediaRef does not have yet."
+    },
+    {
+      "name": "mediaref.v1.MediaService",
+      "description": "Look up titles and where they play."
+    }
+  ]
+}

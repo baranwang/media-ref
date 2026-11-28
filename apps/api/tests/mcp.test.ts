@@ -181,24 +181,25 @@ describe("MCP server at /mcp", () => {
     }[];
     expect(tools.map((tool) => tool.name).sort()).toEqual(TOOL_NAMES);
 
-    // Schemas and hints come from the proto descriptors.
+    // Descriptions and schemas come from the generated OpenAPI document, so from the proto.
     const getMedia = tools.find((tool) => tool.name === "get_media")!;
     expect(getMedia.annotations.readOnlyHint).toBe(true);
-    // Descriptions are the proto comments.
     expect(getMedia.description).toMatch(/^Look up one movie or TV show by any id/);
-    expect(getMedia.inputSchema.properties.ref.description).toMatch(/^The title to look up/);
-    expect(getMedia.inputSchema.properties.namespaceGroup.enum).toContain(
-      "NAMESPACE_GROUP_PLATFORM",
+    const { ref, namespaceGroup } = getMedia.inputSchema.properties;
+    expect(ref.description).toMatch(/^The title to look up/);
+    expect(namespaceGroup.allOf[0].enum).toContain("NAMESPACE_GROUP_PLATFORM");
+    // MediaRef's oneof, with $refs inlined.
+    expect(ref.allOf[0].anyOf.map((option: any) => Object.keys(option.properties)[0])).toContain(
+      "tmdb",
     );
-    expect(getMedia.inputSchema.properties.ref.properties.tmdb.description).toMatch(
-      /Set only one of: mediaId, tmdb, imdb/,
-    );
+    expect(JSON.stringify(getMedia.inputSchema)).not.toContain("$ref");
     const create = tools.find((tool) => tool.name === "create_change_request")!;
     expect(create.annotations.readOnlyHint).toBe(false);
-    expect(Object.keys(create.inputSchema.properties.segments.items.properties)).toEqual([
-      "wholeSeason",
-      "explicit",
-    ]);
+    expect(
+      create.inputSchema.properties.segments.items.anyOf.map(
+        (option: any) => Object.keys(option.properties)[0],
+      ),
+    ).toEqual(["explicit", "wholeSeason"]);
   });
 
   test("forwards get_media and returns the response as protobuf JSON", async () => {

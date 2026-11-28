@@ -6,9 +6,13 @@ plugins:
     opt:
       - target=ts
       - import_extension=.ts
-  # Proto comments as a lookup table for the MCP server's tool descriptions.
-  - local: ["node", "scripts/protoc-gen-proto-docs.ts"]
+  # OpenAPI 3.1 of the public API, comments included; the MCP server reads its tools from it.
+  - remote: buf.build/community/sudorandom-connect-openapi:v0.28.0
     out: apps/api/src/gen
-    strategy: all
     opt:
-      - target=ts
+      - format=json
+      - path=openapi.json
+      - services=mediaref.v1.*
+      - features=connectrpc
+      - content-types=json
+      - trim-unused-types
