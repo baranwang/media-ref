@@ -7,7 +7,7 @@ import {
   verifyApiKey,
   type ApiKeyAction,
 } from "./api-keys.ts";
-import { escapeHtml, getAuthenticatedSession, type AuthInstance } from "./auth.ts";
+import { getAuthenticatedSession, type AuthInstance } from "./auth.ts";
 import { MCP_PATH } from "./mcp.ts";
 
 /**
@@ -37,11 +37,6 @@ const CONSENT_TTL_SECONDS = 600;
 const SCOPES: readonly ApiKeyAction[] = ["read", "report", "submit"];
 /** Every API key can read and report; `submit` is the one scope a client asks for. */
 const BASE_SCOPES: readonly ApiKeyAction[] = ["read", "report"];
-const SCOPE_LABELS: Record<ApiKeyAction, string> = {
-  read: "查询媒体、关联和变更单",
-  report: "上报失效的关联",
-  submit: "提交变更单",
-};
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const UNSAFE_SCHEMES = new Set(["javascript:", "data:", "file:", "vbscript:", "blob:", "about:"]);
@@ -75,6 +70,14 @@ interface Approval {
   sc: ApiKeyAction[];
   uid: string;
 }
+
+/** The error codes the website's consent page knows; it never shows text from the URL. */
+type ConsentPageError =
+  | "unknown_client"
+  | "redirect_mismatch"
+  | "invalid_request"
+  | "email_not_verified"
+  | "expired";
 
 interface Grant {
   k: string;
@@ -180,24 +183,17 @@ function redirectWith(
   });
 }
 
-const PAGE_STYLE = `body{margin:0;background:#f6f6f4;color:#1c1c1a;font:16px/1.6 system-ui,"PingFang TC","PingFang SC",sans-serif}
-main{max-width:30rem;margin:4rem auto;padding:2rem;background:#fff;border:1px solid #e4e4e0;border-radius:.75rem}
-h1{font-size:1.25rem;margin:0 0 1rem}dt{font-weight:600;margin-top:1rem}dd{margin:.25rem 0 0}ul{margin:0;padding-left:1.25rem}
-small{color:#6b6b66}code{word-break:break-all}form{display:flex;gap:.75rem;margin-top:1.5rem}
-button{font:inherit;padding:.5rem 1.25rem;border-radius:.5rem;border:1px solid #1c1c1a;background:#1c1c1a;color:#fff;cursor:pointer}
-button[value=deny]{background:#fff;color:#1c1c1a}`;
-
-/** `body` is HTML; callers escape what they put in it. */
-function page(status: number, title: string, body: string): Response {
-  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MediaRef</title><style>${PAGE_STYLE}</style></head><body><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`;
-  return new Response(html, {
+/** Consent and errors are shown by the website (`/oauth/consent`), in the site's own UI. */
+function toConsentPage(
+  deps: McpOAuthDeps,
+  params: { consent: string } | { error: ConsentPageError },
+  status: 302 | 303 = 302,
+): Response {
+  return new Response(null, {
     status,
     headers: {
-      "content-type": "text/html; charset=utf-8",
+      location: `${deps.websiteUrl}/oauth/consent?${new URLSearchParams(params).toString()}`,
       "cache-control": "no-store",
-      "x-frame-options": "DENY",
-      "content-security-policy":
-        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
     },
   });
 }
@@ -382,34 +378,27 @@ async function authorize(request: Request, deps: McpOAuthDeps): Promise<Response
   // Until the client and redirect URI check out, errors stay on this page (no open redirect).
   const client = await resolveClient(deps, params.get("client_id") ?? "");
   if (!client) {
-    return page(400, "无法识别这个应用", "<p>client_id 无效，或者取不到它的元数据文档。</p>");
+    return toConsentPage(deps, { error: "unknown_client" });
   }
   const redirectUri =
     params.get("redirect_uri") ?? (client.redirectUris.length === 1 ? client.redirectUris[0]! : "");
   if (!matchesRedirectUri(client.redirectUris, redirectUri)) {
-    return page(400, "跳转地址不匹配", "<p>redirect_uri 不在这个应用登记的地址里。</p>");
+    return toConsentPage(deps, { error: "redirect_mismatch" });
   }
 
-  const state = params.get("state");
-  // Anyone can register any https redirect URI, so nothing redirects before the user clicks.
-  const fail = (error: string, description: string) =>
-    page(400, "授权请求无效", `<p>${escapeHtml(`${error}: ${description}`)}</p>`);
-  if (params.get("response_type") !== "code") {
-    return fail("unsupported_response_type", "Only response_type=code is supported");
-  }
+  // Anyone can register any https redirect URI, so nothing redirects to it before the user
+  // clicks: a bad response_type, missing PKCE S256 or a foreign resource stays on our page.
   const challenge = params.get("code_challenge") ?? "";
-  if (params.get("code_challenge_method") !== "S256" || !/^[\w-]{43}$/.test(challenge)) {
-    return fail("invalid_request", "PKCE with code_challenge_method=S256 is required");
-  }
-  if (!acceptsResource(deps, params.get("resource"))) {
-    return fail("invalid_target", `resource must be ${resourceOf(deps)}`);
+  if (
+    params.get("response_type") !== "code" ||
+    params.get("code_challenge_method") !== "S256" ||
+    !/^[\w-]{43}$/.test(challenge) ||
+    !acceptsResource(deps, params.get("resource"))
+  ) {
+    return toConsentPage(deps, { error: "invalid_request" });
   }
   if (!session.user.emailVerified) {
-    return page(
-      403,
-      "先验证邮箱",
-      `<p>授权 MCP 客户端和创建 API 密钥一样，需要先验证邮箱。打开注册时收到的验证邮件，然后回到客户端重新登录。</p>`,
-    );
+    return toConsentPage(deps, { error: "email_not_verified" });
   }
 
   const scopes = grantedScopes(params.get("scope"));
@@ -421,25 +410,14 @@ async function authorize(request: Request, deps: McpOAuthDeps): Promise<Response
     sc: scopes,
     uid: session.user.id,
   };
+  // The website's consent page reads `n`, `u`, `sc` and `h` from this payload to display them.
   const consent = await seal(deps.secret, "consent", {
     ...approval,
-    s: state,
+    s: params.get("state"),
+    h: client.host,
     exp: nowSeconds(deps) + CONSENT_TTL_SECONDS,
   });
-  const target = new URL(redirectUri);
-  const name = escapeHtml(client.name);
-  return page(
-    200,
-    `授权 ${client.name}`,
-    `<p><strong>${name}</strong> 想以 <strong>${escapeHtml(session.user.email)}</strong> 的身份使用 MediaRef。</p>
-<dl>
-<dt>应用</dt><dd>${name}<br><small>${client.host ? `元数据由 ${escapeHtml(client.host)} 发布` : "动态注册，名称未经验证"}</small></dd>
-<dt>授权后跳转到</dt><dd><code>${escapeHtml(`${target.protocol}//${target.host}`)}</code>${isLoopback(redirectUri) ? "<br><small>这是你本机上的地址。只有你刚在这台电脑的 MCP 客户端里发起登录时，才点允许。</small>" : ""}</dd>
-<dt>权限</dt><dd><ul>${scopes.map((scope) => `<li>${SCOPE_LABELS[scope]}</li>`).join("")}</ul></dd>
-</dl>
-<p><small>允许后，你的 API 密钥列表里会多出一把「MCP: ${name}」，${GRANT_TTL_SECONDS / 86_400} 天后过期。删除这把密钥就撤销了授权。</small></p>
-<form method="post" action="${AUTHORIZE_PATH}"><input type="hidden" name="consent" value="${escapeHtml(consent)}"><button name="decision" value="approve">允许</button><button name="decision" value="deny">拒绝</button></form>`,
-  );
+  return toConsentPage(deps, { consent });
 }
 
 async function decide(request: Request, deps: McpOAuthDeps): Promise<Response> {
@@ -452,7 +430,7 @@ async function decide(request: Request, deps: McpOAuthDeps): Promise<Response> {
   );
   const session = await getAuthenticatedSession(deps.getAuth(), request.headers);
   if (!consent || session?.user.id !== consent.uid) {
-    return page(400, "授权请求已失效", "<p>回到 MCP 客户端，重新发起登录。</p>");
+    return toConsentPage(deps, { error: "expired" }, 303);
   }
   if (form.get("decision") !== "approve") {
     return redirectWith(

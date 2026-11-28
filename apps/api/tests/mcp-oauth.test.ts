@@ -101,15 +101,27 @@ async function pkce() {
   return { verifier, challenge: await hashApiKey(verifier) };
 }
 
+/** Where /oauth/authorize sent the browser: the website's consent page, with its query. */
+function consentPage(res: Response): URLSearchParams {
+  expect(res.status).toBe(302);
+  const location = new URL(res.headers.get("location")!);
+  expect(`${location.origin}${location.pathname}`).toBe("https://mediaref.org/oauth/consent");
+  return location.searchParams;
+}
+
+/** What the consent page displays: the signed payload's body. */
+function consentPayload(consent: string): Record<string, unknown> {
+  const body = consent.split(".")[0]!.replaceAll("-", "+").replaceAll("_", "/");
+  return JSON.parse(Buffer.from(body, "base64").toString("utf8")) as Record<string, unknown>;
+}
+
 /** Consent page → approve → code, as the signed-in user. */
 async function approve(app: App, cookie: string, clientId: string, extra = {}) {
   const { verifier, challenge } = await pkce();
   const page = await app.fetch(
     new Request(authorizeUrl(clientId, challenge, extra), { headers: { cookie } }),
   );
-  const html = await page.text();
-  expect(page.status).toBe(200);
-  const consent = html.match(/name="consent" value="([^"]+)"/)![1]!;
+  const consent = consentPage(page).get("consent")!;
 
   const decided = await app.fetch(
     new Request(`${TEST_BASE_URL}/oauth/authorize`, {
@@ -123,7 +135,7 @@ async function approve(app: App, cookie: string, clientId: string, extra = {}) {
   expect(`${location.origin}${location.pathname}`).toBe(REDIRECT_URI);
   expect(location.searchParams.get("state")).toBe("st-1");
   expect(location.searchParams.get("iss")).toBe(TEST_BASE_URL);
-  return { html, code: location.searchParams.get("code")!, verifier };
+  return { shown: consentPayload(consent), code: location.searchParams.get("code")!, verifier };
 }
 
 async function signIn(app: App, clientId: string, cookie: string, extra = {}) {
@@ -242,10 +254,14 @@ describe("MCP OAuth", () => {
     expect(`${login.origin}${login.pathname}`).toBe("https://mediaref.org/login");
     expect(login.searchParams.get("redirect")).toBe(authorizeUrl(clientId, challenge));
 
-    const { html, code, verifier } = await approve(app, cookie, clientId);
-    expect(html).toContain("Test Client");
-    expect(html).toContain("动态注册，名称未经验证");
-    expect(html).toContain("127.0.0.1:33418");
+    const { shown, code, verifier } = await approve(app, cookie, clientId);
+    // A registered client has no publisher host, so the page marks its name unverified.
+    expect(shown).toMatchObject({
+      n: "Test Client",
+      u: REDIRECT_URI,
+      sc: ["read", "report"],
+      h: null,
+    });
 
     const exchange = {
       grant_type: "authorization_code",
@@ -318,8 +334,7 @@ describe("MCP OAuth", () => {
         headers: { cookie },
       }),
     );
-    expect(elsewhere.status).toBe(400);
-    expect(elsewhere.headers.get("location")).toBeNull();
+    expect(consentPage(elsewhere).get("error")).toBe("redirect_mismatch");
 
     // Loopback redirects may use any port (RFC 8252 §7.3).
     const otherPort = await app.fetch(
@@ -328,22 +343,32 @@ describe("MCP OAuth", () => {
         { headers: { cookie } },
       ),
     );
-    expect(otherPort.status).toBe(200);
+    expect(consentPage(otherPort).get("consent")).toBeTruthy();
 
     const forged = await app.fetch(
       new Request(authorizeUrl(`${clientId.slice(0, -2)}xx`, challenge), { headers: { cookie } }),
     );
-    expect(forged.status).toBe(400);
+    expect(consentPage(forged).get("error")).toBe("unknown_client");
 
     const noPkce = await app.fetch(
       new Request(authorizeUrl(clientId, challenge, { code_challenge_method: "plain" }), {
         headers: { cookie },
       }),
     );
-    // Before the user has clicked anything, errors stay on our page: no open redirect.
-    expect(noPkce.status).toBe(400);
-    expect(noPkce.headers.get("location")).toBeNull();
-    expect(await noPkce.text()).toContain("invalid_request");
+    // Before the user has clicked anything, errors stay on our site: no open redirect.
+    expect(consentPage(noPkce).get("error")).toBe("invalid_request");
+
+    const tampered = await app.fetch(
+      new Request(`${TEST_BASE_URL}/oauth/authorize`, {
+        method: "POST",
+        headers: { cookie, "content-type": "application/x-www-form-urlencoded", ...IP },
+        body: new URLSearchParams({ consent: "e30.forged", decision: "approve" }),
+      }),
+    );
+    expect(tampered.status).toBe(303);
+    expect(tampered.headers.get("location")).toBe(
+      "https://mediaref.org/oauth/consent?error=expired",
+    );
   });
 
   test("reusing a rotated refresh token revokes the whole grant", async () => {
@@ -428,8 +453,8 @@ describe("MCP OAuth", () => {
       token_endpoint_auth_method: "none",
     };
     const { app, cookie } = await setup({ cimd });
-    const { html } = await approve(app, cookie, CIMD_URL);
-    expect(html).toContain("元数据由 client.example 发布");
+    const { shown } = await approve(app, cookie, CIMD_URL);
+    expect(shown).toMatchObject({ n: "Doc Client", h: "client.example" });
 
     const tokens = await signIn(app, CIMD_URL, cookie);
     const current = await callTool(app, tokens.access_token, "get_current_api_key");
@@ -442,7 +467,7 @@ describe("MCP OAuth", () => {
     const res = await mismatched.app.fetch(
       new Request(authorizeUrl(CIMD_URL, challenge), { headers: { cookie: mismatched.cookie } }),
     );
-    expect(res.status).toBe(400);
+    expect(consentPage(res).get("error")).toBe("unknown_client");
   });
 
   test("an unverified account cannot authorize, as it cannot create API keys", async () => {
@@ -451,7 +476,6 @@ describe("MCP OAuth", () => {
     const res = await app.fetch(
       new Request(authorizeUrl(await register(app), challenge), { headers: { cookie } }),
     );
-    expect(res.status).toBe(403);
-    expect(await res.text()).not.toContain('name="consent"');
+    expect(Object.fromEntries(consentPage(res))).toEqual({ error: "email_not_verified" });
   });
 });
