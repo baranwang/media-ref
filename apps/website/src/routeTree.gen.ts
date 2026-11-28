@@ -20,6 +20,8 @@ import { Route as WantedRouteImport } from "./routes/wanted";
 import { Route as ChangeRequestsIndexRouteImport } from "./routes/change-requests.index";
 import { Route as ChangeRequestsIdRouteImport } from "./routes/change-requests.$id";
 import { Route as DiscoverCatalogRouteImport } from "./routes/discover.$catalog";
+import { Route as DocsIndexRouteImport } from "./routes/docs.index";
+import { Route as DocsSplatRouteImport } from "./routes/docs.$";
 import { Route as ImgDoubanRouteImport } from "./routes/img.douban";
 import { Route as MediaMediaIdRouteImport } from "./routes/media.$mediaId";
 
@@ -78,6 +80,16 @@ const DiscoverCatalogRoute = DiscoverCatalogRouteImport.update({
   path: "/discover/$catalog",
   getParentRoute: () => rootRouteImport,
 } as any);
+const DocsIndexRoute = DocsIndexRouteImport.update({
+  id: "/docs/",
+  path: "/docs/",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const DocsSplatRoute = DocsSplatRouteImport.update({
+  id: "/docs/$",
+  path: "/docs/$",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const ImgDoubanRoute = ImgDoubanRouteImport.update({
   id: "/img/douban",
   path: "/img/douban",
@@ -100,9 +112,11 @@ export interface FileRoutesByFullPath {
   "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/docs/$": typeof DocsSplatRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
+  "/docs/": typeof DocsIndexRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
@@ -115,9 +129,11 @@ export interface FileRoutesByTo {
   "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/docs/$": typeof DocsSplatRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests": typeof ChangeRequestsIndexRoute;
+  "/docs": typeof DocsIndexRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
@@ -131,9 +147,11 @@ export interface FileRoutesById {
   "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/docs/$": typeof DocsSplatRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
+  "/docs/": typeof DocsIndexRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
@@ -148,9 +166,11 @@ export interface FileRouteTypes {
     | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/docs/$"
     | "/img/douban"
     | "/media/$mediaId"
-    | "/change-requests/";
+    | "/change-requests/"
+    | "/docs/";
   fileRoutesByTo: FileRoutesByTo;
   to:
     | "/"
@@ -163,9 +183,11 @@ export interface FileRouteTypes {
     | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/docs/$"
     | "/img/douban"
     | "/media/$mediaId"
-    | "/change-requests";
+    | "/change-requests"
+    | "/docs";
   id:
     | "__root__"
     | "/"
@@ -178,9 +200,11 @@ export interface FileRouteTypes {
     | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/docs/$"
     | "/img/douban"
     | "/media/$mediaId"
-    | "/change-requests/";
+    | "/change-requests/"
+    | "/docs/";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
@@ -194,9 +218,11 @@ export interface RootRouteChildren {
   WantedRoute: typeof WantedRoute;
   ChangeRequestsIdRoute: typeof ChangeRequestsIdRoute;
   DiscoverCatalogRoute: typeof DiscoverCatalogRoute;
+  DocsSplatRoute: typeof DocsSplatRoute;
   ImgDoubanRoute: typeof ImgDoubanRoute;
   MediaMediaIdRoute: typeof MediaMediaIdRoute;
   ChangeRequestsIndexRoute: typeof ChangeRequestsIndexRoute;
+  DocsIndexRoute: typeof DocsIndexRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -278,6 +304,20 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof DiscoverCatalogRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/docs/": {
+      id: "/docs/";
+      path: "/docs";
+      fullPath: "/docs/";
+      preLoaderRoute: typeof DocsIndexRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/docs/$": {
+      id: "/docs/$";
+      path: "/docs/$";
+      fullPath: "/docs/$";
+      preLoaderRoute: typeof DocsSplatRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/img/douban": {
       id: "/img/douban";
       path: "/img/douban";
@@ -306,9 +346,11 @@ const rootRouteChildren: RootRouteChildren = {
   WantedRoute: WantedRoute,
   ChangeRequestsIdRoute: ChangeRequestsIdRoute,
   DiscoverCatalogRoute: DiscoverCatalogRoute,
+  DocsSplatRoute: DocsSplatRoute,
   ImgDoubanRoute: ImgDoubanRoute,
   MediaMediaIdRoute: MediaMediaIdRoute,
   ChangeRequestsIndexRoute: ChangeRequestsIndexRoute,
+  DocsIndexRoute: DocsIndexRoute,
 };
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

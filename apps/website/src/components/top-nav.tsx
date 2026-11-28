@@ -42,6 +42,7 @@ export function TopNav({ hideSearch = false, transparent = false }: TopNavProps)
     { to: "/", label: "发现", active: pathname === "/" || pathname.startsWith("/discover") },
     { to: "/wanted", label: "待贡献", active: pathname.startsWith("/wanted") },
     { to: "/exploration", label: "探索动态", active: pathname.startsWith("/exploration") },
+    { to: "/docs", label: "文档", active: pathname.startsWith("/docs") },
     ...(isReviewer
       ? [{ to: "/review", label: "审核", active: pathname.startsWith("/review") }]
       : []),
