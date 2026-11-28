@@ -22,6 +22,8 @@ export const file_mediaref_v1_types: GenFile =
  */
 export type TmdbRef = Message<"mediaref.v1.TmdbRef"> & {
   /**
+   * TMDB keeps movies and TV shows apart, so the type is required.
+   *
    * @generated from field: mediaref.v1.MediaType type = 1;
    */
   type: MediaType;
@@ -68,6 +70,8 @@ export const TvdbRefSchema: GenMessage<TvdbRef> =
  */
 export type TraktRef = Message<"mediaref.v1.TraktRef"> & {
   /**
+   * Trakt id or slug.
+   *
    * @generated from field: string id = 1;
    */
   id: string;
@@ -96,6 +100,8 @@ export type PlatformRef = Message<"mediaref.v1.PlatformRef"> & {
   platform: Platform;
 
   /**
+   * The page's id on the platform, e.g. "ss34430" on bilibili.
+   *
    * @generated from field: string native_id = 2;
    */
   nativeId: string;
@@ -110,6 +116,8 @@ export const PlatformRefSchema: GenMessage<PlatformRef> =
   messageDesc(file_mediaref_v1_types, 3);
 
 /**
+ * Names one title by exactly one id it is known under.
+ *
  * @generated from message mediaref.v1.MediaRef
  */
 export type MediaRef = Message<"mediaref.v1.MediaRef"> & {
@@ -119,6 +127,8 @@ export type MediaRef = Message<"mediaref.v1.MediaRef"> & {
   id:
     | {
         /**
+         * MediaRef's own media id (UUID).
+         *
          * @generated from field: string media_id = 1;
          */
         value: string;
@@ -126,6 +136,8 @@ export type MediaRef = Message<"mediaref.v1.MediaRef"> & {
       }
     | {
         /**
+         * e.g. {"type": "MEDIA_TYPE_TV", "id": 95479}.
+         *
          * @generated from field: mediaref.v1.TmdbRef tmdb = 2;
          */
         value: TmdbRef;
@@ -133,6 +145,8 @@ export type MediaRef = Message<"mediaref.v1.MediaRef"> & {
       }
     | {
         /**
+         * e.g. "tt12343534".
+         *
          * @generated from field: string imdb = 3;
          */
         value: string;
@@ -154,6 +168,8 @@ export type MediaRef = Message<"mediaref.v1.MediaRef"> & {
       }
     | {
         /**
+         * Douban subject id, e.g. "1292052".
+         *
          * @generated from field: string douban = 6;
          */
         value: string;
@@ -161,6 +177,8 @@ export type MediaRef = Message<"mediaref.v1.MediaRef"> & {
       }
     | {
         /**
+         * Bangumi subject id, e.g. "294993".
+         *
          * @generated from field: string bangumi = 7;
          */
         value: string;
@@ -168,6 +186,8 @@ export type MediaRef = Message<"mediaref.v1.MediaRef"> & {
       }
     | {
         /**
+         * A platform page; finds the title(s) that page is associated with.
+         *
          * @generated from field: mediaref.v1.PlatformRef platform = 8;
          */
         value: PlatformRef;
@@ -220,6 +240,8 @@ export const ExternalIdSchema: GenMessage<ExternalId> =
  */
 export type SeasonSnapshot = Message<"mediaref.v1.SeasonSnapshot"> & {
   /**
+   * In the media's baseline numbering; 0 is specials.
+   *
    * @generated from field: int32 season = 1;
    */
   season: number;
@@ -244,6 +266,8 @@ export const SeasonSnapshotSchema: GenMessage<SeasonSnapshot> =
   messageDesc(file_mediaref_v1_types, 6);
 
 /**
+ * Title and season structure, from the baseline catalog.
+ *
  * @generated from message mediaref.v1.MediaSnapshot
  */
 export type MediaSnapshot = Message<"mediaref.v1.MediaSnapshot"> & {
@@ -286,6 +310,8 @@ export const MediaSnapshotSchema: GenMessage<MediaSnapshot> =
  */
 export type Media = Message<"mediaref.v1.Media"> & {
   /**
+   * MediaRef media id (UUID).
+   *
    * @generated from field: string id = 1;
    */
   id: string;
@@ -296,6 +322,8 @@ export type Media = Message<"mediaref.v1.Media"> & {
   type: MediaType;
 
   /**
+   * The catalog whose season and episode numbers the media uses, usually "tmdb".
+   *
    * @generated from field: optional string baseline = 3;
    */
   baseline?: string | undefined;
@@ -313,6 +341,9 @@ export type Media = Message<"mediaref.v1.Media"> & {
 export const MediaSchema: GenMessage<Media> = /*@__PURE__*/ messageDesc(file_mediaref_v1_types, 8);
 
 /**
+ * One presentation of a title on one platform, such as the original audio or a Mandarin dub.
+ * Every platform association belongs to a variant.
+ *
  * @generated from message mediaref.v1.Variant
  */
 export type Variant = Message<"mediaref.v1.Variant"> & {
@@ -332,11 +363,15 @@ export type Variant = Message<"mediaref.v1.Variant"> & {
   namespace: string;
 
   /**
+   * Free text describing the variant, e.g. "原声" or "国语".
+   *
    * @generated from field: string label = 4;
    */
   label: string;
 
   /**
+   * Used when a lookup names no variant.
+   *
    * @generated from field: bool is_default = 5;
    */
   isDefault: boolean;
@@ -356,6 +391,10 @@ export const VariantSchema: GenMessage<Variant> =
   messageDesc(file_mediaref_v1_types, 9);
 
 /**
+ * One run of episodes in an association: episodes `episode_start`..`episode_end` of `season`
+ * (baseline numbering) are episodes `target_episode_start`.. on the page. An association without
+ * segments covers the whole title.
+ *
  * @generated from message mediaref.v1.Segment
  */
 export type Segment = Message<"mediaref.v1.Segment"> & {
@@ -370,26 +409,36 @@ export type Segment = Message<"mediaref.v1.Segment"> & {
   episodeStart: number;
 
   /**
+   * Absent for an open-ended run that continues to the end of the season.
+   *
    * @generated from field: optional int32 episode_end = 3;
    */
   episodeEnd?: number | undefined;
 
   /**
+   * Episode number on the page that `episode_start` maps to.
+   *
    * @generated from field: int32 target_episode_start = 4;
    */
   targetEpisodeStart: number;
 
   /**
+   * The catalog whose numbering `season` and episodes use, e.g. "tmdb".
+   *
    * @generated from field: string baseline = 5;
    */
   baseline: string;
 
   /**
+   * The page orders these episodes differently, so only the page as a whole is known.
+   *
    * @generated from field: bool non_linear = 6;
    */
   nonLinear: boolean;
 
   /**
+   * The mapping may be out of date (e.g. the catalog changed its seasons); trust only the page.
+   *
    * @generated from field: bool needs_review = 7;
    */
   needsReview: boolean;
@@ -404,6 +453,8 @@ export const SegmentSchema: GenMessage<Segment> =
   messageDesc(file_mediaref_v1_types, 10);
 
 /**
+ * The page holds one whole season, episode for episode.
+ *
  * @generated from message mediaref.v1.WholeSeasonSegmentInput
  */
 export type WholeSeasonSegmentInput = Message<"mediaref.v1.WholeSeasonSegmentInput"> & {
@@ -413,16 +464,22 @@ export type WholeSeasonSegmentInput = Message<"mediaref.v1.WholeSeasonSegmentInp
   season: number;
 
   /**
+   * The catalog whose numbering `season` uses: tmdb, tvdb, imdb, bangumi or douban.
+   *
    * @generated from field: string baseline = 2;
    */
   baseline: string;
 
   /**
+   * The page orders these episodes differently from the baseline.
+   *
    * @generated from field: bool non_linear = 3;
    */
   nonLinear: boolean;
 
   /**
+   * You are not sure the episode numbers line up; only the page as a whole is claimed.
+   *
    * @generated from field: bool needs_review = 4;
    */
   needsReview: boolean;
@@ -437,6 +494,9 @@ export const WholeSeasonSegmentInputSchema: GenMessage<WholeSeasonSegmentInput> 
   messageDesc(file_mediaref_v1_types, 11);
 
 /**
+ * The page holds episodes `episode_start`..`episode_end` of `season`, starting at its own episode
+ * `target_episode_start`.
+ *
  * @generated from message mediaref.v1.ExplicitSegmentInput
  */
 export type ExplicitSegmentInput = Message<"mediaref.v1.ExplicitSegmentInput"> & {
@@ -451,6 +511,8 @@ export type ExplicitSegmentInput = Message<"mediaref.v1.ExplicitSegmentInput"> &
   episodeStart: number;
 
   /**
+   * Omit for an open-ended run.
+   *
    * @generated from field: optional int32 episode_end = 3;
    */
   episodeEnd?: number | undefined;
@@ -461,16 +523,22 @@ export type ExplicitSegmentInput = Message<"mediaref.v1.ExplicitSegmentInput"> &
   targetEpisodeStart: number;
 
   /**
+   * The catalog whose numbering `season` and episodes use: tmdb, tvdb, imdb, bangumi or douban.
+   *
    * @generated from field: string baseline = 5;
    */
   baseline: string;
 
   /**
+   * The page orders these episodes differently from the baseline.
+   *
    * @generated from field: bool non_linear = 6;
    */
   nonLinear: boolean;
 
   /**
+   * You are not sure the episode numbers line up; only the page as a whole is claimed.
+   *
    * @generated from field: bool needs_review = 7;
    */
   needsReview: boolean;
@@ -485,6 +553,8 @@ export const ExplicitSegmentInputSchema: GenMessage<ExplicitSegmentInput> =
   messageDesc(file_mediaref_v1_types, 12);
 
 /**
+ * Which episodes of the title a submitted page holds: a whole season, or an explicit run.
+ *
  * @generated from message mediaref.v1.SegmentInput
  */
 export type SegmentInput = Message<"mediaref.v1.SegmentInput"> & {
@@ -527,6 +597,8 @@ export type PlatformStatusEntry = Message<"mediaref.v1.PlatformStatusEntry"> & {
   status: PlatformStatus;
 
   /**
+   * When the exploration agent last looked (ISO 8601), for NOT_FOUND.
+   *
    * @generated from field: optional string checked_at = 2;
    */
   checkedAt?: string | undefined;
@@ -541,10 +613,14 @@ export const PlatformStatusEntrySchema: GenMessage<PlatformStatusEntry> =
   messageDesc(file_mediaref_v1_types, 14);
 
 /**
+ * A platform page (or catalog entry) that belongs to a title, with which episodes it holds.
+ *
  * @generated from message mediaref.v1.Association
  */
 export type Association = Message<"mediaref.v1.Association"> & {
   /**
+   * Use it with ReportInvalidation and ListAssociationRevisions.
+   *
    * @generated from field: string id = 1;
    */
   id: string;
@@ -555,16 +631,22 @@ export type Association = Message<"mediaref.v1.Association"> & {
   mediaId?: string | undefined;
 
   /**
+   * The platform or catalog, e.g. "bilibili" or "douban".
+   *
    * @generated from field: string namespace = 3;
    */
   namespace: string;
 
   /**
+   * The page's id there, e.g. "ss34430".
+   *
    * @generated from field: string native_id = 4;
    */
   nativeId: string;
 
   /**
+   * The variant (platforms only).
+   *
    * @generated from field: optional string variant_id = 5;
    */
   variantId?: string | undefined;
@@ -575,11 +657,15 @@ export type Association = Message<"mediaref.v1.Association"> & {
   status: AssociationStatus;
 
   /**
+   * Which episodes the page holds; empty means the whole title.
+   *
    * @generated from field: repeated mediaref.v1.Segment segments = 7;
    */
   segments: Segment[];
 
   /**
+   * The episode mapping may be out of date.
+   *
    * @generated from field: optional bool needs_review = 8;
    */
   needsReview?: boolean | undefined;
@@ -590,6 +676,8 @@ export type Association = Message<"mediaref.v1.Association"> & {
   locked?: boolean | undefined;
 
   /**
+   * Not verified yet; returned only with `include_unconfirmed`.
+   *
    * @generated from field: optional bool unconfirmed = 10;
    */
   unconfirmed?: boolean | undefined;
@@ -600,6 +688,8 @@ export type Association = Message<"mediaref.v1.Association"> & {
   unconfirmedSource?: UnconfirmedAssociationSource | undefined;
 
   /**
+   * For an unconfirmed association from a change request: that request and its status.
+   *
    * @generated from field: optional string change_request_id = 12;
    */
   changeRequestId?: string | undefined;
@@ -618,6 +708,8 @@ export type Association = Message<"mediaref.v1.Association"> & {
   title?: string | undefined;
 
   /**
+   * Episodes on the page, from the same snapshot.
+   *
    * @generated from field: optional int32 episode_count = 15;
    */
   episodeCount?: number | undefined;
@@ -632,6 +724,8 @@ export const AssociationSchema: GenMessage<Association> =
   messageDesc(file_mediaref_v1_types, 15);
 
 /**
+ * Everything MediaRef knows about one title.
+ *
  * @generated from message mediaref.v1.MediaDocument
  */
 export type MediaDocument = Message<"mediaref.v1.MediaDocument"> & {
@@ -651,16 +745,22 @@ export type MediaDocument = Message<"mediaref.v1.MediaDocument"> & {
   variants: Variant[];
 
   /**
+   * Every platform page and catalog entry of the title, with its episode mapping.
+   *
    * @generated from field: repeated mediaref.v1.Association associations = 4;
    */
   associations: Association[];
 
   /**
+   * The associations a platform-page lookup matched.
+   *
    * @generated from field: repeated string matched_association_ids = 5;
    */
   matchedAssociationIds: string[];
 
   /**
+   * Per video platform: associated, looked for and not found, or not checked yet.
+   *
    * @generated from field: map<string, mediaref.v1.PlatformStatusEntry> platform_statuses = 6;
    */
   platformStatuses: { [key: string]: PlatformStatusEntry };
@@ -698,6 +798,8 @@ export const MediaQueryItemSchema: GenMessage<MediaQueryItem> =
   messageDesc(file_mediaref_v1_types, 17);
 
 /**
+ * A proposed association and its decision.
+ *
  * @generated from message mediaref.v1.ChangeRequest
  */
 export type ChangeRequest = Message<"mediaref.v1.ChangeRequest"> & {
@@ -722,6 +824,8 @@ export type ChangeRequest = Message<"mediaref.v1.ChangeRequest"> & {
   submitterKeyId?: string | undefined;
 
   /**
+   * A person or an agent (such as the exploration agent).
+   *
    * @generated from field: mediaref.v1.SubmitterType submitter_type = 5;
    */
   submitterType: SubmitterType;
@@ -732,11 +836,15 @@ export type ChangeRequest = Message<"mediaref.v1.ChangeRequest"> & {
   taskId?: string | undefined;
 
   /**
+   * The title it was matched to.
+   *
    * @generated from field: optional string media_id = 7;
    */
   mediaId?: string | undefined;
 
   /**
+   * The title as submitted.
+   *
    * @generated from field: mediaref.v1.MediaRef target = 8;
    */
   target?: MediaRef | undefined;
@@ -777,16 +885,22 @@ export type ChangeRequest = Message<"mediaref.v1.ChangeRequest"> & {
   segments: Segment[];
 
   /**
+   * What the automatic check found on the platform and catalogs.
+   *
    * @generated from field: optional google.protobuf.Struct evidence = 16;
    */
   evidence?: JsonObject | undefined;
 
   /**
+   * Why it conflicts with existing data, when it does.
+   *
    * @generated from field: optional string conflict_reason = 17;
    */
   conflictReason?: string | undefined;
 
   /**
+   * Why it was approved or rejected.
+   *
    * @generated from field: optional string decision_reason = 18;
    */
   decisionReason?: string | undefined;
@@ -802,6 +916,8 @@ export type ChangeRequest = Message<"mediaref.v1.ChangeRequest"> & {
   reviewedAt?: string | undefined;
 
   /**
+   * The association it created or changed, once approved.
+   *
    * @generated from field: optional string applied_association_id = 21;
    */
   appliedAssociationId?: string | undefined;
@@ -836,6 +952,8 @@ export const ChangeRequestSchema: GenMessage<ChangeRequest> =
   messageDesc(file_mediaref_v1_types, 18);
 
 /**
+ * An association's current state, without its episode mapping.
+ *
  * @generated from message mediaref.v1.AssociationSummary
  */
 export type AssociationSummary = Message<"mediaref.v1.AssociationSummary"> & {
@@ -932,10 +1050,14 @@ export const SegmentValidationErrorDetailSchema: GenMessage<SegmentValidationErr
   messageDesc(file_mediaref_v1_types, 20);
 
 /**
+ * Attached to every MediaRef error.
+ *
  * @generated from message mediaref.v1.ErrorInfoDetail
  */
 export type ErrorInfoDetail = Message<"mediaref.v1.ErrorInfoDetail"> & {
   /**
+   * The business error code, e.g. MEDIA_NOT_FOUND or RATE_LIMITED.
+   *
    * @generated from field: string error_code = 1;
    */
   errorCode: string;
@@ -961,6 +1083,8 @@ export type ErrorInfoDetail = Message<"mediaref.v1.ErrorInfoDetail"> & {
   windowSeconds?: number | undefined;
 
   /**
+   * For rate limits: seconds to wait before retrying.
+   *
    * @generated from field: optional int32 retry_after_seconds = 6;
    */
   retryAfterSeconds?: number | undefined;
@@ -1007,6 +1131,9 @@ export const MediaTypeSchema: GenEnum<MediaType> =
   enumDesc(file_mediaref_v1_types, 0);
 
 /**
+ * Video platforms (tencent, iqiyi, youku, bilibili, mgtv) or catalogs (tmdb, imdb, tvdb, trakt,
+ * douban, bangumi).
+ *
  * @generated from enum mediaref.v1.NamespaceGroup
  */
 export enum NamespaceGroup {
@@ -1043,16 +1170,22 @@ export enum AssociationStatus {
   UNSPECIFIED = 0,
 
   /**
+   * Verified; in effect.
+   *
    * @generated from enum value: ASSOCIATION_STATUS_CONFIRMED = 1;
    */
   CONFIRMED = 1,
 
   /**
+   * Imported from open data and not verified yet.
+   *
    * @generated from enum value: ASSOCIATION_STATUS_SEED_UNCONFIRMED = 2;
    */
   SEED_UNCONFIRMED = 2,
 
   /**
+   * The page was taken down or no longer plays this title.
+   *
    * @generated from enum value: ASSOCIATION_STATUS_DELISTED = 3;
    */
   DELISTED = 3,
@@ -1075,21 +1208,29 @@ export enum ChangeRequestStatus {
   UNSPECIFIED = 0,
 
   /**
+   * Being checked automatically against the platform and catalogs.
+   *
    * @generated from enum value: CHANGE_REQUEST_STATUS_PENDING_EVIDENCE = 1;
    */
   PENDING_EVIDENCE = 1,
 
   /**
+   * In effect.
+   *
    * @generated from enum value: CHANGE_REQUEST_STATUS_APPROVED = 2;
    */
   APPROVED = 2,
 
   /**
+   * The automatic check was not sure; the review agent decides.
+   *
    * @generated from enum value: CHANGE_REQUEST_STATUS_NEEDS_REVIEW = 3;
    */
   NEEDS_REVIEW = 3,
 
   /**
+   * Rejected; the reason is in `decision_reason`.
+   *
    * @generated from enum value: CHANGE_REQUEST_STATUS_REJECTED = 4;
    */
   REJECTED = 4,
@@ -1112,11 +1253,15 @@ export enum UnconfirmedAssociationSource {
   UNSPECIFIED = 0,
 
   /**
+   * An unverified seed association.
+   *
    * @generated from enum value: UNCONFIRMED_ASSOCIATION_SOURCE_SEED_UNCONFIRMED = 1;
    */
   SEED_UNCONFIRMED = 1,
 
   /**
+   * A change request still being decided.
+   *
    * @generated from enum value: UNCONFIRMED_ASSOCIATION_SOURCE_CHANGE_REQUEST = 2;
    */
   CHANGE_REQUEST = 2,
@@ -1139,16 +1284,22 @@ export enum PlatformStatus {
   UNSPECIFIED = 0,
 
   /**
+   * The title has a confirmed association on this platform.
+   *
    * @generated from enum value: PLATFORM_STATUS_ASSOCIATED = 1;
    */
   ASSOCIATED = 1,
 
   /**
+   * The exploration agent looked and found nothing (see `checked_at`).
+   *
    * @generated from enum value: PLATFORM_STATUS_NOT_FOUND = 2;
    */
   NOT_FOUND = 2,
 
   /**
+   * Nobody has looked yet.
+   *
    * @generated from enum value: PLATFORM_STATUS_UNCHECKED = 3;
    */
   UNCHECKED = 3,
@@ -1225,16 +1376,22 @@ export enum ApiKeyAction {
   UNSPECIFIED = 0,
 
   /**
+   * Read media, catalogs, revisions and change requests.
+   *
    * @generated from enum value: API_KEY_ACTION_READ = 1;
    */
   READ = 1,
 
   /**
+   * Report invalid associations.
+   *
    * @generated from enum value: API_KEY_ACTION_REPORT = 2;
    */
   REPORT = 2,
 
   /**
+   * Submit change requests.
+   *
    * @generated from enum value: API_KEY_ACTION_SUBMIT = 3;
    */
   SUBMIT = 3,
@@ -1248,6 +1405,8 @@ export const ApiKeyActionSchema: GenEnum<ApiKeyAction> =
   enumDesc(file_mediaref_v1_types, 8);
 
 /**
+ * A video platform, for PlatformRef.
+ *
  * @generated from enum mediaref.v1.Platform
  */
 export enum Platform {

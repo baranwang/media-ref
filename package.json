@@ -14,7 +14,7 @@
     "db:down": "vp run @media-ref/db#down",
     "db:migrate": "vp run @media-ref/db#migrate",
     "proto:lint": "buf lint",
-    "proto:gen": "buf generate && vp fmt packages/client/src/gen",
+    "proto:gen": "buf generate && vp fmt packages/client/src/gen apps/api/src/gen",
     "prepare": "vp config"
   },
   "devDependencies": {

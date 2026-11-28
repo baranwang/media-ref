@@ -5,36 +5,56 @@ package mediaref.v1;
 import "mediaref/v1/types.proto";
 
 message GetMediaRequest {
+  // The title to look up, by any one id it is known under: a catalog id (tmdb, imdb, tvdb,
+  // trakt, douban, bangumi), a platform page, or a MediaRef media id.
   MediaRef ref = 1;
+  // Also return associations MediaRef has not confirmed yet (seed data and pending change
+  // requests), marked `unconfirmed`.
   bool include_unconfirmed = 2;
+  // The season you are after. It does not filter the response; it tells the exploration agent
+  // what to look for when MediaRef lacks it.
   optional int32 season = 3;
+  // Whether you are after video platforms or catalogs. Like `season`, it does not filter the
+  // response; it steers the exploration agent.
   NamespaceGroup namespace_group = 4;
 }
 
 message GetMediaResponse {
+  // The ref you sent, echoed back.
   MediaRef ref = 1;
+  // The title's full record: external ids, variants, and every association with its segments.
   MediaDocument document = 2;
+  // When looking up by a platform page, the association that page matched.
   optional string matched_association_id = 3;
+  // One entry per title when the ref matches more than one (for example a platform collection
+  // holding two seasons that are separate titles).
   repeated MediaQueryItem items = 4;
 }
 
 message BatchGetMediaRequest {
+  // 1 to 100 refs, written as in GetMedia.
   repeated MediaRef refs = 1;
+  // As in GetMedia.
   bool include_unconfirmed = 2;
+  // As in GetMedia: steers the exploration agent, does not filter.
   optional int32 season = 3;
+  // As in GetMedia.
   NamespaceGroup namespace_group = 4;
 }
 
 message BatchMediaItemSuccess {
+  // The matched titles, each with its full record.
   repeated MediaQueryItem items = 1;
 }
 
 message BatchMediaItemError {
+  // "INVALID_KEY" (the ref is malformed) or "NOT_FOUND" (MediaRef has no such title yet).
   string code = 1;
   string message = 2;
 }
 
 message BatchMediaItemResult {
+  // The ref this result is for.
   MediaRef ref = 1;
   oneof outcome {
     BatchMediaItemSuccess success = 2;
@@ -43,12 +63,20 @@ message BatchMediaItemResult {
 }
 
 message BatchGetMediaResponse {
+  // One result per ref, in request order. A bad or unknown ref fails only its own result.
   repeated BatchMediaItemResult results = 1;
 }
 
+// Look up titles and where they play.
 service MediaService {
+  // Look up one movie or TV show by any id it is known under, and get where it is on each video
+  // platform and catalog, down to which season and episode maps to which page and episode.
+  // Needs a key with read permission. Errors: INVALID_KEY, INVALID_QUERY, MEDIA_NOT_FOUND.
   rpc GetMedia(GetMediaRequest) returns (GetMediaResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // GetMedia for up to 100 titles in one call. Each ref gets its own result; one bad or unknown
+  // ref does not fail the others. Read-only; needs a key with read permission. Errors for the
+  // whole call: BATCH_LIMIT_EXCEEDED, INVALID_QUERY.
   rpc BatchGetMedia(BatchGetMediaRequest) returns (BatchGetMediaResponse);
 }

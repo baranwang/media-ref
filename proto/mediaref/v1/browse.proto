@@ -14,10 +14,12 @@ enum BrowseType {
   BROWSE_TYPE_ANIME = 3;
 }
 
+// A title as a catalog lists it, whether or not MediaRef has it yet.
 message CatalogCard {
   // Catalog target key, usable as a change-request target: "tmdb:tv:1429", "douban:123",
   // "bangumi:456", "trakt:show:slug".
   string key = 1;
+  // The catalog the card comes from.
   string namespace = 2;
   MediaType type = 3;
   bool is_anime = 4;
@@ -42,6 +44,7 @@ message CatalogSeason {
 }
 
 message CatalogDetail {
+  // Title, year, poster and so on, as in Search results.
   CatalogCard card = 1;
   optional string backdrop_url = 2;
   optional string overview = 3;
@@ -51,6 +54,7 @@ message CatalogDetail {
   // "ongoing" or "ended" when the catalog says so.
   optional string status = 7;
   optional int32 year_end = 8;
+  // Episode count of each season.
   repeated CatalogSeason seasons = 9;
 }
 
@@ -58,6 +62,7 @@ message ListTrendingRequest {
   // "tmdb", "douban", "bangumi" or "trakt".
   string namespace = 1;
   BrowseType type = 2;
+  // Default 18, at most 100.
   optional int32 limit = 3;
 }
 
@@ -66,6 +71,8 @@ message ListTrendingResponse {
 }
 
 message GetCatalogDetailRequest {
+  // A catalog key such as "tmdb:tv:95479", "douban:1292052" or "bangumi:294993"; the `key` of a
+  // Search result works as is. TVDB, IMDb and Trakt keys are mapped to their TMDB entry first.
   string key = 1;
 }
 
@@ -74,8 +81,9 @@ message GetCatalogDetailResponse {
 }
 
 message SearchRequest {
-  // A title, a catalog/platform URL, or a "namespace:id" key.
+  // A title, a catalog/platform URL, or a "namespace:id" key. At most 200 characters.
   string query = 1;
+  // Default 10, at most 100.
   optional int32 limit = 2;
 }
 
@@ -85,16 +93,21 @@ message SearchResponse {
   bool matched_as_link = 2;
 }
 
+// A title (or season) people looked up that MediaRef has no platform page for yet.
 message DemandEntry {
   string id = 1;
+  // How many lookups asked for it.
   int32 demand_count = 2;
   optional int32 season = 3;
+  // ISO 8601.
   string last_demanded_at = 4;
   CatalogCard card = 5;
 }
 
 message ListDemandsRequest {
+  // Default 20, at most 100.
   optional int32 limit = 1;
+  // Entries to skip. Default 0.
   optional int32 offset = 2;
 }
 
@@ -147,6 +160,7 @@ enum ExplorationFilter {
 }
 
 message ListExplorationActivityRequest {
+  // Default 20, at most 50.
   optional int32 limit = 1;
   // Cursor: `next_before` of the previous page.
   optional string before = 2;
@@ -160,22 +174,36 @@ message ListExplorationActivityResponse {
   repeated ExplorationActivity recent = 2;
   // The last 24 hours, by finish time (first page only).
   optional ExplorationSummary last_24h = 3;
+  // Cursor for the next page; absent on the last page.
   optional string next_before = 4;
 }
 
+// Find titles and read catalog details, including titles MediaRef does not have yet.
 service BrowseService {
+  // Titles trending on a catalog (tmdb, douban, bangumi or trakt), each marked with whether it is
+  // in MediaRef and on which platforms. Needs read permission.
   rpc ListTrending(ListTrendingRequest) returns (ListTrendingResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // A catalog entry's details: overview, genres, regions, credits and the episode count of each
+  // season. Works for titles MediaRef does not have yet. Needs read permission. Errors:
+  // CATALOG_ENTRY_NOT_FOUND.
   rpc GetCatalogDetail(GetCatalogDetailRequest) returns (GetCatalogDetailResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // Find titles by name, by catalog or platform URL, or by a "namespace:id" key. Names are matched
+  // in MediaRef first, then on catalogs. Each card has a catalog `key` for GetCatalogDetail, and a
+  // `media_id` when the title is already in MediaRef. Needs read permission. Errors: INVALID_QUERY.
   rpc Search(SearchRequest) returns (SearchResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // Titles people looked up that MediaRef has no platform page for yet, most wanted first. The
+  // exploration agent works through these. Needs read permission.
   rpc ListDemands(ListDemandsRequest) returns (ListDemandsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // What the exploration agent is doing and has done: jobs running now, finished jobs with the
+  // outcome on each platform, and a 24-hour summary. Needs read permission.
   rpc ListExplorationActivity(ListExplorationActivityRequest) returns (ListExplorationActivityResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }

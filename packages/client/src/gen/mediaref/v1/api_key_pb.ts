@@ -23,6 +23,8 @@ export const file_mediaref_v1_api_key: GenFile =
  */
 export type ApiKeyPermissions = Message<"mediaref.v1.ApiKeyPermissions"> & {
   /**
+   * What the key may do with media: read, report invalidations, submit change requests.
+   *
    * @generated from field: repeated mediaref.v1.ApiKeyAction media = 1;
    */
   media: ApiKeyAction[];
@@ -59,16 +61,22 @@ export type GetCurrentApiKeyResponse = Message<"mediaref.v1.GetCurrentApiKeyResp
   keyId: string;
 
   /**
+   * The account that owns the key.
+   *
    * @generated from field: string user_id = 2;
    */
   userId: string;
 
   /**
+   * The name given when the key was created.
+   *
    * @generated from field: optional string name = 3;
    */
   name?: string | undefined;
 
   /**
+   * The key's prefix and first characters, to tell keys apart.
+   *
    * @generated from field: optional string prefix = 4;
    */
   prefix?: string | undefined;
@@ -84,21 +92,29 @@ export type GetCurrentApiKeyResponse = Message<"mediaref.v1.GetCurrentApiKeyResp
   permissions?: ApiKeyPermissions | undefined;
 
   /**
+   * The key can submit change requests (needs the submit permission and a verified email).
+   *
    * @generated from field: bool can_submit = 7;
    */
   canSubmit: boolean;
 
   /**
+   * The owner's email is verified; submitting needs it.
+   *
    * @generated from field: bool email_verified = 8;
    */
   emailVerified: boolean;
 
   /**
+   * The owner's role. It changes quotas, never what the evidence gate accepts.
+   *
    * @generated from field: string role = 9;
    */
   role: string;
 
   /**
+   * ISO 8601; absent when the key never expires.
+   *
    * @generated from field: optional string expires_at = 10;
    */
   expiresAt?: string | undefined;
@@ -119,6 +135,10 @@ export const GetCurrentApiKeyResponseSchema: GenMessage<GetCurrentApiKeyResponse
  */
 export const ApiKeyService: GenService<{
   /**
+   * Who owns the calling key, what it may do (read, report, submit) and when it expires. Use it to
+   * check a key before relying on it. Errors: API_KEY_REQUIRED, INVALID_API_KEY, API_KEY_EXPIRED,
+   * API_KEY_DISABLED.
+   *
    * @generated from rpc mediaref.v1.ApiKeyService.GetCurrentApiKey
    */
   getCurrentApiKey: {

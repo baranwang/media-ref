@@ -417,6 +417,9 @@ describe("API Worker auth HTTP + ConnectRPC entrypoint", () => {
     expect(trustedPreflight.headers.get("access-control-allow-headers")).toContain(
       "Connect-Protocol-Version",
     );
+    expect(trustedPreflight.headers.get("access-control-allow-headers")).toContain(
+      "MCP-Protocol-Version",
+    );
 
     const untrustedPreflight = await app.fetch(
       new Request(`${TEST_BASE_URL}/mediaref.internal.v1.AccountService/GetCurrentUser`, {

@@ -23,51 +23,76 @@ export const file_mediaref_v1_change_request: GenFile =
  */
 export type CreateChangeRequestRequest = Message<"mediaref.v1.CreateChangeRequestRequest"> & {
   /**
+   * The title the page belongs to: `media_id` for a title already in MediaRef, otherwise a
+   * catalog id (tmdb, tvdb, imdb, bangumi, douban, trakt).
+   *
    * @generated from field: mediaref.v1.MediaRef target = 1;
    */
   target?: MediaRef | undefined;
 
   /**
+   * The platform or catalog of the page, e.g. "bilibili", "tencent", "iqiyi", "youku", "mgtv",
+   * "douban".
+   *
    * @generated from field: string namespace = 2;
    */
   namespace: string;
 
   /**
+   * The page's id on that platform (e.g. "ss34430" on bilibili). A page URL also works; it is
+   * turned into the canonical id.
+   *
    * @generated from field: string native_id = 3;
    */
   nativeId: string;
 
   /**
+   * The id or URL as you found it, kept for the record.
+   *
    * @generated from field: optional string raw_native_id = 4;
    */
   rawNativeId?: string | undefined;
 
   /**
+   * An existing variant of this title on this platform to attach the page to. Platform pages need
+   * this or `variant_description`.
+   *
    * @generated from field: optional string variant_id = 5;
    */
   variantId?: string | undefined;
 
   /**
+   * Creates a new variant: one sentence on how it differs from the others (e.g. "原声", "国语").
+   *
    * @generated from field: optional string variant_description = 6;
    */
   variantDescription?: string | undefined;
 
   /**
+   * Make the variant the platform's default for this title.
+   *
    * @generated from field: bool set_default_variant = 7;
    */
   setDefaultVariant: boolean;
 
   /**
+   * A UUID you choose. Sending the same `task_id` again returns the same change request.
+   *
    * @generated from field: optional string task_id = 8;
    */
   taskId?: string | undefined;
 
   /**
+   * An existing association this one replaces.
+   *
    * @generated from field: optional string replaces_association_id = 9;
    */
   replacesAssociationId?: string | undefined;
 
   /**
+   * Which episodes of the title the page holds, at most 200. Empty means the page covers the
+   * whole title (e.g. a movie).
+   *
    * @generated from field: repeated mediaref.v1.SegmentInput segments = 10;
    */
   segments: SegmentInput[];
@@ -86,6 +111,8 @@ export const CreateChangeRequestRequestSchema: GenMessage<CreateChangeRequestReq
  */
 export type CreateChangeRequestResponse = Message<"mediaref.v1.CreateChangeRequestResponse"> & {
   /**
+   * The new change request, status PENDING_EVIDENCE. Poll GetChangeRequest for the decision.
+   *
    * @generated from field: mediaref.v1.ChangeRequest change_request = 1;
    */
   changeRequest?: ChangeRequest | undefined;
@@ -104,6 +131,8 @@ export const CreateChangeRequestResponseSchema: GenMessage<CreateChangeRequestRe
  */
 export type GetChangeRequestRequest = Message<"mediaref.v1.GetChangeRequestRequest"> & {
   /**
+   * `change_request.id` from CreateChangeRequest. Any key can read any change request.
+   *
    * @generated from field: string id = 1;
    */
   id: string;
@@ -238,10 +267,20 @@ export const ListChangeRequestCommentsResponseSchema: GenMessage<ListChangeReque
   messageDesc(file_mediaref_v1_change_request, 6);
 
 /**
+ * Propose associations and follow their decisions.
+ *
  * @generated from service mediaref.v1.ChangeRequestService
  */
 export const ChangeRequestService: GenService<{
   /**
+   * Propose that a platform page (or catalog entry) belongs to a title, with which episodes map
+   * where. It is evidence, not a decision: MediaRef opens the page, checks title, year and episodes,
+   * and approves or rejects it on its own; there is no human review. Needs submit permission and a
+   * verified email. Errors include INVALID_TARGET_KEY, INVALID_NAMESPACE, INVALID_NATIVE_ID,
+   * VARIANT_REQUIRED, INVALID_VARIANT, INVALID_SEGMENTS, SEGMENT_OVERLAP,
+   * SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE, INSUFFICIENT_PERMISSIONS, EMAIL_NOT_VERIFIED,
+   * DUPLICATE_CHANGE_REQUEST, NO_CHANGE, SUBMISSION_RATE_LIMITED, PLATFORM_UPSTREAM_ERROR.
+   *
    * @generated from rpc mediaref.v1.ChangeRequestService.CreateChangeRequest
    */
   createChangeRequest: {
@@ -250,6 +289,10 @@ export const ChangeRequestService: GenService<{
     output: typeof CreateChangeRequestResponseSchema;
   };
   /**
+   * A change request's status (being checked, waiting for the review agent, approved, rejected)
+   * and the reason. Needs read permission. Errors: INVALID_CHANGE_REQUEST_ID,
+   * CHANGE_REQUEST_NOT_FOUND.
+   *
    * @generated from rpc mediaref.v1.ChangeRequestService.GetChangeRequest
    */
   getChangeRequest: {
@@ -258,6 +301,9 @@ export const ChangeRequestService: GenService<{
     output: typeof GetChangeRequestResponseSchema;
   };
   /**
+   * The comment thread on a change request: people's comments and the review agent's replies,
+   * oldest first. Needs read permission.
+   *
    * @generated from rpc mediaref.v1.ChangeRequestService.ListChangeRequestComments
    */
   listChangeRequestComments: {

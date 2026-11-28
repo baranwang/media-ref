@@ -5,23 +5,40 @@ package mediaref.v1;
 import "mediaref/v1/types.proto";
 
 message CreateChangeRequestRequest {
+  // The title the page belongs to: `media_id` for a title already in MediaRef, otherwise a
+  // catalog id (tmdb, tvdb, imdb, bangumi, douban, trakt).
   MediaRef target = 1;
+  // The platform or catalog of the page, e.g. "bilibili", "tencent", "iqiyi", "youku", "mgtv",
+  // "douban".
   string namespace = 2;
+  // The page's id on that platform (e.g. "ss34430" on bilibili). A page URL also works; it is
+  // turned into the canonical id.
   string native_id = 3;
+  // The id or URL as you found it, kept for the record.
   optional string raw_native_id = 4;
+  // An existing variant of this title on this platform to attach the page to. Platform pages need
+  // this or `variant_description`.
   optional string variant_id = 5;
+  // Creates a new variant: one sentence on how it differs from the others (e.g. "原声", "国语").
   optional string variant_description = 6;
+  // Make the variant the platform's default for this title.
   bool set_default_variant = 7;
+  // A UUID you choose. Sending the same `task_id` again returns the same change request.
   optional string task_id = 8;
+  // An existing association this one replaces.
   optional string replaces_association_id = 9;
+  // Which episodes of the title the page holds, at most 200. Empty means the page covers the
+  // whole title (e.g. a movie).
   repeated SegmentInput segments = 10;
 }
 
 message CreateChangeRequestResponse {
+  // The new change request, status PENDING_EVIDENCE. Poll GetChangeRequest for the decision.
   ChangeRequest change_request = 1;
 }
 
 message GetChangeRequestRequest {
+  // `change_request.id` from CreateChangeRequest. Any key can read any change request.
   string id = 1;
 }
 
@@ -54,11 +71,24 @@ message ListChangeRequestCommentsResponse {
   repeated ChangeRequestComment comments = 1;
 }
 
+// Propose associations and follow their decisions.
 service ChangeRequestService {
+  // Propose that a platform page (or catalog entry) belongs to a title, with which episodes map
+  // where. It is evidence, not a decision: MediaRef opens the page, checks title, year and episodes,
+  // and approves or rejects it on its own; there is no human review. Needs submit permission and a
+  // verified email. Errors include INVALID_TARGET_KEY, INVALID_NAMESPACE, INVALID_NATIVE_ID,
+  // VARIANT_REQUIRED, INVALID_VARIANT, INVALID_SEGMENTS, SEGMENT_OVERLAP,
+  // SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE, INSUFFICIENT_PERMISSIONS, EMAIL_NOT_VERIFIED,
+  // DUPLICATE_CHANGE_REQUEST, NO_CHANGE, SUBMISSION_RATE_LIMITED, PLATFORM_UPSTREAM_ERROR.
   rpc CreateChangeRequest(CreateChangeRequestRequest) returns (CreateChangeRequestResponse);
+  // A change request's status (being checked, waiting for the review agent, approved, rejected)
+  // and the reason. Needs read permission. Errors: INVALID_CHANGE_REQUEST_ID,
+  // CHANGE_REQUEST_NOT_FOUND.
   rpc GetChangeRequest(GetChangeRequestRequest) returns (GetChangeRequestResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // The comment thread on a change request: people's comments and the review agent's replies,
+  // oldest first. Needs read permission.
   rpc ListChangeRequestComments(ListChangeRequestCommentsRequest) returns (ListChangeRequestCommentsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }

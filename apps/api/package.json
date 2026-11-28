@@ -22,6 +22,7 @@
     "@media-ref/client": "workspace:*",
     "@media-ref/core": "workspace:*",
     "@media-ref/db": "workspace:*",
+    "@modelcontextprotocol/server": "2.4.0",
     "better-auth": "1.7.27"
   },
   "devDependencies": {

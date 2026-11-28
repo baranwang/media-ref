@@ -19,6 +19,8 @@ export const file_mediaref_v1_association: GenFile =
   );
 
 /**
+ * One version of an association, written each time a change to it took effect.
+ *
  * @generated from message mediaref.v1.AssociationRevision
  */
 export type AssociationRevision = Message<"mediaref.v1.AssociationRevision"> & {
@@ -33,11 +35,15 @@ export type AssociationRevision = Message<"mediaref.v1.AssociationRevision"> & {
   associationId: string;
 
   /**
+   * 1 for the first version, counting up.
+   *
    * @generated from field: int32 revision_number = 3;
    */
   revisionNumber: number;
 
   /**
+   * The change request that produced this version; look it up with GetChangeRequest.
+   *
    * @generated from field: optional string change_request_id = 4;
    */
   changeRequestId?: string | undefined;
@@ -48,36 +54,50 @@ export type AssociationRevision = Message<"mediaref.v1.AssociationRevision"> & {
   variantId?: string | undefined;
 
   /**
+   * Status of the association in this version.
+   *
    * @generated from field: mediaref.v1.AssociationStatus status = 6;
    */
   status: AssociationStatus;
 
   /**
+   * Episode mapping in this version.
+   *
    * @generated from field: repeated mediaref.v1.Segment segments = 7;
    */
   segments: Segment[];
 
   /**
+   * Who made the change (a user, or a system agent such as the review agent).
+   *
    * @generated from field: optional string actor_user_id = 8;
    */
   actorUserId?: string | undefined;
 
   /**
+   * Who submitted the change request.
+   *
    * @generated from field: optional string submitter_user_id = 9;
    */
   submitterUserId?: string | undefined;
 
   /**
+   * Who decided the change request (the review agent when the evidence gate did not).
+   *
    * @generated from field: optional string reviewer_user_id = 10;
    */
   reviewerUserId?: string | undefined;
 
   /**
+   * Why the change was made.
+   *
    * @generated from field: optional string reason = 11;
    */
   reason?: string | undefined;
 
   /**
+   * ISO 8601.
+   *
    * @generated from field: string created_at = 12;
    */
   createdAt: string;
@@ -96,11 +116,16 @@ export const AssociationRevisionSchema: GenMessage<AssociationRevision> =
  */
 export type ReportInvalidationRequest = Message<"mediaref.v1.ReportInvalidationRequest"> & {
   /**
+   * The association to report: `associations[].id` from GetMedia. Only confirmed associations
+   * can be reported.
+   *
    * @generated from field: string association_id = 1;
    */
   associationId: string;
 
   /**
+   * What is wrong, in a sentence (page gone, wrong content, episodes off). At most 500 characters.
+   *
    * @generated from field: optional string reason = 2;
    */
   reason?: string | undefined;
@@ -124,26 +149,36 @@ export type ReportInvalidationResponse = Message<"mediaref.v1.ReportInvalidation
   reportId: string;
 
   /**
+   * This key already reported this association in the current round; it was not counted again.
+   *
    * @generated from field: bool deduplicated = 2;
    */
   deduplicated: boolean;
 
   /**
+   * Enough accounts reported it; a recheck has been queued.
+   *
    * @generated from field: bool triggered = 3;
    */
   triggered: boolean;
 
   /**
+   * The recheck job, when one was triggered.
+   *
    * @generated from field: optional string job_id = 4;
    */
   jobId?: string | undefined;
 
   /**
+   * Accounts that reported it in the current round.
+   *
    * @generated from field: int32 report_count = 5;
    */
   reportCount: number;
 
   /**
+   * Accounts needed to trigger a recheck.
+   *
    * @generated from field: int32 threshold = 6;
    */
   threshold: number;
@@ -163,21 +198,29 @@ export const ReportInvalidationResponseSchema: GenMessage<ReportInvalidationResp
 export type ListAssociationRevisionsRequest =
   Message<"mediaref.v1.ListAssociationRevisionsRequest"> & {
     /**
+     * `associations[].id` from GetMedia.
+     *
      * @generated from field: string association_id = 1;
      */
     associationId: string;
 
     /**
+     * Oldest first by default (ASC); DESC for newest first.
+     *
      * @generated from field: mediaref.v1.SortOrder order = 2;
      */
     order: SortOrder;
 
     /**
+     * Page size, 1 to 100. Default 50.
+     *
      * @generated from field: optional int32 limit = 3;
      */
     limit?: number | undefined;
 
     /**
+     * Versions to skip. Default 0.
+     *
      * @generated from field: optional int32 offset = 4;
      */
     offset?: number | undefined;
@@ -197,16 +240,22 @@ export const ListAssociationRevisionsRequestSchema: GenMessage<ListAssociationRe
 export type ListAssociationRevisionsResponse =
   Message<"mediaref.v1.ListAssociationRevisionsResponse"> & {
     /**
+     * The association as it is now.
+     *
      * @generated from field: mediaref.v1.AssociationSummary association = 1;
      */
     association?: AssociationSummary | undefined;
 
     /**
+     * This page of versions.
+     *
      * @generated from field: repeated mediaref.v1.AssociationRevision revisions = 2;
      */
     revisions: AssociationRevision[];
 
     /**
+     * Number of versions in all, for paging.
+     *
      * @generated from field: int32 total = 3;
      */
     total: number;
@@ -221,10 +270,19 @@ export const ListAssociationRevisionsResponseSchema: GenMessage<ListAssociationR
   messageDesc(file_mediaref_v1_association, 4);
 
 /**
+ * Report broken associations and read their history.
+ *
  * @generated from service mediaref.v1.AssociationService
  */
 export const AssociationService: GenService<{
   /**
+   * Report that a confirmed association no longer holds: the platform page is gone, plays
+   * something else, or its episodes do not line up. Reports from enough different accounts
+   * trigger an automatic recheck; a report never changes data by itself. Needs report permission
+   * (every key has it); an account can report 20 times per UTC day. Errors: INVALID_ASSOCIATION_ID,
+   * INVALID_REASON, ASSOCIATION_NOT_FOUND, ASSOCIATION_ALREADY_DELISTED,
+   * ASSOCIATION_NOT_CONFIRMED, INVALIDATION_LIMIT_REACHED.
+   *
    * @generated from rpc mediaref.v1.AssociationService.ReportInvalidation
    */
   reportInvalidation: {
@@ -233,6 +291,10 @@ export const AssociationService: GenService<{
     output: typeof ReportInvalidationResponseSchema;
   };
   /**
+   * The version history of one association: each version's status and episode mapping, and the
+   * change request that made it. Needs read permission. Errors: INVALID_ASSOCIATION_ID,
+   * INVALID_ORDER, INVALID_PAGINATION, ASSOCIATION_NOT_FOUND.
+   *
    * @generated from rpc mediaref.v1.AssociationService.ListAssociationRevisions
    */
   listAssociationRevisions: {
