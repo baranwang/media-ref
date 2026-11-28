@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as ApiKeysRouteImport } from "./routes/api-keys";
 import { Route as ExplorationRouteImport } from "./routes/exploration";
+import { Route as LlmsDottxtRouteImport } from "./routes/llms[.]txt";
 import { Route as LoginRouteImport } from "./routes/login";
 import { Route as ReviewRouteImport } from "./routes/review";
 import { Route as SignupRouteImport } from "./routes/signup";
@@ -20,6 +21,10 @@ import { Route as WantedRouteImport } from "./routes/wanted";
 import { Route as ChangeRequestsIndexRouteImport } from "./routes/change-requests.index";
 import { Route as ChangeRequestsIdRouteImport } from "./routes/change-requests.$id";
 import { Route as DiscoverCatalogRouteImport } from "./routes/discover.$catalog";
+import { Route as DocsIndexRouteImport } from "./routes/docs.index";
+import { Route as DocsSplatRouteImport } from "./routes/docs.$";
+import { Route as DocsChar123Char125DotmdRouteImport } from "./routes/docs.{$}[.]md";
+import { Route as DocsChar123Char125DottxtRouteImport } from "./routes/docs.{$}[.]txt";
 import { Route as ImgDoubanRouteImport } from "./routes/img.douban";
 import { Route as MediaMediaIdRouteImport } from "./routes/media.$mediaId";
 
@@ -36,6 +41,11 @@ const ApiKeysRoute = ApiKeysRouteImport.update({
 const ExplorationRoute = ExplorationRouteImport.update({
   id: "/exploration",
   path: "/exploration",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const LlmsDottxtRoute = LlmsDottxtRouteImport.update({
+  id: "/llms.txt",
+  path: "/llms.txt",
   getParentRoute: () => rootRouteImport,
 } as any);
 const LoginRoute = LoginRouteImport.update({
@@ -78,6 +88,26 @@ const DiscoverCatalogRoute = DiscoverCatalogRouteImport.update({
   path: "/discover/$catalog",
   getParentRoute: () => rootRouteImport,
 } as any);
+const DocsIndexRoute = DocsIndexRouteImport.update({
+  id: "/docs/",
+  path: "/docs/",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const DocsSplatRoute = DocsSplatRouteImport.update({
+  id: "/docs/$",
+  path: "/docs/$",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const DocsChar123Char125DotmdRoute = DocsChar123Char125DotmdRouteImport.update({
+  id: "/docs/{$}.md",
+  path: "/docs/{$}.md",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const DocsChar123Char125DottxtRoute = DocsChar123Char125DottxtRouteImport.update({
+  id: "/docs/{$}.txt",
+  path: "/docs/{$}.txt",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const ImgDoubanRoute = ImgDoubanRouteImport.update({
   id: "/img/douban",
   path: "/img/douban",
@@ -93,6 +123,7 @@ export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
+  "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
@@ -100,14 +131,19 @@ export interface FileRoutesByFullPath {
   "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/docs/$": typeof DocsSplatRoute;
+  "/docs/{$}.md": typeof DocsChar123Char125DotmdRoute;
+  "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
+  "/docs/": typeof DocsIndexRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
+  "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
@@ -115,15 +151,20 @@ export interface FileRoutesByTo {
   "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/docs/$": typeof DocsSplatRoute;
+  "/docs/{$}.md": typeof DocsChar123Char125DotmdRoute;
+  "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests": typeof ChangeRequestsIndexRoute;
+  "/docs": typeof DocsIndexRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
+  "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
@@ -131,9 +172,13 @@ export interface FileRoutesById {
   "/wanted": typeof WantedRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
+  "/docs/$": typeof DocsSplatRoute;
+  "/docs/{$}.md": typeof DocsChar123Char125DotmdRoute;
+  "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
+  "/docs/": typeof DocsIndexRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
@@ -141,6 +186,7 @@ export interface FileRouteTypes {
     | "/"
     | "/api-keys"
     | "/exploration"
+    | "/llms.txt"
     | "/login"
     | "/review"
     | "/signup"
@@ -148,14 +194,19 @@ export interface FileRouteTypes {
     | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/docs/$"
+    | "/docs/{$}.md"
+    | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
-    | "/change-requests/";
+    | "/change-requests/"
+    | "/docs/";
   fileRoutesByTo: FileRoutesByTo;
   to:
     | "/"
     | "/api-keys"
     | "/exploration"
+    | "/llms.txt"
     | "/login"
     | "/review"
     | "/signup"
@@ -163,14 +214,19 @@ export interface FileRouteTypes {
     | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/docs/$"
+    | "/docs/{$}.md"
+    | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
-    | "/change-requests";
+    | "/change-requests"
+    | "/docs";
   id:
     | "__root__"
     | "/"
     | "/api-keys"
     | "/exploration"
+    | "/llms.txt"
     | "/login"
     | "/review"
     | "/signup"
@@ -178,15 +234,20 @@ export interface FileRouteTypes {
     | "/wanted"
     | "/change-requests/$id"
     | "/discover/$catalog"
+    | "/docs/$"
+    | "/docs/{$}.md"
+    | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
-    | "/change-requests/";
+    | "/change-requests/"
+    | "/docs/";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   ApiKeysRoute: typeof ApiKeysRoute;
   ExplorationRoute: typeof ExplorationRoute;
+  LlmsDottxtRoute: typeof LlmsDottxtRoute;
   LoginRoute: typeof LoginRoute;
   ReviewRoute: typeof ReviewRoute;
   SignupRoute: typeof SignupRoute;
@@ -194,9 +255,13 @@ export interface RootRouteChildren {
   WantedRoute: typeof WantedRoute;
   ChangeRequestsIdRoute: typeof ChangeRequestsIdRoute;
   DiscoverCatalogRoute: typeof DiscoverCatalogRoute;
+  DocsSplatRoute: typeof DocsSplatRoute;
+  DocsChar123Char125DotmdRoute: typeof DocsChar123Char125DotmdRoute;
+  DocsChar123Char125DottxtRoute: typeof DocsChar123Char125DottxtRoute;
   ImgDoubanRoute: typeof ImgDoubanRoute;
   MediaMediaIdRoute: typeof MediaMediaIdRoute;
   ChangeRequestsIndexRoute: typeof ChangeRequestsIndexRoute;
+  DocsIndexRoute: typeof DocsIndexRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -220,6 +285,13 @@ declare module "@tanstack/react-router" {
       path: "/exploration";
       fullPath: "/exploration";
       preLoaderRoute: typeof ExplorationRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/llms.txt": {
+      id: "/llms.txt";
+      path: "/llms.txt";
+      fullPath: "/llms.txt";
+      preLoaderRoute: typeof LlmsDottxtRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/login": {
@@ -278,6 +350,34 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof DiscoverCatalogRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/docs/": {
+      id: "/docs/";
+      path: "/docs";
+      fullPath: "/docs/";
+      preLoaderRoute: typeof DocsIndexRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/docs/$": {
+      id: "/docs/$";
+      path: "/docs/$";
+      fullPath: "/docs/$";
+      preLoaderRoute: typeof DocsSplatRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/docs/{$}.md": {
+      id: "/docs/{$}.md";
+      path: "/docs/{$}.md";
+      fullPath: "/docs/{$}.md";
+      preLoaderRoute: typeof DocsChar123Char125DotmdRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/docs/{$}.txt": {
+      id: "/docs/{$}.txt";
+      path: "/docs/{$}.txt";
+      fullPath: "/docs/{$}.txt";
+      preLoaderRoute: typeof DocsChar123Char125DottxtRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/img/douban": {
       id: "/img/douban";
       path: "/img/douban";
@@ -299,6 +399,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ApiKeysRoute: ApiKeysRoute,
   ExplorationRoute: ExplorationRoute,
+  LlmsDottxtRoute: LlmsDottxtRoute,
   LoginRoute: LoginRoute,
   ReviewRoute: ReviewRoute,
   SignupRoute: SignupRoute,
@@ -306,19 +407,24 @@ const rootRouteChildren: RootRouteChildren = {
   WantedRoute: WantedRoute,
   ChangeRequestsIdRoute: ChangeRequestsIdRoute,
   DiscoverCatalogRoute: DiscoverCatalogRoute,
+  DocsSplatRoute: DocsSplatRoute,
+  DocsChar123Char125DotmdRoute: DocsChar123Char125DotmdRoute,
+  DocsChar123Char125DottxtRoute: DocsChar123Char125DottxtRoute,
   ImgDoubanRoute: ImgDoubanRoute,
   MediaMediaIdRoute: MediaMediaIdRoute,
   ChangeRequestsIndexRoute: ChangeRequestsIndexRoute,
+  DocsIndexRoute: DocsIndexRoute,
 };
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>();
 
 import type { getRouter } from "./router.tsx";
-import type { createStart } from "@tanstack/react-start";
+import type { startInstance } from "./start.ts";
 declare module "@tanstack/react-start" {
   interface Register {
     ssr: true;
     router: Awaited<ReturnType<typeof getRouter>>;
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>;
   }
 }

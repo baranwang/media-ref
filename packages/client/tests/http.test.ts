@@ -773,3 +773,13 @@ describe("createMediaRefClient — resolveFromKey and option validation", () => 
     ).rejects.toThrow(RangeError);
   });
 });
+
+test("an error's status matches the HTTP status Connect sends for it", async () => {
+  const { codeToHttpStatus } = await import("@connectrpc/connect/protocol-connect");
+  const { createDomainConnectError, extractConnectErrorInfo } = await import("../src/index.ts");
+  for (const status of [400, 401, 403, 404, 409, 429, 503]) {
+    const error = createDomainConnectError({ status, code: "X", message: "x" });
+    expect(codeToHttpStatus(error.code)).toBe(status);
+    expect(extractConnectErrorInfo(error).status).toBe(status);
+  }
+});

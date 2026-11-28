@@ -187,7 +187,7 @@ test("reviewers no longer approve or reject change requests: they are told to co
 
   for (const error of [approve, reject]) {
     expect(error).toMatchObject({ status: 409, code: "DECIDED_BY_REVIEW_AGENT" });
-    expect(error.connectError.code).toBe(9); // FailedPrecondition
+    expect(error.connectError.code).toBe(10); // Aborted, sent as HTTP 409
     expect(error.connectError.rawMessage).toContain("请留言");
   }
   const cr = await testDb.readDb

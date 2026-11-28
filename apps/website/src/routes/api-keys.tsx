@@ -353,6 +353,13 @@ function ApiKeysPage() {
             </h1>
             <p className="text-sm text-muted-foreground">
               让你的播放器、媒体库或脚本用 API 查询媒体、提交变更单。密钥吊销后最多 75 秒内失效。
+              <Link
+                to="/docs/$"
+                params={{ _splat: "quickstart" }}
+                className="ml-1 text-foreground underline underline-offset-4 hover:text-primary"
+              >
+                怎么调用？看开发者文档
+              </Link>
             </p>
           </div>
 

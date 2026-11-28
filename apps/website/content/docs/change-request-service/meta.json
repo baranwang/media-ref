@@ -1,0 +1,4 @@
+{
+  "title": "ChangeRequestService",
+  "pages": ["create-change-request", "get-change-request"]
+}

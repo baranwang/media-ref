@@ -1,0 +1,97 @@
+---
+title: ReportInvalidation
+breadcrumb: 接口参考 / AssociationService
+badges: ["写入"]
+description: 报告一条对应关系失效了，比如平台页面下架或者集数对不上。来自不同账号的报告凑够人数，就会触发一次自动复核。
+---
+
+<Endpoint
+  method="POST"
+  url="https://api.mediaref.org/mediaref.v1.AssociationService/ReportInvalidation"
+/>
+
+## 请求参数 [#request]
+
+| 字段            | 类型   | 说明                                                          |
+| --------------- | ------ | ------------------------------------------------------------- |
+| `associationId` | string | 必填。对应关系的 ID，就是 GetMedia 返回的 `associations[].id` |
+| `reason`        | string | 可选。哪里不对，最多 500 个字                                 |
+
+## 返回内容 [#response]
+
+| 字段           | 类型   | 说明                                           |
+| -------------- | ------ | ---------------------------------------------- |
+| `reportId`     | string | 这次报告的 ID                                  |
+| `deduplicated` | bool   | 这把密钥在这一轮已经报过，这次没有重复计数     |
+| `triggered`    | bool   | 人数凑够了，已经排上复核                       |
+| `jobId`        | string | 复核任务的 ID，触发了才有                      |
+| `reportCount`  | int32  | 这一轮有几个账号报过                           |
+| `threshold`    | int32  | 要几个账号报告才触发复核，默认 3，以返回值为准 |
+
+<Hint>
+  每把密钥都能报告，不需要「提交变更单」权限。只有已确认的对应关系能报。一个账号每天（UTC）最多报 20
+  次，不同的对应关系共用这个额度。
+</Hint>
+
+## 错误 [#errors]
+
+鉴权和限流的错误见[错误处理](/docs/errors#codes)。
+
+| HTTP  | 业务错误码                     | 原因                            |
+| ----- | ------------------------------ | ------------------------------- |
+| `400` | `INVALID_ASSOCIATION_ID`       | `associationId` 不是合法的 UUID |
+| `400` | `INVALID_REASON`               | `reason` 超过 500 个字          |
+| `401` | `UNAUTHORIZED`                 | 没带密钥                        |
+| `404` | `ASSOCIATION_NOT_FOUND`        | 没有这条对应关系                |
+| `409` | `ASSOCIATION_ALREADY_DELISTED` | 这条对应关系已经下架了          |
+| `409` | `ASSOCIATION_NOT_CONFIRMED`    | 还没确认的对应关系不能报        |
+| `429` | `INVALIDATION_LIMIT_REACHED`   | 今天的 20 次已经用完            |
+
+## 代码示例 [#example]
+
+<CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.AssociationService/ReportInvalidation \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "associationId": "0193f2c5-1b2d-…", "reason": "页面已经下架" }'
+```
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { AssociationService, createMediaRefTransport } from "@media-ref/client";
+
+const transport = createMediaRefTransport({ apiKey: process.env.MEDIAREF_API_KEY! });
+const associations = createClient(AssociationService, transport);
+
+const res = await associations.reportInvalidation({
+  associationId: "0193f2c5-1b2d-…",
+  reason: "页面已经下架",
+});
+console.log(res.triggered, `${res.reportCount}/${res.threshold}`);
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.AssociationService/ReportInvalidation",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={"associationId": "0193f2c5-1b2d-…", "reason": "页面已经下架"},
+)
+res.raise_for_status()
+print(res.json())
+```
+
+```go
+body := strings.NewReader(`{ "associationId": "0193f2c5-1b2d-…", "reason": "页面已经下架" }`)
+req, _ := http.NewRequest("POST",
+	"https://api.mediaref.org/mediaref.v1.AssociationService/ReportInvalidation", body)
+req.Header.Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+req.Header.Set("Content-Type", "application/json")
+res, err := http.DefaultClient.Do(req)
+```
+
+</CodeTabs>
