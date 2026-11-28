@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/baranwang/media-ref/compare/client-v1.1.1...client-v1.1.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* **review-agent:** map an entry holding two episodes to the first and leave the second unmapped ([#159](https://github.com/baranwang/media-ref/issues/159)) ([7512675](https://github.com/baranwang/media-ref/commit/7512675e8ec7d91b23c135a3c0312488373b62c5))
+
 ## [1.1.1](https://github.com/baranwang/media-ref/compare/client-v1.1.0...client-v1.1.1) (2026-11-27)
 
 
