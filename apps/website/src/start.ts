@@ -6,11 +6,12 @@ import { isMarkdownPreferred } from "fumadocs-core/negotiation";
 const docsMarkdownMiddleware = createMiddleware().server(({ next, request }) => {
   const url = new URL(request.url);
   if (
-    url.pathname.startsWith("/docs/") &&
+    /^\/docs(\/|$)/.test(url.pathname) &&
     !/\.(md|txt)$/.test(url.pathname) &&
     isMarkdownPreferred(request)
   ) {
-    url.pathname += ".md";
+    // The docs root is a redirect, not a page, so point it at the overview the redirect opens.
+    url.pathname = /^\/docs\/?$/.test(url.pathname) ? "/docs/overview.md" : `${url.pathname}.md`;
     // The same URL has two representations, so caches must key on Accept.
     throw redirect({ href: url.href, headers: { Vary: "Accept" } });
   }
