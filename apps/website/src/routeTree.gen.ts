@@ -27,6 +27,7 @@ import { Route as DocsChar123Char125DotmdRouteImport } from "./routes/docs.{$}[.
 import { Route as DocsChar123Char125DottxtRouteImport } from "./routes/docs.{$}[.]txt";
 import { Route as ImgDoubanRouteImport } from "./routes/img.douban";
 import { Route as MediaMediaIdRouteImport } from "./routes/media.$mediaId";
+import { Route as OauthConsentRouteImport } from "./routes/oauth.consent";
 
 const IndexRoute = IndexRouteImport.update({
   id: "/",
@@ -103,11 +104,12 @@ const DocsChar123Char125DotmdRoute = DocsChar123Char125DotmdRouteImport.update({
   path: "/docs/{$}.md",
   getParentRoute: () => rootRouteImport,
 } as any);
-const DocsChar123Char125DottxtRoute = DocsChar123Char125DottxtRouteImport.update({
-  id: "/docs/{$}.txt",
-  path: "/docs/{$}.txt",
-  getParentRoute: () => rootRouteImport,
-} as any);
+const DocsChar123Char125DottxtRoute =
+  DocsChar123Char125DottxtRouteImport.update({
+    id: "/docs/{$}.txt",
+    path: "/docs/{$}.txt",
+    getParentRoute: () => rootRouteImport,
+  } as any);
 const ImgDoubanRoute = ImgDoubanRouteImport.update({
   id: "/img/douban",
   path: "/img/douban",
@@ -116,6 +118,11 @@ const ImgDoubanRoute = ImgDoubanRouteImport.update({
 const MediaMediaIdRoute = MediaMediaIdRouteImport.update({
   id: "/media/$mediaId",
   path: "/media/$mediaId",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const OauthConsentRoute = OauthConsentRouteImport.update({
+  id: "/oauth/consent",
+  path: "/oauth/consent",
   getParentRoute: () => rootRouteImport,
 } as any);
 
@@ -136,6 +143,7 @@ export interface FileRoutesByFullPath {
   "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
+  "/oauth/consent": typeof OauthConsentRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
   "/docs/": typeof DocsIndexRoute;
 }
@@ -156,6 +164,7 @@ export interface FileRoutesByTo {
   "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
+  "/oauth/consent": typeof OauthConsentRoute;
   "/change-requests": typeof ChangeRequestsIndexRoute;
   "/docs": typeof DocsIndexRoute;
 }
@@ -177,6 +186,7 @@ export interface FileRoutesById {
   "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
+  "/oauth/consent": typeof OauthConsentRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
   "/docs/": typeof DocsIndexRoute;
 }
@@ -199,6 +209,7 @@ export interface FileRouteTypes {
     | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
+    | "/oauth/consent"
     | "/change-requests/"
     | "/docs/";
   fileRoutesByTo: FileRoutesByTo;
@@ -219,6 +230,7 @@ export interface FileRouteTypes {
     | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
+    | "/oauth/consent"
     | "/change-requests"
     | "/docs";
   id:
@@ -239,6 +251,7 @@ export interface FileRouteTypes {
     | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
+    | "/oauth/consent"
     | "/change-requests/"
     | "/docs/";
   fileRoutesById: FileRoutesById;
@@ -260,6 +273,7 @@ export interface RootRouteChildren {
   DocsChar123Char125DottxtRoute: typeof DocsChar123Char125DottxtRoute;
   ImgDoubanRoute: typeof ImgDoubanRoute;
   MediaMediaIdRoute: typeof MediaMediaIdRoute;
+  OauthConsentRoute: typeof OauthConsentRoute;
   ChangeRequestsIndexRoute: typeof ChangeRequestsIndexRoute;
   DocsIndexRoute: typeof DocsIndexRoute;
 }
@@ -392,6 +406,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof MediaMediaIdRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/oauth/consent": {
+      id: "/oauth/consent";
+      path: "/oauth/consent";
+      fullPath: "/oauth/consent";
+      preLoaderRoute: typeof OauthConsentRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
   }
 }
 
@@ -412,6 +433,7 @@ const rootRouteChildren: RootRouteChildren = {
   DocsChar123Char125DottxtRoute: DocsChar123Char125DottxtRoute,
   ImgDoubanRoute: ImgDoubanRoute,
   MediaMediaIdRoute: MediaMediaIdRoute,
+  OauthConsentRoute: OauthConsentRoute,
   ChangeRequestsIndexRoute: ChangeRequestsIndexRoute,
   DocsIndexRoute: DocsIndexRoute,
 };
