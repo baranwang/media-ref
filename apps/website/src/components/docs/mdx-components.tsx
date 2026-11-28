@@ -31,12 +31,7 @@ function textOf(node: ReactNode): string {
 
 /** A fenced code block, already highlighted at build time; CodeBlock / CodeTabs give it the card. */
 function Pre({ className, ...props }: ComponentProps<"pre">) {
-  return (
-    <pre
-      className={cn("overflow-x-auto p-4 font-mono text-xs leading-5 text-foreground", className)}
-      {...props}
-    />
-  );
+  return <pre className={cn("font-mono text-xs leading-5", className)} {...props} />;
 }
 
 function CopyButton({ text }: { text: string }) {

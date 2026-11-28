@@ -2,6 +2,7 @@ import { Badge } from "@media-ref/ui/components/badge";
 import { createFileRoute, notFound } from "@tanstack/react-router";
 import { DocsLayout } from "#/components/docs/docs-layout";
 import { docsMdxComponents } from "#/components/docs/mdx-components";
+import { codeThemeCss } from "#/lib/code-theme";
 import { docsSource } from "#/lib/docs-source";
 
 function getPage(splat: string | undefined) {
@@ -15,6 +16,7 @@ export const Route = createFileRoute("/docs/$")({
     return { title: page.data.title, description: page.data.description };
   },
   head: ({ loaderData }) => ({
+    styles: [{ children: codeThemeCss }],
     meta: loaderData
       ? [
           { title: `${loaderData.title} · MediaRef 文档` },
