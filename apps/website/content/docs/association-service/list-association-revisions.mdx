@@ -1,0 +1,92 @@
+---
+title: ListAssociationRevisions
+breadcrumb: 接口参考 / AssociationService
+badges: ["只读", "支持 GET"]
+description: 看一条对应关系的修改历史：每一版的状态、分集映射，以及是哪张变更单改的。
+---
+
+<Endpoint
+  method="POST"
+  url="https://api.mediaref.org/mediaref.v1.AssociationService/ListAssociationRevisions"
+/>
+
+## 请求参数 [#request]
+
+| 字段            | 类型      | 说明                                                                          |
+| --------------- | --------- | ----------------------------------------------------------------------------- |
+| `associationId` | string    | 必填。对应关系的 ID，就是 GetMedia 返回的 `associations[].id`                 |
+| `order`         | SortOrder | 可选。默认 `SORT_ORDER_ASC`，从最早的一版开始；`SORT_ORDER_DESC` 从最新的开始 |
+| `limit`         | int32     | 可选。每页几条，1 到 100，默认 50                                             |
+| `offset`        | int32     | 可选。跳过前几条，默认 0                                                      |
+
+## 返回内容 [#response]
+
+| 字段          | 类型                  | 说明                                     |
+| ------------- | --------------------- | ---------------------------------------- |
+| `association` | AssociationSummary    | 这条对应关系现在的样子：平台、编号、状态 |
+| `revisions`   | AssociationRevision[] | 这一页的修改记录                         |
+| `total`       | int32                 | 一共有几版，用来翻页                     |
+
+每条 `AssociationRevision`：
+
+| 字段              | 类型              | 说明                                              |
+| ----------------- | ----------------- | ------------------------------------------------- |
+| `revisionNumber`  | int32             | 第几版                                            |
+| `status`          | AssociationStatus | 这一版的状态，比如 `ASSOCIATION_STATUS_CONFIRMED` |
+| `segments`        | Segment[]         | 这一版的分集映射                                  |
+| `changeRequestId` | string            | 是哪张变更单改的，可以拿去 GetChangeRequest 查    |
+| `reason`          | string            | 改动原因                                          |
+| `createdAt`       | string            | 改动时间                                          |
+
+## 错误 [#errors]
+
+鉴权和限流的错误见[快速开始](/docs/quickstart#errors)。
+
+| HTTP  | 业务错误码               | 原因                                           |
+| ----- | ------------------------ | ---------------------------------------------- |
+| `400` | `INVALID_ASSOCIATION_ID` | `associationId` 不是合法的 UUID                |
+| `400` | `INVALID_ORDER`          | `order` 不是升序或降序                         |
+| `400` | `INVALID_PAGINATION`     | `limit` 不在 1 到 100 之间，或 `offset` 是负数 |
+| `401` | `UNAUTHORIZED`           | 没带密钥                                       |
+| `404` | `ASSOCIATION_NOT_FOUND`  | 没有这条对应关系                               |
+
+## 代码示例 [#example]
+
+<CodeTabs items={["curl", "TypeScript", "Python"]}>
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.AssociationService/ListAssociationRevisions \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "associationId": "0193f2c5-1b2d-…", "order": "SORT_ORDER_DESC", "limit": 10 }'
+```
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { AssociationService, createMediaRefTransport, proto } from "@media-ref/client";
+
+const transport = createMediaRefTransport({ apiKey: process.env.MEDIAREF_API_KEY! });
+const associations = createClient(AssociationService, transport);
+
+const { revisions, total } = await associations.listAssociationRevisions({
+  associationId: "0193f2c5-1b2d-…",
+  order: proto.SortOrder.DESC,
+  limit: 10,
+});
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.AssociationService/ListAssociationRevisions",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={"associationId": "0193f2c5-1b2d-…", "order": "SORT_ORDER_DESC", "limit": 10},
+)
+res.raise_for_status()
+for revision in res.json().get("revisions", []):
+    print(revision["revisionNumber"], revision["status"])
+```
+
+</CodeTabs>

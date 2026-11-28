@@ -1,3 +1,10 @@
+import { createHighlighter } from "@tanstack/highlight/core";
+import { go } from "@tanstack/highlight/languages/go";
+import { json } from "@tanstack/highlight/languages/json";
+import { python } from "@tanstack/highlight/languages/python";
+import { shell } from "@tanstack/highlight/languages/shell";
+import { ts } from "@tanstack/highlight/languages/ts";
+import { rehypeHighlightCodeBlocks } from "@tanstack/highlight/rehype";
 import { loader } from "fumadocs-core/source";
 import { pageSchema } from "fumadocs-core/source/schema";
 import { applyMdxPreset } from "fumadocs-mdx/config";
@@ -13,8 +20,17 @@ const docs = defineDocs({
       /** Small badges next to the title, e.g. ["只读", "支持 GET"]. */
       badges: z.array(z.string()).optional(),
     }),
-    // Code blocks are drawn by our own CodeBlock to match the design, so skip Shiki.
-    mdxOptions: applyMdxPreset({ rehypeCodeOptions: false }),
+    // Highlight code blocks at build time with TanStack Highlight instead of Fumadocs' Shiki.
+    mdxOptions: applyMdxPreset({
+      rehypeCodeOptions: false,
+      rehypePlugins: (plugins) => [
+        [
+          rehypeHighlightCodeBlocks,
+          { highlighter: createHighlighter({ languages: [go, json, python, shell, ts] }) },
+        ],
+        ...plugins,
+      ],
+    }),
   },
 });
 

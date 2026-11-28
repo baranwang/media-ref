@@ -1,0 +1,140 @@
+---
+title: CreateChangeRequest
+breadcrumb: 接口参考 / ChangeRequestService
+badges: ["写入", "需要提交权限"]
+description: 提交一条新的对应关系：这部作品在某个平台或目录站上是哪个页面，分集怎么对上。提交后自动核对，不用等人审。
+---
+
+<Endpoint
+  method="POST"
+  url="https://api.mediaref.org/mediaref.v1.ChangeRequestService/CreateChangeRequest"
+/>
+
+## 请求参数 [#request]
+
+| 字段                    | 类型           | 说明                                                                                                                     |
+| ----------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `target`                | MediaRef       | 必填。要对上的作品。已收录的用 `mediaId`，还没收录的用目录站编号（`tmdb`、`tvdb`、`imdb`、`bangumi`、`douban`、`trakt`） |
+| `namespace`             | string         | 必填。哪个平台或目录站，比如 `bilibili`                                                                                  |
+| `nativeId`              | string         | 必填。平台上的编号，也可以直接贴页面网址，会换成标准编号                                                                 |
+| `rawNativeId`           | string         | 可选。你原本拿到的编号或网址，留作记录                                                                                   |
+| `variantId`             | string         | 平台条目必须和 `variantDescription` 二选一。挂到这部作品在该平台已有的版本下                                             |
+| `variantDescription`    | string         | 新建一个版本时，用一句话说明它和别的版本有什么不同                                                                       |
+| `setDefaultVariant`     | bool           | 可选。把这个版本设为该平台的默认版本                                                                                     |
+| `replacesAssociationId` | string         | 可选。用这条替换掉一条已有的对应关系                                                                                     |
+| `taskId`                | string         | 可选。UUID。同一个 `taskId` 重复提交，返回同一张变更单                                                                   |
+| `segments`              | SegmentInput[] | 可选，最多 200 段。空数组表示整部作品对应这个页面                                                                        |
+
+每段 `SegmentInput` 二选一：
+
+| 写法          | 说明                                                                               |
+| ------------- | ---------------------------------------------------------------------------------- |
+| `wholeSeason` | 整季对上：`season`、`baseline`（按哪个目录站的分集算，比如 `tmdb`）                |
+| `explicit`    | 指定集数：`season`、`episodeStart`、`episodeEnd`、`targetEpisodeStart`、`baseline` |
+
+## 返回内容 [#response]
+
+| 字段            | 类型          | 说明                                                                                                |
+| --------------- | ------------- | --------------------------------------------------------------------------------------------------- |
+| `changeRequest` | ChangeRequest | 刚创建的变更单，字段见 [GetChangeRequest](/docs/change-request-service/get-change-request#response) |
+
+<Hint>
+  新变更单的状态是
+  `CHANGE_REQUEST_STATUS_PENDING_EVIDENCE`。系统会自动打开页面核对片名、年份和集数，对上了直接生效，拿不准的交给审核
+  agent 判定。用 GetChangeRequest 查结果。
+</Hint>
+
+## 错误 [#errors]
+
+鉴权和限流的错误见[快速开始](/docs/quickstart#errors)。
+
+| HTTP  | 业务错误码                              | 原因                                                   |
+| ----- | --------------------------------------- | ------------------------------------------------------ |
+| `400` | `INVALID_TARGET_KEY`                    | `target` 写得不对，或者没收录的作品没用目录站编号      |
+| `400` | `INVALID_NAMESPACE`                     | 不认识这个 `namespace`                                 |
+| `400` | `INVALID_NATIVE_ID`                     | `nativeId` 为空、太长，或者网址认不出来                |
+| `400` | `VARIANT_REQUIRED`                      | 平台条目没给 `variantId` 或 `variantDescription`       |
+| `400` | `INVALID_VARIANT`                       | `variantId` 不属于这部作品和这个平台                   |
+| `400` | `INVALID_SEGMENTS`                      | 分集写得不对                                           |
+| `400` | `SEGMENT_OVERLAP`                       | 和这个版本或这个页面上已有的对应关系集数重叠           |
+| `400` | `SEGMENTS_NOT_ALLOWED_WITHOUT_BASELINE` | 作品没有可以对照的分集，只能整部提交（`segments: []`） |
+| `401` | `UNAUTHORIZED`                          | 没带密钥                                               |
+| `403` | `INSUFFICIENT_PERMISSIONS`              | 密钥没开「提交变更单」                                 |
+| `403` | `EMAIL_NOT_VERIFIED`                    | 账号邮箱还没验证                                       |
+| `404` | `MEDIA_NOT_FOUND`                       | `mediaId` 对应的作品不存在                             |
+| `429` | `SUBMISSION_RATE_LIMITED`               | 超出每小时的提交上限，按 `Retry-After` 再试            |
+| `502` | `PLATFORM_UPSTREAM_ERROR`               | 换算标准编号时平台没响应，稍后再试                     |
+
+## 代码示例 [#example]
+
+<CodeTabs items={["curl", "TypeScript", "Python"]}>
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.ChangeRequestService/CreateChangeRequest \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": { "tmdb": { "type": "MEDIA_TYPE_TV", "id": 95479 } },
+    "namespace": "bilibili",
+    "nativeId": "https://www.bilibili.com/bangumi/play/ss45574",
+    "variantDescription": "中文字幕版",
+    "segments": [
+      { "explicit": { "season": 1, "episodeStart": 25, "episodeEnd": 47,
+                      "targetEpisodeStart": 1, "baseline": "tmdb" } }
+    ]
+  }'
+```
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { ChangeRequestService, createMediaRefTransport, proto } from "@media-ref/client";
+
+const transport = createMediaRefTransport({ apiKey: process.env.MEDIAREF_API_KEY! });
+const changeRequests = createClient(ChangeRequestService, transport);
+
+const { changeRequest } = await changeRequests.createChangeRequest({
+  target: { id: { case: "tmdb", value: { type: proto.MediaType.TV, id: 95479 } } },
+  namespace: "bilibili",
+  nativeId: "ss45574",
+  variantDescription: "中文字幕版",
+  segments: [
+    {
+      kind: {
+        case: "explicit",
+        value: {
+          season: 1,
+          episodeStart: 25,
+          episodeEnd: 47,
+          targetEpisodeStart: 1,
+          baseline: "tmdb",
+        },
+      },
+    },
+  ],
+});
+console.log(changeRequest?.id);
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.ChangeRequestService/CreateChangeRequest",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={
+        "target": {"tmdb": {"type": "MEDIA_TYPE_TV", "id": 95479}},
+        "namespace": "bilibili",
+        "nativeId": "ss45574",
+        "variantDescription": "中文字幕版",
+        "segments": [
+            {"explicit": {"season": 1, "episodeStart": 25, "episodeEnd": 47,
+                          "targetEpisodeStart": 1, "baseline": "tmdb"}}
+        ],
+    },
+)
+res.raise_for_status()
+print(res.json()["changeRequest"]["id"])
+```
+
+</CodeTabs>

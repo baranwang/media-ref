@@ -20,7 +20,6 @@ import {
 import { Link } from "@tanstack/react-router";
 import type { MDXComponents } from "mdx/types";
 import { Children, isValidElement, useState, type ComponentProps, type ReactNode } from "react";
-import { highlightLine } from "#/lib/code-highlight";
 
 /** Plain text of a node tree, e.g. the source inside a fenced code block. */
 function textOf(node: ReactNode): string {
@@ -30,33 +29,14 @@ function textOf(node: ReactNode): string {
   return "";
 }
 
-function CodeLines({ code }: { code: string }) {
+/** A fenced code block, already highlighted at build time; CodeBlock / CodeTabs give it the card. */
+function Pre({ className, ...props }: ComponentProps<"pre">) {
   return (
-    <pre className="overflow-x-auto p-4 font-mono text-xs leading-5 text-foreground">
-      <code>
-        {code.split("\n").map((line, i) => (
-          <span key={i} className="block min-h-5">
-            {highlightLine(line).map((token, j) => (
-              <span
-                key={j}
-                className={cn(
-                  token.kind === "string" && "text-primary",
-                  token.kind === "comment" && "text-muted-foreground",
-                )}
-              >
-                {token.text}
-              </span>
-            ))}
-          </span>
-        ))}
-      </code>
-    </pre>
+    <pre
+      className={cn("overflow-x-auto p-4 font-mono text-xs leading-5 text-foreground", className)}
+      {...props}
+    />
   );
-}
-
-/** A fenced code block; CodeBlock / CodeTabs give it the card and header. */
-function Pre({ children }: ComponentProps<"pre">) {
-  return <CodeLines code={textOf(children).replace(/\n$/, "")} />;
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -222,6 +202,12 @@ export const docsMdxComponents = {
     <code className="font-mono text-foreground" {...props} />
   ),
   pre: Pre,
+  a: (props: ComponentProps<"a">) => (
+    <a
+      className="text-foreground underline underline-offset-4 transition-colors hover:text-primary"
+      {...props}
+    />
+  ),
   table: (props: ComponentProps<"table">) => (
     <div className="w-full rounded-lg border border-border bg-card px-4 py-1">
       <Table {...props} />

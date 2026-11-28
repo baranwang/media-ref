@@ -21,6 +21,7 @@
     "@media-ref/ui": "workspace:*",
     "@remixicon/react": "^4.9.0",
     "@tailwindcss/vite": "catalog:",
+    "@tanstack/highlight": "^1.2.12",
     "@tanstack/react-form": "^1.33.5",
     "@tanstack/react-query": "^5.108.4",
     "@tanstack/react-router": "1.170.46",

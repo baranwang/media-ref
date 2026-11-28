@@ -1,0 +1,84 @@
+---
+title: Search
+breadcrumb: 接口参考 / BrowseService
+badges: ["只读", "支持 GET"]
+description: 用片名、目录站或平台的网址、或者 namespace:id 编号找作品。片名先在库里找，不够再去目录站搜。
+---
+
+<Endpoint method="POST" url="https://api.mediaref.org/mediaref.v1.BrowseService/Search" />
+
+## 请求参数 [#request]
+
+| 字段    | 类型   | 说明                                                                              |
+| ------- | ------ | --------------------------------------------------------------------------------- |
+| `query` | string | 必填。片名、网址或 `douban:1292052` 这样的编号，最多 200 个字。空字符串返回空列表 |
+| `limit` | int32  | 可选。最多返回几条，默认 10，最大 100，超出按 100 算                              |
+
+## 返回内容 [#response]
+
+| 字段            | 类型          | 说明                                 |
+| --------------- | ------------- | ------------------------------------ |
+| `items`         | CatalogCard[] | 搜到的作品                           |
+| `matchedAsLink` | bool          | `query` 被当成网址或编号，而不是片名 |
+
+每条 `CatalogCard`：
+
+| 字段                      | 类型      | 说明                                                           |
+| ------------------------- | --------- | -------------------------------------------------------------- |
+| `key`                     | string    | 目录站编号，比如 `tmdb:tv:1429`，可以直接传给 GetCatalogDetail |
+| `namespace`               | string    | 来自哪个目录站                                                 |
+| `type`                    | MediaType | 电影还是剧集                                                   |
+| `isAnime`                 | bool      | 是不是动画                                                     |
+| `title` / `originalTitle` | string    | 片名和原名                                                     |
+| `year`                    | int32     | 年份                                                           |
+| `posterUrl`               | string    | 海报地址                                                       |
+| `mediaId`                 | string    | 库里已经有这部作品时才有                                       |
+| `platforms`               | string[]  | 已经确认对上的视频平台，库里没有时为空                         |
+
+<Hint>平台网址只能找到库里已经收录的作品；目录站网址就算库里还没有，也会返回目录站上的条目。</Hint>
+
+## 错误 [#errors]
+
+鉴权和限流的错误见[快速开始](/docs/quickstart#errors)。
+
+| HTTP  | 业务错误码      | 原因                  |
+| ----- | --------------- | --------------------- |
+| `400` | `INVALID_QUERY` | `query` 超过 200 个字 |
+
+## 代码示例 [#example]
+
+<CodeTabs items={["curl", "TypeScript", "Python"]}>
+
+```bash
+curl https://api.mediaref.org/mediaref.v1.BrowseService/Search \
+  -H "Authorization: Bearer $MEDIAREF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "query": "咒术回战", "limit": 5 }'
+```
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { BrowseService, createMediaRefTransport } from "@media-ref/client";
+
+const transport = createMediaRefTransport({ apiKey: process.env.MEDIAREF_API_KEY! });
+const browse = createClient(BrowseService, transport);
+
+const { items } = await browse.search({ query: "咒术回战", limit: 5 });
+console.log(items.map((card) => `${card.title} ${card.key}`));
+```
+
+```python
+import os
+import requests
+
+res = requests.post(
+    "https://api.mediaref.org/mediaref.v1.BrowseService/Search",
+    headers={"Authorization": "Bearer " + os.environ["MEDIAREF_API_KEY"]},
+    json={"query": "咒术回战", "limit": 5},
+)
+res.raise_for_status()
+for card in res.json().get("items", []):
+    print(card["title"], card["key"])
+```
+
+</CodeTabs>

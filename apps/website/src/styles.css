@@ -11,3 +11,11 @@
   content: counter(docs-step);
   @apply flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-muted text-xs font-medium tracking-normal;
 }
+
+/* Docs code blocks (TanStack Highlight): string values in the accent colour, comments muted, the rest plain. */
+pre.th-code .th-string {
+  color: var(--primary);
+}
+pre.th-code .th-comment {
+  color: var(--muted-foreground);
+}
