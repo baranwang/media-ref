@@ -189,6 +189,14 @@ function ButtonLink({ to, children }: { to: "/api-keys"; children: ReactNode }) 
 }
 
 export const docsMdxComponents = {
+  // The page header renders the title; drop an included file's own H1 (e.g. "# Changelog").
+  h1: () => null,
+  h3: ({ className, ...props }: ComponentProps<"h3">) => (
+    <h3 className={cn("mt-2 text-sm font-semibold text-foreground", className)} {...props} />
+  ),
+  ul: ({ className, ...props }: ComponentProps<"ul">) => (
+    <ul className={cn("flex list-disc flex-col gap-1 pl-5", className)} {...props} />
+  ),
   h2: ({ className, ...props }: ComponentProps<"h2">) => (
     <h2
       className={cn(

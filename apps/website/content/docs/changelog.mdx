@@ -1,25 +1,7 @@
 ---
 title: 更新日志
 breadcrumb: 文档 / 其他
-description: 公开 API 和 TypeScript SDK（@media-ref/client）的变化。
+description: TypeScript SDK（@media-ref/client）和公开 API 的变化，由 release-please 在每次发版时生成。
 ---
 
-## 2026-11-28 [#2026-11-28]
-
-- 开发者文档上线。
-- `GetCurrentApiKey` 归入公开的 `ApiKeyService`。网站自己用的账号、贡献者和审核接口移到 `mediaref.internal.v1`，不再属于公开 API。
-- 和现有数据冲突的错误（比如 `DUPLICATE_CHANGE_REQUEST`、`NO_CHANGE`、`ASSOCIATION_ALREADY_DELISTED`）实际返回 HTTP 409，Connect 错误码从 `failed_precondition` 改为 `aborted`。按业务错误码判断的程序不受影响。
-- SDK：`MediaRefApiError.status` 和实际响应的 HTTP 状态码一致。
-
-## 2026-11-27 · SDK 1.1.1 [#sdk-1-1-1]
-
-- 修正：豆瓣条目确认过的每个平台，都要出现在对应季的覆盖里。
-
-## 2026-11-27 · SDK 1.1.0 [#sdk-1-1-0]
-
-- `GetChangeRequest` 新增 `liveChangeRequestId`：变更单没生效、但同一部作品同一个页面已经有另一张生效时，返回那一张的 ID。
-- 修正：保留核实过的关联，并能从新的证据里恢复关联。
-
-## 2026-11-26 · SDK 1.0.0 [#sdk-1-0-0]
-
-- 第一个版本：`mediaref.v1` 接口和 TypeScript SDK。
+<include>../../../../packages/client/CHANGELOG.md</include>
