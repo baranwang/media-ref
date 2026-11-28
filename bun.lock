@@ -38,6 +38,7 @@
         "@connectrpc/connect-web": "catalog:",
         "@media-ref/client": "workspace:*",
         "@media-ref/ui": "workspace:*",
+        "@modelcontextprotocol/server": "^2.4.0",
         "@remixicon/react": "^4.9.0",
         "@tailwindcss/vite": "catalog:",
         "@tanstack/highlight": "^1.2.12",

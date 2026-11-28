@@ -1,0 +1,19 @@
+{
+  "title": "MediaRef 开发者文档",
+  "pages": [
+    "---入门---",
+    "quickstart",
+    "auth",
+    "errors",
+    "---接口参考---",
+    "media-service",
+    "browse-service",
+    "association-service",
+    "change-request-service",
+    "api-key-service",
+    "---接入方式---",
+    "typescript-sdk",
+    "proto",
+    "http"
+  ]
+}

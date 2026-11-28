@@ -15,15 +15,39 @@ import { z } from "zod";
 const docs = defineDocs({
   dir: "content/docs",
   docs: {
+    // Each page compiles to its own chunk, so the browser only downloads the page it shows.
+    async: true,
     schema: pageSchema.extend({
       /** Shown above the title, e.g. "文档 / 入门". */
       breadcrumb: z.string(),
       /** Small badges next to the title, e.g. ["只读", "支持 GET"]. */
       badges: z.array(z.string()).optional(),
     }),
+    postprocess: {
+      // Markdown for LLMs: our MDX components become placeholders, rendered in `docsLlms` below.
+      includeProcessedMarkdown: {
+        output: "string",
+        headingIds: false,
+        mdxAsPlaceholder: [
+          "Callout",
+          "Steps",
+          "Hint",
+          "Endpoint",
+          "CodeBlock",
+          "CodeTabs",
+          "ApproachCard",
+          "ButtonLink",
+        ],
+        // Layout-only wrappers: keep what is inside them.
+        filterElement: (node) =>
+          node.type === "mdxJsxFlowElement" && node.name === "div" ? "children-only" : true,
+      },
+    },
     // Highlight code blocks at build time with TanStack Highlight instead of Fumadocs' Shiki.
     mdxOptions: applyMdxPreset({
       rehypeCodeOptions: false,
+      // Search indexes the text inside our components, not their JSX source.
+      remarkStructureOptions: { filterElement: () => false },
       rehypePlugins: (plugins) => [
         [
           rehypeHighlightCodeBlocks,
@@ -39,3 +63,5 @@ export const docsSource = loader({
   baseUrl: "/docs",
   source: docs.toFumadocsSource(),
 });
+
+export const DOCS_SITE_URL = "https://mediaref.org";

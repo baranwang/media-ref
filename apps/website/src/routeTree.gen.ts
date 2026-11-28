@@ -12,16 +12,22 @@ import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as ApiKeysRouteImport } from "./routes/api-keys";
 import { Route as ExplorationRouteImport } from "./routes/exploration";
+import { Route as LlmsFullDottxtRouteImport } from "./routes/llms-full[.]txt";
+import { Route as LlmsDottxtRouteImport } from "./routes/llms[.]txt";
 import { Route as LoginRouteImport } from "./routes/login";
 import { Route as ReviewRouteImport } from "./routes/review";
 import { Route as SignupRouteImport } from "./routes/signup";
 import { Route as VerifyEmailRouteImport } from "./routes/verify-email";
 import { Route as WantedRouteImport } from "./routes/wanted";
+import { Route as ApiMcpRouteImport } from "./routes/api.mcp";
+import { Route as ApiSearchRouteImport } from "./routes/api.search";
 import { Route as ChangeRequestsIndexRouteImport } from "./routes/change-requests.index";
 import { Route as ChangeRequestsIdRouteImport } from "./routes/change-requests.$id";
 import { Route as DiscoverCatalogRouteImport } from "./routes/discover.$catalog";
 import { Route as DocsIndexRouteImport } from "./routes/docs.index";
 import { Route as DocsSplatRouteImport } from "./routes/docs.$";
+import { Route as DocsChar123Char125DotmdRouteImport } from "./routes/docs.{$}[.]md";
+import { Route as DocsChar123Char125DottxtRouteImport } from "./routes/docs.{$}[.]txt";
 import { Route as ImgDoubanRouteImport } from "./routes/img.douban";
 import { Route as MediaMediaIdRouteImport } from "./routes/media.$mediaId";
 
@@ -38,6 +44,16 @@ const ApiKeysRoute = ApiKeysRouteImport.update({
 const ExplorationRoute = ExplorationRouteImport.update({
   id: "/exploration",
   path: "/exploration",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const LlmsFullDottxtRoute = LlmsFullDottxtRouteImport.update({
+  id: "/llms-full.txt",
+  path: "/llms-full.txt",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const LlmsDottxtRoute = LlmsDottxtRouteImport.update({
+  id: "/llms.txt",
+  path: "/llms.txt",
   getParentRoute: () => rootRouteImport,
 } as any);
 const LoginRoute = LoginRouteImport.update({
@@ -65,6 +81,16 @@ const WantedRoute = WantedRouteImport.update({
   path: "/wanted",
   getParentRoute: () => rootRouteImport,
 } as any);
+const ApiMcpRoute = ApiMcpRouteImport.update({
+  id: "/api/mcp",
+  path: "/api/mcp",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const ApiSearchRoute = ApiSearchRouteImport.update({
+  id: "/api/search",
+  path: "/api/search",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const ChangeRequestsIndexRoute = ChangeRequestsIndexRouteImport.update({
   id: "/change-requests/",
   path: "/change-requests/",
@@ -90,6 +116,16 @@ const DocsSplatRoute = DocsSplatRouteImport.update({
   path: "/docs/$",
   getParentRoute: () => rootRouteImport,
 } as any);
+const DocsChar123Char125DotmdRoute = DocsChar123Char125DotmdRouteImport.update({
+  id: "/docs/{$}.md",
+  path: "/docs/{$}.md",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const DocsChar123Char125DottxtRoute = DocsChar123Char125DottxtRouteImport.update({
+  id: "/docs/{$}.txt",
+  path: "/docs/{$}.txt",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const ImgDoubanRoute = ImgDoubanRouteImport.update({
   id: "/img/douban",
   path: "/img/douban",
@@ -105,14 +141,20 @@ export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
+  "/llms-full.txt": typeof LlmsFullDottxtRoute;
+  "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
   "/wanted": typeof WantedRoute;
+  "/api/mcp": typeof ApiMcpRoute;
+  "/api/search": typeof ApiSearchRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/docs/$": typeof DocsSplatRoute;
+  "/docs/{$}.md": typeof DocsChar123Char125DotmdRoute;
+  "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
@@ -122,14 +164,20 @@ export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
+  "/llms-full.txt": typeof LlmsFullDottxtRoute;
+  "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
   "/wanted": typeof WantedRoute;
+  "/api/mcp": typeof ApiMcpRoute;
+  "/api/search": typeof ApiSearchRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/docs/$": typeof DocsSplatRoute;
+  "/docs/{$}.md": typeof DocsChar123Char125DotmdRoute;
+  "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests": typeof ChangeRequestsIndexRoute;
@@ -140,14 +188,20 @@ export interface FileRoutesById {
   "/": typeof IndexRoute;
   "/api-keys": typeof ApiKeysRoute;
   "/exploration": typeof ExplorationRoute;
+  "/llms-full.txt": typeof LlmsFullDottxtRoute;
+  "/llms.txt": typeof LlmsDottxtRoute;
   "/login": typeof LoginRoute;
   "/review": typeof ReviewRoute;
   "/signup": typeof SignupRoute;
   "/verify-email": typeof VerifyEmailRoute;
   "/wanted": typeof WantedRoute;
+  "/api/mcp": typeof ApiMcpRoute;
+  "/api/search": typeof ApiSearchRoute;
   "/change-requests/$id": typeof ChangeRequestsIdRoute;
   "/discover/$catalog": typeof DiscoverCatalogRoute;
   "/docs/$": typeof DocsSplatRoute;
+  "/docs/{$}.md": typeof DocsChar123Char125DotmdRoute;
+  "/docs/{$}.txt": typeof DocsChar123Char125DottxtRoute;
   "/img/douban": typeof ImgDoubanRoute;
   "/media/$mediaId": typeof MediaMediaIdRoute;
   "/change-requests/": typeof ChangeRequestsIndexRoute;
@@ -159,14 +213,20 @@ export interface FileRouteTypes {
     | "/"
     | "/api-keys"
     | "/exploration"
+    | "/llms-full.txt"
+    | "/llms.txt"
     | "/login"
     | "/review"
     | "/signup"
     | "/verify-email"
     | "/wanted"
+    | "/api/mcp"
+    | "/api/search"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/docs/$"
+    | "/docs/{$}.md"
+    | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
     | "/change-requests/"
@@ -176,14 +236,20 @@ export interface FileRouteTypes {
     | "/"
     | "/api-keys"
     | "/exploration"
+    | "/llms-full.txt"
+    | "/llms.txt"
     | "/login"
     | "/review"
     | "/signup"
     | "/verify-email"
     | "/wanted"
+    | "/api/mcp"
+    | "/api/search"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/docs/$"
+    | "/docs/{$}.md"
+    | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
     | "/change-requests"
@@ -193,14 +259,20 @@ export interface FileRouteTypes {
     | "/"
     | "/api-keys"
     | "/exploration"
+    | "/llms-full.txt"
+    | "/llms.txt"
     | "/login"
     | "/review"
     | "/signup"
     | "/verify-email"
     | "/wanted"
+    | "/api/mcp"
+    | "/api/search"
     | "/change-requests/$id"
     | "/discover/$catalog"
     | "/docs/$"
+    | "/docs/{$}.md"
+    | "/docs/{$}.txt"
     | "/img/douban"
     | "/media/$mediaId"
     | "/change-requests/"
@@ -211,14 +283,20 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   ApiKeysRoute: typeof ApiKeysRoute;
   ExplorationRoute: typeof ExplorationRoute;
+  LlmsFullDottxtRoute: typeof LlmsFullDottxtRoute;
+  LlmsDottxtRoute: typeof LlmsDottxtRoute;
   LoginRoute: typeof LoginRoute;
   ReviewRoute: typeof ReviewRoute;
   SignupRoute: typeof SignupRoute;
   VerifyEmailRoute: typeof VerifyEmailRoute;
   WantedRoute: typeof WantedRoute;
+  ApiMcpRoute: typeof ApiMcpRoute;
+  ApiSearchRoute: typeof ApiSearchRoute;
   ChangeRequestsIdRoute: typeof ChangeRequestsIdRoute;
   DiscoverCatalogRoute: typeof DiscoverCatalogRoute;
   DocsSplatRoute: typeof DocsSplatRoute;
+  DocsChar123Char125DotmdRoute: typeof DocsChar123Char125DotmdRoute;
+  DocsChar123Char125DottxtRoute: typeof DocsChar123Char125DottxtRoute;
   ImgDoubanRoute: typeof ImgDoubanRoute;
   MediaMediaIdRoute: typeof MediaMediaIdRoute;
   ChangeRequestsIndexRoute: typeof ChangeRequestsIndexRoute;
@@ -246,6 +324,20 @@ declare module "@tanstack/react-router" {
       path: "/exploration";
       fullPath: "/exploration";
       preLoaderRoute: typeof ExplorationRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/llms-full.txt": {
+      id: "/llms-full.txt";
+      path: "/llms-full.txt";
+      fullPath: "/llms-full.txt";
+      preLoaderRoute: typeof LlmsFullDottxtRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/llms.txt": {
+      id: "/llms.txt";
+      path: "/llms.txt";
+      fullPath: "/llms.txt";
+      preLoaderRoute: typeof LlmsDottxtRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/login": {
@@ -283,6 +375,20 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof WantedRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/api/mcp": {
+      id: "/api/mcp";
+      path: "/api/mcp";
+      fullPath: "/api/mcp";
+      preLoaderRoute: typeof ApiMcpRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/api/search": {
+      id: "/api/search";
+      path: "/api/search";
+      fullPath: "/api/search";
+      preLoaderRoute: typeof ApiSearchRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/change-requests/": {
       id: "/change-requests/";
       path: "/change-requests";
@@ -318,6 +424,20 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof DocsSplatRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/docs/{$}.md": {
+      id: "/docs/{$}.md";
+      path: "/docs/{$}.md";
+      fullPath: "/docs/{$}.md";
+      preLoaderRoute: typeof DocsChar123Char125DotmdRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/docs/{$}.txt": {
+      id: "/docs/{$}.txt";
+      path: "/docs/{$}.txt";
+      fullPath: "/docs/{$}.txt";
+      preLoaderRoute: typeof DocsChar123Char125DottxtRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/img/douban": {
       id: "/img/douban";
       path: "/img/douban";
@@ -339,14 +459,20 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ApiKeysRoute: ApiKeysRoute,
   ExplorationRoute: ExplorationRoute,
+  LlmsFullDottxtRoute: LlmsFullDottxtRoute,
+  LlmsDottxtRoute: LlmsDottxtRoute,
   LoginRoute: LoginRoute,
   ReviewRoute: ReviewRoute,
   SignupRoute: SignupRoute,
   VerifyEmailRoute: VerifyEmailRoute,
   WantedRoute: WantedRoute,
+  ApiMcpRoute: ApiMcpRoute,
+  ApiSearchRoute: ApiSearchRoute,
   ChangeRequestsIdRoute: ChangeRequestsIdRoute,
   DiscoverCatalogRoute: DiscoverCatalogRoute,
   DocsSplatRoute: DocsSplatRoute,
+  DocsChar123Char125DotmdRoute: DocsChar123Char125DotmdRoute,
+  DocsChar123Char125DottxtRoute: DocsChar123Char125DottxtRoute,
   ImgDoubanRoute: ImgDoubanRoute,
   MediaMediaIdRoute: MediaMediaIdRoute,
   ChangeRequestsIndexRoute: ChangeRequestsIndexRoute,
@@ -357,10 +483,11 @@ export const routeTree = rootRouteImport
   ._addFileTypes<FileRouteTypes>();
 
 import type { getRouter } from "./router.tsx";
-import type { createStart } from "@tanstack/react-start";
+import type { startInstance } from "./start.ts";
 declare module "@tanstack/react-start" {
   interface Register {
     ssr: true;
     router: Awaited<ReturnType<typeof getRouter>>;
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>;
   }
 }

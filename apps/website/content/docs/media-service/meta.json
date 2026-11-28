@@ -1,0 +1,4 @@
+{
+  "title": "MediaService",
+  "pages": ["get-media", "batch-get-media"]
+}
