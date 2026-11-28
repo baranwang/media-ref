@@ -42,6 +42,7 @@ import {
   TmdbGatewayError,
   type TmdbGateway,
   type TmdbGatewayConfig,
+  type TmdbMediaFetchResult,
 } from "./tmdb.ts";
 
 export const TMDB_SYNC_JOB_TYPE = "tmdb_sync";
@@ -49,6 +50,8 @@ export const TMDB_SYNC_KEY_MOVIE = "tmdb_changes_movie";
 export const TMDB_SYNC_KEY_TV = "tmdb_changes_tv";
 export const TMDB_CHANGES_MAX_WINDOW_DAYS = 14;
 export const DEFAULT_TMDB_FULL_REFRESH_BATCH_SIZE = 50;
+// Below the 15-minute queue invocation wall clock, leaving room for the item in flight and the commit.
+export const DEFAULT_TMDB_SYNC_MAX_DURATION_MS = 12 * 60_000;
 /**
  * Media one full-refresh run refreshes per type. Each costs a TMDB fetch and a transaction (about
  * 250 ms), so two pages stay well inside the 15-minute invocation; the next cron tick runs the next.
@@ -90,6 +93,8 @@ export interface TmdbMediaTypeSyncSummary {
   flaggedSegmentCount: number;
   cursorAdvanced: boolean;
   lastSyncedDate: string | null;
+  /** Stopped at the deadline before every candidate was processed; the cursor did not move. */
+  deadlineReached?: true;
 }
 
 export interface TmdbDailySyncResult {
@@ -97,6 +102,7 @@ export interface TmdbDailySyncResult {
   movie: TmdbMediaTypeSyncSummary;
   tv: TmdbMediaTypeSyncSummary;
   transientErrors: TmdbSyncTransientError[];
+  deadlineReached: boolean;
 }
 
 export interface RunTmdbDailySyncOptions {
@@ -107,6 +113,8 @@ export interface RunTmdbDailySyncOptions {
   fullRefreshPageSize?: number;
   maxChangesWindowDays?: number;
   backfillMissingTrakt?: boolean;
+  /** No new item starts after this; unfinished types keep their cursor and run again next time. */
+  deadline?: Date;
 }
 
 export interface EnqueueTmdbDailySyncOptions {
@@ -134,6 +142,7 @@ export interface CreateTmdbSyncJobHandlerOptions {
   fullRefreshPageSize?: number;
   maxChangesWindowDays?: number;
   backfillMissingTrakt?: boolean;
+  maxDurationMs?: number;
 }
 
 export type MediaSyncErrorCode =
@@ -354,6 +363,99 @@ export function detectChangedSeasons(
   return Array.from(changed).sort((a, b) => a - b);
 }
 
+function sameSeasons(a: readonly SeasonSnapshot[], b: readonly SeasonSnapshot[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (season, index) =>
+        season.season === b[index]!.season &&
+        season.episodeCount === b[index]!.episodeCount &&
+        (season.airYear ?? null) === (b[index]!.airYear ?? null),
+    )
+  );
+}
+
+const SYNCED_SECONDARY_NAMESPACES = ["imdb", "tvdb", "trakt"] as const;
+
+interface StoredSyncState {
+  media: Map<
+    string,
+    {
+      title: string;
+      original_title: string | null;
+      year: number | null;
+      seasons: unknown;
+      merged_into_media_id: string | null;
+    }
+  >;
+  externalIds: Map<string, Array<{ namespace: string; native_id: string; locked: boolean }>>;
+}
+
+/** One read per batch, so items whose stored state already matches TMDB skip the write transaction. */
+async function loadStoredSyncState(db: Db, mediaIds: string[]): Promise<StoredSyncState> {
+  const [mediaRows, externalRows] = await Promise.all([
+    db
+      .selectFrom("media")
+      .select(["id", "title", "original_title", "year", "seasons", "merged_into_media_id"])
+      .where("id", "in", mediaIds)
+      .execute(),
+    db
+      .selectFrom("associations")
+      .select(["media_id", "namespace", "native_id", "locked"])
+      .where("is_external_id", "=", true)
+      .where("media_id", "in", mediaIds)
+      .where("namespace", "in", [...SYNCED_SECONDARY_NAMESPACES])
+      .execute(),
+  ]);
+  const externalIds: StoredSyncState["externalIds"] = new Map();
+  for (const row of externalRows) {
+    const list = externalIds.get(row.media_id) ?? [];
+    list.push(row);
+    externalIds.set(row.media_id, list);
+  }
+  return { media: new Map(mediaRows.map((row) => [row.id, row])), externalIds };
+}
+
+/**
+ * True when the write transaction would change nothing but updated_at: the media is gone or merged
+ * (the transaction is a no-op then too), or every synced field and external ID already matches.
+ * shortcut: read before the batch's fetches, so a write landing in between can be missed until the
+ * next TMDB change to the item; lock per item if that ever matters.
+ */
+function isStoredStateCurrent(
+  stored: StoredSyncState,
+  mediaId: string,
+  fetched: TmdbMediaFetchResult,
+  backfillOnly: boolean,
+): boolean {
+  const media = stored.media.get(mediaId);
+  if (!media || media.merged_into_media_id !== null) {
+    return true;
+  }
+  const externalRows = stored.externalIds.get(mediaId) ?? [];
+  const externalIdsCurrent = SYNCED_SECONDARY_NAMESPACES.every((namespace) => {
+    const nativeId = fetched.externalIds[namespace];
+    if (!nativeId) {
+      return true;
+    }
+    const rows = externalRows.filter((row) => row.namespace === namespace);
+    // Backfill only inserts namespaces the media lacks; a full refresh also corrects unlocked IDs.
+    return backfillOnly
+      ? rows.length > 0
+      : rows.length > 0 && rows.every((row) => row.locked || row.native_id === nativeId);
+  });
+  if (backfillOnly) {
+    return externalIdsCurrent;
+  }
+  return (
+    externalIdsCurrent &&
+    media.title === fetched.snapshot.title &&
+    media.original_title === fetched.snapshot.originalTitle &&
+    media.year === fetched.snapshot.year &&
+    sameSeasons(parseSeasonsSnapshot(media.seasons), fetched.snapshot.seasons)
+  );
+}
+
 async function recordOpenReviewAlert(
   db: DbExecutor,
   input: {
@@ -448,7 +550,9 @@ async function syncSingleMediaType(
   maxChangesWindowDays: number,
   traktBackfillEnabled: boolean,
   transientErrors: TmdbSyncTransientError[],
+  deadline: Date | undefined,
 ): Promise<TmdbMediaTypeSyncSummary> {
+  const pastDeadline = () => deadline !== undefined && Date.now() >= deadline.getTime();
   const syncKey = mediaType === "movie" ? TMDB_SYNC_KEY_MOVIE : TMDB_SYNC_KEY_TV;
 
   const [trackedRows, existingCursor] = await Promise.all([
@@ -569,6 +673,26 @@ async function syncSingleMediaType(
       ? existingMetadata.fullRefreshStartedOn
       : today;
 
+  const unfinished = (deadlineReached: boolean): TmdbMediaTypeSyncSummary => ({
+    mediaType,
+    syncKey,
+    mode,
+    startDate,
+    endDate,
+    gapDays,
+    trackedCount: parsedTracked.length,
+    candidateCount: 0,
+    refreshedCount: 0,
+    missingCount: 0,
+    flaggedSegmentCount: 0,
+    cursorAdvanced: false,
+    lastSyncedDate: existingCursor?.last_synced_date ?? null,
+    ...(deadlineReached ? { deadlineReached: true as const } : {}),
+  });
+  if (pastDeadline()) {
+    return unfinished(true);
+  }
+
   let candidates = parsedTracked;
   if (mode === "full_refresh") {
     const remaining = prevFullRefreshCursor
@@ -610,21 +734,7 @@ async function syncSingleMediaType(
         mediaType,
         message: error instanceof Error ? error.message : String(error),
       });
-      return {
-        mediaType,
-        syncKey,
-        mode,
-        startDate,
-        endDate,
-        gapDays,
-        trackedCount: parsedTracked.length,
-        candidateCount: 0,
-        refreshedCount: 0,
-        missingCount: 0,
-        flaggedSegmentCount: 0,
-        cursorAdvanced: false,
-        lastSyncedDate: existingCursor?.last_synced_date ?? null,
-      };
+      return unfinished(false);
     }
   }
 
@@ -632,11 +742,27 @@ async function syncSingleMediaType(
   let missingCount = 0;
   let flaggedSegmentCount = 0;
   const failedTmdbIds: string[] = [];
+  let deadlineReached = false;
+  // Candidates are processed in order; the ones past this index were left for the next run.
+  let attemptedCount = 0;
 
-  for (let offset = 0; offset < candidates.length; offset += fullRefreshBatchSize) {
+  batches: for (let offset = 0; offset < candidates.length; offset += fullRefreshBatchSize) {
     const batch = candidates.slice(offset, offset + fullRefreshBatchSize);
+    if (pastDeadline()) {
+      deadlineReached = true;
+      break;
+    }
+    const stored = await loadStoredSyncState(
+      db,
+      batch.map((item) => item.mediaId),
+    );
 
     for (const item of batch) {
+      if (pastDeadline()) {
+        deadlineReached = true;
+        break batches;
+      }
+      attemptedCount += 1;
       let fetched = null;
       let isNotFound = false;
 
@@ -677,6 +803,14 @@ async function syncSingleMediaType(
           },
           dedupeByMediaAndType: true,
         });
+        continue;
+      }
+
+      if (isStoredStateCurrent(stored, item.mediaId, fetched, item.backfillOnly)) {
+        const media = stored.media.get(item.mediaId);
+        if (!item.backfillOnly && media && media.merged_into_media_id === null) {
+          refreshedCount += 1;
+        }
         continue;
       }
 
@@ -906,6 +1040,20 @@ async function syncSingleMediaType(
     }
   }
 
+  const attempted = candidates.slice(0, attemptedCount);
+  const leftOver = candidates.slice(attemptedCount);
+  if (deadlineReached) {
+    if (attempted.length === 0) {
+      return unfinished(true);
+    }
+    // Resume where this run stopped: the next full-refresh page starts after the last item done,
+    // and the Trakt backfill rotation only moves past backfill items actually processed.
+    if (mode === "full_refresh") {
+      nextFullRefreshCursor = attempted.at(-1)!.mediaId;
+    }
+    nextBackfillCursor =
+      attempted.filter((entry) => entry.backfillOnly).at(-1)?.mediaId ?? prevBackfillCursor;
+  }
   const cursorAdvanced = nextFullRefreshCursor === null;
   const targetDate = cursorAdvanced
     ? maxDateString(
@@ -915,12 +1063,16 @@ async function syncSingleMediaType(
     : existingCursor!.last_synced_date;
   // Earlier failures stay listed until a run actually retries them (a later full-refresh page
   // does not), plus this run's failures.
-  const attemptedIds = new Set(candidates.map((entry) => entry.tmdbId));
+  const attemptedIds = new Set(attempted.map((entry) => entry.tmdbId));
   const trackedIds = new Set(parsedTracked.map((entry) => entry.tmdbId));
   const nextRetryTmdbIds = [
     ...new Set([
       ...retryTmdbIds.filter((id) => trackedIds.has(id) && !attemptedIds.has(id)),
       ...failedTmdbIds,
+      // Changed items the deadline cut off are retried like failures; a full refresh resumes by page.
+      ...(mode === "changes"
+        ? leftOver.filter((entry) => !entry.backfillOnly).map((entry) => entry.tmdbId)
+        : []),
     ]),
   ];
   const lastSyncedDate = await upsertSyncState(
@@ -968,6 +1120,7 @@ async function syncSingleMediaType(
     flaggedSegmentCount,
     cursorAdvanced,
     lastSyncedDate,
+    ...(deadlineReached ? { deadlineReached: true as const } : {}),
   };
 }
 
@@ -1006,6 +1159,7 @@ export async function runTmdbDailySync(
     maxChangesWindowDays,
     traktBackfillEnabled,
     transientErrors,
+    options.deadline,
   );
 
   const tv = await syncSingleMediaType(
@@ -1019,6 +1173,7 @@ export async function runTmdbDailySync(
     maxChangesWindowDays,
     traktBackfillEnabled,
     transientErrors,
+    options.deadline,
   );
 
   return {
@@ -1026,6 +1181,7 @@ export async function runTmdbDailySync(
     movie,
     tv,
     transientErrors,
+    deadlineReached: Boolean(movie.deadlineReached || tv.deadlineReached),
   };
 }
 
@@ -1126,12 +1282,18 @@ export function createTmdbSyncJobHandler(
       fullRefreshPageSize: options.fullRefreshPageSize,
       maxChangesWindowDays: options.maxChangesWindowDays,
       backfillMissingTrakt: options.backfillMissingTrakt,
+      // Stop on our own before the platform kills the invocation; a kill loses the retry outcome.
+      deadline: new Date(Date.now() + (options.maxDurationMs ?? DEFAULT_TMDB_SYNC_MAX_DURATION_MS)),
     });
 
-    if (summary.transientErrors.length > 0) {
+    if (summary.transientErrors.length > 0 || summary.deadlineReached) {
+      // Items written before the stop now match TMDB, so the next run skips their writes.
       return {
         status: "retry",
-        errorMessage: summary.transientErrors.map((err) => err.message).join("; "),
+        errorMessage: [
+          ...summary.transientErrors.map((err) => err.message),
+          ...(summary.deadlineReached ? ["tmdb_sync stopped at its deadline"] : []),
+        ].join("; "),
       };
     }
 
