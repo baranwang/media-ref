@@ -8,7 +8,6 @@ interface NavItem {
   label: string;
   /** Docs page slug under /docs; left out for pages not written yet (rendered as plain text). */
   page?: string;
-  hash?: string;
   /** RPC names render in mono and indent under their service. */
   rpc?: boolean;
 }
@@ -18,17 +17,15 @@ interface NavGroup {
   items: Array<NavItem | { service: string }>;
 }
 
-const QUICKSTART = "quickstart";
-
 // Only public mediaref.v1 services belong here; mediaref.internal.v1 is website-only.
 const NAV: NavGroup[] = [
   {
     title: "入门",
     items: [
       { label: "概览" },
-      { label: "快速开始", page: QUICKSTART },
-      { label: "鉴权与限流", page: QUICKSTART, hash: "auth" },
-      { label: "错误处理", page: QUICKSTART, hash: "errors" },
+      { label: "快速开始", page: "quickstart" },
+      { label: "鉴权与限流", page: "auth" },
+      { label: "错误处理", page: "errors" },
     ],
   },
   {
@@ -69,16 +66,16 @@ const NAV: NavGroup[] = [
   {
     title: "接入方式",
     items: [
-      { label: "TypeScript SDK", page: QUICKSTART, hash: "typescript-sdk" },
-      { label: "从 proto 生成客户端", page: QUICKSTART, hash: "proto" },
-      { label: "直接调用 HTTP", page: QUICKSTART, hash: "http" },
+      { label: "TypeScript SDK", page: "typescript-sdk" },
+      { label: "从 proto 生成客户端", page: "proto" },
+      { label: "直接调用 HTTP", page: "http" },
     ],
   },
   { title: "其他", items: [{ label: "更新日志" }] },
 ];
 
 function SidebarItem({ item, pathname }: { item: NavItem; pathname: string }) {
-  const active = item.page !== undefined && !item.hash && `/docs/${item.page}` === pathname;
+  const active = item.page !== undefined && `/docs/${item.page}` === pathname;
   const className = cn(
     "flex h-8 items-center rounded-md pr-2.5",
     item.rpc ? "pl-4 font-mono text-xs" : "pl-2.5 text-sm",
@@ -95,7 +92,6 @@ function SidebarItem({ item, pathname }: { item: NavItem; pathname: string }) {
     <Link
       to="/docs/$"
       params={{ _splat: item.page }}
-      hash={item.hash}
       aria-current={active ? "page" : undefined}
       className={cn(className, !active && "transition-colors hover:text-foreground")}
     >

@@ -1,0 +1,62 @@
+---
+title: 鉴权与限流
+breadcrumb: 文档 / 入门
+description: 每个请求都要带 API 密钥。密钥决定你能调哪些接口，限流按密钥、IP 和账号分别计算。
+---
+
+## 带上密钥 [#api-key]
+
+下面两种写法任选一种，效果一样：
+
+| 写法               | 例子                           |
+| ------------------ | ------------------------------ |
+| `Authorization` 头 | `Authorization: Bearer <密钥>` |
+| `X-API-Key` 头     | `X-API-Key: <密钥>`            |
+
+<Hint>
+  TypeScript SDK 会替你加上 `X-API-Key`。密钥只放在服务端，不要写进网页或 App 的前端代码：API 只允许
+  mediaref.org 自己跨域调用，别的网站在浏览器里直接请求会被拦下。
+</Hint>
+
+## 密钥权限 [#permissions]
+
+| 权限       | 谁有                                     | 能调的接口                                                                                                      |
+| ---------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 查询媒体   | 每把密钥都有                             | GetMedia、BatchGetMedia、Search、GetCatalogDetail、ListAssociationRevisions、GetChangeRequest、GetCurrentApiKey |
+| 报告失效   | 每把密钥都有                             | ReportInvalidation                                                                                              |
+| 提交变更单 | 创建或编辑密钥时开启，账号邮箱还要验证过 | CreateChangeRequest                                                                                             |
+
+想知道手上这把密钥有哪些权限、什么时候过期，调 [GetCurrentApiKey](/docs/api-key-service/get-current-api-key)。
+
+## 限流 [#rate-limits]
+
+| 范围       | 上限                                              | 管哪些接口                                        |
+| ---------- | ------------------------------------------------- | ------------------------------------------------- |
+| 每把密钥   | 每 60 秒 120 次                                   | GetMedia、BatchGetMedia、Search、GetCatalogDetail |
+| 每个 IP    | 每 60 秒 300 次                                   | 所有接口                                          |
+| 提交变更单 | 每个账号每小时有上限，新账号 5 次，信誉高了会放宽 | CreateChangeRequest                               |
+| 报告失效   | 每个账号每天（UTC）20 次                          | ReportInvalidation                                |
+
+BatchGetMedia 一次查最多 100 部，整批只算一次。
+
+## 超出之后 [#exceeded]
+
+返回 HTTP 429。业务错误码说明是哪一种限制：
+
+| 业务错误码                   | 意思                     | 什么时候能再试                                                       |
+| ---------------------------- | ------------------------ | -------------------------------------------------------------------- |
+| `RATE_LIMITED`               | 密钥或 IP 的次数用完了   | 看 `Retry-After` 头，单位是秒                                        |
+| `SUBMISSION_RATE_LIMITED`    | 这个小时的提交额度用完了 | 看 `Retry-After` 头；错误详情里还有 `limit`、`used`、`windowSeconds` |
+| `INVALIDATION_LIMIT_REACHED` | 今天的报告次数用完了     | UTC 零点之后                                                         |
+
+## 密钥失效 [#key-errors]
+
+| HTTP  | 业务错误码                 | 原因                                 |
+| ----- | -------------------------- | ------------------------------------ |
+| `401` | `API_KEY_REQUIRED`         | 查询类接口没带密钥                   |
+| `401` | `UNAUTHORIZED`             | 报告、提交、查变更单这些接口没带密钥 |
+| `401` | `INVALID_API_KEY`          | 密钥不对，或者已经吊销               |
+| `401` | `API_KEY_EXPIRED`          | 密钥过期了，去「API 密钥」页换一把   |
+| `401` | `API_KEY_DISABLED`         | 密钥被停用了                         |
+| `403` | `INSUFFICIENT_PERMISSIONS` | 密钥没有这个接口要的权限             |
+| `403` | `EMAIL_NOT_VERIFIED`       | 提交变更单时，账号邮箱还没验证       |

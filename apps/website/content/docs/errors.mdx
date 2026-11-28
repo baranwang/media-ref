@@ -1,0 +1,84 @@
+---
+title: 错误处理
+breadcrumb: 文档 / 入门
+description: 出错时同时给 HTTP 状态码、Connect 错误码和业务错误码。程序里请按业务错误码判断，它最具体，也不会随传输方式变化。
+---
+
+## 错误长什么样 [#format]
+
+用 JSON 调用时，出错的响应体是这样的：
+
+<CodeBlock title="响应 · JSON">
+
+```json
+{
+  "code": "not_found",
+  "message": "Media not found",
+  "details": [
+    {
+      "type": "mediaref.v1.ErrorInfoDetail",
+      "value": "…",
+      "debug": { "errorCode": "MEDIA_NOT_FOUND" }
+    }
+  ]
+}
+```
+
+</CodeBlock>
+
+| 字段                        | 意思                                                                                    |
+| --------------------------- | --------------------------------------------------------------------------------------- |
+| HTTP 状态码                 | 大类，比如 404                                                                          |
+| `code`                      | Connect 错误码，比如 `not_found`                                                        |
+| `message`                   | 给人看的说明，措辞可能会改，别拿它做判断                                                |
+| `details[].debug.errorCode` | 业务错误码，比如 `MEDIA_NOT_FOUND`。找 `type` 是 `mediaref.v1.ErrorInfoDetail` 的那一项 |
+
+## 读业务错误码 [#read-code]
+
+| 接入方式                                 | 去哪儿读                                                                      |
+| ---------------------------------------- | ----------------------------------------------------------------------------- |
+| 直接调用 HTTP                            | 响应体里的 `details[].debug.errorCode`                                        |
+| TypeScript SDK 的 `createMediaRefClient` | 抛出的 `MediaRefApiError` 的 `code`，`status` 和 `retryAfterSeconds` 也在上面 |
+| SDK 里用 `createClient` 调其他服务       | `extractConnectErrorInfo(ConnectError.from(error)).code`                      |
+| 从 proto 生成的客户端                    | 解出错误详情里的 `mediaref.v1.ErrorInfoDetail`，读 `errorCode`                |
+
+`ErrorInfoDetail` 里除了 `errorCode`，有时还有这些：
+
+| 字段                                         | 什么时候有                                                       |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `retryAfterSeconds`                          | 限流时，和 `Retry-After` 头一样                                  |
+| `scope` / `limit` / `used` / `windowSeconds` | 超出提交额度时：按什么算、上限多少、用了多少、窗口多长           |
+| `validationErrors`                           | 分集写得不对时，每项有 `code`、`message` 和出错的 `segmentIndex` |
+
+## HTTP 状态码和 Connect 错误码 [#status]
+
+| HTTP  | Connect 错误码        | 什么情况                                         | 要不要重试          |
+| ----- | --------------------- | ------------------------------------------------ | ------------------- |
+| `400` | `invalid_argument`    | 参数写得不对                                     | 改了再发            |
+| `400` | `failed_precondition` | 数据的状态不允许，比如报告一条已经下架的对应关系 | 改了再发            |
+| `401` | `unauthenticated`     | 没带密钥，或密钥不能用                           | 换密钥              |
+| `403` | `permission_denied`   | 密钥没有这个权限                                 | 换密钥或开权限      |
+| `404` | `not_found`           | 要的东西不存在                                   | 不用                |
+| `429` | `resource_exhausted`  | 超出限流                                         | 按 `Retry-After` 等 |
+| `503` | `unavailable`         | 依赖的平台或目录站一时没响应                     | 稍等再试            |
+
+<Hint>
+  TypeScript SDK 的 `MediaRefApiError.status` 会把 `failed_precondition` 记成 409，判断时请以 `code`
+  为准。
+</Hint>
+
+## 常见业务错误码 [#codes]
+
+每个接口会返回哪些，写在它自己的页面里。下面是最常遇到的：
+
+| HTTP  | 业务错误码                 | 什么时候出现                                     |
+| ----- | -------------------------- | ------------------------------------------------ |
+| `400` | `INVALID_KEY`              | `ref` 写得不对，或者一个都没填                   |
+| `400` | `INVALID_QUERY`            | 查询参数不合法，比如 `season` 是负数             |
+| `401` | `API_KEY_REQUIRED`         | 查询类接口没带密钥                               |
+| `401` | `UNAUTHORIZED`             | 报告、提交、查变更单这些接口没带密钥             |
+| `401` | `INVALID_API_KEY`          | 密钥不对，或者已经吊销                           |
+| `401` | `API_KEY_EXPIRED`          | 密钥过期了                                       |
+| `403` | `INSUFFICIENT_PERMISSIONS` | 只能查询的密钥调用了提交类接口                   |
+| `404` | `MEDIA_NOT_FOUND`          | 库里还没有这部作品，探索 agent 会去各平台找      |
+| `429` | `RATE_LIMITED`             | 超出限流，见[鉴权与限流](/docs/auth#rate-limits) |

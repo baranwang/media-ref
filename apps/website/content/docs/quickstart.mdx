@@ -20,7 +20,7 @@ description: MediaRef 把电影和剧集对到各个视频平台的具体页面�
 
 ## 发第一个请求 [#first-request]
 
-每个接口都是一个 HTTP 地址：`/mediaref.v1.<服务>/<方法>`。用 JSON 发请求体，把密钥放在 `Authorization` 头里。下面查的是 TMDB 编号 95479 这部剧。
+每个接口都是一个 HTTP 地址：`/mediaref.v1.<服务>/<方法>`。用 JSON 发请求体，把密钥放在 `Authorization` 头里，其他写法和限流见[鉴权与限流](/docs/auth)。下面查的是 TMDB 编号 95479 这部剧。
 
 <CodeTabs items={["curl", "TypeScript", "Python", "Go"]}>
 
@@ -126,48 +126,23 @@ res, err := http.DefaultClient.Do(req)
 
 </Steps>
 
-## 鉴权与限流 [#auth]
-
-| 项目     | 说明                                                   |
-| -------- | ------------------------------------------------------ |
-| 带上密钥 | `Authorization: Bearer <密钥>`，或 `X-API-Key: <密钥>` |
-| 每把密钥 | 每 60 秒最多 120 次                                    |
-| 每个 IP  | 每 60 秒最多 300 次                                    |
-| 超出之后 | 返回 HTTP 429，`Retry-After` 头告诉你要等几秒          |
-
-## 错误处理 [#errors]
-
-出错时会同时给 HTTP 状态码、Connect 错误码，以及错误详情 `ErrorInfoDetail` 里的业务错误码 `errorCode`。程序里请按业务错误码判断；TypeScript SDK 会把它放在 `MediaRefApiError.code`。
-
-| HTTP  | 业务错误码                 | 什么时候出现                                   |
-| ----- | -------------------------- | ---------------------------------------------- |
-| `400` | `INVALID_KEY`              | `ref` 写得不对，或者一个都没填                 |
-| `400` | `INVALID_QUERY`            | `season` 不是合法的季号，比如负数              |
-| `401` | `API_KEY_REQUIRED`         | 查询接口没带密钥                               |
-| `401` | `UNAUTHORIZED`             | 提交类接口（比如 CreateChangeRequest）没带密钥 |
-| `401` | `INVALID_API_KEY`          | 密钥不对，或者已经吊销                         |
-| `401` | `API_KEY_EXPIRED`          | 密钥过期了，去「API 密钥」页换一把             |
-| `403` | `INSUFFICIENT_PERMISSIONS` | 只能查询的密钥调用了提交类接口                 |
-| `404` | `MEDIA_NOT_FOUND`          | 库里还没有这部作品，探索 agent 会去各平台找    |
-| `429` | `RATE_LIMITED`             | 超出限流，按 `Retry-After` 等一会儿再试        |
-
 ## 选择接入方式 [#integrations]
 
 接口定义是公开的 proto 文件，所以任何语言都能接。挑一种最顺手的：
 
 <ApproachCard
-  id="typescript-sdk"
+  page="typescript-sdk"
   title="TypeScript SDK"
   badge="官方维护"
   badgeVariant="confirmed"
   command="npm install @media-ref/client"
 >
-  带完整类型，内置 `resolveEpisode` 帮你换算集数。Node.js、Bun、Deno、Cloudflare Workers
-  和浏览器都能用。
+  带完整类型，内置 `resolveEpisode` 帮你换算集数。Node.js、Bun、Deno 和 Cloudflare Workers
+  里都能用。
 </ApproachCard>
 
 <ApproachCard
-  id="proto"
+  page="proto"
   title="从 proto 生成客户端"
   badge="Go · Python · Kotlin · Swift"
   command={
@@ -178,4 +153,4 @@ res, err := http.DefaultClient.Do(req)
   都有官方实现，类型和服务端完全一致。生成时选 Connect 协议，或者 gRPC-Web。
 </ApproachCard>
 
-<ApproachCard id="http" title="直接调用 HTTP" badge="不用装依赖" badgeVariant="outline" command="POST https://api.mediaref.org/mediaref.v1.MediaService/GetMedia">任何能发 HTTP 的语言都行：POST JSON 到 `/mediaref.v1.<服务>/<方法>`。适合脚本、Shell 和还没有生成器的语言。</ApproachCard>
+<ApproachCard page="http" title="直接调用 HTTP" badge="不用装依赖" badgeVariant="outline" command="POST https://api.mediaref.org/mediaref.v1.MediaService/GetMedia">任何能发 HTTP 的语言都行：POST JSON 到 `/mediaref.v1.<服务>/<方法>`。适合脚本、Shell 和还没有生成器的语言。</ApproachCard>

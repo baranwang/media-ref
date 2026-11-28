@@ -1,0 +1,69 @@
+---
+title: 从 proto 生成客户端
+breadcrumb: 文档 / 接入方式
+badges: ["Go · Python · Kotlin · Swift"]
+description: 接口定义是公开的 proto 文件。用 buf 生成 Connect 客户端，类型和服务端完全一致。
+---
+
+## 接口定义在哪 [#source]
+
+proto 文件在 GitHub 仓库 [baranwang/media-ref](https://github.com/baranwang/media-ref) 的 `proto/mediaref/v1` 下，包名是 `mediaref.v1`。生成时只取这个目录（`--path mediaref/v1`），其他目录是网站内部用的，随时会改。
+
+## 生成代码 [#generate]
+
+在你的项目里写好 `buf.gen.yaml`，然后运行：
+
+<CodeBlock title="终端">
+
+```bash
+buf generate "https://github.com/baranwang/media-ref.git#subdir=proto" --path mediaref/v1
+```
+
+</CodeBlock>
+
+proto 文件没写各语言的包路径，生成 Go 代码时要在 `buf.gen.yaml` 里打开 managed 模式，指定你自己的包前缀：
+
+<CodeBlock title="buf.gen.yaml">
+
+```yaml
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: example.com/yourapp/gen
+plugins:
+  - remote: buf.build/protocolbuffers/go
+    out: gen
+    opt: paths=source_relative
+  - remote: buf.build/connectrpc/go
+    out: gen
+    opt: paths=source_relative
+```
+
+</CodeBlock>
+
+Connect 官方还有 Python、Kotlin、Swift 等语言的实现，插件名和配置见 [connectrpc.com](https://connectrpc.com/docs/introduction)。
+
+## 调用 [#call]
+
+服务端支持 Connect 协议和 gRPC-Web。生成的客户端选 Connect 协议就行（connect-go 默认就是），JSON 和 Protobuf 二进制都可以。密钥放在 `Authorization` 头里。
+
+<CodeBlock title="Go">
+
+```go
+client := mediarefv1connect.NewMediaServiceClient(http.DefaultClient, "https://api.mediaref.org")
+
+req := connect.NewRequest(&mediarefv1.GetMediaRequest{
+	Ref: &mediarefv1.MediaRef{Id: &mediarefv1.MediaRef_Tmdb{
+		Tmdb: &mediarefv1.TmdbRef{Type: mediarefv1.MediaType_MEDIA_TYPE_TV, Id: 95479},
+	}},
+})
+req.Header().Set("Authorization", "Bearer "+os.Getenv("MEDIAREF_API_KEY"))
+
+res, err := client.GetMedia(context.Background(), req)
+```
+
+</CodeBlock>
+
+出错时，业务错误码在错误详情 `mediaref.v1.ErrorInfoDetail` 的 `errorCode` 里，见[错误处理](/docs/errors#read-code)。

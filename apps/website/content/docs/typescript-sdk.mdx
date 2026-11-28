@@ -1,0 +1,127 @@
+---
+title: TypeScript SDK
+breadcrumb: 文档 / 接入方式
+badges: ["官方维护"]
+description: "@media-ref/client 带完整类型，封装了查询和集数换算，其他接口也能用它的连接配置直接调。"
+---
+
+## 安装 [#install]
+
+<CodeBlock title="终端">
+
+```bash
+npm install @media-ref/client
+```
+
+</CodeBlock>
+
+能在 Node.js 22 以上、Bun、Deno 和 Cloudflare Workers 里跑。请在服务端用：密钥不该出现在前端，别的网站在浏览器里跨域调用也会被拦下。
+
+## 创建客户端 [#client]
+
+<CodeBlock title="TypeScript">
+
+```ts
+import { createMediaRefClient } from "@media-ref/client";
+
+const client = createMediaRefClient({ apiKey: process.env.MEDIAREF_API_KEY! });
+```
+
+</CodeBlock>
+
+| 选项              | 默认                       | 说明                                           |
+| ----------------- | -------------------------- | ---------------------------------------------- |
+| `apiKey`          | 无                         | 必填                                           |
+| `baseUrl`         | `https://api.mediaref.org` | 接口地址                                       |
+| `fetch`           | 全局 `fetch`               | 换成你自己的 `fetch`                           |
+| `useBinaryFormat` | `true`                     | 用 Protobuf 二进制传输；设成 `false` 改用 JSON |
+| `useHttpGet`      | `false`                    | 设成 `true` 时，支持 GET 的接口改发 GET        |
+| `interceptors`    | 无                         | Connect 拦截器，比如加日志、加请求头           |
+
+## 查询作品 [#methods]
+
+| 方法                                   | 返回                         | 说明                                                                                                   |
+| -------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `getMedia(key, options?)`              | `GetMediaResponse` 或 `null` | 对应 [GetMedia](/docs/media-service/get-media)。库里没有这部作品时返回 `null`，不抛错                  |
+| `getMediaBatch(keys, options?)`        | `{ results }`                | 对应 [BatchGetMedia](/docs/media-service/batch-get-media)。超过 100 个会自动拆成几次请求，结果顺序不变 |
+| `resolveFromKey(key, query, options?)` | 换算结果                     | 查询加集数换算一步做完，库里没有时 `kind` 是 `not_found`                                               |
+
+`key` 可以是 `{ tmdb: { type: "tv", id: 95479 } }` 这样的对象，也可以是作品 UUID，或者 `"tmdb:tv:95479"` 这样的字符串。`options` 支持 `season`、`namespaceGroup`、`includeUnconfirmed` 和 `signal`。
+
+## 换算集数 [#resolve-episode]
+
+`resolveEpisode(document, { namespace, season, episode })` 告诉你某一集在某个平台上是哪个页面的第几集。结果按 `kind` 分三种：
+
+| `kind`            | 意思                               | 带的字段                                                             |
+| ----------------- | ---------------------------------- | -------------------------------------------------------------------- |
+| `mapped`          | 对上了                             | `nativeId`、`targetEpisode`、`associationId`、`variantId`、`segment` |
+| `collection_only` | 只能对到整个页面，对不到具体哪一集 | `nativeId`、`reason`                                                 |
+| `unmapped`        | 对不上                             | `reason`                                                             |
+
+| `reason`               | 意思                                                 |
+| ---------------------- | ---------------------------------------------------- |
+| `whole_media`          | 整部作品对应这一个页面                               |
+| `non_linear`           | 这一段的分集顺序和目录站不是一一对应                 |
+| `needs_review`         | 这段映射还待复核                                     |
+| `no_variant`           | 这个平台上没有默认版本，或者没有你指定的 `variantId` |
+| `no_association`       | 这个平台上还没有对应关系                             |
+| `episode_out_of_range` | 这一集不在任何一段映射里                             |
+| `missing_episode`      | 没传 `season` 和 `episode`，又没有整部对应的页面     |
+
+<CodeBlock title="TypeScript">
+
+```ts
+import { createMediaRefClient, resolveEpisode } from "@media-ref/client";
+
+const client = createMediaRefClient({ apiKey: process.env.MEDIAREF_API_KEY! });
+const res = await client.getMedia({ tmdb: { type: "tv", id: 95479 } });
+
+if (res) {
+  const ep = resolveEpisode(res.document, { namespace: "bilibili", season: 1, episode: 30 });
+  if (ep.kind === "mapped") console.log(ep.nativeId, ep.targetEpisode);
+}
+```
+
+</CodeBlock>
+
+## 处理错误 [#errors]
+
+`createMediaRefClient` 的方法出错时抛 `MediaRefApiError`，上面有 `status`、`code`（业务错误码）、`message` 和 `retryAfterSeconds`。各错误码的意思见[错误处理](/docs/errors)。
+
+<CodeBlock title="TypeScript">
+
+```ts
+import { MediaRefApiError } from "@media-ref/client";
+
+try {
+  await client.getMedia("tmdb:tv:95479");
+} catch (error) {
+  if (error instanceof MediaRefApiError && error.code === "RATE_LIMITED") {
+    console.warn(`${error.retryAfterSeconds} 秒后再试`);
+  }
+}
+```
+
+</CodeBlock>
+
+## 调其他接口 [#other-services]
+
+查询以外的接口用 `createMediaRefTransport` 建好连接，再交给 `@connectrpc/connect` 的 `createClient`。SDK 导出了 `MediaService`、`BrowseService`、`AssociationService`、`ChangeRequestService` 和 `ApiKeyService`，请求和返回的类型在 `proto` 里。
+
+<CodeBlock title="TypeScript">
+
+```ts
+import { ConnectError, createClient } from "@connectrpc/connect";
+import { BrowseService, createMediaRefTransport, extractConnectErrorInfo } from "@media-ref/client";
+
+const transport = createMediaRefTransport({ apiKey: process.env.MEDIAREF_API_KEY! });
+const browse = createClient(BrowseService, transport);
+
+try {
+  const { items } = await browse.search({ query: "咒术回战" });
+} catch (error) {
+  console.error(extractConnectErrorInfo(ConnectError.from(error)).code);
+}
+```
+
+</CodeBlock>

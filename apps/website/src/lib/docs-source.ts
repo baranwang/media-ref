@@ -4,6 +4,7 @@ import { json } from "@tanstack/highlight/languages/json";
 import { python } from "@tanstack/highlight/languages/python";
 import { shell } from "@tanstack/highlight/languages/shell";
 import { ts } from "@tanstack/highlight/languages/ts";
+import { yaml } from "@tanstack/highlight/languages/yaml";
 import { rehypeHighlightCodeBlocks } from "@tanstack/highlight/rehype";
 import { loader } from "fumadocs-core/source";
 import { pageSchema } from "fumadocs-core/source/schema";
@@ -26,7 +27,7 @@ const docs = defineDocs({
       rehypePlugins: (plugins) => [
         [
           rehypeHighlightCodeBlocks,
-          { highlighter: createHighlighter({ languages: [go, json, python, shell, ts] }) },
+          { highlighter: createHighlighter({ languages: [go, json, python, shell, ts, yaml] }) },
         ],
         ...plugins,
       ],

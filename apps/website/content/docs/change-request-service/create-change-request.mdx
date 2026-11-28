@@ -46,7 +46,7 @@ description: 提交一条新的对应关系：这部作品在某个平台或目�
 
 ## 错误 [#errors]
 
-鉴权和限流的错误见[快速开始](/docs/quickstart#errors)。
+鉴权和限流的错误见[错误处理](/docs/errors#codes)。
 
 | HTTP  | 业务错误码                              | 原因                                                   |
 | ----- | --------------------------------------- | ------------------------------------------------------ |
@@ -63,7 +63,7 @@ description: 提交一条新的对应关系：这部作品在某个平台或目�
 | `403` | `EMAIL_NOT_VERIFIED`                    | 账号邮箱还没验证                                       |
 | `404` | `MEDIA_NOT_FOUND`                       | `mediaId` 对应的作品不存在                             |
 | `429` | `SUBMISSION_RATE_LIMITED`               | 超出每小时的提交上限，按 `Retry-After` 再试            |
-| `502` | `PLATFORM_UPSTREAM_ERROR`               | 换算标准编号时平台没响应，稍后再试                     |
+| `503` | `PLATFORM_UPSTREAM_ERROR`               | 换算标准编号时平台没响应，稍后再试                     |
 
 ## 代码示例 [#example]
 

@@ -143,14 +143,15 @@ function Endpoint({ method, url }: { method: string; url: string }) {
 }
 
 function ApproachCard({
-  id,
+  page,
   title,
   badge,
   badgeVariant = "secondary",
   command,
   children,
 }: {
-  id: string;
+  /** Docs page slug the card links to. */
+  page: string;
   title: string;
   badge: string;
   badgeVariant?: "confirmed" | "secondary" | "outline";
@@ -158,12 +159,16 @@ function ApproachCard({
   children: ReactNode;
 }) {
   return (
-    <div
-      id={id}
-      className="flex w-full scroll-mt-20 flex-col gap-2 rounded-lg border border-border bg-card p-4"
-    >
+    <div className="flex w-full flex-col gap-2 rounded-lg border border-border bg-card p-4">
       <div className="flex items-center gap-2">
-        <p className="text-sm font-bold text-foreground">{title}</p>
+        <Link
+          to="/docs/$"
+          params={{ _splat: page }}
+          className="inline-flex items-center gap-1 text-sm font-bold text-foreground transition-colors hover:text-primary"
+        >
+          {title}
+          <RiArrowRightUpLine className="size-3.5" />
+        </Link>
         <Badge variant={badgeVariant}>{badge}</Badge>
       </div>
       <div className="text-xs">{children}</div>
@@ -197,12 +202,21 @@ export const docsMdxComponents = {
     <code className="font-mono text-foreground" {...props} />
   ),
   pre: Pre,
-  a: (props: ComponentProps<"a">) => (
-    <a
-      className="text-foreground underline underline-offset-4 transition-colors hover:text-primary"
-      {...props}
-    />
-  ),
+  a: ({ href = "", children }: ComponentProps<"a">) => {
+    const className =
+      "text-foreground underline underline-offset-4 transition-colors hover:text-primary";
+    // Links between docs pages navigate in the app; anything else is a plain external link.
+    const docs = href.match(/^\/docs\/([^#]+)(?:#(.+))?$/);
+    return docs ? (
+      <Link to="/docs/$" params={{ _splat: docs[1] }} hash={docs[2]} className={className}>
+        {children}
+      </Link>
+    ) : (
+      <a href={href} className={className} target="_blank" rel="noreferrer">
+        {children}
+      </a>
+    );
+  },
   table: (props: ComponentProps<"table">) => (
     <div className="w-full rounded-lg border border-border bg-card px-4 py-1">
       <Table {...props} />
