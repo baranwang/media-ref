@@ -110,13 +110,20 @@ function consentPage(res: Response): URLSearchParams {
 }
 
 /** What the consent page displays: the signed payload's body. */
-function consentPayload(consent: string): Record<string, unknown> {
+function consentPayload(consent: string): Record<string, any> {
   const body = consent.split(".")[0]!.replaceAll("-", "+").replaceAll("_", "/");
   return JSON.parse(Buffer.from(body, "base64").toString("utf8")) as Record<string, unknown>;
 }
 
 /** Consent page → approve → code, as the signed-in user. */
-async function approve(app: App, cookie: string, clientId: string, extra = {}) {
+/** `submit` is the consent page's checkbox; by default it starts as the client asked. */
+async function approve(
+  app: App,
+  cookie: string,
+  clientId: string,
+  extra: Record<string, string> = {},
+  submit?: boolean,
+) {
   const { verifier, challenge } = await pkce();
   const page = await app.fetch(
     new Request(authorizeUrl(clientId, challenge, extra), { headers: { cookie } }),
@@ -127,7 +134,11 @@ async function approve(app: App, cookie: string, clientId: string, extra = {}) {
     new Request(`${TEST_BASE_URL}/oauth/authorize`, {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded", ...IP },
-      body: new URLSearchParams({ consent, decision: "approve" }),
+      body: new URLSearchParams({
+        consent,
+        decision: "approve",
+        ...((submit ?? consentPayload(consent).sc.includes("submit")) ? { submit: "on" } : {}),
+      }),
     }),
   );
   expect(decided.status).toBe(303);
@@ -138,8 +149,14 @@ async function approve(app: App, cookie: string, clientId: string, extra = {}) {
   return { shown: consentPayload(consent), code: location.searchParams.get("code")!, verifier };
 }
 
-async function signIn(app: App, clientId: string, cookie: string, extra = {}) {
-  const { code, verifier } = await approve(app, cookie, clientId, extra);
+async function signIn(
+  app: App,
+  clientId: string,
+  cookie: string,
+  extra: Record<string, string> = {},
+  submit?: boolean,
+) {
+  const { code, verifier } = await approve(app, cookie, clientId, extra, submit);
   const res = await tokenRequest(app, {
     grant_type: "authorization_code",
     code,
@@ -312,6 +329,25 @@ describe("MCP OAuth", () => {
     expect(tokens.scope).toBe("read report submit");
     const current = await callTool(app, tokens.access_token, "get_current_api_key");
     expect(current.data.canSubmit).toBe(true);
+  });
+
+  test("the consent checkbox decides submit, whatever the client asked for", async () => {
+    const { app, cookie } = await setup();
+    const clientId = await register(app);
+
+    // The client asks only for read and report (as the 401 challenge says); the user ticks submit.
+    const ticked = await signIn(app, clientId, cookie, {}, true);
+    expect(ticked.scope).toBe("read report submit");
+    expect((await callTool(app, ticked.access_token, "get_current_api_key")).data.canSubmit).toBe(
+      true,
+    );
+
+    // The client asks for submit; the user unticks it.
+    const unticked = await signIn(app, clientId, cookie, { scope: "read report submit" }, false);
+    expect(unticked.scope).toBe("read report");
+    expect(
+      (await callTool(app, unticked.access_token, "get_current_api_key")).data.canSubmit,
+    ).toBeUndefined(); // protobuf JSON omits false
   });
 
   test("rejects a wrong verifier, an unregistered redirect URI and a forged client", async () => {
