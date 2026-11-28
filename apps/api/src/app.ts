@@ -36,6 +36,7 @@ import {
 } from "./auth.ts";
 import { changeRequestServiceImpl, contributorServiceImpl } from "./change-requests.ts";
 import { kApiRequestRuntime, limitRpcByIp, type ApiRequestRuntime } from "./context.ts";
+import { handleMcpRequest, MCP_PATH } from "./mcp.ts";
 import { mediaServiceImpl } from "./media.ts";
 import {
   checkReadRateLimit,
@@ -327,6 +328,12 @@ export function createApiApp(deps: ApiDeps): ApiApp {
       }
       const authRes = await getAuth().handler(request);
       return applyCorsHeaders(request, authRes, deps.config);
+    }
+
+    // Public only: MCP tools call the public RPCs below with the caller's API key.
+    if (pathname === MCP_PATH && !internal) {
+      const res = await handleMcpRequest(request, (rpcRequest) => handle(rpcRequest, ctx, false));
+      return applyCorsHeaders(request, res, deps.config);
     }
 
     const connectHandler = connectHandlerMap.get(pathname);

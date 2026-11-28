@@ -22,7 +22,9 @@
     "@media-ref/client": "workspace:*",
     "@media-ref/core": "workspace:*",
     "@media-ref/db": "workspace:*",
-    "better-auth": "1.7.27"
+    "@modelcontextprotocol/server": "2.4.0",
+    "better-auth": "1.7.27",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
