@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/baranwang/media-ref/compare/client-v1.1.2...client-v1.2.0) (2026-11-28)
+
+
+### Features
+
+* **api:** MCP server at /mcp generated from the public proto ([#164](https://github.com/baranwang/media-ref/issues/164)) ([7453edf](https://github.com/baranwang/media-ref/commit/7453edf4fccdb1fcc51410b857b797ce3c7dc6b9))
+* **website:** developer docs at /docs (quickstart + GetMedia) ([#163](https://github.com/baranwang/media-ref/issues/163)) ([c6260de](https://github.com/baranwang/media-ref/commit/c6260defe31e7530b50e0512c03b7c23bb960a03))
+
 ## [1.1.2](https://github.com/baranwang/media-ref/compare/client-v1.1.1...client-v1.1.2) (2026-11-28)
 
 
