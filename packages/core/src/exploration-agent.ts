@@ -686,6 +686,8 @@ function buildAgentSystemPrompt(namespaces: readonly Namespace[]): string {
     "   Douban has one subject per TV season. Video platforms often split or merge seasons.",
     "4. Check title, year, media type and episode count against the target. Prefer original audio over dubs or recuts.",
     "5. A collection may hold several seasons, or a season may be split; express that with linear segments when episodes correspond 1:1.",
+    "   A platform position is the index in the collection's feature list, not the number in the title. An extra in the list pushes later positions on; one entry holding two episodes (01-02) pulls them back:",
+    "   map the first of the pair to that entry, leave the second unmapped, and start the next segment at the following position (e.g. episodes 1–1 at position 1, 3–49 at position 2).",
     "   When episode counts differ because the platform and catalog count variety broadcasts/extras differently (e.g. platform has 第1期上..第10期下 = 20 while TMDB includes 先导片/加更 = 47, and the collection spans the whole season),",
     "   NEVER truncate to a shorter linear prefix like 1..20; inspect get_catalog_season + get_collection and submit { season, episodeStart: 1, episodeEnd: null, targetEpisodeStart: 1, nonLinear: true }.",
     "   Match a substantive finale subtitle or final broadcast installment before claiming the whole season. Platform publication dates can be delayed. Map only the verified finite range for Part 1, using nonLinear when its episodes are grouped differently.",

@@ -202,6 +202,30 @@ function httpStub(request: ExternalHttpRequest): ExternalHttpResponse {
       },
     });
   }
+  if (request.namespace === "bilibili" && url.includes("season_id=28890")) {
+    // 灵笼 with episodes 1 and 2 in one entry, as 银魂 on Bilibili opens with 「01-02」.
+    return jsonResponse(url, {
+      code: 0,
+      message: "success",
+      result: {
+        season_id: 28890,
+        title: "灵笼",
+        type: 4,
+        publish: { pub_time: "2019-07-13 11:00:00" },
+        episodes: ["001-002", ...LINGLONG_TITLES.slice(2, 6), ...LINGLONG_TITLES.slice(7, 13)].map(
+          (title, i) => ({
+            id: 320000 + i,
+            title,
+            long_title: "",
+            badge: "",
+            badge_type: 0,
+            section_type: 0,
+            duration: 1500000,
+          }),
+        ),
+      },
+    });
+  }
   if (request.namespace === "bilibili" && url.includes("season_id=77777")) {
     // The 2026 season, which is TMDB season 8.
     return jsonResponse(url, {
@@ -2042,6 +2066,63 @@ describe("review agent: reject with correction (#76)", () => {
     expect(await leads(ctx)).toEqual([
       expect.objectContaining({ native_id: "ss28888", season: 1 }),
     ]);
+  });
+
+  test("two episodes in one entry: the correction leaves episode 2 unmapped and shifts the rest back one position, so it holds", async () => {
+    // ss28890 opens with 「001-002」: 11 entries for 12 episodes, every later position one ahead.
+    const correction = [
+      { season: 1, episodeStart: 1, episodeEnd: 1, targetEpisodeStart: 1 },
+      { season: 1, episodeStart: 3, episodeEnd: 12, targetEpisodeStart: 2 },
+    ];
+    const model: ScriptedModel = (request) => {
+      const turn = turnOf(request);
+      if (turn === 0) {
+        return reply(turn, [
+          ["get_collection", { namespace: "bilibili", id: "ss28890" }],
+          ["get_catalog_season", { season: 1 }],
+        ]);
+      }
+      return reply(turn, [
+        [
+          "reject_with_correction",
+          { opinion: "位置 1 是第 1、2 集合并", season: 1, segments: correction },
+        ],
+      ]);
+    };
+    const ctx = track(await setup(model));
+    const id = await ctx.submit("ss28890", { segments: linglongWholeSeason });
+
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).evidence).toMatchObject({
+      reviewAgent: {
+        verdict: "reject_with_correction",
+        correction: { season: 1, segments: correction },
+        fallback: null,
+      },
+    });
+    expect(await leads(ctx)).toEqual([
+      expect.objectContaining({ native_id: "ss28890", season: 1, segments: correction }),
+    ]);
+  });
+
+  test("two episodes in one entry: the corrected segments resubmitted pass the Evidence Gate with no model", async () => {
+    // Spans 1 + 10 equal the 11 entries, and the second segment starts right after the first.
+    const ctx = track(
+      await setup(() => {
+        throw new Error("the review agent must not run");
+      }),
+    );
+    const id = await ctx.submit("ss28890", {
+      segments: [
+        { season: 1, episodeStart: 1, episodeEnd: 1, targetEpisodeStart: 1, baseline: "tmdb" },
+        { season: 1, episodeStart: 3, episodeEnd: 12, targetEpisodeStart: 2, baseline: "tmdb" },
+      ],
+    });
+
+    await ctx.drain();
+
+    expect((await ctx.changeRequest(id)).status).toBe("approved");
   });
 
   test.each([
