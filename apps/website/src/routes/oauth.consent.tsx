@@ -1,14 +1,10 @@
 import { Alert, AlertDescription, AlertTitle } from "@media-ref/ui/components/alert";
 import { Button } from "@media-ref/ui/components/button";
-import {
-  RiCheckLine,
-  RiErrorWarningLine,
-  RiKey2Line,
-  RiPlugLine,
-  RiShieldCheckLine,
-} from "@remixicon/react";
+import { RiErrorWarningLine, RiKey2Line, RiPlugLine, RiShieldCheckLine } from "@remixicon/react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
 import { AuthLayout } from "#/components/auth-layout";
+import { KeyPermissionsField } from "#/components/key-permissions-field";
 import { getApiBaseUrl } from "#/lib/api-client";
 import { useAppStore } from "#/lib/app-store";
 
@@ -17,14 +13,6 @@ import { useAppStore } from "#/lib/app-store";
  * `consent`, a payload it signed; this page only reads it for display, and the API verifies
  * the signature again when the form posts back. Errors arrive as a fixed code, never as text.
  */
-
-type Scope = "read" | "report" | "submit";
-
-const SCOPE_LABELS: Record<Scope, string> = {
-  read: "查询媒体、关联和变更单",
-  report: "上报失效的关联",
-  submit: "提交变更单",
-};
 
 const ERRORS = {
   unknown_client: {
@@ -59,7 +47,8 @@ interface ConsentRequest {
   /** Host that published the client's metadata document; null for a dynamically registered one. */
   clientHost: string | null;
   redirectUri: string;
-  scopes: Scope[];
+  /** Whether the client asked for submit; the user decides with the checkbox. */
+  requestsSubmit: boolean;
 }
 
 interface ConsentSearch {
@@ -87,7 +76,7 @@ function readConsent(token: string): ConsentRequest | null {
       clientName: payload.n,
       clientHost: typeof payload.h === "string" ? payload.h : null,
       redirectUri: payload.u,
-      scopes: payload.sc.filter((scope): scope is Scope => scope in SCOPE_LABELS),
+      requestsSubmit: payload.sc.includes("submit"),
     };
   } catch {
     return null;
@@ -170,6 +159,7 @@ function ConsentError({ code }: { code: ErrorCode }) {
 function ConsentForm({ request, action }: { request: ConsentRequest; action: string }) {
   const { user } = useAppStore();
   const redirect = describeRedirect(request.redirectUri);
+  const [canSubmit, setCanSubmit] = useState(request.requestsSubmit);
 
   return (
     // A plain form post: the API checks the signed payload against the session cookie.
@@ -209,16 +199,9 @@ function ConsentForm({ request, action }: { request: ConsentRequest; action: str
           <dt className="text-xs text-muted-foreground">授权后跳转到</dt>
           <dd className="font-mono text-xs break-all text-foreground">{redirect.origin}</dd>
         </div>
-        <div className="flex flex-col gap-1.5">
-          <dt className="text-xs text-muted-foreground">权限</dt>
-          {request.scopes.map((scope) => (
-            <dd key={scope} className="flex items-center gap-2 text-foreground">
-              <RiCheckLine className="size-4 shrink-0 text-muted-foreground" />
-              {SCOPE_LABELS[scope]}
-            </dd>
-          ))}
-        </div>
       </dl>
+
+      <KeyPermissionsField canSubmit={canSubmit} onCanSubmitChange={setCanSubmit} name="submit" />
 
       {redirect.loopback && (
         <Alert className="px-3 py-2.5">

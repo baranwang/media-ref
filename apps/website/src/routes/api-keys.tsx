@@ -7,7 +7,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@media-ref/ui/components/card";
-import { Checkbox } from "@media-ref/ui/components/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -30,13 +29,7 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@media-ref/ui/components/empty";
-import {
-  Field,
-  FieldContent,
-  FieldDescription,
-  FieldLabel,
-  FieldTitle,
-} from "@media-ref/ui/components/field";
+import { Field, FieldDescription, FieldLabel } from "@media-ref/ui/components/field";
 import { Input } from "@media-ref/ui/components/input";
 import {
   InputGroup,
@@ -80,6 +73,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { KeyPermissionsField } from "#/components/key-permissions-field";
 import { TopNav } from "#/components/top-nav";
 import { useAppStore } from "#/lib/app-store";
 import { formatCount, formatDate, formatRelativeTime } from "#/lib/format";
@@ -716,31 +710,7 @@ function ApiKeysPage() {
               />
             </Field>
 
-            <Field>
-              <FieldLabel>权限</FieldLabel>
-              <div className="flex flex-col gap-3 rounded-lg border border-border/70 bg-background/50 p-3">
-                <Field orientation="horizontal">
-                  <Checkbox checked disabled />
-                  <FieldContent>
-                    <FieldTitle>查询媒体</FieldTitle>
-                    <FieldDescription>查媒体在哪个平台、对应第几集</FieldDescription>
-                  </FieldContent>
-                </Field>
-                <Field orientation="horizontal">
-                  <Checkbox
-                    id="perm-submit"
-                    checked={canSubmit}
-                    onCheckedChange={(checked) => setCanSubmit(Boolean(checked))}
-                  />
-                  <FieldContent>
-                    <FieldLabel htmlFor="perm-submit" className="cursor-pointer">
-                      提交变更单
-                    </FieldLabel>
-                    <FieldDescription>让脚本替你提交变更单，补充或修正集数</FieldDescription>
-                  </FieldContent>
-                </Field>
-              </div>
-            </Field>
+            <KeyPermissionsField canSubmit={canSubmit} onCanSubmitChange={setCanSubmit} />
 
             <Field>
               <FieldLabel>有效期</FieldLabel>

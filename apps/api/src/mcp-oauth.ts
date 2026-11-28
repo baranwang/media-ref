@@ -442,6 +442,9 @@ async function decide(request: Request, deps: McpOAuthDeps): Promise<Response> {
 
   const code = randomToken();
   const { s: state, ...approval } = consent;
+  // The user picks submit on the consent page, whatever the client asked for; read and report
+  // come with every grant. The key check still requires a verified email to submit.
+  approval.sc = form.has("submit") ? [...BASE_SCOPES, "submit"] : [...BASE_SCOPES];
   await putRow(
     deps,
     CODE_ROW_PREFIX + (await hashApiKey(code)),
